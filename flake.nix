@@ -1,5 +1,5 @@
 {
-  description = "Cardano SPO Tools";
+  description = "Cardano SPO Workbench";
 
   # This uses IOG cache to avoid rebuilding all artifacts
   # see: https://github.com/input-output-hk/iogx/blob/main/doc/api.md#flakenixnixconfig
@@ -38,7 +38,27 @@
         inherit system;
       };
 
-      spoScriptsCfg = rec {
+      # Cardano Network Validator Functions
+      validators = import ./validators.nix { lib = pkgs.lib; };
+
+      # Base system packages to include
+      basePkgs = [
+        pkgs.jq
+        pkgs.curl
+        pkgs.bc
+        pkgs.xxd
+      ];
+
+      # NOTE: There are two types of network variables following:
+      # `network`: the actual network name, e.g. "Mainnet", "PreProd", "Preview"
+      # `commonNetwork`: the type of network the `network` belongs to ["mainnet", "testnet"]
+      # This is included because the spo scripts are separated based on the paths of the `commonNetwork`
+      # but the configuration still depends on the names of the actual `network`
+
+      # This provides the common network name, i.e. "mainnet" or "testnet", validating the inputs
+      commonNetwork = network: if validators.network.isMainnet network then "mainnet" else "testnet";
+
+      spoScriptsCfgTemplate = network: rec {
         # Define all required packages here. These will be added to the PATH.
         exes = {
           cardanonode = cardano-pkgs.cardano-node;
@@ -51,11 +71,12 @@
         # Define all other parameters here.
         # see: https://github.com/gitmachtl/scripts/blob/master/cardano/mainnet/00_common.sh
         cfg = {
-          workMode = "online";
+          workMode = "light";
+          network = "${network}";
         } // pkgs.lib.mapAttrs (name: pkg: pkgs.lib.getExe pkg) exes;
 
         # Automatically generate quoted key="value" lines
-        # This fill wil be linked to ~/.common.inc and removed on exit of dev shell
+        # This file wil be linked to ~/.common.inc and removed on exit of dev shell
         commonInc = pkgs.writeText "common.inc" (
           pkgs.lib.concatStringsSep "\n" (
             pkgs.lib.mapAttrsToList (name: value: ''${name}="${value}"'') cfg
@@ -63,31 +84,36 @@
         );
       };
 
+      # Shell generator function
+       mkNetworkShell = network:
+          let cfg = spoScriptsCfgTemplate network;
+          in pkgs.mkShell {
+            name = "workspace-${network}";
+            buildInputs = basePkgs ++ builtins.attrValues cfg.exes;
+            
+            shellHook = ''
+              # Set up common.inc
+              ln -sf ${cfg.commonInc} ~/.common.inc
+              
+              # Add scripts to PATH
+              export PATH="$PATH:${spo-scripts}/cardano/${commonNetwork network}"
+              
+              # Clean up on exit
+              trap "rm -f ~/.common.inc" EXIT 0
+              
+              echo "Configured for ${network} network"
+            '';
+          };
+
     in
     {
-      devShells.${system}.default = pkgs.mkShell {
-        name = "cardano-spo-workspace";
-        
-        buildInputs = builtins.attrValues spoScriptsCfg.exes;
-        
-        shellHook = ''
-          export PATH=$PATH:${spo-scripts}/cardano/mainnet
-          echo "Using cardano-node from branch: ${inputs.cardano-node.rev or "unknown"}"
-          echo "gitmachtl scripts from cardano/mainnet added to PATH"
-
-          # Create temp dir and symlink
-          export COMMON_INC_TMPDIR=$(mktemp -d)
-          ln -sf ${spoScriptsCfg.commonInc} "$COMMON_INC_TMPDIR/.common.inc"
-          ln -sf "$COMMON_INC_TMPDIR/.common.inc" ~/.common.inc
-          echo "Linked config to ~/.common.inc"
-
-          # Cleanup on exit
-          cleanup() {
-            rm -f ~/.common.inc
-            rm -rf "$COMMON_INC_TMPDIR"
-          }
-          trap cleanup EXIT
-        '';
+      devShells.${system} = {
+        default = self.devShells.${system}.mainnet;
+        mainnet = mkNetworkShell "Mainnet";
+        preprod = mkNetworkShell "PreProd";
+        preview = mkNetworkShell "Preview";
+        sancho = mkNetworkShell "Sancho";
       };
+
     };
 }

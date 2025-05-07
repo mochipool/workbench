@@ -41,7 +41,28 @@ cd workbench
 Enter a dev shell
 
 ```sh
-nix develop
+nix develop --accept-flake-config
 ```
 
 Great! Now you're off to the races 🎉
+
+# Customization
+
+## SPO Scripts
+Although the envrionments are pre-configured with all you'd need to run the spo-scripts, sometimes it is desirable to change parameter. The files provided by Nix are not meant to be changed, but you can still include a `common.inc` file in the working directory, which overrides all parameters in `.common.inc`.
+
+
+# Testing
+To test validation functions for example, run the following nix repl commands:
+```sh
+# Start repl
+nix repl
+
+# Load files and libs
+:lf .
+lib = (import <nixpkgs> {}).lib
+validators = import ./validators.nix { inherit lib; }
+
+# Then test functions like
+validators.network.normalize "Preview"
+```
