@@ -38,6 +38,13 @@
         inherit system;
       };
 
+      # Cardano HW CLI
+      cardano-hw-cli = import ./tools/cardano-hw-cli.nix {
+          inherit (pkgs) pkgs lib stdenv fetchurl autoPatchelfHook;
+          inherit system;
+          version = "1.18.2";
+        };
+
       # Cardano Network Validator Functions
       validators = import ./validators.nix { lib = pkgs.lib; };
 
@@ -47,6 +54,7 @@
         pkgs.curl
         pkgs.bc
         pkgs.xxd
+        cardano-hw-cli.cli
       ];
 
       # NOTE: There are two types of network variables following:
@@ -92,6 +100,9 @@
             buildInputs = basePkgs ++ builtins.attrValues cfg.exes;
             
             shellHook = ''
+              # autocomplete for cardano-hw-cli
+              source ${cardano-hw-cli.autocomplete}/share/cardano-hw-cli/autocomplete.sh
+
               # Set up common.inc
               ln -sf ${cfg.commonInc} ~/.common.inc
               
@@ -107,6 +118,11 @@
 
     in
     {
+      packages.${system} = {
+        cardano-hw-cli = cardano-hw-cli.cli;
+        # cardano-hw-cli = cardano-hw-cli.autocomplete;
+      };
+
       devShells.${system} = {
         default = self.devShells.${system}.mainnet;
         mainnet = mkNetworkShell "Mainnet";
