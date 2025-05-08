@@ -19,10 +19,6 @@
       url = "github:IntersectMBO/cardano-node?ref=master";
       flake = true;
     };
-    spo-scripts = {
-      url = "github:gitmachtl/scripts";
-      flake = false;
-    };
   };
   outputs = { self, nixpkgs, cardano-node, spo-scripts, ... } @ inputs:
     let
