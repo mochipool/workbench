@@ -47,6 +47,13 @@ in {
       cp ./* $out/bin
       chmod +x $out/bin/cardano-hw-cli
     '';
+
+    meta = {
+      description = "CLI for Cardano Hardware Wallets";
+      homepage = "https://github.com/vacuumlabs/cardano-hw-cli";
+      platforms = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" ];
+      mainProgram = "cardano-hw-cli";
+    };
   };
 
   autocomplete = stdenv.mkDerivation {

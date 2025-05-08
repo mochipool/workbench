@@ -41,7 +41,11 @@ cd workbench
 Enter a dev shell
 
 ```sh
+# Mainnet is the default
 nix develop --accept-flake-config
+
+# Or choose a specific network
+nix develop --accept-flake-config .#preview
 ```
 
 Great! Now you're off to the races 🎉
