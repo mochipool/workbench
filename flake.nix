@@ -19,8 +19,12 @@
       url = "github:IntersectMBO/cardano-node?ref=master";
       flake = true;
     };
+    cardano-configs = {
+      url = "path:tools/cardano-configs";
+      flake = true;
+    };
   };
-  outputs = { self, nixpkgs, cardano-node, spo-scripts, ... } @ inputs:
+  outputs = { self, nixpkgs, cardano-node, cardano-configs, ... } @ inputs:
     let
       system = "x86_64-linux"; # Change if needed for your system
 
@@ -33,6 +37,10 @@
       cardano-pkgs = import cardano-node {
         inherit system;
       };
+
+      # Cardano Config Files
+      # TODO: Example
+      # byron = cardano-configs.outputs.packages.${system}.byron;
 
       # Cardano HW CLI
       cardano-hw-cli = import ./tools/cardano-hw-cli.nix {
@@ -54,6 +62,9 @@
 
       # Base system packages to include
       basePkgs = [
+        cardano-pkgs.cardano-node
+        cardano-pkgs.cardano-cli
+        cardano-pkgs.bech32
         cardano-hw-cli.cli
       ];
 
