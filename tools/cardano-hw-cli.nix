@@ -1,14 +1,11 @@
 # cardano-hw-cli.nix
 { pkgs 
-, lib
-, stdenv
-, fetchurl
-, autoPatchelfHook
-, system
+, system ? builtins.currentSystem
 , version ? "1.18.2"
 }:
 
 let
+  inherit (pkgs) lib stdenv fetchurl autoPatchelfHook;
   platforms = {
     x86_64-linux = "linux-x64";
     aarch64-linux = "linux-arm64";

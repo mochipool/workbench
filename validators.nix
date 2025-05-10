@@ -1,5 +1,4 @@
-# validation.nix provides helper functions to validate network inputs
-
+# validators.nix provides helper functions to validate network inputs
 { lib }:
 
 let
@@ -27,10 +26,11 @@ let
         ${lib.concatStringsSep "\n" (lib.mapAttrsToList (k: v: "- ${v}") validNetworks)}
       '';
 
+  normalize = network: lib.toLower network;
+  isMainnet = network: (validateNetwork network) == "Mainnet";
+
 in {
   network = {
-    inherit validateNetwork;
-    # normalize = validateNetwork;
-    isMainnet = network: (validateNetwork network) == "Mainnet";
+    inherit validateNetwork normalize isMainnet;
   };
 }

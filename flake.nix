@@ -19,12 +19,8 @@
       url = "github:IntersectMBO/cardano-node?ref=master";
       flake = true;
     };
-    cardano-configs = {
-      url = "path:tools/cardano-configs";
-      flake = true;
-    };
   };
-  outputs = { self, nixpkgs, cardano-node, cardano-configs, ... } @ inputs:
+  outputs = { self, nixpkgs, cardano-node, ... } @ inputs:
     let
       system = "x86_64-linux"; # Change if needed for your system
 
@@ -38,14 +34,15 @@
         inherit system;
       };
 
-      # Cardano Config Files
-      # TODO: Example
-      # byron = cardano-configs.outputs.packages.${system}.byron;
+      # Cardano Configs
+      cardano-cfg = import ./tools/cardano-configs.nix {
+        inherit pkgs;
+      };
 
       # Cardano HW CLI
       cardano-hw-cli = import ./tools/cardano-hw-cli.nix {
-          inherit system;
-          inherit (pkgs) pkgs lib stdenv fetchurl autoPatchelfHook;
+          inherit pkgs system;
+          # inherit (pkgs) pkgs lib stdenv fetchurl autoPatchelfHook;
           version = "1.18.2";
       };
 
@@ -72,39 +69,38 @@
        mkNetworkShell = network:
           let 
             spoConfig = spo-scripts.mkCommon {
-              inherit network;
-              workMode = "light";
+              overrides = {
+                inherit network;
+                workMode = "light";
+              };
             };
-            
           in pkgs.mkShell {
             name = "workspace-${network}";
+
             buildInputs = basePkgs ++ spo-scripts.buildInputs ++ [
               spoConfig.derivation
             ];
-            
+
             shellHook = ''
               # autocomplete for cardano-hw-cli
               source ${cardano-hw-cli.autocomplete}/share/cardano-hw-cli/autocomplete.sh
 
               # Set up common.inc
               ln -sf ${spoConfig.commonInc} ~/.common.inc
-              
               # Clean up on exit
               trap "rm -f ~/.common.inc" EXIT 0
-              
               echo "Configured for ${network} network"
             '';
           };
 
     in
     {
-      # packages.${system} = spo-scripts.derivations;
       devShells.${system} = {
         default = self.devShells.${system}.mainnet;
         mainnet = mkNetworkShell "Mainnet";
         preprod = mkNetworkShell "PreProd";
         preview = mkNetworkShell "Preview";
-        sancho = mkNetworkShell "Sancho";
+        # sancho = mkNetworkShell "Sancho";
       };
 
     };

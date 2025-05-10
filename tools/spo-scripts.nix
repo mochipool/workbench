@@ -1,21 +1,24 @@
 # spo-scripts.nix
-{ pkgs, lib, cardano-pkgs, cardano-hw-cli }:
+{  pkgs
+  ,lib
+  ,system ? builtins.currentSystem
+  ,cardano-pkgs ? builtins.getFlake "github:IntersectMBO/cardano-node?ref=master" { inherit system; }
+  ,cardano-hw-cli ? import ./cardano-hw-cli.nix { inherit system; }
+}:
 let
-# Debug spo-scripts input
-  validators = import ../validators.nix{
+
+  validators = import ../validators.nix {
     inherit lib;
+  };
+
+  # Cardano Configs
+  cardano-cfg = import ./cardano-configs.nix {
+    inherit pkgs;
   };
 
   spo-scripts = builtins.fetchGit {
     url = "https://github.com/gitmachtl/scripts";
     rev = "c0225dc9fae42f6b6816afb3837f49e2bff79b9e";
-  };
-
-  # Default params (can be overridden)
-  defaultParams = {
-    network = null;  # Required (no default)
-    workMode = "light";
-    # ... other params with defaults
   };
 
   # Executables configuration
@@ -33,12 +36,15 @@ let
     pkgs.xxd
   ];
 
-  mkScripts = params:
-    let commonNetwork = getCommonNetwork params;
+  getCommonNetwork = network:
+    if validators.network.isMainnet (network) then "mainnet" else "testnet";
+
+  mkScripts = { overrides ? {} }:
+    let commonNetwork = getCommonNetwork overrides.network or "Mainnet";
     in pkgs.stdenv.mkDerivation {
       name = "spo-scripts-${commonNetwork}";
       src = spo-scripts;
-      
+
       networkPath = "cardano/${commonNetwork}";
 
       installPhase = ''
@@ -48,31 +54,46 @@ let
       '';
     };
 
-  # Merge user params with defaults
-  mkParams = userParams: defaultParams // userParams;
 
-  # Complete configuration builder
-  mkConfig = params:
-    let finalParams = mkParams params;
-    in finalParams // lib.mapAttrs (name: pkg: lib.getExe pkg) exes;
+  # Default params (can be overridden)
+  defaultParams = { network ? "Mainnet" }: 
+    let
+      inherit network;
+      normalizedNetwork = validators.network.normalize network;
+    in
+    {
+      network = network;
+      workMode = "light";
+      genesisfile = cardano-cfg.configs.${normalizedNetwork}.shelley;
+      genesisfile_byron = cardano-cfg.configs.${normalizedNetwork}.byron;
+    } // lib.mapAttrs (name: pkg: lib.getExe pkg) exes;
+
+  # Merge user param overrides with defaults
+  mkParams = { overrides ? {} }:
+    let
+      # Get network from overrides if it exists, otherwise use default
+      effectiveNetwork = overrides.network or "Mainnet";
+      # Create base params with the effective network
+      baseParams = defaultParams { network = effectiveNetwork; };
+      # Merge with overrides (overrides will take precedence)
+      finalParams = baseParams // overrides;
+    in
+      finalParams;
 
   # Configuration file generator
-  mkCommonInc = params:
-    let cfg = mkConfig params;
+  mkCommonInc = { overrides ? {} }:
+    let cfg = mkParams { inherit overrides; };
     in pkgs.writeText "common.inc" (
       lib.concatStringsSep "\n" (
         lib.mapAttrsToList (name: value: ''${name}="${value}"'') cfg
       )
     );
 
-  getCommonNetwork = params:
-    if validators.network.isMainnet (params.network) then "mainnet" else "testnet";
 
 in {
-  mkCommon = params: {
-    # Generates common.inc
-    commonInc = mkCommonInc params;
-    derivation = mkScripts params;
+  mkCommon = { overrides ? {} }: {
+    derivation = mkScripts { inherit overrides; };
+    commonInc = mkCommonInc { inherit overrides; };
   };
 
   # Provides a common set of buildInputs to run the scripts
