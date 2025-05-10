@@ -64,8 +64,8 @@ let
     {
       network = network;
       workMode = "light";
-      genesisfile = cardano-cfg.configs.${normalizedNetwork}.shelley;
-      genesisfile_byron = cardano-cfg.configs.${normalizedNetwork}.byron;
+      genesisfile = cardano-cfg.configs.${normalizedNetwork}.shelley.genesisFile;
+      genesisfile_byron = cardano-cfg.configs.${normalizedNetwork}.byron.genesisFile;
     } // lib.mapAttrs (name: pkg: lib.getExe pkg) exes;
 
   # Merge user param overrides with defaults

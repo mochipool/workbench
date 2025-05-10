@@ -71,14 +71,19 @@ let
 
   # Create a derivation for each file
   mkConfigDerivation = name: { url, sha256 }:
-    pkgs.stdenv.mkDerivation {
-      name = "${name}-genesis";
-      src = builtins.fetchurl { inherit url sha256; };
-      dontUnpack = true;
-      installPhase = ''
-        mkdir -p $out
-        cp $src $out/${name}-genesis.json
-      '';
+    let
+      drv = pkgs.stdenv.mkDerivation {
+        name = "${name}-genesis";
+        src = builtins.fetchurl { inherit url sha256; };
+        dontUnpack = true;
+        installPhase = ''
+          mkdir -p $out
+          cp $src $out/${name}-genesis.json
+        '';
+      };
+    in drv // {
+        # access the genesis file name directly by <derivation>.genesisFile
+        genesisFile = "${drv}/${name}-genesis.json";
     };
 
   # This lib provides a way to override the config file locations and hashes
@@ -97,7 +102,7 @@ let
         };
         finalConfigs = base // composite;
       in
-        builtins.mapAttrs mkConfigDerivation finalConfigs.${network};
+        builtins.mapAttrs mkConfigDerivation finalConfigs.${network}; 
   };
 
   # Create derivations for each default network
