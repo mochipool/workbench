@@ -55,18 +55,12 @@ Great! Now you're off to the races 🎉
 ## SPO Scripts
 Although the envrionments are pre-configured with all you'd need to run the spo-scripts, sometimes it is desirable to change parameter. The files provided by Nix are not meant to be changed, but you can still include a `common.inc` file in the working directory, which overrides all parameters in `.common.inc`.
 
+# Ledger `udev` Rules
+On Linux you may encounter issues when interacting with hardware wallets like Ledger. This is due to permissions not being granted to the user to access these USB devicesby default, unless they are `root`. You can add the necessary udev rules to allow users to access Ledger devices by running the following:
 
-# Testing
-To test validation functions for example, run the following nix repl commands:
 ```sh
-# Start repl
-nix repl
-
-# Load files and libs
-:lf .
-lib = (import <nixpkgs> {}).lib
-validators = import ./validators.nix { inherit lib; }
-
-# Then test functions like
-validators.network.normalize "Preview"
+curl -L https://raw.githubusercontent.com/LedgerHQ/udev-rules/master/add_udev_rules.sh | sudo bash
 ```
+
+# TODO
+- [ ] Enable customization of config files via the spo-scripts flake

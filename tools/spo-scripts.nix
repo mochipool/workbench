@@ -12,6 +12,7 @@ let
   };
 
   # Cardano Configs
+  # TODO: pass overrides for customization
   cardano-cfg = import ./cardano-configs.nix {
     inherit pkgs;
   };
