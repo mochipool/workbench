@@ -19,7 +19,7 @@ let
 
   spo-scripts = builtins.fetchGit {
     url = "https://github.com/gitmachtl/scripts";
-    rev = "c0225dc9fae42f6b6816afb3837f49e2bff79b9e";
+    rev = "acf99ebfde71153aae2e973ccf3828c9151f8bf2";
   };
 
   # Executables configuration

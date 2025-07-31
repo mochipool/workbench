@@ -53,10 +53,10 @@ Great! Now you're off to the races 🎉
 # Customization
 
 ## SPO Scripts
-Although the envrionments are pre-configured with all you'd need to run the spo-scripts, sometimes it is desirable to change parameter. The files provided by Nix are not meant to be changed, but you can still include a `common.inc` file in the working directory, which overrides all parameters in `.common.inc`.
+Although the envrionments are pre-configured with all you'd need to run the spo-scripts, sometimes it is desirable to change parameters. The files provided by Nix are not meant to be changed, but you can still include a `common.inc` file in the working directory, which overrides all parameters in `.common.inc`.
 
 # Ledger `udev` Rules
-On Linux you may encounter issues when interacting with hardware wallets like Ledger. This is due to permissions not being granted to the user to access these USB devicesby default, unless they are `root`. You can add the necessary udev rules to allow users to access Ledger devices by running the following:
+On Linux you may encounter issues when interacting with hardware wallets like Ledger. This is due to permissions not being granted to the user to access these USB devices by default, unless they are `root`. You can add the necessary udev rules to allow users to access Ledger devices by running the following:
 
 ```sh
 curl -L https://raw.githubusercontent.com/LedgerHQ/udev-rules/master/add_udev_rules.sh | sudo bash

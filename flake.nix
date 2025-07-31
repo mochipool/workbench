@@ -16,7 +16,7 @@
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
     cardano-node = {
-      url = "github:IntersectMBO/cardano-node?ref=master";
+      url = "github:IntersectMBO/cardano-node?ref=10.5.1";
       flake = true;
     };
   };
