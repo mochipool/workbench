@@ -1,0 +1,29 @@
+name: Validate Nix Flake & SPO Scripts
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Nix with flakes
+        uses: cachix/install-nix-action@v22
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+          nix_cache: true
+
+      - name: Validate all networks
+        run: |
+          for network in default mainnet preprod preview; do
+            echo "\n=== Testing flake environment: $network ==="
+            nix develop --accept-flake-config .#${network} --command bash 00_common.sh
+          done

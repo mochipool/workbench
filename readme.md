@@ -72,13 +72,12 @@ curl -L https://raw.githubusercontent.com/LedgerHQ/udev-rules/master/add_udev_ru
 
 ## 🌐 Supported Networks
 
-| Network    | Default | Notes               |
-| ---------- | ------- | ------------------- |
+| Network    | Default  | Notes               |
+| ---------- | -------  | ------------------- |
 | Mainnet    | ✅       | Default environment |
-| Testnet    |         | Configure via flake |
-| Previewnet |         | Configure via flake |
+| Preprod    |          | .#preprod |
+| Preview    |          | .#preview |
 
-Easily add custom networks in your flake configuration.
 
 ---
 
