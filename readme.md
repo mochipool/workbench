@@ -1,66 +1,109 @@
-# Problem Statement
+<div align="center">
 
-Typical SPO maintenance operations can be a hassle especially when you're working across multiple machines, and application versions change. For anyone looking to just get up-and-running, there is currently no effective, reproducible solution.
+# Mochi's SPO Workbench ✨
 
-Guild Operators provide a really convenient deploy script to get the executables you need, `guild-deploy.sh`, but this only works on some variants of Linux. If you're using Arch for instance, you're out of luck. Not only that, but it modifies your current machine's directory structure.
+[![License](https://img.shields.io/badge/license-GPLv3-blue?style=flat-square)](./LICENSE)
+[![GitHub last commit](https://img.shields.io/github/last-commit/mochipool/workbench?style=flat-square)](https://github.com/mochipool/workbench/commits/main)
+[![GitHub issues](https://img.shields.io/github/issues/mochipool/workbench?style=flat-square)](https://github.com/mochipool/workbench/issues)
+[![GitHub stars](https://img.shields.io/github/stars/mochipool/workbench?style=flat-square)](https://github.com/mochipool/workbench/stargazers)
 
-What happens when you want to use the [SPO Scripts from Martin Lang](https://github.com/gitmachtl/scripts)? Right - another thing to configure.
+A reproducible, hassle-free environment for Cardano SPOs. Mochi's SPO Workbench bundles all essential tools, binaries, and configurations into a single, robust Nix-based setup.
 
-Or what about when you want to change from a mainnet environment to testnet? Gotta reconfigure or move some files around...bummer.
+</div>
 
-Sure, you can spend your time creating scripts upon scripts to automate this process, maybe even spin up a VM or container to isolate from your machine's filesystem, but then that's a lot of overhead to deal with.
+---
 
-But, we have a better way...
+## 🌟 Features
 
-# Mochi's SPO Workbench
-Introducing *Mochi's SPO Workbench* - a collection of common tools and binaries for the SPO who just wants to get up-and-running.
+* 🌍 **Cross-Platform & Reproducible**: Works anywhere Nix is supported.
+* 🔄 **Environment Switching**: Switch effortlessly between mainnet, testnet, or previewnet.
+* 🏷️ **Version Management**: Pin specific `cardano-node` versions or other tools directly in the flake.
+* 🧹 **Minimal Host Impact**: Keeps your filesystem clean and organized.
+* ⚙️ **Customizable Scripts**: Override defaults safely with a local `common.inc`.
+* 🔒 **Hardware Wallet Friendly**: Built-in guidance for Ledger integration.
 
-Using the amazing Nix language, your can configure your system in a robust, repeatable way, without having to worry about your user filesystem getting cluttered.
+---
 
-Want to change environments? Easy, just set it in the flake configuration; all dependencies will be accounted for.
+## ⚡ Quick Start
 
-Want to use a specific version of cardano-node? No problem, just set the appropriate git ref in the flake and all your configurations will be updated.
-
-Try it out and see if you like it. PRs are always welcome!
-
-# Quick Start
-
-First, make sure Nix is installed on your system. The easiest way is to use the [Determinate Systems Nix Installer](https://docs.determinate.systems/).
+### 1. Install Nix
 
 ```sh
 curl -fsSL https://install.determinate.systems/nix | sh -s -- install --determinate
 ```
 
-Clone the repo
+### 2. Clone the Repository
 
 ```sh
 git clone https://github.com/mochipool/workbench.git
 cd workbench
 ```
 
-Enter a dev shell
+### 3. Enter a Development Shell
 
 ```sh
-# Mainnet is the default
+# Default: mainnet
 nix develop --accept-flake-config
 
-# Or choose a specific network
+# Switch network (example: previewnet)
 nix develop --accept-flake-config .#preview
 ```
 
-Great! Now you're off to the races 🎉
+🎉 You're ready to run!
 
-# Customization
+---
 
-## SPO Scripts
-Although the envrionments are pre-configured with all you'd need to run the spo-scripts, sometimes it is desirable to change parameters. The files provided by Nix are not meant to be changed, but you can still include a `common.inc` file in the working directory, which overrides all parameters in `.common.inc`.
+## 🛠️ Customization
 
-# Ledger `udev` Rules
-On Linux you may encounter issues when interacting with hardware wallets like Ledger. This is due to permissions not being granted to the user to access these USB devices by default, unless they are `root`. You can add the necessary udev rules to allow users to access Ledger devices by running the following:
+### SPO Scripts
+
+* Preconfigured for immediate use.
+* Override defaults by creating a `common.inc` in your working directory. It takes priority over `.common.inc`.
+
+### Ledger Hardware Wallet Support
+
+On Linux, add udev rules for non-root access:
 
 ```sh
 curl -L https://raw.githubusercontent.com/LedgerHQ/udev-rules/master/add_udev_rules.sh | sudo bash
 ```
 
-# TODO
-- [ ] Enable customization of config files via the spo-scripts flake
+---
+
+## 🌐 Supported Networks
+
+| Network    | Default | Notes               |
+| ---------- | ------- | ------------------- |
+| Mainnet    | ✅       | Default environment |
+| Testnet    |         | Configure via flake |
+| Previewnet |         | Configure via flake |
+
+Easily add custom networks in your flake configuration.
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! Please ensure your changes are reproducible with Nix and follow standard GitHub contribution practices.
+
+---
+
+## 📌 Roadmap / TODO
+
+* [ ] Enable full customization of SPO scripts via flake integration
+* [ ] Improve documentation for advanced flake configurations
+* [ ] Add CI checks for reproducibility and network switching
+
+---
+
+## 🙏 Acknowledgements
+
+* [Martin Lang](https://github.com/gitmachtl/scripts) for the SPO scripts which form a core part of this environment.
+* The Nix community for making reproducible, cross-platform development environments possible.
+* LedgerHQ for maintaining the official udev rules for hardware wallets.
+
+---
+
+## 📜 License
+
+This project is licensed under the [GNU GPL v3](./LICENSE).
