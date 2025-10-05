@@ -22,13 +22,14 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      - name: Cache Nix store
-        uses: actions/cache@v4
-        with:
-          path: /nix/store
-          key: ${{ runner.os }}-nix-${{ hashFiles('flake.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-nix-
+      # TODO: Fix cache if possible
+      # - name: Cache Nix store
+      #   uses: actions/cache@v4
+      #   with:
+      #     path: /nix/store
+      #     key: ${{ runner.os }}-nix-${{ hashFiles('flake.lock') }}
+      #     restore-keys: |
+      #       ${{ runner.os }}-nix-
 
       - name: Validate all networks
         run: |
