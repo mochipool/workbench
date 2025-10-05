@@ -3,6 +3,8 @@ name: Validate Nix Flake & SPO Scripts
 on:
   push:
     branches: [main, develop]
+    tags:
+      - 'v*'   # Trigger workflow for version tags
   pull_request:
     branches: [main, develop]
 
@@ -19,7 +21,14 @@ jobs:
           nix_path: nixpkgs=channel:nixos-unstable
           extra_nix_config: |
             experimental-features = nix-command flakes
-          nix_cache: true
+
+      - name: Cache Nix store
+        uses: actions/cache@v3
+        with:
+          path: /nix/store
+          key: ${{ runner.os }}-nix-${{ hashFiles('flake.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-nix-
 
       - name: Validate all networks
         run: |
