@@ -19,7 +19,7 @@ let
 
   spo-scripts = builtins.fetchGit {
     url = "https://github.com/gitmachtl/scripts";
-    rev = "acf99ebfde71153aae2e973ccf3828c9151f8bf2";
+    rev = "4d3a03285e3eb856948cfcfd37c829ef572a4037";
   };
 
   # Executables configuration
@@ -57,7 +57,7 @@ let
 
 
   # Default params (can be overridden)
-  defaultParams = { network ? "Mainnet" }: 
+  defaultParams = { network ? "Mainnet" }:
     let
       inherit network;
       normalizedNetwork = validators.network.normalize network;
