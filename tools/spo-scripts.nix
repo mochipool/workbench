@@ -1,7 +1,6 @@
 # spo-scripts.nix
 {  pkgs
   ,lib
-  ,system ? builtins.currentSystem
   , cardano-node-pkgs
   , cardano-cli-pkgs
   , cardano-hw-cli
@@ -39,7 +38,7 @@ let
   ];
 
   getCommonNetwork = network:
-    if validators.network.isMainnet (network) then "mainnet" else "testnet";
+    if validators.network.isMainnet network then "mainnet" else "testnet";
 
   mkScripts = { overrides ? {} }:
     let commonNetwork = getCommonNetwork overrides.network or "Mainnet";

@@ -25,7 +25,7 @@
       flake = true;
     };
   };
-  outputs = { self, nixpkgs, cardano-node, cardano-cli, ... } @ inputs:
+  outputs = { self, nixpkgs, cardano-node, cardano-cli, ... }:
     let
       system = "x86_64-linux"; # Change if needed for your system
 
@@ -38,11 +38,6 @@
       cardano-node-pkgs = cardano-node.packages.${system};
       cardano-cli-pkgs = cardano-cli.legacyPackages.${system};
 
-      # Cardano Configs
-      cardano-cfg = import ./tools/cardano-configs.nix {
-        inherit pkgs;
-      };
-
       # Cardano HW CLI
       cardano-hw-cli = import ./tools/cardano-hw-cli.nix {
           inherit pkgs system;
@@ -54,11 +49,6 @@
       spo-scripts = import ./tools/spo-scripts.nix {
         inherit (pkgs) pkgs lib system;
         inherit cardano-node-pkgs cardano-cli-pkgs cardano-hw-cli;
-      };
-
-      # Cardano Network Validator Functions
-      validators = import ./validators.nix {
-        inherit (pkgs) lib;
       };
 
       # Base system packages to include
