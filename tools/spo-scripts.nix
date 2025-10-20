@@ -2,8 +2,9 @@
 {  pkgs
   ,lib
   ,system ? builtins.currentSystem
-  ,cardano-pkgs ? builtins.getFlake "github:IntersectMBO/cardano-node?ref=master" { inherit system; }
-  ,cardano-hw-cli ? import ./cardano-hw-cli.nix { inherit system; }
+  , cardano-node-pkgs
+  , cardano-cli-pkgs
+  , cardano-hw-cli
 }:
 let
 
@@ -24,9 +25,9 @@ let
 
   # Executables configuration
   exes = {
-    cardanonode = cardano-pkgs.cardano-node;
-    cardanocli = cardano-pkgs.cardano-cli;
-    bech32_bin = cardano-pkgs.bech32;
+    cardanonode = cardano-node-pkgs.cardano-node;
+    bech32_bin = cardano-node-pkgs.bech32;
+    cardanocli = cardano-cli-pkgs.cardano-cli;
     cardanohwcli = cardano-hw-cli.cli;
   };
 

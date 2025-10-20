@@ -19,8 +19,13 @@
       url = "github:IntersectMBO/cardano-node?ref=10.5.1";
       flake = true;
     };
+    # CLI is kept in its own repo and updates async from cardano-node
+    cardano-cli = {
+      url = "github:IntersectMBO/cardano-cli?ref=cardano-cli-10.12.0.0";
+      flake = true;
+    };
   };
-  outputs = { self, nixpkgs, cardano-node, ... } @ inputs:
+  outputs = { self, nixpkgs, cardano-node, cardano-cli, ... } @ inputs:
     let
       system = "x86_64-linux"; # Change if needed for your system
 
@@ -30,9 +35,8 @@
       };
 
       # Cardano Packages
-      cardano-pkgs = import cardano-node {
-        inherit system;
-      };
+      cardano-node-pkgs = cardano-node.packages.${system};
+      cardano-cli-pkgs = cardano-cli.legacyPackages.${system};
 
       # Cardano Configs
       cardano-cfg = import ./tools/cardano-configs.nix {
@@ -48,26 +52,26 @@
 
       # SPO Scripts
       spo-scripts = import ./tools/spo-scripts.nix {
-        inherit (pkgs) pkgs lib;
-        inherit cardano-pkgs cardano-hw-cli;
+        inherit (pkgs) pkgs lib system;
+        inherit cardano-node-pkgs cardano-cli-pkgs cardano-hw-cli;
       };
 
       # Cardano Network Validator Functions
-      validators = import ./validators.nix { 
+      validators = import ./validators.nix {
         inherit (pkgs) lib;
       };
 
       # Base system packages to include
       basePkgs = [
-        cardano-pkgs.cardano-node
-        cardano-pkgs.cardano-cli
-        cardano-pkgs.bech32
+        cardano-node-pkgs.cardano-node
+        cardano-node-pkgs.bech32
+        cardano-cli-pkgs.cardano-cli
         cardano-hw-cli.cli
       ];
 
       # Shell generator function
        mkNetworkShell = network:
-          let 
+          let
             spoConfig = spo-scripts.mkCommon {
               overrides = {
                 inherit network;
