@@ -1,7 +1,7 @@
 # cardano-hw-cli.nix
 { pkgs 
 , system ? builtins.currentSystem
-, version ? "1.18.2"
+, version ? "1.19.1"
 }:
 
 let
@@ -21,9 +21,9 @@ let
 
   # You'll need to replace these with actual hashes
   binaryHashes = {
-    "linux-x64" = "Ly4+CS0w3FBqZZQucE+YICA0hkP0sKel/w9pU8PEjGU=";
-    "linux-arm64" = "14511bk0qb8sif5v6dx3ici497v28l8phdfw2kbhr1c0l4rl61jr";
-    "mac-x64" = "1fp9y9pdqzkv6qwpzx7hcahfrf52bh8nxknksy6panzkh1fiy6gi";
+    "linux-x64" = "0x34nyam4ckg4mpvbaljks2xpxlll1zhgbzs07inb972rzmlk4q8";
+    "linux-arm64" = "0sv8mpzs8mc89cfdgqvy0cfgs2i8h7npj2kgx98ckhlngh7j105r";
+    "mac-x64" = "0m0i3xn5krqiap83cj2dj7qncaz6sfwbkj66fm6df5x56nqvhi9a";
   };
 
   autocompleteHash = "14yj7g6n5idxrjskk32krn9zphsiidhprh4xm3l7s6q599cb3nnl";

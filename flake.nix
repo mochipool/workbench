@@ -42,7 +42,7 @@
       cardano-hw-cli = import ./tools/cardano-hw-cli.nix {
           inherit pkgs system;
           # inherit (pkgs) pkgs lib stdenv fetchurl autoPatchelfHook;
-          version = "1.18.2";
+          version = "1.19.1";
       };
 
       # SPO Scripts
