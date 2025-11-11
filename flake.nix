@@ -47,7 +47,7 @@
 
       # SPO Scripts
       spo-scripts = import ./tools/spo-scripts.nix {
-        inherit (pkgs) pkgs lib system;
+        inherit (pkgs) pkgs lib;
         inherit cardano-node-pkgs cardano-cli-pkgs cardano-hw-cli;
       };
 
