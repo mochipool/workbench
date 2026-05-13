@@ -51,6 +51,16 @@ nix develop --accept-flake-config .#preview
 
 🎉 You're ready to run!
 
+**NOTE (Determinate Systems Nix):**
+
+When using Determinate Systems Nix, some extra configuration is needed to use the iog cache. It is highly recommended to do so to avoid building everything from source.
+
+Run the following script to configure the cache correctly. It requires sudo:
+
+```sh
+./scripts/determinate-nix-config.sh
+```
+
 ---
 
 ## 🛠️ Customization
