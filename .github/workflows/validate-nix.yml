@@ -9,8 +9,24 @@ on:
     branches: [main, develop]
 
 jobs:
-  validate:
-    runs-on: ubuntu-latest
+  # Cheap validation on every supported system: release-set consistency
+  # checks plus the prebuilt binary tools. Deliberately avoids the haskell
+  # toolchain so it stays fast on all architectures.
+  checks:
+    name: checks (${{ matrix.system }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            system: x86_64-linux
+          - os: ubuntu-24.04-arm
+            system: aarch64-linux
+          - os: macos-latest
+            system: aarch64-darwin
+          - os: macos-15-intel
+            system: x86_64-darwin
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -18,40 +34,107 @@ jobs:
       - name: Set up Nix with flakes
         uses: cachix/install-nix-action@v31
         with:
-          nix_path: nixpkgs=channel:nixos-unstable
           extra_nix_config: |
             experimental-features = nix-command flakes
+            extra-substituters = https://cache.iog.io
+            extra-trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ=
+            allow-import-from-derivation = true
 
-      # TODO: Fix cache if possible
-      # - name: Cache Nix store
-      #   uses: actions/cache@v4
-      #   with:
-      #     path: /nix/store
-      #     key: ${{ runner.os }}-nix-${{ hashFiles('flake.lock') }}
-      #     restore-keys: |
-      #       ${{ runner.os }}-nix-
-
-      - name: Validate all networks
+      - name: Release-set consistency checks
         run: |
-          for network in default mainnet preprod preview; do
-            echo "=== Testing flake environment: $network ==="
-            nix develop --accept-flake-config .#${network} --command bash 00_common.sh
-          done
+          nix build --accept-flake-config --no-link -L \
+            .#checks.${{ matrix.system }}.version-manifest \
+            .#checks.${{ matrix.system }}.spo-compat
 
-  publish_release:
-    runs-on: ubuntu-latest
-    needs: validate
-    if: github.ref_type == 'tag'
+      - name: Build binary tools and scripts
+        run: |
+          nix build --accept-flake-config --no-link -L \
+            .#packages.${{ matrix.system }}.cardano-hw-cli \
+            .#packages.${{ matrix.system }}.cardano-signer \
+            .#packages.${{ matrix.system }}.spo-scripts-mainnet \
+            .#packages.${{ matrix.system }}.spo-scripts-testnet
+
+      - name: Smoke-test binary tools
+        run: |
+          nix shell --accept-flake-config \
+            .#packages.${{ matrix.system }}.cardano-hw-cli \
+            .#packages.${{ matrix.system }}.cardano-signer \
+            --command sh -c 'cardano-hw-cli version && cardano-signer version'
+
+  # Full devShell validation. Runs only on systems where the IOG binary
+  # cache carries native cardano-node/cardano-cli builds; aarch64-linux is
+  # excluded because upstream has no native builders for cardano-cli there
+  # (a full from-source GHC build does not fit in CI).
+  devshell:
+    name: devshell (${{ matrix.system }}, ${{ matrix.network }})
+    runs-on: ${{ matrix.os }}
+    needs: checks
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        network: [mainnet, preprod, preview]
+        include:
+          - os: ubuntu-latest
+            system: x86_64-linux
+          - os: macos-latest
+            system: aarch64-darwin
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+
+      - name: Set up Nix with flakes
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            extra-substituters = https://cache.iog.io
+            extra-trusted-public-keys = hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ=
+            allow-import-from-derivation = true
+
+      - name: Validate ${{ matrix.network }} environment
+        run: |
+          nix develop --accept-flake-config .#${{ matrix.network }} --command bash 00_common.sh
+
+  publish_release:
+    runs-on: ubuntu-latest
+    needs: [checks, devshell]
+    if: github.ref_type == 'tag'
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Nix with flakes
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Generate release-set table
+        id: release_set
+        run: |
+          {
+            echo 'body<<EOF'
+            echo "## Release set"
+            echo ""
+            echo "| Tool | Version |"
+            echo "| --- | --- |"
+            for tool in cardano-node cardano-cli spo-scripts cardano-hw-cli cardano-signer; do
+              version=$(nix eval --raw --file versions.nix tools.$tool.version)
+              echo "| $tool | $version |"
+            done
+            echo ""
+            echo "All versions above are pinned in \`versions.nix\` and verified compatible by \`nix flake check\`."
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
-          body: |
-            Automated release generated from GitHub Actions.
+          body: ${{ steps.release_set.outputs.body }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
