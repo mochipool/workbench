@@ -1,69 +1,84 @@
-# cardano-hw-cli.nix
-{ pkgs 
-, system ? builtins.currentSystem
-, version ? "1.19.1"
+# Packages the official cardano-hw-cli release binaries (vacuumlabs).
+# Upstream has no nix support; artifacts are pkg'd node binaries per platform.
+{ pkgs
+, version
+, hashes
+, autocompleteHash
 }:
 
 let
-  inherit (pkgs) lib stdenv fetchurl autoPatchelfHook;
+  inherit (pkgs) lib stdenvNoCC fetchurl;
+  system = stdenvNoCC.hostPlatform.system;
+
+  # Map nix systems to release artifact platform names. No native mac-arm64
+  # artifact exists (as of 1.19.1); Apple Silicon runs mac-x64 via Rosetta 2.
   platforms = {
     x86_64-linux = "linux-x64";
     aarch64-linux = "linux-arm64";
     x86_64-darwin = "mac-x64";
+    aarch64-darwin = "mac-x64";
   };
 
-  platform = platforms.${system} or (throw "Unsupported system: ${system}");
+  platform = platforms.${system} or (throw "cardano-hw-cli: unsupported system: ${system}");
+
+  hash = hashes.${platform} or (throw "cardano-hw-cli: no hash recorded for ${platform} at version ${version} — update versions.nix");
 
   baseUrl = "https://github.com/vacuumlabs/cardano-hw-cli/releases/download/v${version}";
 
-  binaryTarball = "${baseUrl}/cardano-hw-cli-${version}_${platform}.tar.gz";
-  autocompleteScript = "${baseUrl}/autocomplete.sh";
-
-  # You'll need to replace these with actual hashes
-  binaryHashes = {
-    "linux-x64" = "0x34nyam4ckg4mpvbaljks2xpxlll1zhgbzs07inb972rzmlk4q8";
-    "linux-arm64" = "0sv8mpzs8mc89cfdgqvy0cfgs2i8h7npj2kgx98ckhlngh7j105r";
-    "mac-x64" = "0m0i3xn5krqiap83cj2dj7qncaz6sfwbkj66fm6df5x56nqvhi9a";
-  };
-
-  autocompleteHash = "14yj7g6n5idxrjskk32krn9zphsiidhprh4xm3l7s6q599cb3nnl";
-
 in {
-  cli = stdenv.mkDerivation {
+  cli = stdenvNoCC.mkDerivation {
     pname = "cardano-hw-cli";
     inherit version;
+
     src = fetchurl {
-      url = binaryTarball;
-      sha256 = binaryHashes.${platform};
+      url = "${baseUrl}/cardano-hw-cli-${version}_${platform}.tar.gz";
+      inherit hash;
     };
 
-    # File stripping causes errors
-    dontStrip = true;         # Skip stripping binaries
+    # The executable is a pkg-bundled node binary with its JS payload appended
+    # to the ELF image: patchelf/strip shift the payload offsets and corrupt
+    # it, so the binary must be shipped exactly as released. On NixOS (no FHS
+    # loader paths) run it via nix-ld; regular distros work as-is.
+    dontStrip = true;
+    dontPatchELF = true;
     installPhase = ''
+      runHook preInstall
       mkdir -p $out/bin
-      cp ./* $out/bin
+      cp -r ./* $out/bin/
       chmod +x $out/bin/cardano-hw-cli
+      runHook postInstall
     '';
 
     meta = {
-      description = "CLI for Cardano Hardware Wallets";
+      description = "Command-line tool for signing Cardano transactions with Ledger, Trezor and Keystone hardware wallets";
       homepage = "https://github.com/vacuumlabs/cardano-hw-cli";
-      platforms = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" ];
+      license = lib.licenses.isc;
+      platforms = builtins.attrNames platforms;
+      sourceProvenance = [ lib.sourceTypes.binaryNativeCode ];
       mainProgram = "cardano-hw-cli";
     };
   };
 
-  autocomplete = stdenv.mkDerivation {
+  autocomplete = stdenvNoCC.mkDerivation {
     pname = "cardano-hw-cli-autocomplete";
     inherit version;
+
     src = fetchurl {
-      url = autocompleteScript;
-      sha256 = autocompleteHash;
+      url = "${baseUrl}/autocomplete.sh";
+      hash = autocompleteHash;
     };
+
     dontUnpack = true;
     installPhase = ''
-      mkdir -p $out/share/cardano-hw-cli
-      install -m644 $src $out/share/cardano-hw-cli/autocomplete.sh
+      runHook preInstall
+      install -Dm644 $src $out/share/cardano-hw-cli/autocomplete.sh
+      runHook postInstall
     '';
+
+    meta = {
+      description = "Shell autocompletion for cardano-hw-cli";
+      homepage = "https://github.com/vacuumlabs/cardano-hw-cli";
+      license = lib.licenses.isc;
+    };
   };
 }

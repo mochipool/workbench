@@ -2,31 +2,23 @@
 { lib }:
 
 let
+  # Maps normalized (lowercase) names to the canonical network name.
   validNetworks = {
     mainnet = "Mainnet";
     preprod = "PreProd";
     preview = "Preview";
-    sancho = "Sancho";
-    legacy = "Legacy";
-    guildnet = "GuildNet";
   };
 
-  # Validates that the network input is part of `validNetworks`
+  # Validates the network input (case-insensitive) and returns its
+  # canonical name.
   validateNetwork = network:
-    let
-      matchingNetwork = lib.findFirst
-        (valid: valid == toString network)
-        null
-        (lib.attrValues validNetworks);
-    in
-      if matchingNetwork != null then matchingNetwork
-      else throw ''
-        Invalid network: '${toString network}'
-        Valid networks are:
-        ${lib.concatStringsSep "\n" (lib.mapAttrsToList (k: v: "- ${v}") validNetworks)}
-      '';
+    validNetworks.${lib.toLower (toString network)} or (throw ''
+      Invalid network: '${toString network}'
+      Valid networks are:
+      ${lib.concatStringsSep "\n" (lib.mapAttrsToList (k: v: "- ${v}") validNetworks)}
+    '');
 
-  normalize = network: lib.toLower network;
+  normalize = network: lib.toLower (toString (validateNetwork network));
   isMainnet = network: (validateNetwork network) == "Mainnet";
 
 in {

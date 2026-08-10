@@ -1,8 +1,9 @@
-# cardano-configs.nix
+# Fetches the official per-network genesis files as fixed-output derivations.
 { pkgs }:
 let
+  inherit (pkgs) lib;
+
   configPaths = {
-    # mainnet
     mainnet = {
       byron = {
         url = "https://book.world.dev.cardano.org/environments/mainnet/byron-genesis.json";
@@ -59,62 +60,42 @@ let
     };
   };
 
-  # Accepts a network name and an override for the paths to the config files
-  mkConfigs = { overrides ? {} }:
-    let
-      applyOverride = name: default:
-        if overrides ? ${name}
-        then (default // overrides.${name})
-        else default;
-    in
-      builtins.mapAttrs applyOverride configPaths;
-
-  # Create a derivation for each file
+  # Create a derivation for a single genesis file
   mkConfigDerivation = name: { url, sha256 }:
     let
-      drv = pkgs.stdenv.mkDerivation {
+      drv = pkgs.stdenvNoCC.mkDerivation {
         name = "${name}-genesis";
-        src = builtins.fetchurl { inherit url sha256; };
+        src = pkgs.fetchurl { inherit url sha256; };
         dontUnpack = true;
         installPhase = ''
-          mkdir -p $out
-          cp $src $out/${name}-genesis.json
+          runHook preInstall
+          install -Dm644 $src $out/${name}-genesis.json
+          runHook postInstall
         '';
       };
     in drv // {
-        # access the genesis file name directly by <derivation>.genesisFile
-        genesisFile = "${drv}/${name}-genesis.json";
+      # access the genesis file path directly via <derivation>.genesisFile
+      genesisFile = "${drv}/${name}-genesis.json";
     };
 
-  # This lib provides a way to override the config file locations and hashes
-  # This is useful when switching networks or using a custom file host
-  lib = {
+  # Allows overriding the config file locations and hashes, which is useful
+  # when switching networks or using a custom file host.
+  configsLib = {
     mkCardanoConfigs = { network, overrides ? {} }:
       let
-        # Create a derivation for each file
-        # and one which contains all files
-        base = mkConfigs { inherit overrides; };
-        composite = {
-          all = (pkgs.symlinkJoin {
-            name = "cardano-configs";
-            paths = builtins.attrValues base;
-          });
-        };
-        finalConfigs = base // composite;
+        base = configPaths.${network}
+          or (throw "cardano-configs: no bundled configs for network '${network}' — valid: ${lib.concatStringsSep ", " (builtins.attrNames configPaths)}");
+        withOverrides = base // (overrides.${network} or {});
       in
-        builtins.mapAttrs mkConfigDerivation finalConfigs.${network}; 
+        builtins.mapAttrs mkConfigDerivation withOverrides;
   };
 
-  # Create derivations for each default network
-  # TODO: expand this to allow for custom network overrides
-  configs = builtins.listToAttrs (map (net: {
-    name = net;
-    value = lib.mkCardanoConfigs {
-      network = net;
-      overrides = {};
-    };
-  }) ["mainnet" "preview" "preprod"]);
+  # Derivations for each bundled network
+  configs = lib.genAttrs (builtins.attrNames configPaths) (network:
+    configsLib.mkCardanoConfigs { inherit network; }
+  );
 in
 {
-  inherit lib configs;
+  lib = configsLib;
+  inherit configs;
 }
