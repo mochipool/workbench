@@ -1,8 +1,8 @@
 # Packages the official cardano-hw-cli release binaries (vacuumlabs).
 # Upstream has no nix support; artifacts are pkg'd node binaries per platform.
 { pkgs
-, version
-, hashes
+, version # nominal release-set version (used for the autocomplete script)
+, platforms # per-platform artifact pins: { <platform> = { version, hash }; }
 , autocompleteHash
 }:
 
@@ -12,27 +12,25 @@ let
 
   # Map nix systems to release artifact platform names. No native mac-arm64
   # artifact exists (as of 1.19.1); Apple Silicon runs mac-x64 via Rosetta 2.
-  platforms = {
+  systemPlatforms = {
     x86_64-linux = "linux-x64";
     aarch64-linux = "linux-arm64";
     x86_64-darwin = "mac-x64";
     aarch64-darwin = "mac-x64";
   };
 
-  platform = platforms.${system} or (throw "cardano-hw-cli: unsupported system: ${system}");
+  platform = systemPlatforms.${system} or (throw "cardano-hw-cli: unsupported system: ${system}");
 
-  hash = hashes.${platform} or (throw "cardano-hw-cli: no hash recorded for ${platform} at version ${version} — update versions.nix");
-
-  baseUrl = "https://github.com/vacuumlabs/cardano-hw-cli/releases/download/v${version}";
+  artifact = platforms.${platform} or (throw "cardano-hw-cli: no artifact pin recorded for ${platform} — update versions.nix");
 
 in {
   cli = stdenvNoCC.mkDerivation {
     pname = "cardano-hw-cli";
-    inherit version;
+    version = artifact.version;
 
     src = fetchurl {
-      url = "${baseUrl}/cardano-hw-cli-${version}_${platform}.tar.gz";
-      inherit hash;
+      url = "https://github.com/vacuumlabs/cardano-hw-cli/releases/download/v${artifact.version}/cardano-hw-cli-${artifact.version}_${platform}.tar.gz";
+      inherit (artifact) hash;
     };
 
     # The executable is a pkg-bundled node binary with its JS payload appended
@@ -53,7 +51,7 @@ in {
       description = "Command-line tool for signing Cardano transactions with Ledger, Trezor and Keystone hardware wallets";
       homepage = "https://github.com/vacuumlabs/cardano-hw-cli";
       license = lib.licenses.isc;
-      platforms = builtins.attrNames platforms;
+      platforms = builtins.attrNames systemPlatforms;
       sourceProvenance = [ lib.sourceTypes.binaryNativeCode ];
       mainProgram = "cardano-hw-cli";
     };
@@ -64,7 +62,7 @@ in {
     inherit version;
 
     src = fetchurl {
-      url = "${baseUrl}/autocomplete.sh";
+      url = "https://github.com/vacuumlabs/cardano-hw-cli/releases/download/v${version}/autocomplete.sh";
       hash = autocompleteHash;
     };
 

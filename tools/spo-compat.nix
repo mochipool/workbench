@@ -44,6 +44,12 @@ in {
     ++ requireAtMost "cardano-cli" tools.cardano-cli.version requirements.maxCliVersion
     ++ requireAtLeast "cardano-node" tools.cardano-node.version requirements.minNodeVersion
     ++ requireAtMost "cardano-node" tools.cardano-node.version requirements.maxNodeVersion
-    ++ requireAtLeast "cardano-hw-cli" tools.cardano-hw-cli.version requirements.minHardwareCliVersion
+    # hw-cli artifacts may be pinned per platform, so validate every one
+    ++ lib.concatMap
+      (platform:
+        requireAtLeast "cardano-hw-cli (${platform})"
+          tools.cardano-hw-cli.platforms.${platform}.version
+          requirements.minHardwareCliVersion)
+      (builtins.attrNames tools.cardano-hw-cli.platforms)
     ++ requireAtLeast "cardano-signer" tools.cardano-signer.version requirements.minCardanoSignerVersion;
 }
