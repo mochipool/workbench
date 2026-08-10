@@ -1,9 +1,12 @@
-# spo-scripts.nix
-{  pkgs
-  ,lib
-  , cardano-node-pkgs
-  , cardano-cli-pkgs
-  , cardano-hw-cli
+# Packages Martin Lang's StakePool Operator Scripts and generates the
+# common.inc configuration that wires them to the nix-provided binaries.
+{ pkgs
+, lib
+, src # spo-scripts flake input (locked in flake.lock)
+, cardano-node-pkgs
+, cardano-cli-pkgs
+, cardano-hw-cli
+, cardano-signer
 }:
 let
 
@@ -17,17 +20,14 @@ let
     inherit pkgs;
   };
 
-  spo-scripts = builtins.fetchGit {
-    url = "https://github.com/gitmachtl/scripts";
-    rev = "4d3a03285e3eb856948cfcfd37c829ef572a4037";
-  };
-
-  # Executables configuration
+  # Executables configuration; the attribute names match the variables
+  # expected by 00_common.sh.
   exes = {
     cardanonode = cardano-node-pkgs.cardano-node;
     bech32_bin = cardano-node-pkgs.bech32;
     cardanocli = cardano-cli-pkgs.cardano-cli;
-    cardanohwcli = cardano-hw-cli.cli;
+    cardanohwcli = cardano-hw-cli;
+    cardanosigner = cardano-signer;
   };
 
   buildInputs = [
@@ -37,59 +37,61 @@ let
     pkgs.xxd
   ];
 
+  # The upstream repo keeps mainnet and testnet script variants in
+  # separate directories.
   getCommonNetwork = network:
     if validators.network.isMainnet network then "mainnet" else "testnet";
 
   mkScripts = { overrides ? {} }:
-    let commonNetwork = getCommonNetwork overrides.network or "Mainnet";
-    in pkgs.stdenv.mkDerivation {
+    let commonNetwork = getCommonNetwork (overrides.network or "Mainnet");
+    in pkgs.stdenvNoCC.mkDerivation {
       name = "spo-scripts-${commonNetwork}";
-      src = spo-scripts;
+      inherit src;
 
       networkPath = "cardano/${commonNetwork}";
 
       installPhase = ''
+        runHook preInstall
         mkdir -p $out/bin
         cp $networkPath/* $out/bin/
         chmod +x $out/bin/*
+        runHook postInstall
       '';
-    };
 
+      meta = {
+        description = "StakePool Operator Scripts (${commonNetwork} variant)";
+        homepage = "https://github.com/gitmachtl/scripts";
+        license = lib.licenses.gpl3Only;
+        platforms = lib.platforms.unix;
+      };
+    };
 
   # Default params (can be overridden)
   defaultParams = { network ? "Mainnet" }:
     let
-      inherit network;
       normalizedNetwork = validators.network.normalize network;
+      networkConfigs = cardano-cfg.configs.${normalizedNetwork}
+        or (throw "spo-scripts: no bundled genesis configs for network '${network}'");
     in
     {
-      network = network;
+      inherit network;
       workMode = "light";
-      genesisfile = cardano-cfg.configs.${normalizedNetwork}.shelley.genesisFile;
-      genesisfile_byron = cardano-cfg.configs.${normalizedNetwork}.byron.genesisFile;
+      genesisfile = networkConfigs.shelley.genesisFile;
+      genesisfile_byron = networkConfigs.byron.genesisFile;
     } // lib.mapAttrs (name: pkg: lib.getExe pkg) exes;
 
-  # Merge user param overrides with defaults
+  # Merge user param overrides with defaults (overrides take precedence)
   mkParams = { overrides ? {} }:
-    let
-      # Get network from overrides if it exists, otherwise use default
-      effectiveNetwork = overrides.network or "Mainnet";
-      # Create base params with the effective network
-      baseParams = defaultParams { network = effectiveNetwork; };
-      # Merge with overrides (overrides will take precedence)
-      finalParams = baseParams // overrides;
-    in
-      finalParams;
+    defaultParams { network = overrides.network or "Mainnet"; } // overrides;
 
   # Configuration file generator
   mkCommonInc = { overrides ? {} }:
     let cfg = mkParams { inherit overrides; };
     in pkgs.writeText "common.inc" (
       lib.concatStringsSep "\n" (
-        lib.mapAttrsToList (name: value: ''${name}="${value}"'') cfg
+        lib.mapAttrsToList (name: value: ''${name}="${toString value}"'') cfg
       )
     );
-
 
 in {
   mkCommon = { overrides ? {} }: {
@@ -99,5 +101,4 @@ in {
 
   # Provides a common set of buildInputs to run the scripts
   buildInputs = buildInputs ++ builtins.attrValues exes;
-
 }
