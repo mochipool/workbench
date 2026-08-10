@@ -55,12 +55,27 @@
     };
 
     # Prebuilt release binaries (no upstream nix support); hashes are SRI.
+    # Each platform pins its own artifact version: the v1.19.1 linux-arm64
+    # artifact ships an incomplete pkg snapshot (missing tslib) and crashes
+    # at startup, so linux-arm64 stays on v1.19.0. v1.19.1's only change is
+    # a macOS build fix, so the Linux code is identical. Every platform
+    # version is still validated against the SPO scripts' minimum by
+    # checks.<system>.spo-compat.
     cardano-hw-cli = {
       version = "1.19.1";
-      hashes = {
-        linux-x64 = "sha256-CJNJ68/ipGXjAfqvB3+glPbbhZ6SqrVvJW8yUpW3ZHQ=";
-        linux-arm64 = "sha256-uYAgD3yWwslQ6m8Kee2BKAr9HAN+49ccS4hVpP+taGs=";
-        mac-x64 = "sha256-KkW4sTWlF9dMdcbIubjT5itm8ZFNSDbQVRHnWWwfEVQ=";
+      platforms = {
+        linux-x64 = {
+          version = "1.19.1";
+          hash = "sha256-CJNJ68/ipGXjAfqvB3+glPbbhZ6SqrVvJW8yUpW3ZHQ=";
+        };
+        linux-arm64 = {
+          version = "1.19.0";
+          hash = "sha256-xNcbEiU8haA7T/nGiLwA/UZ60D8cM832OmMCXbBLkIA=";
+        };
+        mac-x64 = {
+          version = "1.19.1";
+          hash = "sha256-KkW4sTWlF9dMdcbIubjT5itm8ZFNSDbQVRHnWWwfEVQ=";
+        };
       };
       autocompleteHash = "sha256-1NqxWEoFG33oqJ3AfGGLUcP7k81TjDm1zL3FYs070pM=";
     };

@@ -56,7 +56,7 @@
           # Cardano HW CLI (prebuilt release binaries)
           cardano-hw-cli = import ./tools/cardano-hw-cli.nix {
             inherit pkgs;
-            inherit (versions.tools.cardano-hw-cli) version hashes autocompleteHash;
+            inherit (versions.tools.cardano-hw-cli) version platforms autocompleteHash;
           };
 
           # Cardano Signer (prebuilt release binaries)
