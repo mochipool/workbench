@@ -10,14 +10,16 @@ let
   commonSh = builtins.readFile "${src}/cardano/mainnet/00_common.sh";
   lines = lib.splitString "\n" commonSh;
 
-  # Extract `name="value"` shell assignments (first match wins).
+  # Extract the first quoted version from a `name=...` shell assignment (first
+  # matching line wins). Handles both `name="1.2.3"` and the env-overridable
+  # `name=${ENV:-"1.2.3"}` form.
   getVar = name:
     let
-      prefix = "${name}=\"";
-      matching = builtins.filter (l: lib.hasPrefix prefix l) lines;
+      matching = builtins.filter (l: lib.hasPrefix "${name}=" l) lines;
+      m = if matching == [ ] then null
+          else builtins.match ''[^"]*"([0-9][0-9.]*)".*'' (builtins.head matching);
     in
-      if matching == [ ] then null
-      else builtins.head (lib.splitString "\"" (lib.removePrefix prefix (builtins.head matching)));
+      if m == null then null else builtins.head m;
 
   requirements = {
     minCliVersion = getVar "minCliVersion";
@@ -26,6 +28,10 @@ let
     maxNodeVersion = getVar "maxNodeVersion";
     minHardwareCliVersion = getVar "minHardwareCliVersion";
     minCardanoSignerVersion = getVar "minCardanoSignerVersion";
+    # Hardware wallet device-side requirements (not bundled; operator-managed)
+    minLedgerCardanoAppVersion = getVar "minLedgerCardanoAppVersion";
+    minTrezorCardanoAppVersion = getVar "minTrezorCardanoAppVersion";
+    minKeystoneCardanoAppVersion = getVar "minKeystoneCardanoAppVersion";
   };
 
   requireAtLeast = tool: actual: min:

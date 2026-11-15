@@ -22,17 +22,17 @@
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
     cardano-node = {
-      url = "github:IntersectMBO/cardano-node?ref=11.0.1";
+      url = "github:IntersectMBO/cardano-node?ref=11.1.3";
       flake = true;
     };
     # CLI is kept in its own repo and updates async from cardano-node
     cardano-cli = {
-      url = "github:IntersectMBO/cardano-cli?ref=cardano-cli-11.0.0.0";
+      url = "github:IntersectMBO/cardano-cli?ref=cardano-cli-11.2.3.0";
       flake = true;
     };
     # StakePool Operator Scripts (plain source tree, not a flake)
     spo-scripts = {
-      url = "github:gitmachtl/scripts?ref=Update-2026-03";
+      url = "github:gitmachtl/scripts?ref=Update-2026-04";
       flake = false;
     };
   };
@@ -65,6 +65,28 @@
             inherit (versions.tools.cardano-signer) version hashes;
           };
 
+          # Trezor CLI (firmware updates)
+          trezorctl = import ./tools/trezorctl.nix {
+            inherit pkgs;
+            inherit (versions.tools.trezorctl) version hash;
+          };
+
+          # Hardware wallet health check
+          doctor = import ./tools/doctor.nix {
+            inherit pkgs;
+            inherit (spoCompat) requirements;
+            inherit (versions) tools;
+            cardano-node = cardano-node-pkgs.cardano-node;
+            cardano-cli = cardano-cli-pkgs.cardano-cli;
+            cardano-hw-cli = cardano-hw-cli.cli;
+            inherit cardano-signer;
+          };
+
+          # udev rules for Ledger/Trezor (Linux only)
+          udevRules = lib.optionalAttrs pkgs.stdenv.isLinux {
+            udev-rules = import ./tools/udev-rules.nix { inherit pkgs; };
+          };
+
           # SPO Scripts
           spo = import ./tools/spo-scripts.nix {
             inherit pkgs lib cardano-node-pkgs cardano-cli-pkgs cardano-signer;
@@ -79,6 +101,8 @@
             cardano-cli-pkgs.cardano-cli
             cardano-hw-cli.cli
             cardano-signer
+            trezorctl
+            doctor
           ];
 
           # Shell generator function
@@ -110,7 +134,7 @@
             };
         in {
           inherit pkgs cardano-node-pkgs cardano-cli-pkgs
-            cardano-hw-cli cardano-signer spo mkNetworkShell;
+            cardano-hw-cli cardano-signer trezorctl doctor udevRules spo mkNetworkShell;
         };
 
       workbench = forAllSystems workbenchFor;
@@ -144,6 +168,23 @@
         inherit (versions) tools;
       };
 
+      requirementsDoc = import ./tools/release-docs.nix {
+        inherit lib versions;
+        inherit (spoCompat) requirements;
+      };
+
+      beginMarker = "<!-- BEGIN generated:requirements -->";
+      endMarker = "<!-- END generated:requirements -->";
+
+      # Prints the block currently embedded in a readme (between the markers).
+      extractBlock = pkgs: pkgs.writeShellScript "extract-block" ''
+        ${pkgs.gawk}/bin/awk '
+          $0 == "${endMarker}" { on = 0 }
+          on { print }
+          $0 == "${beginMarker}" { on = 1 }
+        ' "$1"
+      '';
+
     in
     {
       devShells = forAllSystems (system:
@@ -160,6 +201,8 @@
         in rec {
           cardano-hw-cli = wb.cardano-hw-cli.cli;
           cardano-signer = wb.cardano-signer;
+          trezorctl = wb.trezorctl;
+          doctor = wb.doctor;
           spo-scripts-mainnet = (wb.spo.mkCommon { overrides.network = "Mainnet"; }).derivation;
           spo-scripts-testnet = (wb.spo.mkCommon { overrides.network = "PreProd"; }).derivation;
           # Re-exports for convenience (built by upstream flakes / IOG cache)
@@ -174,10 +217,12 @@
               cardano-cli
               cardano-hw-cli
               cardano-signer
+              trezorctl
+              doctor
               spo-scripts-mainnet
             ];
           };
-        });
+        } // wb.udevRules);
 
       # Lightweight checks: these deliberately avoid depending on the haskell
       # toolchain so they stay cheap on every system (including aarch64-linux,
@@ -187,6 +232,75 @@
         in {
           version-manifest = mkAssertion wb.pkgs "version-manifest" manifestFailures;
           spo-compat = mkAssertion wb.pkgs "spo-compat" spoCompat.failures;
+          # The readme's generated requirements section must match the nix data.
+          readme-sync = wb.pkgs.runCommand "readme-sync" { } ''
+            ${extractBlock wb.pkgs} ${self}/readme.md > actual
+            cat > expected <<'EOF_DOC'
+            ${requirementsDoc}
+            EOF_DOC
+            if ! diff -u actual expected; then
+              echo "readme.md requirements section is stale; run: nix run .#update-readme"
+              exit 1
+            fi
+            echo ok > $out
+          '';
+        });
+
+      # Rewrites the generated requirements section of ./readme.md in place.
+      apps = forAllSystems (system:
+        let pkgs = workbench.${system}.pkgs;
+        in {
+          doctor = {
+            type = "app";
+            program = "${workbench.${system}.doctor}/bin/workbench-doctor";
+          };
+        } // lib.optionalAttrs pkgs.stdenv.isLinux {
+          # Prints (or with --install, installs) the Ledger/Trezor udev rules.
+          install-udev-rules = {
+            type = "app";
+            program = toString (pkgs.writeShellScript "install-udev-rules" ''
+              set -eu
+              rules=${workbench.${system}.udevRules.udev-rules}/lib/udev/rules.d/70-cardano-spo-workbench.rules
+              dest=/etc/udev/rules.d/70-cardano-spo-workbench.rules
+              if [ -e /etc/NIXOS ]; then
+                echo "NixOS detected: /etc is managed declaratively. Add to your configuration:"
+                echo "  services.udev.packages = [ <this flake>.packages.${system}.udev-rules ];"
+                echo "(or, for Ledger only: hardware.ledger.enable = true;)"
+                exit 0
+              fi
+              if [ "''${1:-}" = "--install" ]; then
+                sudo install -Dm644 "$rules" "$dest"
+                sudo udevadm control --reload-rules
+                sudo udevadm trigger
+                echo "Installed $dest. Unplug and replug your device."
+              else
+                echo "Rules file: $rules"
+                echo
+                echo "Install it with this command, or re-run with --install:"
+                echo "  sudo install -Dm644 $rules $dest && sudo udevadm control --reload-rules && sudo udevadm trigger"
+              fi
+            '');
+          };
+          update-readme = {
+            type = "app";
+            program = toString (pkgs.writeShellScript "update-readme" ''
+              set -eu
+              readme="''${1:-readme.md}"
+              doc=${pkgs.writeText "requirements.md" requirementsDoc}
+              tmp="$(mktemp)"
+              ${pkgs.gawk}/bin/awk -v doc="$doc" '
+                $0 == "${endMarker}" { skip = 0 }
+                !skip { print }
+                $0 == "${beginMarker}" {
+                  skip = 1
+                  while ((getline line < doc) > 0) print line
+                }
+              ' "$readme" > "$tmp"
+              cat "$tmp" > "$readme"
+              rm -f "$tmp"
+              echo "updated $readme"
+            '');
+          };
         });
 
       formatter = forAllSystems (system: workbench.${system}.pkgs.nixfmt-rfc-style);
