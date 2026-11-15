@@ -31,6 +31,10 @@ Two flake checks keep it honest on every system:
   `minHardwareCliVersion` and `minCardanoSignerVersion` requirements that the
   SPO scripts enforce at runtime in `00_common.sh`, and fails evaluation if
   any pinned tool violates them.
+- `checks.<system>.readme-sync` — fails if the generated requirements section
+  of `readme.md` (pinned versions, the scripts' min/max requirements and
+  hardware-wallet device minimums) differs from what nix computes. Fix with
+  `nix run .#update-readme`.
 
 ## Picking compatible versions
 
@@ -44,6 +48,11 @@ Two flake checks keep it honest on every system:
    above — `checks.spo-compat` verifies this mechanically.
 4. **cardano-hw-cli / cardano-signer**: newest *stable* releases satisfying
    the scripts' minimums. Avoid betas/pre-releases even when newer.
+5. **trezorctl** (firmware-update tooling, built from PyPI by
+   `tools/trezorctl.nix`): bump `versions.nix` and refresh the hash with
+   `nix store prefetch-file https://files.pythonhosted.org/packages/source/t/trezor/trezor-<ver>.tar.gz`.
+   Releases from 0.20.2 need `cryptography >= 47`; stay on a version the
+   flake's nixpkgs can satisfy.
 
 ## Cutting a release
 
@@ -54,6 +63,9 @@ Two flake checks keep it honest on every system:
 
 # 2. Re-lock the changed inputs
 nix flake update cardano-node cardano-cli spo-scripts
+
+# 2b. Regenerate the requirements table in readme.md
+nix run --accept-flake-config .#update-readme
 
 # 3. Verify the release set is internally consistent
 nix flake check --accept-flake-config

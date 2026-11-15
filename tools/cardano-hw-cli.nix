@@ -10,13 +10,12 @@ let
   inherit (pkgs) lib stdenvNoCC fetchurl;
   system = stdenvNoCC.hostPlatform.system;
 
-  # Map nix systems to release artifact platform names. No native mac-arm64
-  # artifact exists (as of 1.19.1); Apple Silicon runs mac-x64 via Rosetta 2.
+  # Map nix systems to release artifact platform names. Since 1.20.0 only a
+  # native mac-arm64 artifact is published (no mac-x64).
   systemPlatforms = {
     x86_64-linux = "linux-x64";
     aarch64-linux = "linux-arm64";
-    x86_64-darwin = "mac-x64";
-    aarch64-darwin = "mac-x64";
+    aarch64-darwin = "mac-arm64";
   };
 
   platform = systemPlatforms.${system} or (throw "cardano-hw-cli: unsupported system: ${system}");

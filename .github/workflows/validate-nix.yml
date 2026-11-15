@@ -25,8 +25,6 @@ jobs:
             system: aarch64-linux
           - os: macos-latest
             system: aarch64-darwin
-          - os: macos-15-intel
-            system: x86_64-darwin
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -44,13 +42,15 @@ jobs:
         run: |
           nix build --accept-flake-config --no-link -L \
             .#checks.${{ matrix.system }}.version-manifest \
-            .#checks.${{ matrix.system }}.spo-compat
+            .#checks.${{ matrix.system }}.spo-compat \
+            .#checks.${{ matrix.system }}.readme-sync
 
       - name: Build binary tools and scripts
         run: |
           nix build --accept-flake-config --no-link -L \
             .#packages.${{ matrix.system }}.cardano-hw-cli \
             .#packages.${{ matrix.system }}.cardano-signer \
+            .#packages.${{ matrix.system }}.trezorctl \
             .#packages.${{ matrix.system }}.spo-scripts-mainnet \
             .#packages.${{ matrix.system }}.spo-scripts-testnet
 
@@ -59,7 +59,8 @@ jobs:
           nix shell --accept-flake-config \
             .#packages.${{ matrix.system }}.cardano-hw-cli \
             .#packages.${{ matrix.system }}.cardano-signer \
-            --command sh -c 'cardano-hw-cli version && cardano-signer version'
+            .#packages.${{ matrix.system }}.trezorctl \
+            --command sh -c 'cardano-hw-cli version && cardano-signer version && trezorctl --version'
 
   # Full devShell validation. Runs only on systems where the IOG binary
   # cache carries native cardano-node/cardano-cli builds; aarch64-linux is
@@ -95,6 +96,12 @@ jobs:
       - name: Validate ${{ matrix.network }} environment
         run: |
           nix develop --accept-flake-config .#${{ matrix.network }} --command bash 00_common.sh
+
+      # The doctor depends on cardano-node/cli, so it only runs here (not in
+      # the cheap per-system job).
+      - name: Run workbench-doctor (tools only)
+        run: |
+          nix develop --accept-flake-config .#${{ matrix.network }} --command workbench-doctor --no-device
 
   publish_release:
     runs-on: ubuntu-latest
