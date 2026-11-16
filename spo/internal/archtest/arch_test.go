@@ -96,6 +96,9 @@ func TestConfinedImports(t *testing.T) {
 		"github.com/blinklabs-io":      module + "/internal/adapters/native",
 		"github.com/awnumar/memguard":  module + "/internal/platform/secret",
 		"modernc.org/sqlite":           module + "/internal/adapters/sqlitestore",
+		// The terminal UI library and its text-width helper (ADR 0009).
+		"github.com/charmbracelet":      module + "/internal/adapters/tui",
+		"github.com/mattn/go-runewidth": module + "/internal/adapters/tui",
 	}
 	for _, p := range load(t) {
 		for _, imp := range p.Imports {
@@ -103,6 +106,24 @@ func TestConfinedImports(t *testing.T) {
 				if (imp == target || strings.HasPrefix(imp, target+"/")) && p.ImportPath != home {
 					t.Errorf("%s imports %s; only %s may", p.ImportPath, imp, home)
 				}
+			}
+		}
+	}
+}
+
+// ADR 0009: the TUI is a second driver of the command tree the composition
+// root builds. It receives the tree as a *cobra.Command and a factory, so it
+// imports neither the CLI adapter nor any adapter, and no other package
+// imports it but cmd/spo.
+func TestTUIIsDrivenThroughTheCommandTreeOnly(t *testing.T) {
+	tui := module + "/internal/adapters/tui"
+	for _, p := range load(t) {
+		for _, imp := range p.Imports {
+			switch {
+			case p.ImportPath == tui && (imp == module+"/internal/adapters/cli" || (strings.HasPrefix(imp, module+"/internal/adapters/") && imp != tui)):
+				t.Errorf("%s imports %s: the TUI reaches commands only through the cobra tree it is handed", p.ImportPath, imp)
+			case imp == tui && !strings.HasPrefix(p.ImportPath, module+"/cmd/"):
+				t.Errorf("%s imports the TUI; only the composition root may", p.ImportPath)
 			}
 		}
 	}

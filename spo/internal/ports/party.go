@@ -60,6 +60,33 @@ func FileTransport(s EnvelopeSender) Transport { return Transport{send: s, kind:
 // NetworkTransport is a sender over a network (SPO-Xparty-INV-024).
 func NetworkTransport(s EnvelopeSender) Transport { return Transport{send: s, kind: ViaNetwork} }
 
+// Only narrows a transport: an envelope the predicate does not allow gets
+// ErrNoRoute and is not sent, so an outbox leaves it queued. The kind and the
+// underlying sender are unchanged; a narrowed transport can send less, never
+// elsewhere and never as another kind (SPO-Xparty-INV-024).
+func (t Transport) Only(allow func(ctx context.Context, to party.Fingerprint, env []byte) (bool, error)) Transport {
+	if t.send == nil {
+		return t
+	}
+	return Transport{send: onlySender{to: t.send, allow: allow}, kind: t.kind}
+}
+
+type onlySender struct {
+	to    EnvelopeSender
+	allow func(ctx context.Context, to party.Fingerprint, env []byte) (bool, error)
+}
+
+func (o onlySender) Send(ctx context.Context, to party.Fingerprint, env []byte) error {
+	ok, err := o.allow(ctx, to, env)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrNoRoute
+	}
+	return o.to.Send(ctx, to, env)
+}
+
 // Received is one envelope as a transport delivered it, with how it arrived.
 // The kind is not a field a caller can set: only FileReceived and
 // NetworkReceived, which the adapters call, make one, and Signer.Handle and

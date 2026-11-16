@@ -31,6 +31,12 @@ import (
 // treated as script. A string that is not bech32 (a Byron base58 address, or
 // garbage) is false here: the inspector decides, and a failed inspection is
 // treated as a script by its caller.
+//
+// Never grant a key verdict from this function alone. False means "this
+// function found no script", not "this is a key": it is false for Byron and
+// for anything that is not bech32. Whoever needs to know that an address is a
+// plain key must also have it inspected and fail closed on any doubt, as
+// Signer.resolveFlow does (SPO-Xparty-PR-004).
 func AddressPaymentIsScript(addr string) bool {
 	_, b, err := chain.Bech32Decode(addr)
 	if err != nil {

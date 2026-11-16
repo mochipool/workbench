@@ -77,6 +77,24 @@ type WorkspaceConfig struct {
 	Hardware *HardwareConfig
 	// Handles is the optional [handles] section; nil keeps the network's API.
 	Handles *HandlesConfig
+	// Party and Tailcat are the optional [party] and [tailcat] sections.
+	Party   *PartyConfig
+	Tailcat *TailcatConfig
+	// Registry is the optional [registry] section: the token-registry server.
+	Registry *RegistryConfig
+}
+
+// RegistryConfig is the [registry] section: URL is the root of a CIP-26
+// token-registry server.
+type RegistryConfig struct{ URL string }
+
+// PartyConfig is the [party] section: the file transport's directories.
+type PartyConfig struct{ Inbox, Outbox string }
+
+// TailcatConfig is the [tailcat] section. Zero values keep the defaults.
+type TailcatConfig struct {
+	Port       int
+	DERPMapURL string
 }
 
 // HardwareConfig is the [hardware] section. Zero values keep the defaults.

@@ -47,6 +47,33 @@ type Handles struct {
 	URL string
 }
 
+// Registry names the token-registry server ([registry]): the root a subject is
+// appended to (CIP-26). Without it mainnet uses the public server and the test
+// networks have none.
+type Registry struct {
+	URL string
+}
+
+// Party sets where the multi-party file transport keeps its directories
+// ([party]). A relative path is relative to the workspace directory. The
+// inbox must be a local directory that only the operator can write to, and
+// never a synced folder (ADR 0005, obligation 5).
+type Party struct {
+	Inbox, Outbox string
+}
+
+// Tailcat tunes the tailcat transport ([tailcat]). The node key, the
+// pre-shared key and the coordinator's address are Secret records of the
+// sealed store, never settings.
+type Tailcat struct {
+	// Port is the one TCP port a coordinator serves and a signer dials; zero
+	// keeps the adapter's default, 7345 (adapters/tailcat.DefaultPort).
+	Port int
+	// DERPMapURL overrides where tailcat fetches its relay map from (https
+	// only, or a loopback host).
+	DERPMapURL string
+}
+
 // Config is the content of spo.toml.
 type Config struct {
 	Network string
@@ -56,6 +83,11 @@ type Config struct {
 	// Hardware and Handles are nil when the file has no such section.
 	Hardware *Hardware
 	Handles  *Handles
+	// Party and Tailcat are nil when the file has no such section.
+	Party   *Party
+	Tailcat *Tailcat
+	// Registry is nil when the file has no [registry] section.
+	Registry *Registry
 }
 
 var versionText = regexp.MustCompile(`^[0-9]+(\.[0-9]+){1,3}$`)
@@ -117,6 +149,9 @@ func (c Config) Validate() error {
 		if err := c.Hardware.validate(); err != nil {
 			return err
 		}
+	}
+	if t := c.Tailcat; t != nil && (t.Port < 0 || t.Port > 65535) {
+		return errors.New("[tailcat] port must be 1 to 65535")
 	}
 	return nil
 }
@@ -200,6 +235,54 @@ func Parse(data []byte) (Config, error) {
 					return Config{}, fmt.Errorf("line %d: unknown key %q in [handles]", e.val.line, e.key)
 				}
 			}
+		case "registry":
+			c.Registry = &Registry{}
+			for _, e := range sec.entries {
+				switch e.key {
+				case "url":
+					if c.Registry.URL, err = e.val.str("registry.url"); err != nil {
+						return Config{}, err
+					}
+				default:
+					return Config{}, fmt.Errorf("line %d: unknown key %q in [registry]", e.val.line, e.key)
+				}
+			}
+		case "party":
+			c.Party = &Party{}
+			for _, e := range sec.entries {
+				switch e.key {
+				case "inbox":
+					if c.Party.Inbox, err = e.val.str("party.inbox"); err != nil {
+						return Config{}, err
+					}
+				case "outbox":
+					if c.Party.Outbox, err = e.val.str("party.outbox"); err != nil {
+						return Config{}, err
+					}
+				default:
+					return Config{}, fmt.Errorf("line %d: unknown key %q in [party]", e.val.line, e.key)
+				}
+			}
+		case "tailcat":
+			c.Tailcat = &Tailcat{}
+			for _, e := range sec.entries {
+				switch e.key {
+				case "port":
+					if e.val.kind != kindInt {
+						return Config{}, fmt.Errorf("line %d: key \"tailcat.port\" must be a whole number", e.val.line)
+					}
+					if e.val.i < 1 || e.val.i > 65535 {
+						return Config{}, fmt.Errorf("line %d: [tailcat] port must be 1 to 65535", e.val.line)
+					}
+					c.Tailcat.Port = int(e.val.i)
+				case "derp_map_url":
+					if c.Tailcat.DERPMapURL, err = e.val.str("tailcat.derp_map_url"); err != nil {
+						return Config{}, err
+					}
+				default:
+					return Config{}, fmt.Errorf("line %d: unknown key %q in [tailcat]", e.val.line, e.key)
+				}
+			}
 		default:
 			return Config{}, fmt.Errorf("line %d: unknown section [%s]", sec.line, sec.name)
 		}
@@ -246,6 +329,30 @@ func Marshal(c Config) ([]byte, error) {
 			if kv[1] != "" {
 				fmt.Fprintf(&b, "%s = %s\n", kv[0], quote(kv[1]))
 			}
+		}
+	}
+	if p := c.Party; p != nil {
+		b.WriteString("\n[party]\n")
+		if p.Inbox != "" {
+			fmt.Fprintf(&b, "inbox = %s\n", quote(p.Inbox))
+		}
+		if p.Outbox != "" {
+			fmt.Fprintf(&b, "outbox = %s\n", quote(p.Outbox))
+		}
+	}
+	if t := c.Tailcat; t != nil {
+		b.WriteString("\n[tailcat]\n")
+		if t.Port > 0 {
+			fmt.Fprintf(&b, "port = %d\n", t.Port)
+		}
+		if t.DERPMapURL != "" {
+			fmt.Fprintf(&b, "derp_map_url = %s\n", quote(t.DERPMapURL))
+		}
+	}
+	if c.Registry != nil {
+		b.WriteString("\n[registry]\n")
+		if c.Registry.URL != "" {
+			fmt.Fprintf(&b, "url = %s\n", quote(c.Registry.URL))
 		}
 	}
 	if c.Handles != nil {

@@ -18,6 +18,21 @@
 // was delivered and not acknowledged stays where it is and is delivered again
 // after a restart; the replay log makes that harmless.
 //
+// The inbox directory is the operator's (ADR 0005, obligation 5). Open refuses
+// a directory that has an ancestor others can rename (writable by group or
+// others without the sticky bit, or owned by neither root nor the operator),
+// a directory that is a symbolic link, is not a directory, is not owned by the
+// user running the program, or is writable by its group or by others: whoever
+// can write into the inbox can feed envelopes to the signer as if the
+// operator's own hand had delivered them (they arrive as "file", which is the
+// more trusted kind: a pool cold key request is allowed over a file and not
+// over a network). On Linux it also refuses a directory on a network or FUSE
+// file system (NFS, SMB, CIFS, 9p, Ceph, FUSE: sshfs, rclone and most sync
+// mounts). It cannot tell a local directory that a sync client (Dropbox,
+// Syncthing, iCloud, a cloud drive's folder) copies to other machines: do not
+// use a synced folder as the inbox. OpenOutput is the lenient variant for a
+// directory the bag only writes to (an export target such as a USB stick).
+//
 // The bag does not look inside an envelope. What it returns is unchecked
 // bytes; the caller opens them with adapters/envelope.
 package filebag
@@ -71,6 +86,7 @@ type Bag struct {
 	root *os.Root
 	poll time.Duration
 
+	namer     func(envelope []byte) string
 	mu        sync.Mutex // one Receive at a time; guards the fields below
 	rejected  []Rejection
 	delivered map[string]bool // delivered by this process and not yet acknowledged
@@ -86,13 +102,94 @@ var (
 // transport, so a cold-key request may go through it (SPO-Xparty-PRE-004).
 func (b *Bag) Transport() ports.Transport { return ports.FileTransport(b) }
 
-// Open opens the bag on an existing directory.
+// ErrInbox: the directory is not one a signer may take envelopes from.
+var ErrInbox = errors.New("filebag: the inbox is not a local directory owned by the operator that nobody else can write to")
+
+// Open opens the bag on an existing directory that passes CheckInbox. The
+// directory is judged through one descriptor (opened with O_DIRECTORY and
+// O_NOFOLLOW), and the root the bag then reads through must be that very
+// directory (same device and inode): a path swapped between the check and the
+// open is refused.
 func Open(dir string) (*Bag, error) {
+	st, err := checkInbox(dir)
+	if err != nil {
+		return nil, err
+	}
+	b, err := newBag(dir)
+	if err != nil {
+		return nil, err
+	}
+	rst, err := b.root.Stat(".")
+	if err != nil || !sameFile(st, rst) {
+		b.Close()
+		return nil, fmt.Errorf("%w: %s changed between the check and the open", ErrInbox, dir)
+	}
+	return b, nil
+}
+
+// OpenOutput opens the bag on a directory it only writes to: an export target
+// is often a mounted stick whose owner and mode the operator does not control,
+// and nothing is read from it as an inbox. It still refuses a symbolic link.
+// Receive on such a bag is not for an inbox.
+func OpenOutput(dir string) (*Bag, error) {
+	if st, err := os.Lstat(dir); err != nil {
+		return nil, err
+	} else if st.Mode()&os.ModeSymlink != 0 || !st.IsDir() {
+		return nil, fmt.Errorf("%w: %s is a symbolic link or not a directory", ErrInbox, dir)
+	}
+	return newBag(dir)
+}
+
+func newBag(dir string) (*Bag, error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return nil, err
 	}
 	return &Bag{root: root, poll: DefaultPoll, delivered: map[string]bool{}}, nil
+}
+
+// CheckInbox is the runtime refusal of obligation 5: dir must be a real
+// directory (not a symbolic link), owned by the current user, with no group or
+// other write bit, on a local file system where the platform can tell, and
+// every directory above it up to the filesystem root must be owned by root or
+// by the operator and not writable by group or others unless it has the sticky
+// bit (the rule sshd applies under StrictModes): whoever can rename a parent
+// can swap the inbox for another directory. The checks run on one descriptor
+// opened on the directory itself.
+func CheckInbox(dir string) error {
+	_, err := checkInbox(dir)
+	return err
+}
+
+func checkInbox(dir string) (os.FileInfo, error) {
+	f, err := openDirNoFollow(dir)
+	if err != nil {
+		if _, lerr := os.Lstat(dir); lerr != nil {
+			return nil, lerr
+		}
+		return nil, fmt.Errorf("%w: %s is a symbolic link or not a directory (%v)", ErrInbox, dir, err)
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case !st.IsDir():
+		return nil, fmt.Errorf("%w: %s is not a directory", ErrInbox, dir)
+	case st.Mode().Perm()&0o022 != 0:
+		return nil, fmt.Errorf("%w: %s is writable by its group or by others (mode %04o); chmod go-w it", ErrInbox, dir, st.Mode().Perm())
+	}
+	if err := ownedByMe(st); err != nil {
+		return nil, fmt.Errorf("%w: %s: %v", ErrInbox, dir, err)
+	}
+	if err := localFS(f); err != nil {
+		return nil, fmt.Errorf("%w: %s: %v", ErrInbox, dir, err)
+	}
+	if err := CheckAncestors(dir); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInbox, err)
+	}
+	return st, nil
 }
 
 // SetPoll changes the polling interval.
@@ -115,14 +212,26 @@ func checkSize(envelope []byte) error {
 	return nil
 }
 
-// Send writes the envelope to a file named after the recipient and a hash of
-// the envelope. Use Write to give it the spec's name.
-func (b *Bag) Send(ctx context.Context, to party.Fingerprint, envelope []byte) error {
+// SetNamer sets a function that names the file of an envelope Send writes
+// (the spec's <type>-<collection>-<slot>.spo, which only the caller who knows
+// what the ciphertext holds can give). It returns "" to take the default name.
+func (b *Bag) SetNamer(f func(envelope []byte) string) { b.namer = f }
+
+// Send writes the envelope to a file named by the namer, else after a hash of
+// the envelope (never the recipient).
+func (b *Bag) Send(ctx context.Context, _ party.Fingerprint, envelope []byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	sum := sha256.Sum256(envelope)
-	name := fmt.Sprintf("envelope-%s-%s%s", strings.ReplaceAll(to.String(), "-", "")[:8], hex.EncodeToString(sum[:4]), Ext)
+	// The default name carries no recipient: a file name that says who an
+	// envelope is for tells whoever sees the directory more than it needs.
+	name := fmt.Sprintf("envelope-%s%s", hex.EncodeToString(sum[:6]), Ext)
+	if b.namer != nil {
+		if n := b.namer(envelope); n != "" && nameRE.MatchString(n) {
+			name = n
+		}
+	}
 	return b.Write(name, envelope)
 }
 

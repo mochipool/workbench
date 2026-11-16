@@ -113,6 +113,24 @@ const (
 	CapAdaHandle    Cap = "ada-handle"
 	CapPollQuestion Cap = "poll-question"
 	CapBLSKeys      Cap = "bls-keygen"
+	// CapParty is the multi-party stack: the party identity, the registry,
+	// the envelope kit and the transports (spec/extensions/Xparty.md).
+	CapParty Cap = "multi-party-signing"
+
+	// The token registry (CIP-26, upstream 12a and 12b) and the import of a
+	// pool from the chain (0x). CapTokenRegistry reads a registry server and
+	// exists only where a server is reachable; CapRegistrySigning is a signer
+	// that signs registry entries with a policy key; CapLogoFiles reads the
+	// logo a record names. CapPoolInfo and CapPoolUpdates read a pool's
+	// registration and latest update; CapVKeyEnvelope and CapVrfVKey derive the
+	// verification key envelope of an imported signing key.
+	CapTokenRegistry   Cap = "token-registry"
+	CapRegistrySigning Cap = "registry-signing"
+	CapLogoFiles       Cap = "logo-file"
+	CapPoolInfo        Cap = "pool-info"
+	CapPoolUpdates     Cap = "pool-updates"
+	CapVKeyEnvelope    Cap = "verification-key-envelope"
+	CapVrfVKey         Cap = "vrf-verification-key"
 )
 
 // GovernanceChainCaps are the governance capabilities that read the chain.
@@ -273,6 +291,32 @@ type Env struct {
 	Polls ports.PollQuestionReader
 	// BLSKeys generates the pool BLS key pair (local).
 	BLSKeys ports.BLSKeyGenerator
+
+	// Party is the multi-party stack (party identities, envelopes, the file
+	// and tailcat transports). OwnUtxos is the signer's OWN chain provider as
+	// a resolver of inputs by reference: set only in light mode, where it is
+	// the provider the operator configured; the offline transfer file is
+	// never put here, because a transfer file may have been written by
+	// another party (ADR 0005, obligation 3). SnapshotResolver reads an
+	// offline snapshot at a path the operator names with --own-snapshot.
+	Party            *PartyKit
+	OwnUtxos         ports.UtxoResolver
+	SnapshotResolver func(path string) ports.UtxoResolver
+
+	// Registry reads a token-registry server (light mode, a server configured
+	// or the network's public one). RegistrySigner is the vault signer that also
+	// signs registry entries; Signers hands it out for a vault-held policy key,
+	// and a hardware key has none. Logos reads the logo file a record names.
+	Registry       ports.TokenRegistryReader
+	RegistrySigner ports.Signer
+	Logos          ports.LogoFileReader
+	// PoolInfos and PoolUpdates read the registration of a pool and its latest
+	// update (light mode); VKeyEnvelopes and VrfVKeys derive the verification
+	// key envelopes of the signing keys of an imported pool (local).
+	PoolInfos     ports.PoolInfoReader
+	PoolUpdates   ports.PoolUpdateReader
+	VKeyEnvelopes ports.VKeyEnvelopeDeriver
+	VrfVKeys      ports.VrfVKeyDeriver
 
 	// AllowUnverified is true only when the chain is not consulted.
 	AllowUnverified bool
@@ -472,6 +516,22 @@ func (e *Env) has(c Cap) bool {
 		v = e.Polls
 	case CapBLSKeys:
 		v = e.BLSKeys
+	case CapParty:
+		v = e.Party
+	case CapTokenRegistry:
+		v = e.Registry
+	case CapRegistrySigning:
+		v = e.RegistrySigner
+	case CapLogoFiles:
+		v = e.Logos
+	case CapPoolInfo:
+		v = e.PoolInfos
+	case CapPoolUpdates:
+		v = e.PoolUpdates
+	case CapVKeyEnvelope:
+		v = e.VKeyEnvelopes
+	case CapVrfVKey:
+		v = e.VrfVKeys
 	}
 	return !isNil(v)
 }
@@ -482,6 +542,12 @@ func (e *Env) Has(c Cap) bool { return e.has(c) }
 // Source names the provider behind a chain capability, or "" when the
 // capability is absent or has no provider name (a local one).
 func (e *Env) Source(c Cap) string {
+	if c == CapTokenRegistry { // named by its host, not by a chain source
+		if isNil(e.Registry) {
+			return ""
+		}
+		return e.Registry.Registry()
+	}
 	var v any
 	switch c {
 	case CapTip:
@@ -526,6 +592,10 @@ func (e *Env) Source(c Cap) string {
 		v = e.CalidusReader
 	case CapPollQuestion:
 		v = e.Polls
+	case CapPoolInfo:
+		v = e.PoolInfos
+	case CapPoolUpdates:
+		v = e.PoolUpdates
 	}
 	if isNil(v) {
 		return ""

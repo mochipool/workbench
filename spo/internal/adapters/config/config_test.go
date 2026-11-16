@@ -188,3 +188,27 @@ func TestKoiosURL(t *testing.T) {
 		t.Error("no provider, no URL")
 	}
 }
+
+// [party] and [tailcat] are optional, strict and round-trip; the secrets of the
+// tailcat transport are never settings.
+func TestPartyAndTailcatSections(t *testing.T) {
+	c, err := Parse([]byte("network = \"preview\"\nmode = \"offline\"\n[party]\ninbox = \"in\"\noutbox = \"/x/out\"\n[tailcat]\nport = 9000\nderp_map_url = \"http://127.0.0.1:1/derp.json\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Party.Inbox != "in" || c.Party.Outbox != "/x/out" || c.Tailcat.Port != 9000 || c.Tailcat.DERPMapURL == "" {
+		t.Fatalf("%+v %+v", c.Party, c.Tailcat)
+	}
+	b, err := Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2, err := Parse(b); err != nil || *c2.Party != *c.Party || *c2.Tailcat != *c.Tailcat {
+		t.Fatalf("round trip: %v %+v", err, c2)
+	}
+	for _, bad := range []string{"[tailcat]\nport = 0\n", "[tailcat]\nport = 70000\n", "[tailcat]\npsk = \"x\"\n", "[tailcat]\nport = \"9\"\n", "[party]\nsync = \"x\"\n"} {
+		if _, err := Parse([]byte("network = \"preview\"\nmode = \"offline\"\n" + bad)); err == nil {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+}

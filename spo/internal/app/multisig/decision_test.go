@@ -147,10 +147,10 @@ func TestAnsweredRequestIsAnsweredAgainFromTheStore(t *testing.T) {
 	if h, err := s.C.Coordinator().Handle(ctx, ports.FileReceived(again[0])); err != nil || h.Effect != "filled" {
 		t.Fatalf("coordinator = %+v, %v", h, err)
 	}
-	// By network the same id is answered the same way, with the stored
-	// response, over the network too (INV-017): never signed again.
+	// By network the same id is not answered: the request first arrived by
+	// file, and a duplicate is answered over that kind only (INV-017).
 	h, err = signer.Handle(ctx, ports.NetworkReceived(reqs[0]))
-	if err != nil || h.Refused || h.Effect != "response-resent" {
+	if err != nil || h.Refused || h.Effect != "duplicate" {
 		t.Fatalf("by network = %+v, %v", h, err)
 	}
 	if n.Load() != 1 {

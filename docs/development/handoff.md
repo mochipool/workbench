@@ -39,7 +39,29 @@ Unit tests use stand-ins (`tests/fake_scripts.py`) that reproduce the upstream f
 
 Started 2026-11-16. Read [Go reference implementation: concerns](./go-reference-implementation-concerns.md) and the [ADRs](../explanation/adr/README.md) before touching it. The concerns page has a *Status* table that says what is closed.
 
-State: milestone M0 (decisions and skeleton) is done, and M1 (parity harness) has its first vertical slices: `spo pool kes generate <pool>` is at parity with upstream `04c`, `pool opcert issue` with `04d`, and `spo wallet send` wraps the `SendLovelaces` use case (`01_sendLovelaces`). The sealed store is the default. `spo init` creates a workspace (`workspace.spo`, its head file and `spo.toml`), and every command opens it with a passphrase from the terminal or `--passphrase-fd`. A passphrase change or a new recovery key is a rekey and always revokes the old recovery key; `store recover` is the only reader of a recovery key; a rolled-back file is refused unless `--accept-rollback`. `--upstream-layout` still works on a plain directory, with keys unsealed. Offline mode (clock, transfer file) and light mode (Koios, light-mode parameters file) are wired; online mode (node socket) is not built. Provider API tokens are stored in the sealed store. See [spo CLI](../reference/spo-cli.md) and [spo.toml](../reference/spo-toml.md).
+State: 68 of 68 specs are implemented (`spo/spec-coverage.toml`; the waived ids carry their reasons, and `python3 spec/tools/specctl.py coverage --tests spo --config spo/spec-coverage.toml` is the proof). The sealed store is the default (ADR 0003): `spo init` creates a workspace (`workspace.spo`, its head file and `spo.toml`), every command opens it with a passphrase from the terminal or `--passphrase-fd`, a rekey always revokes the old recovery key, and a rolled-back file is refused unless `--accept-rollback`. `--upstream-layout` still works on a plain directory, with keys unsealed. Offline mode (clock, transfer file) and light mode (Koios, light-mode parameters file) are wired. Provider API tokens are stored in the sealed store. See [spo CLI](../reference/spo-cli.md) and [spo.toml](../reference/spo-toml.md).
+
+Built, by area (the table below says where):
+
+* Keys and pool: KES, VRF and cold keys, opcert issue and check, the pool descriptor, certificates, registration and retirement with witness collections, and the import of a pool from the chain or an info file (`pool import`, `pool export-info`).
+* Money: `wallet send`, `claim-rewards`, `send-assets`, the stake commands, the offline transfer file (`offline ...`), native policies, mint, burn and settle, and the token-registry entry (`asset meta generate` and `check`; the registry needs light mode with a server, so a test network needs `[registry] url`).
+* Governance: DReps, committee, votes and actions (`info`, `no-confidence`, `update-committee`, `new-constitution`, `hard-fork`, `treasury-withdrawal`), with the checks the commands can make.
+* Other: Calidus and Catalyst registration (signed metadata records), ADA Handles, SPO polls, BLS keys.
+* Hardware wallets: the adapter over `cardano-hw-cli` is built and tested against a stand-in tool only. **Untested on devices**: work through [the device checklist](./hardware-device-checklist.md) before relying on it.
+* Multi-party signing (file and tailcat transports, ADR 0005): the `spo party ...` commands and the signing and review flows (`cli/party*.go`, `cmd/spo/party.go`) are wired. The library stack and the wiring were cleared by review (nine Opus passes in all; the last lists no required change) with the operating conditions in the "Multi-party signing" section of [the command reference](../reference/spo-cli.md). The pre-signature summary (`cli/party_summary.go`) and the rule that `approve` refuses when any certificate, vote, withdrawal or required-signer line was folded are the parts reviews kept finding gaps in: change them only with a regression test and a review. Not built: `party rotate`, a collection-closed notice to signers.
+* TUI (`spo tui`, ADR 0009, [reference](../reference/spo-tui.md)): a second driver that walks the same command tree, so a new command is in it with no TUI code. The parity test is `TestU1...` in `cmd/spo`; a new `*-fd` flag must be classified in `cli/uihints.go` (`TestU2...`).
+
+**Not built:**
+
+* The node socket (gouroboros N2C): online mode is not wired, so every chain read goes through Koios.
+* A second, independent chain provider: reads of the "harmful if false" class (ADR 0006) have no cross-check, so they refuse unless the command is given `--single-source`.
+* `party rotate` (SPO-Xparty-IF-008): a new identity is a new enrollment.
+* The Catalyst mobile-app QR code.
+* Calidus and Catalyst keys on a hardware device.
+* A Calidus status reader (`calidus-registrations` is absent in every mode).
+* The `parameter-change` governance action, and the actions that carry a guardrails (Plutus) script, which this build does not evaluate.
+* Online (full-node) mode as a whole.
+
 
 How a command gets what it needs, and how to add one:
 
@@ -50,66 +72,34 @@ How a command gets what it needs, and how to add one:
 * Tests: fakes in `adapters/cli` (a fake `Deps.Wire`; see `wallet_test.go` for a fixture around the real native ledger), the real adapters in `cmd/spo` on a sealed workspace (`e2e_test.go`; Argon2 runs at its floor, so one workspace is created and copied).
 
 | What | Where |
-| --- | --- | --- |
-| Orchestrator | `workbench` CLI: `init`, `workflows`, `check`, `run`, `resume`, `abandon`, `status`, `runs`, `show`, `exec`, `edit` | `orchestrator/src/spo_workbench/` |
-| Workflows | `kes-rotate` (+ block-producer tar bundle), `claim-rewards`, `send-ada`, `pool-update` | `orchestrator/src/spo_workbench/workflows/` |
-| Engine | Steps with a location (`chain` / `keys` / `any`), filesystem done-probes, non-repeatable steps, artefact digests and drift detection, one open run per workflow, air-gap hand-off via a ticket attached to `offlineTransfer.json` | `engine.py`, `transfer.py`, `journal.py` |
-| Validation | Strict `workbench.toml` schema; per-workflow check-time validation (address network prefixes, `pool.json` limits mirroring `05a`, KES counter consistency, offline hand-off precondition, partial-`04d` guard) | `config.py`, `validate.py`, each workflow's `validate()` |
-| Packaging | `packages.<sys>.workbench`, `apps.<sys>.workbench`, `checks.<sys>.workbench-tests`; toolchain manifest JSON baked into the wrapper | `tools/workbench.nix`, `flake.nix` |
-| Flake fixes | `gnupg` added to the SPO script runtime (needed for `enc` keys); `mkParams` exposed; dev shell no longer clobbers a user's own `~/.common.inc` | `tools/spo-scripts.nix`, `flake.nix` |
-| Spec corpus | Behavioural spec of every upstream script and `00_common.sh` function (67 specs, 2257 requirement ids with source ranges, about 95% of upstream code lines cited; reviewed once by Opus against source, all findings applied), domain model, ports, `specctl` (lint, drift, hunks, gaps, index), `checks.<sys>.spec-lint` | `spec/` |
-| Docs | Diataxis set (tutorials, how-to, reference, explanation); `readme.md` trimmed to a landing page; `RELEASING.md` points into `docs/` | `docs/` |
-
-Commits (jj, colocated): `feat(workbench): ...` then `docs: Diataxis ...` on bookmark `workbench-orchestrator`, merged into `main` with `merge: workbench orchestrator and Diataxis docs`. **Not pushed**: the user pushes.
-
-## Verify the current state
-
-Every one of these must pass before and after your change:
-
-```sh
-nix flake check --accept-flake-config                     # includes workbench-tests (52 unit tests)
-nix build --accept-flake-config -o result-workbench .#workbench
-cd orchestrator && SPO_WB_E2E_WORKBENCH=$PWD/../result-workbench/bin/workbench \
-  nix shell --impure --expr '(import (builtins.getFlake "nixpkgs") {}).python3.withPackages (p: [p.pytest])' \
-  -c sh -c 'PYTHONPATH=src python -m pytest -q -p no:cacheprovider'   # 52 unit + 1 real-script e2e
-```
-
-The e2e test (`tests/test_e2e_real_scripts.py`) drives the real pinned scripts and cardano-cli in offline mode on preview. It needs network access for one light-mode `01_workOffline.sh new`. The tutorial `docs/tutorials/rotate-kes-on-preview.md` was executed verbatim and ends `[DONE]`. Re-run it after changing `kes-rotate`.
-
-Unit tests use stand-ins (`tests/fake_scripts.py`) that reproduce the upstream file contract. When you learn something new about upstream behaviour, encode it in the stand-in first, so the unit tests cannot drift from reality again (this happened once; see Gotchas).
-
-## Go reference implementation (`spo/`)
-
-Started 2026-11-16. Read [Go reference implementation: concerns](./go-reference-implementation-concerns.md) and the [ADRs](../explanation/adr/README.md) before touching it. The concerns page has a *Status* table that says what is closed.
-
-State: milestone M0 (decisions and skeleton) is done, and M1 (parity harness) has its first vertical slice: `spo pool kes generate <pool>` is at parity with upstream `04c` under a differential test. The sealed store is the default. `spo init` creates a workspace (`workspace.spo` plus `spo.toml`), and every command opens it with a passphrase from the terminal or `--passphrase-fd`. `--upstream-layout` still works on a plain directory in the upstream file layout, with keys unsealed, and is refused when `workspace.spo` is present. `pool opcert issue` is wired for offline mode (clock, no chain check) and light mode (Koios, chain check enforced); online mode (node socket) is not built. Provider API tokens cannot be stored until `ports` has a secret kind for them. See [spo CLI](../reference/spo-cli.md) and [spo.toml](../reference/spo-toml.md).
-
-| What | Where |
 | --- | --- |
-| Composition root | `spo/cmd/spo` |
-| Process runner: argument vectors only, secrets through inherited pipes, empty environment by default | `spo/internal/platform/execx` |
-| Guarded memory for key material; core dumps disabled at start | `spo/internal/platform/secret` |
-| Release-set gates (upstream's bounds plus an exact match with the pin) | `spo/internal/adapters/toolchain`, manifest from `tools/spo.nix` |
+| Composition root: wiring of every adapter, the `Env` of each mode, the TUI entry | `spo/cmd/spo` |
+| Command tree (cobra driving adapter) and the `Env`/`Cap`/`Require` pattern | `spo/internal/adapters/cli` |
+| Terminal UI over the same tree (ADR 0009) | `spo/internal/adapters/tui` |
 | Dependency rule and import confinement, enforced as a test | `spo/internal/archtest` |
-| Ports defined so far: `Toolchain`, `Store`, `Vault`, `KesKeyGenerator`, `VrfKeyGenerator` | `spo/internal/ports` |
-| Key roles, signer profiles, demands and signing plans (ADR 0008) | `spo/internal/domain/custody` |
-| Opcert issue (`04d`), byte-equal to cardano-cli; vault signer and signer directory | `spo/internal/app/poolops/issue_opcert.go`, `spo/internal/adapters/native/opcert.go` |
-| Chain vocabulary: three-valued readings, tip, genesis, protocol parameters, UTxOs, bech32 | `spo/internal/domain/chain` |
-| Koios adapter with recorded preview responses | `spo/internal/adapters/koios` |
-| Offline tip from the clock, genesis file reader, system clock | `spo/internal/adapters/offline`, `genesisfile`, `systemclock` |
-| Sealing primitives with committed test vectors (ADR 0003) | `spo/internal/platform/seal` |
-| Sealed single-file store: `Store` and `Vault` over SQLite, audit chain, backup and restore. Wired into `init`, `store ...` and every key command; under security review | `spo/internal/adapters/sqlitestore` |
-| Workspace configuration: `spo.toml` with a strict schema, and the network presets | `spo/internal/adapters/config` |
-| KES rotation state and the `GenerateKesKey` use case | `spo/internal/domain/pool`, `spo/internal/app/poolops` |
-| Upstream-layout store (plain files, keys unsealed) | `spo/internal/adapters/fsstore` |
-| Native key generation for KES and VRF (Blink Labs `bursa`), checked against cardano-cli | `spo/internal/adapters/native`, `spo/test/parity/keygen_test.go` |
-| Transaction kernel: draft, amount forms, layout, fee loop, witness check (pure) | `spo/internal/domain/txbuild` |
-| Payment use case `SendLovelaces` (`01_sendLovelaces`): plan, one body, confirm, witness, verify, submit or queue | `spo/internal/app/wallet` |
-| Native ledger side of transactions: body encoding, fee, minimum output, assembly, address inspection; vault witnesses for payment and stake keys | `spo/internal/adapters/native` (`tx.go`, `witness.go`) |
-| Offline transfer file as snapshot reader and transaction queue (atomic write, read-back) | `spo/internal/adapters/transferfile` |
-| The environment of a command (`Env`, `Require`) and the wiring of each mode | `spo/internal/adapters/cli/env.go`, `spo/cmd/spo/env.go` |
+| Process runner (argument vectors only, secrets through pipes), guarded memory, sealing primitives, core dumps disabled | `spo/internal/platform/{execx,secret,seal}` |
+| Release-set gates, manifest from `tools/spo.nix` | `spo/internal/adapters/toolchain` |
+| Ports (one small interface per capability) and domain (custody, chain vocabulary, txbuild, pool, stake, assets, tokenmeta, party, ...) | `spo/internal/ports`, `spo/internal/domain` |
+| Use cases | `spo/internal/app/*` |
+| Native ledger, key generation, signers (vault, registry), verification-key and VRF derivation, on Blink Labs libraries (ADR 0007) | `spo/internal/adapters/native` |
+| Sealed single-file store, its audit chain, backup and restore; the upstream-layout store | `spo/internal/adapters/{sqlitestore,storeaudit,fsstore}` |
+| `spo.toml` with a strict schema, and the network presets | `spo/internal/adapters/config` |
+| Chain and web readers: Koios (recorded responses) and the light-mode parameters, ADA Handle API, token-registry server, metadata fetch | `spo/internal/adapters/{koios,adahandle,tokenregistry,httpfetch}` |
+| Offline: tip from the clock, genesis file reader, the transfer file as snapshot, queue and bundle | `spo/internal/adapters/{offline,genesisfile,systemclock,transferfile}` |
+| Hardware wallets over `cardano-hw-cli` (untested on devices) | `spo/internal/adapters/hwcli` |
+| Multi-party: party registry, envelopes, file and tailcat transports | `spo/internal/adapters/{partystore,envelope,filebag,tailcat}` |
+| gpg envelope for upstream's encrypted keys | `spo/internal/adapters/gpg` |
 | Differential tests against the pinned upstream scripts | `spo/test/parity` |
 | Which specs are implemented, and the waived ids with reasons | `spo/spec-coverage.toml` |
+
+
+Fast loop, from `spo/` (needs Go 1.27; `-count=1` matters, Go caches the import-rule test):
+
+```sh
+gofmt -l internal cmd && go vet ./... && go test -count=1 ./...
+go test -count=1 ./internal/archtest/            # the dependency rule
+go test -count=1 -run TestU ./cmd/...             # the TUI parity and descriptor-flag tests
+```
 
 Verify:
 
@@ -130,7 +120,7 @@ Things that will bite:
 * **Hardware wallets are untested on real devices.** The adapter is built and tested against a stand-in tool. Before relying on it, work through [the device checklist](./hardware-device-checklist.md).
 
 * **The multi-party stack passed its fifth security review** with operating conditions (ADR 0005, `spec/extensions/Xparty.md`). Four fix rounds preceded it and two of them left a fail-open edge, so any change to `domain/party`, `app/multisig` or the transports needs a regression test that fails without the change, and an Opus review. The wiring obligations a command must meet are listed in ADR 0005 (address inspector always set; resolver only through `OwnProvider`/`OwnSnapshot`; `Received` only from a transport; a real approval gate).
-* **The sealed store passed its seventh security review** with operating conditions (ADR 0003). Its history matters: each of the first five fix rounds introduced a new defect, mostly around rekeying, locking and SQLite's side files. Change `spo/internal/adapters/sqlitestore` only with a regression test per change and an Opus review afterwards. **Multi-party signing is not yet cleared**: see the *Status* table in the concerns page.
+* **The sealed store passed its seventh security review** with operating conditions (ADR 0003). Its history matters: each of the first five fix rounds introduced a new defect, mostly around rekeying, locking and SQLite's side files. Change `spo/internal/adapters/sqlitestore` only with a regression test per change and an Opus review afterwards. The multi-party library stack is cleared; the wiring of its commands is pending review (see the *Status* table in the concerns page).
 * **Parity tests that need cardano-signer skip inside the Nix sandbox.** The signer is a prebuilt binary whose interpreter path cannot be patched, so it does not run there. Run them in the development loop: `source <scratch>/env.sh` style variables as described in `spo/test/parity/parity_test.go`, then `go test ./test/parity/`. The Nix check allows exactly that skip and fails on any other.
 * **Tailcat adds about 18 MB** to the binary and a large test-only dependency set (concern T8).
 
@@ -149,7 +139,7 @@ How to port a use case (the pattern `GenerateKesKey` sets):
 4. Add the spec code to `implemented` in `spo/spec-coverage.toml`; waive what is deliberately not ported, with a reason.
 5. Fold anything the real tools taught you back into the spec.
 
-Next, in order: `04d` and `04e` (the opcert signer interface over `bursa.CreateOperationalCertificate`, byte-equal to cardano-cli under the oracle; narrow chain readers; the Koios adapter), the sealed store (ADR 0003), then send ADA through a pipeline built on `gouroboros` types. After that the multi-party slice (M3).
+Where to go next: the **Not built** list above. A second provider comes first (so harmful reads stop needing `--single-source`), then the node socket and online mode, then the Calidus reader and the refused governance actions.
 
 ## Backlog
 
