@@ -1,0 +1,22 @@
+# Spec codes (the `id` in spec front matter, for example "04c") whose every
+# requirement must be cited by a Go test or waived below. A citation is a
+# comment line containing `spec:` and the ids, in a *_test.go file under spo/:
+#   // spec: SPO-04c-PRE-001, SPO-04c-PRE-002
+# Add a code here when its use case is implemented.
+implemented = ["04c"]
+
+# Requirement ids deliberately not covered, each with a non-empty reason:
+#   "SPO-04c-PR-002" = "display only; the port never shows a password"
+# A waiver for an id that a test also cites is an error.
+[waived]
+# 04c: the port has no gpg `enc` mode at generation. Every signing key goes
+# into the store; protection is the store's (sealed store), and the upstream
+# `enc` file format is produced only by the key-protection use case (01_protectKey).
+"SPO-04c-INV-002" = "enc mode not ported at generation; also broken upstream with cardano-cli 11.2.3.0 (see the quirk note in the spec)"
+"SPO-04c-PR-001" = "enc mode not ported at generation: no per-key password prompt"
+"SPO-04c-PR-002" = "enc mode not ported at generation: the port never displays a password"
+"SPO-04c-PRE-003" = "enc mode not ported at generation: no password prompt to abort"
+"SPO-04c-PRE-004" = "enc mode not ported at generation; the orphaned .vkey it describes cannot occur (generation is atomic)"
+"SPO-04c-PRE-005" = "enc mode not ported at generation: no interactive phase to interrupt"
+"SPO-04c-OUT-002" = "enc mode not ported at generation: the gpg envelope is written by the key-protection use case"
+"SPO-04c-SEC-002" = "enc mode not ported at generation: the port never displays a password"

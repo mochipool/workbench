@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/mochipool/workbench/spo/internal/app/poolops"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -21,6 +22,11 @@ type Deps struct {
 	Tools     []ports.ToolName
 	Out       io.Writer
 	Err       io.Writer
+
+	// OpenStore opens the workspace. upstreamLayout selects the plain
+	// directory in upstream's file layout, where signing keys are not sealed.
+	OpenStore func(dir string, upstreamLayout bool) (ports.Store, error)
+	KeyGen    ports.KeyGen
 }
 
 // NewRoot builds the command tree.
@@ -54,6 +60,35 @@ func NewRoot(d Deps) *cobra.Command {
 		},
 	})
 	root.AddCommand(tc)
+
+	var workspace string
+	var upstreamLayout bool
+	root.PersistentFlags().StringVarP(&workspace, "workspace", "C", ".", "workspace directory")
+	root.PersistentFlags().BoolVar(&upstreamLayout, "upstream-layout", false,
+		"use a directory in the upstream scripts' file layout; signing keys are stored unsealed, as upstream stores them")
+
+	poolCmd := &cobra.Command{Use: "pool", Short: "Pool keys, certificates and registration"}
+	kesCmd := &cobra.Command{Use: "kes", Short: "KES key rotation"}
+	kesCmd.AddCommand(&cobra.Command{
+		Use:   "generate <pool>",
+		Short: "Generate the KES key pair for the next operational certificate",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := d.OpenStore(workspace, upstreamLayout)
+			if err != nil {
+				return err
+			}
+			res, err := poolops.GenerateKesKey{Store: store, KeyGen: d.KeyGen}.Run(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			// The verification key is public. The signing key is never shown.
+			fmt.Fprintf(d.Out, "Generated KES key %03d for pool %s.\n%s\n", res.Number, res.Pool, res.VKey)
+			return nil
+		},
+	})
+	poolCmd.AddCommand(kesCmd)
+	root.AddCommand(poolCmd)
 	return root
 }
 

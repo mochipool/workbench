@@ -105,7 +105,7 @@
 
           # Go reference implementation, bound to this release set's toolchain
           spoBin = import ./tools/spo.nix {
-            inherit pkgs lib versions cardano-signer;
+            inherit pkgs lib versions cardano-signer workbench;
             inherit (import nixpkgs-go { inherit system; }) buildGoModule;
             inherit (spoCompat) requirements;
             cardano-cli = cardano-cli-pkgs.cardano-cli;
@@ -267,11 +267,20 @@
           workbench-tests = wb.workbench.tests;
           # Go reference implementation: vet and unit tests (no haskell toolchain).
           spo-tests = wb.spoBin.unwrapped;
+          # Differential tests of spo against the pinned upstream scripts.
+          # Needs the Cardano toolchain, so CI runs it only where the IOG
+          # cache has native builds.
+          spo-parity = wb.spoBin.parity;
           # The upstream spec corpus (spec/) must match the pinned spo-scripts
           # tree: file and function hashes, mechanical facts, source ranges,
           # unique ids, full coverage. See spec/README.md.
           spec-lint = wb.pkgs.runCommand "spec-lint" { nativeBuildInputs = [ wb.pkgs.python3 ]; } ''
             SPO_SCRIPTS_SRC=${spo-scripts} SPO_SCRIPTS_REV=${spo-scripts.rev} python3 ${self}/spec/tools/specctl.py lint
+            echo ok > $out
+          '';
+          # Every requirement of an implemented spec is cited by a Go test or waived.
+          spo-spec-coverage = wb.pkgs.runCommand "spo-spec-coverage" { nativeBuildInputs = [ wb.pkgs.python3 ]; } ''
+            python3 ${self}/spec/tools/specctl.py coverage --tests ${self}/spo --config ${self}/spo/spec-coverage.toml
             echo ok > $out
           '';
           # The readme's generated requirements section must match the nix data.
