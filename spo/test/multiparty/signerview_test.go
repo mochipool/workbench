@@ -26,15 +26,42 @@ import (
 // that is enrolled, authenticated and hostile. Each is refused with its reason,
 // and nothing is signed.
 
-// utxoSet is the signer's own chain view, a ports.UtxoReader over a map.
+// utxoSet is the signer's own chain view, a ports.UtxoResolver over a map of
+// references. A reference it was not told about is Unknown, as the snapshot's
+// and Koios' are.
 type utxoSet struct {
-	byAddr map[chain.Address][]chain.Utxo
-	fail   error
+	byRef map[chain.OutRef]chain.Reading[chain.ResolvedUtxo]
+	fail  error
 }
 
 func (u *utxoSet) Source() chain.Source { return "the signer's own view" }
-func (u *utxoSet) Utxos(_ context.Context, a chain.Address) ([]chain.Utxo, error) {
-	return u.byAddr[a], u.fail
+
+// put makes the UTxO unspent at the address.
+func (u *utxoSet) put(addr chain.Address, ut chain.Utxo) {
+	if u.byRef == nil {
+		u.byRef = map[chain.OutRef]chain.Reading[chain.ResolvedUtxo]{}
+	}
+	u.byRef[chain.OutRef{TxID: ut.TxID, Index: ut.Index}] = chain.Value(chain.ResolvedUtxo{Address: addr, Lovelace: ut.Lovelace, Assets: ut.Assets})
+}
+
+// spend makes the provider say the UTxO is spent.
+func (u *utxoSet) spend(ut chain.Utxo) {
+	u.byRef[chain.OutRef{TxID: ut.TxID, Index: ut.Index}] = chain.None[chain.ResolvedUtxo]()
+}
+
+func (u *utxoSet) ResolveUtxos(_ context.Context, refs []chain.OutRef) (map[chain.OutRef]chain.Reading[chain.ResolvedUtxo], error) {
+	if u.fail != nil {
+		return nil, u.fail
+	}
+	out := map[chain.OutRef]chain.Reading[chain.ResolvedUtxo]{}
+	for _, r := range refs {
+		if v, ok := u.byRef[r]; ok {
+			out[r] = v
+		} else {
+			out[r] = chain.Unknown[chain.ResolvedUtxo]("the rig's provider has no answer for " + r.String())
+		}
+	}
+	return out, nil
 }
 
 // fixture is the world with a payment key on bob's machine, his own address
@@ -63,9 +90,12 @@ func newFixture(t *testing.T, scope func(w *world) party.Scope) *fixture {
 		t.Fatal(err)
 	}
 	f.own = chain.Utxo{TxID: chain.TxID{0xb0}, Index: 0, Lovelace: 50_000_000}
-	f.utxos = &utxoSet{byAddr: map[chain.Address][]chain.Utxo{f.payAddr: {f.own}}}
-	w.B.Owned = party.OwnedList{Payment: []chain.Address{f.payAddr}, Reward: []chain.StakeAddress{f.rewards}}
-	w.B.Utxos = f.utxos
+	f.utxos = &utxoSet{}
+	f.utxos.put(f.payAddr, f.own)
+	// bob's credentials: the hashes of the payment and stake keys in his store.
+	w.B.Owned = party.OwnedKeys{Payment: [][28]byte{f.payHash}, Stake: [][28]byte{w.bobHash}}
+	w.B.Resolver = f.utxos
+	w.B.Addresses = w.led
 	w.B.AddKnownKey(custody.RoleStake, "bob", [28]byte(w.bobHash))
 	return f
 }
@@ -134,7 +164,8 @@ func rawTTL(m []byte) (uint64, bool) {
 func (f *fixture) send(s multisig.Signer, req party.SigningRequest, via ports.TransportKind) multisig.Handled {
 	f.t.Helper()
 	env := seal(f.t, f.world, req)
-	h, err := s.Handle(ctx, env, via)
+	rcv := partyrig.Received(env, via)
+	h, err := s.Handle(ctx, rcv)
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -253,12 +284,12 @@ func TestAttackPaymentKeyRequestWithoutAUTxOReader(t *testing.T) {
 		Outputs: []txbuild.Output{{Address: f.testnetAddr(other28), Lovelace: 49_800_000}}})
 	req := f.request(body, custody.RolePayment, f.payHash)
 
-	f.B.Utxos = nil
+	f.B.Resolver = nil
 	h := f.send(f.signer(), req, ports.ViaFile)
 	f.silentRefusal(h, party.RefuseCannotResolveInputs, req.TxBody)
 
 	// A reader that fails is the same: its answer is unknown, never "none".
-	f.B.Utxos = &utxoSet{fail: context.DeadlineExceeded}
+	f.B.Resolver = &utxoSet{fail: context.DeadlineExceeded}
 	req2 := f.request(body, custody.RolePayment, f.payHash)
 	f.silentRefusal(f.send(f.signer(), req2, ports.ViaFile), party.RefuseCannotResolveInputs, req2.TxBody)
 }
@@ -270,6 +301,7 @@ func TestAttackPaymentKeyRequestWithoutAUTxOReader(t *testing.T) {
 func TestPaymentKeyRequestShowsWhoseMoneyLeaves(t *testing.T) {
 	f := newFixture(t, payAndStake)
 	foreign := chain.Utxo{TxID: chain.TxID{0xf0}, Index: 3, Lovelace: 1_000_000_000}
+	f.utxos.put(f.testnetAddr(other28), foreign) // someone else's: resolved, at another key's address
 	body := f.builtBody(txbuild.BodySpec{Inputs: []chain.Utxo{f.own, foreign},
 		Outputs: []txbuild.Output{
 			{Address: f.testnetAddr(other28), Lovelace: 1_030_000_000}, // to someone else
@@ -303,6 +335,7 @@ func TestPaymentKeyRequestShowsWhoseMoneyLeaves(t *testing.T) {
 func TestAttackPaymentKeyRequestWithNoInputOfTheSigner(t *testing.T) {
 	f := newFixture(t, payAndStake)
 	notMine := chain.Utxo{TxID: chain.TxID{0xee}, Index: 0, Lovelace: 5_000_000}
+	f.utxos.put(f.testnetAddr(other28), notMine) // resolved, and not at an address of bob's key
 	body := f.builtBody(txbuild.BodySpec{Inputs: []chain.Utxo{notMine},
 		Outputs: []txbuild.Output{{Address: f.testnetAddr(other28), Lovelace: 4_800_000}}})
 	req := f.request(body, custody.RolePayment, f.payHash)
@@ -321,7 +354,7 @@ func TestStakeKeyRequestStatesThatInputsWereNotChecked(t *testing.T) {
 	body := f.builtBody(txbuild.BodySpec{Inputs: []chain.Utxo{{TxID: chain.TxID{0xaa}, Lovelace: 10_000_000}},
 		Outputs:      []txbuild.Output{{Address: f.testnetAddr(other28), Lovelace: 7_800_000}},
 		Certificates: []stake.Certificate{cert}})
-	f.B.Utxos = nil
+	f.B.Resolver = nil
 	f.accepted(f.send(f.signer(), f.request(body, custody.RoleStake, f.bobHash), ports.ViaFile))
 	rv := f.review()
 	if rv.Flow.Checked || rv.Flow.NotChecked != party.NotCheckedText || rv.Flow.Deposits != 2_000_000 {
@@ -622,7 +655,7 @@ func TestOneSendersQuotaDoesNotBlockAnother(t *testing.T) {
 		t.Fatalf("%d pending", len(pend))
 	}
 	// The other coordinator is not affected.
-	h, err := f.signer().Handle(ctx, partyrig.Seal(t, c2, f.B, req(), 5*time.Minute), ports.ViaFile)
+	h, err := f.signer().Handle(ctx, ports.FileReceived(partyrig.Seal(t, c2, f.B, req(), 5*time.Minute)))
 	if err != nil || h.Refused || h.Effect != "stored" {
 		t.Fatalf("another coordinator: %+v, %v", h, err)
 	}
@@ -653,7 +686,7 @@ func TestGarbageDoesNotEvictSecurityEvents(t *testing.T) {
 	}
 	for i := 0; i < 400; i++ {
 		junk := bytes.Repeat([]byte{byte(i), byte(i >> 8)}, 40)
-		h, err := w.C.Coordinator().Handle(ctx, junk, ports.ViaFile)
+		h, err := w.C.Coordinator().Handle(ctx, ports.FileReceived(junk))
 		if err != nil || !h.Refused || h.HasSender {
 			t.Fatalf("garbage %d: %+v, %v", i, h, err)
 		}

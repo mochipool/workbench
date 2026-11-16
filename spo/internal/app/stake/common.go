@@ -6,8 +6,10 @@
 //
 // Every use case is one workflow. Which signer holds a key and whether the
 // signed transaction is submitted or queued are decided by the composition:
-// a hardware holder is refused up front by the signing plan, because no
-// hardware signer exists yet (ADR 0008).
+// a hardware holder is decided up front by the signing plan against the
+// device's profile (ADR 0008), the body is brought to hardware form before it
+// is shown, and a hardware key mixed with a key-file key is refused
+// (SPO-Ptx-PRE-006).
 package stake
 
 import (
@@ -113,6 +115,10 @@ type Base struct {
 	DefTTL uint64
 	// Selection chooses the inputs; empty means SelectAll.
 	Selection txbuild.SelectionStrategy
+	// Files and Encrypter are needed only by a request with Extras that name
+	// metadata files or ask for message encryption.
+	Files     ports.MetadataFileReader
+	Encrypter ports.MessageEncrypter
 }
 
 // Result is what a transaction use case did. Nothing in it is secret.

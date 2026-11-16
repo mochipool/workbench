@@ -526,10 +526,19 @@ func TestImportRefusals(t *testing.T) {
 			t.Errorf("%v", err)
 		}
 		r.nothingChanged(before, "a refused import")
-		// The window is open at ttl itself.
+		// Upstream quirk decision (SPO-05d-INV-003): upstream treats the
+		// window as open while ttl >= tip. The body's TTL is the ledger's
+		// invalid-hereafter bound, which is exclusive: once the tip has
+		// reached it, no later block can include the transaction. Fixed: the
+		// collection is expired at the TTL slot itself.
 		r.chain.tip.Slot = 1000 + 100000
-		if _, err := r.importer().Run(ctx, ImportRequest{Pool: "mypool", File: tf.Render()}); err != nil {
+		if _, err := r.importer().Run(ctx, ImportRequest{Pool: "mypool", File: tf.Render()}); !errors.Is(err, pool.ErrCollectionNotOpen) {
 			t.Errorf("at the TTL: %v", err)
+		}
+		// One slot earlier it is still open.
+		r.chain.tip.Slot = 1000 + 100000 - 1
+		if _, err := r.importer().Run(ctx, ImportRequest{Pool: "mypool", File: tf.Render()}); err != nil {
+			t.Errorf("one slot before the TTL: %v", err)
 		}
 	})
 	t.Run("no collection", func(t *testing.T) {

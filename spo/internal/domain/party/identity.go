@@ -156,13 +156,15 @@ func (i Identity) Fingerprint() Fingerprint { return FingerprintOf(i.Ed25519, i.
 var ErrIdentity = errors.New("party: invalid identity")
 
 // cleanText reports whether s is valid UTF-8 without control or format
-// characters (terminal escape sequences, bidi overrides).
+// characters (terminal escape sequences, bidi overrides) and without the line
+// and paragraph separators U+2028 and U+2029, which break a line like a
+// newline does.
 func cleanText(s string) bool {
 	if !utf8.ValidString(s) {
 		return false
 	}
 	for _, r := range s {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == 0x2028 || r == 0x2029 {
 			return false
 		}
 	}

@@ -80,18 +80,31 @@ func startServer(t *testing.T, reg *tailcfg.DERPRegion, allowed []party.NodeKey,
 
 func clientFor(t *testing.T, s *Server, node *secret.Buffer, coord party.Fingerprint) *Client {
 	t.Helper()
+	return clientForHello(t, s, node, coord, func(context.Context) ([]byte, error) { return stubHello, nil })
+}
+
+// clientForHello is clientFor with the Hello builder the wiring would give.
+func clientForHello(t *testing.T, s *Server, node *secret.Buffer, coord party.Fingerprint, hello func(context.Context) ([]byte, error)) *Client {
+	t.Helper()
 	addr, err := s.Address()
 	if err != nil {
 		t.Fatal(err)
 	}
 	sk := party.NodeKey(s.ts.Key.Public().Raw32())
-	c, err := NewClient(ClientConfig{Address: addr, NodeKey: node, Coordinator: coord, ExpectServerKey: &sk, Logf: quietLogf, DialTimeout: 15 * time.Second})
+	c, err := NewClient(ClientConfig{Address: addr, NodeKey: node, Coordinator: coord, ExpectServerKey: &sk, Logf: quietLogf, DialTimeout: 15 * time.Second,
+		Hello: hello})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { c.Close() })
 	return c
 }
+
+// stubHello is the first frame of every connection of a client whose server
+// admits anything (the contract suite and the limit tests).
+var stubHello = []byte("a hello, as far as the transport knows")
+
+func stubHelloFn(context.Context) ([]byte, error) { return stubHello, nil }
 
 // The interface contract suite (concern T1), over real tailcat.
 func TestContract(t *testing.T) {
@@ -104,7 +117,7 @@ func TestContract(t *testing.T) {
 		// the real check is tested below.
 		s := startServer(t, reg, []party.NodeKey{pub}, admitAll)
 		c := clientFor(t, s, node, coord)
-		return porttest.Pair{Sender: c, Receiver: s, To: coord, Via: ports.ViaNetwork}
+		return porttest.Pair{Sender: c, Receiver: s, To: coord, Via: ports.ViaNetwork, Hello: stubHello}
 	})
 }
 
@@ -150,7 +163,13 @@ func TestEnvelopesOverTailcat(t *testing.T) {
 	}
 	node, pub := nodeKey(t)
 	s := startServer(t, reg, []party.NodeKey{pub}, admit)
-	c := clientFor(t, s, node, coordID.Fingerprint())
+	// The wiring's Hello builder: a fresh Hello sealed by the signer's identity.
+	var hellos int
+	c := clientForHello(t, s, node, coordID.Fingerprint(), func(context.Context) ([]byte, error) {
+		hellos++
+		env, _, err := envelope.Seal(signerID, coordID.Identity(), party.Hello{}, now, now.Add(5*time.Minute), det(byte(20+hellos)))
+		return env, err
+	})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -163,10 +182,20 @@ func TestEnvelopesOverTailcat(t *testing.T) {
 	if err := c.Send(ctx, coordID.Fingerprint(), env); err != nil {
 		t.Fatal(err)
 	}
-	got, via, err := s.Receive(ctx)
-	if err != nil || via != ports.ViaNetwork {
-		t.Fatalf("Receive = %v, %v", via, err)
+	// The first frame of the connection is the client's own fresh Hello, the
+	// second what was sent.
+	first, err := s.Receive(ctx)
+	if err != nil || first.Via() != ports.ViaNetwork {
+		t.Fatalf("Receive = %v, %v", first.Via(), err)
 	}
+	if h, err := envelope.Open(coordID, first.Envelope, lookup, time.Now()); err != nil || h.Type() != party.TypeHello || hellos != 1 {
+		t.Fatalf("the first frame is not the client's Hello: %v, %v, %d built", h, err, hellos)
+	}
+	gotR, err := s.Receive(ctx)
+	if err != nil || gotR.Via() != ports.ViaNetwork {
+		t.Fatalf("Receive = %v, %v", gotR.Via(), err)
+	}
+	got := gotR.Envelope
 	o, err := envelope.Open(coordID, got, lookup, time.Now())
 	if err != nil || o.ID() != id {
 		t.Fatalf("Open = %v, %v", o, err)
@@ -182,9 +211,10 @@ func TestEnvelopesOverTailcat(t *testing.T) {
 	if err := s.Send(ctx, signerID.Fingerprint(), reply); err != nil {
 		t.Fatal(err)
 	}
-	back, via, err := c.Receive(ctx)
-	if err != nil || via != ports.ViaNetwork || !bytes.Equal(back, reply) {
-		t.Fatalf("client Receive = %v, %v", via, err)
+	backR, err := c.Receive(ctx)
+	back := backR.Envelope
+	if err != nil || backR.Via() != ports.ViaNetwork || !bytes.Equal(back, reply) {
+		t.Fatalf("client Receive = %v, %v", backR.Via(), err)
 	}
 	coordParty := mkParty(coordID, "coord", party.RoleCoordinator)
 	o2, err := envelope.Open(signerID, back, func(fp party.Fingerprint) (party.Party, bool) { return coordParty, fp == coordParty.Fingerprint }, time.Now())
@@ -232,8 +262,11 @@ func TestUnenrolledNodeKeyReachesNothing(t *testing.T) {
 	if err := c.Send(ctx, party.Fingerprint{0xc0}, []byte("hello")); err != nil {
 		t.Fatal(err)
 	}
-	if got, _, err := s.Receive(ctx); err != nil || string(got) != "hello" {
-		t.Fatalf("Receive = %q, %v", got, err)
+	if got, err := s.Receive(ctx); err != nil || !bytes.Equal(got.Envelope, stubHello) {
+		t.Fatalf("Receive = %q, %v: the connection's first frame is the client's own Hello", got.Envelope, err)
+	}
+	if got, err := s.Receive(ctx); err != nil || string(got.Envelope) != "hello" {
+		t.Fatalf("Receive = %q, %v", got.Envelope, err)
 	}
 	if st := s.Stats(); st.Accepted != 1 {
 		t.Fatalf("accepted = %d, want exactly the enrolled client's connection", st.Accepted)
@@ -340,23 +373,23 @@ func TestClientChecksServerKey(t *testing.T) {
 	wrong := right
 	wrong[0] ^= 1
 	addr := func() *secret.Buffer { a, _ := s.Address(); return a }
-	if _, err := NewClient(ClientConfig{Address: addr(), NodeKey: copyBuf(t, node), ExpectServerKey: &wrong}); err == nil {
+	if _, err := NewClient(ClientConfig{Hello: stubHelloFn, Address: addr(), NodeKey: copyBuf(t, node), ExpectServerKey: &wrong}); err == nil {
 		t.Fatal("accepted an address for another server key")
 	}
-	c, err := NewClient(ClientConfig{Address: addr(), NodeKey: copyBuf(t, node), ExpectServerKey: &right, Logf: quietLogf})
+	c, err := NewClient(ClientConfig{Hello: stubHelloFn, Address: addr(), NodeKey: copyBuf(t, node), ExpectServerKey: &right, Logf: quietLogf})
 	if err != nil {
 		t.Fatal(err)
 	}
 	c.Close()
-	if _, err := NewClient(ClientConfig{Address: secretOf(t, "not an address"), NodeKey: copyBuf(t, node), ExpectServerKey: &right}); err == nil {
+	if _, err := NewClient(ClientConfig{Hello: stubHelloFn, Address: secretOf(t, "not an address"), NodeKey: copyBuf(t, node), ExpectServerKey: &right}); err == nil {
 		t.Fatal("accepted junk as an address")
 	}
 	// The server key from the invitation is mandatory (SPO-Xparty-IF-006).
-	if _, err := NewClient(ClientConfig{Address: addr(), NodeKey: copyBuf(t, node)}); err == nil {
+	if _, err := NewClient(ClientConfig{Hello: stubHelloFn, Address: addr(), NodeKey: copyBuf(t, node)}); err == nil {
 		t.Fatal("built a client with no expected server key")
 	}
 	zero := party.NodeKey{}
-	if _, err := NewClient(ClientConfig{Address: addr(), NodeKey: copyBuf(t, node), ExpectServerKey: &zero}); err == nil {
+	if _, err := NewClient(ClientConfig{Hello: stubHelloFn, Address: addr(), NodeKey: copyBuf(t, node), ExpectServerKey: &zero}); err == nil {
 		t.Fatal("built a client with a zero expected server key")
 	}
 }
@@ -367,4 +400,69 @@ func secretOf(t *testing.T, s string) *secret.Buffer {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// A Hello builder is required, and every connection, the first and each one
+// after a drop, opens with a fresh Hello the client sends itself: a new
+// message id each time, so no connection starts with an envelope the
+// coordinator has already accepted (SPO-Xparty-INV-018, INV-021).
+// spec: SPO-Xparty-INV-018, SPO-Xparty-INV-021
+func TestEveryConnectionStartsWithAFreshHello(t *testing.T) {
+	t.Parallel()
+	reg := relay(t)
+	node, pub := nodeKey(t)
+	s := startServer(t, reg, []party.NodeKey{pub}, admitAll)
+	var n int
+	c := clientForHello(t, s, node, party.Fingerprint{0xc0}, func(context.Context) ([]byte, error) {
+		n++
+		return []byte{0x48, byte(n)}, nil // a different frame every time
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	for i := 1; i <= 3; i++ {
+		if err := c.Connect(ctx); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.Receive(ctx)
+		if err != nil || !bytes.Equal(got.Envelope, []byte{0x48, byte(i)}) {
+			t.Fatalf("connection %d: first frame %x, %v", i, got.Envelope, err)
+		}
+		// What the caller sends comes after the Hello, never before it.
+		if err := c.Send(ctx, party.Fingerprint{0xc0}, []byte("payload")); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := s.Receive(ctx); err != nil || string(got.Envelope) != "payload" {
+			t.Fatalf("connection %d: second frame %q, %v", i, got.Envelope, err)
+		}
+		c.Disconnect()
+	}
+	if n != 3 {
+		t.Fatalf("the Hello builder ran %d times for 3 connections", n)
+	}
+}
+
+// A client with no Hello builder, or one whose builder fails, does not connect.
+// spec: SPO-Xparty-INV-018
+func TestClientRefusesToConnectWithoutAHello(t *testing.T) {
+	t.Parallel()
+	reg := relay(t)
+	node, pub := nodeKey(t)
+	s := startServer(t, reg, []party.NodeKey{pub}, admitAll)
+	addr, err := s.Address()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sk := party.NodeKey(s.ts.Key.Public().Raw32())
+	if _, err := NewClient(ClientConfig{Address: addr, NodeKey: node, ExpectServerKey: &sk}); err == nil {
+		t.Fatal("a client was built with no Hello builder")
+	}
+	failing := clientForHello(t, s, copyBuf(t, node), party.Fingerprint{0xc0}, func(context.Context) ([]byte, error) { return nil, errors.New("no identity") })
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := failing.Connect(ctx); err == nil {
+		t.Fatal("connected with a builder that fails")
+	}
+	if st := s.Stats(); st.Frames != 0 {
+		t.Fatalf("%d frames reached the server", st.Frames)
+	}
 }

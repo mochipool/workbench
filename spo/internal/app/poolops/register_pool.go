@@ -14,6 +14,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/domain/stake"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
+	"github.com/mochipool/workbench/spo/internal/domain/txparam"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -84,6 +85,10 @@ type RegisterPool struct {
 	// Metadata downloads poolMetaUrl for the hash check; nil skips the check
 	// (offline: it runs at execute, SPO-05c-MODE-004).
 	Metadata ports.MetadataFetcher
+	// Files and Encrypter are needed only by a request with Extras that name
+	// metadata files or ask for message encryption.
+	Files     ports.MetadataFileReader
+	Encrypter ports.MessageEncrypter
 	// Tickers is the opt-in ticker-protection lookup. It is sent the ticker
 	// and nothing else: the registration protection key never leaves the
 	// machine (hazard H6, SPO-05c-SEC-002). Nil means no lookup.
@@ -114,6 +119,10 @@ type RegisterRequest struct {
 	Payer   string
 	Type    pool.RegistrationType
 	Message []string
+	// Extras are the parsed extra parameters (txparam.Parse with
+	// txparam.ForCertificate); Passphrase is the `pass:` of Extras. Optional.
+	Extras     *txparam.Extras
+	Passphrase *ports.Secret
 }
 
 // RegisterResult is what happened. Nothing in it is secret.
@@ -173,6 +182,11 @@ func (uc RegisterPool) Run(ctx context.Context, req RegisterRequest) (RegisterRe
 	if err := txbuild.ValidateMessage(req.Message); err != nil {
 		return RegisterResult{}, err
 	}
+	// spec: SPO-Pparam-IF-010, SPO-Pparam-IF-016
+	meta, err := txflow.ResolveExtras(txflow.ExtrasPorts{Files: uc.Files, Encrypter: uc.Encrypter}, req.Extras, req.Message, req.Passphrase)
+	if err != nil {
+		return RegisterResult{}, err
+	}
 	name, err := poolName(req.Pool)
 	if err != nil {
 		return RegisterResult{}, err
@@ -214,7 +228,7 @@ func (uc RegisterPool) Run(ctx context.Context, req RegisterRequest) (RegisterRe
 	}
 
 	if in.coll != nil {
-		if req.Type != "" || len(req.Message) > 0 {
+		if req.Type != "" || len(req.Message) > 0 || req.Extras != nil {
 			return RegisterResult{}, ErrCollectionOpen
 		}
 		coll := *in.coll
@@ -277,6 +291,11 @@ func (uc RegisterPool) Run(ctx context.Context, req RegisterRequest) (RegisterRe
 		if err != nil {
 			return RegisterResult{}, err
 		}
+		if req.Extras != nil {
+			if draft, err = meta.Attach(draft); err != nil {
+				return RegisterResult{}, err
+			}
+		}
 		slots, err := uc.slots(draft, in)
 		if err != nil {
 			return RegisterResult{}, err
@@ -300,7 +319,7 @@ func (uc RegisterPool) Run(ctx context.Context, req RegisterRequest) (RegisterRe
 		if err != nil {
 			return RegisterResult{}, err
 		}
-		b, err := uc.Pipeline.Build(inp)
+		b, err := uc.Pipeline.BuildCtx(ctx, inp)
 		if err != nil {
 			return RegisterResult{}, err
 		}

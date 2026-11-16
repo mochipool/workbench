@@ -673,6 +673,12 @@ func TestMintBurnMatchUpstream(t *testing.T) {
 				upTxs[0].SendToAddr != portTxs[0].SendToAddr {
 				t.Errorf("queue entry differs: %+v vs %+v", upTxs[0], portTxs[0])
 			}
+			// The one pinned difference of the queue entry: the port's own
+			// spoAssetPending field, which carries the asset record update across
+			// the air gap (spec 11a, port note 2026-11-16). Nothing else differs.
+			if n := stripAssetPending(portDoc); n != 1 {
+				t.Errorf("the queue entry carries %d spoAssetPending field(s), want 1", n)
+			}
 			if u, p := normalised(upDoc), normalised(portDoc); u != p {
 				t.Errorf("transfer file differs (queue entry, history)\n--- upstream\n%s\n--- port\n%s", u, p)
 			}
@@ -730,4 +736,20 @@ func (r recordingSubmitter) Submit(_ context.Context, tx []byte) (chain.TxID, er
 		return chain.TxID{}, err
 	}
 	return chain.TxID(blake2b.Sum256(items[0])), nil
+}
+
+// stripAssetPending removes the port's `spoAssetPending` field from every
+// queue entry of the document and returns how many it removed.
+func stripAssetPending(doc map[string]any) int {
+	n := 0
+	txs, _ := doc["transactions"].([]any)
+	for _, x := range txs {
+		if m, ok := x.(map[string]any); ok {
+			if _, has := m["spoAssetPending"]; has {
+				delete(m, "spoAssetPending")
+				n++
+			}
+		}
+	}
+	return n
 }

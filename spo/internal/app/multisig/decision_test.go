@@ -109,7 +109,7 @@ func TestAnsweredRequestIsAnsweredAgainFromTheStore(t *testing.T) {
 	if len(reqs) != 1 {
 		t.Fatal(len(reqs))
 	}
-	if h, err := signer.Handle(ctx, reqs[0], ports.ViaFile); err != nil || h.Effect != "stored" {
+	if h, err := signer.Handle(ctx, ports.FileReceived(reqs[0])); err != nil || h.Effect != "stored" {
 		t.Fatalf("first = %+v, %v", h, err)
 	}
 	pend, _ := signer.Pending(ctx)
@@ -131,7 +131,7 @@ func TestAnsweredRequestIsAnsweredAgainFromTheStore(t *testing.T) {
 	if len(lost) != 1 {
 		t.Fatal(len(lost))
 	}
-	h, err := signer.Handle(ctx, reqs[0], ports.ViaFile)
+	h, err := signer.Handle(ctx, ports.FileReceived(reqs[0]))
 	if err != nil || h.Refused || h.Effect != "response-resent" {
 		t.Fatalf("again by file = %+v, %v", h, err)
 	}
@@ -144,12 +144,12 @@ func TestAnsweredRequestIsAnsweredAgainFromTheStore(t *testing.T) {
 		t.Errorf("the key signed %d times", n.Load())
 	}
 	// The re-sent response completes the collection once.
-	if h, err := s.C.Coordinator().Handle(ctx, again[0], ports.ViaFile); err != nil || h.Effect != "filled" {
+	if h, err := s.C.Coordinator().Handle(ctx, ports.FileReceived(again[0])); err != nil || h.Effect != "filled" {
 		t.Fatalf("coordinator = %+v, %v", h, err)
 	}
 	// By network the same id is answered the same way, with the stored
 	// response, over the network too (INV-017): never signed again.
-	h, err = signer.Handle(ctx, reqs[0], ports.ViaNetwork)
+	h, err = signer.Handle(ctx, ports.NetworkReceived(reqs[0]))
 	if err != nil || h.Refused || h.Effect != "response-resent" {
 		t.Fatalf("by network = %+v, %v", h, err)
 	}
@@ -197,21 +197,21 @@ func TestHello(t *testing.T) {
 	}
 	// It lives no more than five minutes.
 	long := s.sealFrom(s.B, s.C, party.Hello{}, s.clock.Now(), s.clock.Now().Add(10*time.Minute))
-	h, _ := s.C.Coordinator().Handle(ctx, long, ports.ViaNetwork)
+	h, _ := s.C.Coordinator().Handle(ctx, ports.NetworkReceived(long))
 	mustRefuse(t, h, party.ErrHelloExpiry.Error())
 	// It is not replayable within that time.
 	short := s.sealFrom(s.B, s.C, party.Hello{}, s.clock.Now(), s.clock.Now().Add(time.Minute))
-	if h, _ := s.C.Coordinator().Handle(ctx, short, ports.ViaNetwork); h.Refused {
+	if h, _ := s.C.Coordinator().Handle(ctx, ports.NetworkReceived(short)); h.Refused {
 		t.Fatalf("first hello refused: %+v", h)
 	}
-	h, _ = s.C.Coordinator().Handle(ctx, short, ports.ViaNetwork)
+	h, _ = s.C.Coordinator().Handle(ctx, ports.NetworkReceived(short))
 	mustRefuse(t, h, envelope.ErrReplayed.Error())
 	// Only a signer says hello.
 	co := partyrig.New(t, "coonly", s.clock, s.chain)
 	s.C.Enroll(co, "coonly", []party.Role{party.RoleCoordinator}, []string{s.bech})
 	co.Enroll(s.C, "coord", []party.Role{party.RoleCoordinator}, nil)
 	env := s.sealFrom(co, s.C, party.Hello{}, s.clock.Now(), s.clock.Now().Add(time.Minute))
-	h, _ = s.C.Coordinator().Handle(ctx, env, ports.ViaNetwork)
+	h, _ = s.C.Coordinator().Handle(ctx, ports.NetworkReceived(env))
 	mustRefuse(t, h, party.ErrNotAuthorised.Error())
 }
 
@@ -307,7 +307,7 @@ func TestCompletionCallbackAndTheSubmittedNotice(t *testing.T) {
 	s.bobApproves()
 	s.bobFlush()
 	env := s.bc.Take()[0]
-	h, err := coord.Handle(ctx, env, ports.ViaFile)
+	h, err := coord.Handle(ctx, ports.FileReceived(env))
 	if err != nil || h.Effect != "filled" || !h.Complete || called != 1 {
 		t.Fatalf("handled = %+v, %v, called %d", h, err, called)
 	}
@@ -386,7 +386,7 @@ func TestRevocationKeepsVerifiedWitnessesAndUnassignsTheRest(t *testing.T) {
 	}
 	// Bob's envelopes, even made before, are refused.
 	late := s.sealFrom(s.B, s.C, party.Hello{}, s.clock.Now(), s.clock.Now().Add(time.Minute))
-	h, _ := s.C.Coordinator().Handle(ctx, late, ports.ViaNetwork)
+	h, _ := s.C.Coordinator().Handle(ctx, ports.NetworkReceived(late))
 	mustRefuse(t, h, envelope.ErrSenderRevoked.Error())
 }
 
@@ -438,7 +438,7 @@ func TestInviteGoesToTheHookAndIsRedacted(t *testing.T) {
 	}
 	inv := party.Invite{Address: "tailcat://secret-address-text", Node: coordNode}
 	env := s.sealFrom(s.C, s.B, inv, s.clock.Now(), s.clock.Now().Add(time.Hour))
-	h, err := signer.Handle(ctx, env, ports.ViaFile)
+	h, err := signer.Handle(ctx, ports.FileReceived(env))
 	if err != nil || h.Effect != "invite" || got.Address != inv.Address {
 		t.Fatalf("handled = %+v, %v, got %+v", h, err, got)
 	}
@@ -448,7 +448,7 @@ func TestInviteGoesToTheHookAndIsRedacted(t *testing.T) {
 		}
 	}
 	// A signer without the hook refuses it.
-	h, _ = s.B.Signer().Handle(ctx, s.sealFrom(s.C, s.B, inv, s.clock.Now(), s.clock.Now().Add(time.Hour)), ports.ViaFile)
+	h, _ = s.B.Signer().Handle(ctx, ports.FileReceived(s.sealFrom(s.C, s.B, inv, s.clock.Now(), s.clock.Now().Add(time.Hour))))
 	if !h.Refused {
 		t.Errorf("an invite was taken with no hook: %+v", h)
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/mochipool/workbench/spo/internal/app/hwkeys"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -13,8 +14,8 @@ import (
 // WalletKeySource says where a wallet's keys come from. It replaces the key
 // type word of upstream's 03a for the software paths: `cli` is
 // WalletKeysRandom, `mnemonics` is WalletKeysMnemonic. `enc` is not ported at
-// generation (same decision as 04c); the hardware, hybrid types are refused
-// up front through the holder.
+// generation (same decision as 04c); the hardware and hybrid types are Holder
+// and StakeHolder, planned against the device profile (hwkeys.Plan).
 type WalletKeySource string
 
 // Key sources.
@@ -46,6 +47,9 @@ type GenerateWalletAccount struct {
 	Deriver   ports.WalletDeriver       // WalletKeysMnemonic
 	Addresses ports.AddressBuilder
 	NetworkID uint8
+	// Hardware exports the keys of a hardware holder (`hw`, `hwmulti`,
+	// `hybrid`, `hybridmulti`); nil keeps the upfront refusal.
+	Hardware ports.HardwareKeyExporter
 }
 
 // GenerateWalletRequest is the wallet to create.
@@ -54,8 +58,18 @@ type GenerateWalletRequest struct {
 	// dropped, nothing else (SPO-03a-IF-003).
 	Name   string
 	Holder custody.Holder // empty means the vault
-	Source WalletKeySource
-	// Account and Index select the CIP-1852 path of a mnemonic wallet:
+	// StakeHolder is who holds the stake key; empty means Holder. Hardware
+	// payment key with StakeHolder vault is the `hybrid` type of 03a; the
+	// stake key is then a software key. A software payment key with a
+	// hardware stake key is not a type of 03a and is refused.
+	StakeHolder custody.Holder
+	// Multisig selects the 1854H root of `hwmulti` and `hybridmulti` for the
+	// hardware payment key (SPO-03a-INV-001).
+	Multisig bool
+	Source   WalletKeySource
+	// Account and Index select the CIP-1852 path of a mnemonic wallet or the
+	// hardware payment path <root>H/1815H/<Account>H/0/<Index> (the hardware
+	// stake path is <root>H/1815H/<Account>H/2/0, SPO-03a-INV-001):
 	// payment 1852H/1815H/<Account>H/0/<Index>, stake
 	// 1852H/1815H/<Account>H/2/<Index>. They must be 0 for random keys.
 	Account, Index uint32
@@ -85,15 +99,35 @@ func (uc GenerateWalletAccount) Run(ctx context.Context, req GenerateWalletReque
 	if req.Account > MaxDerivationIndex || req.Index > MaxDerivationIndex {
 		return res, ErrDerivationRange
 	}
-	switch req.Source {
-	case WalletKeysRandom:
+	payHolder, stakeHolder := req.Holder, req.StakeHolder
+	if stakeHolder == "" {
+		stakeHolder = payHolder
+	}
+	payHW, stakeHW := payHolder == custody.HolderHardware, stakeHolder == custody.HolderHardware
+	if stakeHW && !payHW {
+		return res, fmt.Errorf("%w: a hardware stake key with a software payment key is not a wallet type of 03a", ErrOptionNotUsed)
+	}
+	if !payHW && req.Multisig {
+		return res, fmt.Errorf("%w: multisig is for a hardware payment key", ErrOptionNotUsed)
+	}
+	switch {
+	case payHW:
+		// spec: SPO-03a-IF-001 (hw, hwmulti, hybrid, hybridmulti)
+		if req.Source != WalletKeysRandom && req.Source != "" || req.Mnemonic != nil {
+			return res, fmt.Errorf("%w: a hardware wallet has no mnemonic or derived source", ErrOptionNotUsed)
+		}
+		req.Source = WalletKeysRandom
+		if !stakeHW && uc.Stake == nil {
+			return res, ErrNotConfigured
+		}
+	case req.Source == WalletKeysRandom:
 		if req.Account != 0 || req.Index != 0 || req.Mnemonic != nil {
 			return res, fmt.Errorf("%w: account, index and mnemonic are for derived wallets", ErrOptionNotUsed)
 		}
 		if uc.Payment == nil || uc.Stake == nil {
 			return res, ErrNotConfigured
 		}
-	case WalletKeysMnemonic:
+	case req.Source == WalletKeysMnemonic:
 		if uc.Deriver == nil || (req.Mnemonic == nil && uc.Mnemonics == nil) {
 			return res, ErrNotConfigured
 		}
@@ -101,10 +135,9 @@ func (uc GenerateWalletAccount) Run(ctx context.Context, req GenerateWalletReque
 		return res, fmt.Errorf("unknown key source %q", req.Source)
 	}
 
-	if _, err := custody.PlanGeneration(
-		custody.KeyRef{Role: custody.RolePayment, Holder: req.Holder, Owner: name + ".payment"},
-		custody.KeyRef{Role: custody.RoleStake, Holder: req.Holder, Owner: name},
-	); err != nil {
+	payRef := custody.KeyRef{Role: custody.RolePayment, Holder: payHolder, Owner: name + ".payment"}
+	stakeRef := custody.KeyRef{Role: custody.RoleStake, Holder: stakeHolder, Owner: name}
+	if _, err := hwkeys.Plan(uc.Hardware, payRef, stakeRef); err != nil {
 		return res, err
 	}
 
@@ -134,15 +167,31 @@ func (uc GenerateWalletAccount) Run(ctx context.Context, req GenerateWalletReque
 		stake.SKey.Destroy()
 		words.Destroy()
 	}()
-	switch req.Source {
-	case WalletKeysRandom:
+	var payHws, stakeHws []byte
+	switch {
+	case payHW:
+		hk, err := hwkeys.Export(ctx, uc.Hardware, payRef, hwkeys.Options{Account: req.Account, Index: req.Index, Multisig: req.Multisig})
+		if err != nil {
+			return res, err
+		}
+		pay.VKey, payHws = hk.VKey, hk.SigningFile
+		if stakeHW {
+			sk, err := hwkeys.Export(ctx, uc.Hardware, stakeRef, hwkeys.Options{Account: req.Account, Multisig: req.Multisig})
+			if err != nil {
+				return res, err
+			}
+			stake.VKey, stakeHws = sk.VKey, sk.SigningFile
+		} else if stake, err = uc.Stake.GenerateStake(ctx); err != nil {
+			return res, fmt.Errorf("generate stake key: %w", err)
+		}
+	case req.Source == WalletKeysRandom:
 		if pay, err = uc.Payment.GeneratePayment(ctx); err != nil {
 			return res, fmt.Errorf("generate payment key: %w", err)
 		}
 		if stake, err = uc.Stake.GenerateStake(ctx); err != nil {
 			return res, fmt.Errorf("generate stake key: %w", err)
 		}
-	case WalletKeysMnemonic:
+	case req.Source == WalletKeysMnemonic:
 		if words, err = uc.phrase(ctx, req.Mnemonic); err != nil {
 			return res, err
 		}
@@ -190,13 +239,22 @@ func (uc GenerateWalletAccount) Run(ctx context.Context, req GenerateWalletReque
 		if err := w.Put(ports.Ref{Name: payName, Kind: ports.AddrVKey}, pay.VKey); err != nil {
 			return err
 		}
-		if err := w.PutSecret(ports.Ref{Name: payName, Kind: ports.AddrSKey}, pay.SKey); err != nil {
+		if payHW {
+			// spec: SPO-03a-EXT-002, SPO-03a-OUT-001, SPO-Pfiles-OUT-004
+			if err := w.Put(ports.Ref{Name: payName, Kind: ports.AddrHwsFile}, payHws); err != nil {
+				return err
+			}
+		} else if err := w.PutSecret(ports.Ref{Name: payName, Kind: ports.AddrSKey}, pay.SKey); err != nil {
 			return err
 		}
 		if err := w.Put(ports.Ref{Name: name, Kind: ports.StakingVKey}, stake.VKey); err != nil {
 			return err
 		}
-		if err := w.PutSecret(ports.Ref{Name: name, Kind: ports.StakingSKey}, stake.SKey); err != nil {
+		if stakeHW {
+			if err := w.Put(ports.Ref{Name: name, Kind: ports.StakingHwsFile}, stakeHws); err != nil {
+				return err
+			}
+		} else if err := w.PutSecret(ports.Ref{Name: name, Kind: ports.StakingSKey}, stake.SKey); err != nil {
 			return err
 		}
 		// The base address file has no trailing newline, the stake address

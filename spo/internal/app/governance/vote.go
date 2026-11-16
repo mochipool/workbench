@@ -13,6 +13,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/governance"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
+	"github.com/mochipool/workbench/spo/internal/domain/txparam"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -392,6 +393,17 @@ type RegisterVoteRequest struct {
 	// Files are vote file names as given (`x_<ts>.drep.vote`).
 	Files   []string
 	Message []string
+	// Extras are the parsed extra parameters (txparam.Parse with
+	// txparam.ForCertificate); Passphrase is the `pass:` of Extras. Optional.
+	Extras     *txparam.Extras
+	Passphrase *ports.Secret
+	// Unrestricted is the operator's consent to the device's unrestricted mode
+	// for several votes at once (`--allow-unrestricted-mode`, SPO-24b-PR-001:
+	// asked, default Yes, when more than one vote file is given and the payment
+	// or voter key is on a device; declining exits 2). Never implied; without it
+	// that case is refused with ErrUnrestrictedNeeded. It has no effect with one
+	// vote file or with key files only.
+	Unrestricted bool
 }
 
 func parseVoteFileName(s string) (ports.Ref, error) {
@@ -528,7 +540,20 @@ func (uc RegisterVote) Run(ctx context.Context, req RegisterVoteRequest) (Result
 		return Result{}, err
 	}
 	_ = vk
-	run := txRun{payer: pay, signers: []txflow.Slot{signer}, votes: atts, message: req.Message}
+	run := txRun{payer: pay, signers: []txflow.Slot{signer}, votes: atts, message: req.Message, extras: req.Extras, pass: req.Passphrase}
+	// spec: SPO-24b-PRE-009 (payment hardware with a key-file voter is refused,
+	// SPO-Ptx-PRE-006; a key-file payer with a hardware voter is allowed),
+	// SPO-24b-PR-001 (unrestricted mode for several votes, never implied).
+	signerHW := signer.Key.Holder == custody.HolderHardware
+	if pay.holder == custody.HolderHardware && !signerHW {
+		return Result{}, txflow.ErrMixedHolders
+	}
+	if len(atts) > 1 && (pay.holder == custody.HolderHardware || signerHW) {
+		if !req.Unrestricted {
+			return Result{}, ErrUnrestrictedNeeded
+		}
+		run.unrestricted = true
+	}
 	if err := uc.early(run); err != nil {
 		return Result{}, err
 	}

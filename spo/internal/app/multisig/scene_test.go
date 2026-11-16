@@ -50,7 +50,13 @@ type sceneOpt struct {
 	cold bool
 	kind ports.TransportKind
 	ttl  uint64 // slots after the tip; 0 means 500
+	// bobNode gives bob's identity a tailcat node key, bobNode, which the
+	// coordinator has enrolled.
+	bobNode bool
 }
+
+// bobNodeKey is bob's tailcat node key when sceneOpt.bobNode is set.
+var bobNodeKey = party.NodeKey{0xb0, 2}
 
 func newScene(t *testing.T, o sceneOpt) *scene {
 	t.Helper()
@@ -63,7 +69,11 @@ func newScene(t *testing.T, o sceneOpt) *scene {
 	s := &scene{t: t, clock: partyrig.NewClock(t0)}
 	s.chain = partyrig.NewChain(s.clock.Now())
 	s.C = partyrig.NewWithNode(t, "coord", s.clock, s.chain, &coordNode)
-	s.B = partyrig.New(t, "bob", s.clock, s.chain)
+	if o.bobNode {
+		s.B = partyrig.NewWithNode(t, "bob", s.clock, s.chain, &bobNodeKey)
+	} else {
+		s.B = partyrig.New(t, "bob", s.clock, s.chain)
+	}
 	s.X = partyrig.New(t, "xavier", s.clock, s.chain)
 	s.bobHash = s.B.AddKey(custody.RoleStake, "bob")
 	if o.cold {
@@ -118,7 +128,7 @@ func (s *scene) bobHandles() []multisig.Handled {
 	s.t.Helper()
 	var out []multisig.Handled
 	for _, env := range s.cb.Take() {
-		h, err := s.B.Signer().Handle(ctx, env, s.cb.Kind)
+		h, err := s.B.Signer().Handle(ctx, partyrig.Received(env, s.cb.Kind))
 		if err != nil {
 			s.t.Fatal(err)
 		}
@@ -132,7 +142,7 @@ func (s *scene) coordHandles() []multisig.Handled {
 	s.t.Helper()
 	var out []multisig.Handled
 	for _, env := range s.bc.Take() {
-		h, err := s.C.Coordinator().Handle(ctx, env, s.bc.Kind)
+		h, err := s.C.Coordinator().Handle(ctx, partyrig.Received(env, s.bc.Kind))
 		if err != nil {
 			s.t.Fatal(err)
 		}

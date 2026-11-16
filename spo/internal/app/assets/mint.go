@@ -1,8 +1,10 @@
 package assets
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -12,6 +14,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
+	"github.com/mochipool/workbench/spo/internal/domain/transfer"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/domain/txparam"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -62,6 +65,9 @@ type Base struct {
 	Selection txbuild.SelectionStrategy
 	Files     ports.MetadataFileReader
 	Encrypter ports.MessageEncrypter
+	// Canonicalizer brings the body to hardware form when the policy or paying
+	// key is held by a hardware wallet; nil refuses a hardware plan.
+	Canonicalizer ports.HardwareCanonicalizer
 }
 
 // MintAsset mints a positive amount of one asset under a policy and credits
@@ -123,7 +129,8 @@ type payerInfo struct {
 
 func (b Base) run(ctx context.Context, req Request, burn bool) (Result, error) {
 	pipe := txflow.Pipeline{Signers: b.Signers, Min: b.Min, Fees: b.Fees, Bodies: b.Bodies, Assembler: b.Assembler,
-		Confirmer: b.Confirmer, Submitter: b.Submitter, Queue: b.Queue, Approval: b.Approval}
+		Confirmer: b.Confirmer, Submitter: b.Submitter, Queue: b.Queue, Approval: b.Approval,
+		Canonicalizer: b.Canonicalizer}
 	if err := pipe.Check(); err != nil {
 		return Result{}, err
 	}
@@ -167,6 +174,7 @@ func (b Base) run(ctx context.Context, req Request, burn bool) (Result, error) {
 	var script []byte
 	var idHex string
 	var polHash txbuild.KeyHash
+	var polHolder custody.Holder
 	var payer payerInfo
 	if err := b.Store.View(ctx, func(r ports.Reader) error {
 		// spec: SPO-11a-IN-001, SPO-11a-IN-002, SPO-11b-IN-001
@@ -189,15 +197,20 @@ func (b Base) run(ctx context.Context, req Request, burn bool) (Result, error) {
 		if err != nil {
 			return err
 		}
+		// The signing plan decides whether the device can sign a mint (the
+		// policy row of custody.HardwareTable); the hardware file wins when both
+		// exist (SPO-Pfiles-INV-002).
+		polHolder = custody.HolderVault
 		if hws {
-			return fmt.Errorf("%w: the policy key is on a hardware wallet, which this build cannot sign with", custody.ErrWrongRole)
-		}
-		skey, err := r.Exists(ports.Ref{Name: policyName, Kind: ports.PolicySKey})
-		if err != nil {
-			return err
-		}
-		if !skey {
-			return fmt.Errorf("%w: %s.policy.skey is missing", ErrPolicyFiles, policyName)
+			polHolder = custody.HolderHardware
+		} else {
+			skey, err := r.Exists(ports.Ref{Name: policyName, Kind: ports.PolicySKey})
+			if err != nil {
+				return err
+			}
+			if !skey {
+				return fmt.Errorf("%w: %s.policy.skey is missing", ErrPolicyFiles, policyName)
+			}
 		}
 		vk, err := get(ports.PolicyVKey)
 		if err != nil {
@@ -341,7 +354,7 @@ func (b Base) run(ctx context.Context, req Request, burn bool) (Result, error) {
 	// The policy witness first, then the payment witness (SPO-11a-EXT-003); two
 	// signatures, the fee's witness count (SPO-11a-INV-003).
 	prep, err := pipe.Prepare(draft, []txflow.Slot{
-		{Label: "policy", Key: custody.KeyRef{Role: custody.RolePolicy, Holder: custody.HolderVault, Owner: policyName}, Hash: polHash},
+		{Label: "policy", Key: custody.KeyRef{Role: custody.RolePolicy, Holder: polHolder, Owner: policyName}, Hash: polHash},
 		{Label: "payment", Key: custody.KeyRef{Role: custody.RolePayment, Holder: payer.holder, Owner: payer.name}, Hash: payer.hash},
 	}, txbuild.MintWitnesses)
 	if err != nil {
@@ -356,7 +369,7 @@ func (b Base) run(ctx context.Context, req Request, burn bool) (Result, error) {
 			FromName: payer.name, FromAddr: payer.addr, ToName: payer.name, ToAddr: payer.addr,
 			Description: fmt.Sprintf("%s %s '%s' on '%s'", past, req.Amount, ref.Asset, payer.name)}}
 
-	built, err := pipe.Build(in)
+	built, err := pipe.BuildCtx(ctx, in)
 	if err != nil {
 		return Result{}, err
 	}
@@ -396,6 +409,13 @@ func (b Base) run(ctx context.Context, req Request, burn bool) (Result, error) {
 		if err := b.Store.Update(ctx, func(w ports.Writer) error { return w.Put(pending, pb) }); err != nil {
 			return Result{}, fmt.Errorf("keep the asset record update for the queued transaction: %w", err)
 		}
+		// The update also travels with the queue entry, so the machine that
+		// submits it can report the submission back across the air gap.
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, pb); err != nil {
+			return Result{}, err
+		}
+		in.Queued.Extra = append(in.Queued.Extra, ports.QueuedField{Key: transfer.KeyAssetPending, Value: compact.String()})
 	} else {
 		change.Action = fmt.Sprintf("%s %d", verb, amount)
 	}

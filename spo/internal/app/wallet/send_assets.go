@@ -42,6 +42,11 @@ type SendAssets struct {
 	Selection txbuild.SelectionStrategy
 	Files     ports.MetadataFileReader
 	Encrypter ports.MessageEncrypter
+	// Canonicalizer brings the body to hardware form when the paying key is held
+	// by a hardware wallet; nil refuses a hardware plan.
+	Canonicalizer ports.HardwareCanonicalizer
+	// Handles resolves an ADA Handle destination; nil refuses handles.
+	Handles HandleResolver
 }
 
 // SendAssetsRequest is one send. Selections come from assets.ParseSelections;
@@ -80,7 +85,8 @@ type SendAssetsResult struct {
 // spec: SPO-01sendAssets-OUT-002, SPO-01sendAssets-PR-002
 func (uc SendAssets) Run(ctx context.Context, req SendAssetsRequest) (SendAssetsResult, error) {
 	pipe := txflow.Pipeline{Signers: uc.Signers, Min: uc.Min, Fees: uc.Fees, Bodies: uc.Bodies, Assembler: uc.Assembler,
-		Confirmer: uc.Confirmer, Submitter: uc.Submitter, Queue: uc.Queue, Approval: txflow.ApprovalPolicy(uc.Approval)}
+		Confirmer: uc.Confirmer, Submitter: uc.Submitter, Queue: uc.Queue, Approval: txflow.ApprovalPolicy(uc.Approval),
+		Canonicalizer: uc.Canonicalizer}
 	if err := pipe.Check(); err != nil {
 		return SendAssetsResult{}, err
 	}
@@ -134,7 +140,7 @@ func (uc SendAssets) Run(ctx context.Context, req SendAssetsRequest) (SendAssets
 		default:
 			return fmt.Errorf("%w: %s", ErrNoSigningKey, srcName)
 		}
-		if dst, err = (SendLovelaces{Addresses: uc.Addresses}).resolveDestination(r, req.Destination); err != nil {
+		if dst, err = (SendLovelaces{Addresses: uc.Addresses, Handles: uc.Handles}).resolveDestination(r, req.Destination); err != nil {
 			return err
 		}
 		for i, s := range sels {
@@ -147,6 +153,11 @@ func (uc SendAssets) Run(ctx context.Context, req SendAssetsRequest) (SendAssets
 		}
 		return nil
 	}); err != nil {
+		return SendAssetsResult{}, err
+	}
+	// An ADA Handle destination is resolved and verified here, outside the store
+	// view, and shown as the handle and its address (ADR 0006).
+	if dst, err = resolveHandle(ctx, uc.Handles, dst); err != nil {
 		return SendAssetsResult{}, err
 	}
 	if dups := assets.Duplicates(sels); len(dups) > 0 && !req.SumDuplicates {
@@ -230,6 +241,7 @@ func (uc SendAssets) Run(ctx context.Context, req SendAssetsRequest) (SendAssets
 		return SendAssetsResult{}, err
 	}
 	res, err := pipe.Execute(ctx, txflow.Input{Draft: draft, Params: params, TTL: ttl, Prepared: prep, Witnesses: txbuild.SendWitnesses,
+		HardwareChangeKeys: hardwareChangeKeys(ctx, uc.Store, custody.KeyRef{Role: custody.RolePayment, Holder: holder, Owner: src.name}),
 		Summary: ports.TxSummary{Kind: "asset payment", Source: src.name, SourceAddr: src.addr, Destination: dst.name, DestAddr: dst.addr,
 			Amount: fmt.Sprintf("%d asset type(s)", len(plan.Send))},
 		Queued: ports.QueuedTx{Type: "Transaction", FromName: src.name, FromAddr: src.addr, ToName: dst.name, ToAddr: dst.addr,
@@ -239,7 +251,7 @@ func (uc SendAssets) Run(ctx context.Context, req SendAssetsRequest) (SendAssets
 	}
 	out := SendAssetsResult{SendResult: SendResult{TxID: res.TxID, Fee: res.Fee, TTL: res.TTL, Outputs: res.Outputs, Inputs: res.Inputs,
 		Size: res.Size, SignedTx: res.SignedTx, Submitted: res.Submitted, Queued: res.Queued, ApprovalSkipped: res.ApprovalSkipped,
-		Destination: dst.name, Encrypted: meta.Encryption != ""}, Sent: plan.Send, Warnings: plan.Warnings}
+		Destination: dst.name, Handle: dst.handle, Encrypted: meta.Encryption != ""}, Sent: plan.Send, Warnings: plan.Warnings}
 	for _, f := range meta.Files {
 		out.MetadataFiles = append(out.MetadataFiles, f.Name)
 	}

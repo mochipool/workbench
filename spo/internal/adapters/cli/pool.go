@@ -37,6 +37,7 @@ func (a *app) poolPipeline(s *session, env *Env) txflow.Pipeline {
 type poolFlags struct {
 	chain           chainFlags
 	messages        []string
+	extra           extraFlags
 	yes             bool
 	allowUnverified bool
 	singleSource    bool
@@ -258,13 +259,13 @@ while it is open.`,
 				return err
 			}
 			needs := stakeTxNeeds(CapPoolCertDecode, CapCertDecode, CapTxID, CapMetaHash, CapClock)
-			spec := envSpec{flags: &f.chain, config: true, needs: needs}
+			spec := envSpec{flags: &f.chain, config: true, needs: needs, extras: &f.extra}
 			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, wo WireOptions) error {
 				uc := poolops.RegisterPool{
 					Store: s.Store, Addresses: env.AddressInspector, Params: env.Params, Tip: env.Tip, Utxos: env.Utxos,
 					Pipeline: a.poolPipeline(s, env), PoolCerts: env.PoolCertDecoder, StakeCerts: env.CertDecoder,
 					TxIDs: env.TxIDs, Hasher: env.MetadataHasher, Clock: env.Clock,
-					Pools: env.Pools, Metadata: env.Metadata, Attach: env.Attach,
+					Pools: env.Pools, Metadata: env.Metadata, Attach: env.Attach, Files: env.MetadataFiles, Encrypter: env.MsgEncrypter,
 					// Tickers stays nil in every mode: the lookup is not built (hazard H6).
 					NetworkID: env.NetworkID, AllowUnverified: f.allowUnverified, AllowPending: f.allowPending,
 				}
@@ -274,7 +275,7 @@ while it is open.`,
 				if f.singleSource {
 					uc.Sources = poolops.SingleSourceAcknowledged
 				}
-				res, err := uc.Run(ctx, poolops.RegisterRequest{Pool: args[0], Payer: args[1], Type: typ, Message: f.messages})
+				res, err := uc.Run(ctx, poolops.RegisterRequest{Pool: args[0], Payer: args[1], Type: typ, Message: f.messages, Extras: f.extra.ex, Passphrase: f.extra.pass})
 				if err != nil {
 					return f.hint(err)
 				}
@@ -285,6 +286,7 @@ while it is open.`,
 	fl := cmd.Flags()
 	fl.StringVar(&f.typ, "type", "", "force the registration type: REG (first registration, pays the deposit) or REREG (re-registration)")
 	fl.StringArrayVar(&f.messages, "message", nil, "CIP-20 message line, at most 64 bytes (repeatable)")
+	f.extra.add(cmd, &f.messages, extraCert)
 	fl.BoolVar(&f.yes, "yes", false, "not accepted: this command is always asked")
 	fl.BoolVar(&f.allowUnverified, "allow-unverified", false, "go on when the chain could not say whether the pool is registered: the type then comes from the descriptor. A wrong type only makes the ledger reject the transaction. The summary lists every check that was skipped")
 	fl.BoolVar(&f.singleSource, "single-source", false, "accept a registration state that rests on ONE chain source. A false answer decides wrongly between registration and re-registration. The summary says so")
@@ -351,7 +353,7 @@ func payerWord(s string) (string, error) {
 // ---- witness ---------------------------------------------------------------------
 
 func (a *app) poolWitnessCommand() *cobra.Command {
-	cmd := &cobra.Command{Use: "witness", Short: "Witnesses of an open registration: import, status"}
+	cmd := &cobra.Command{Use: "witness", Short: "Witnesses of an open registration: import, status, info, sign, clear"}
 
 	var (
 		overwrite bool
@@ -478,7 +480,7 @@ a witness is replaced only with --overwrite.`,
 		},
 	}
 	addChainFlags(status, &sf, false)
-	cmd.AddCommand(imp, status)
+	cmd.AddCommand(imp, status, a.witnessSignCommand(), a.witnessInfoCommand(), a.witnessClearCommand())
 	return cmd
 }
 
@@ -593,12 +595,13 @@ protocol's maximum before a fee is spent.`,
 				return errors.New(yesRetireWhy)
 			}
 			needs := stakeTxNeeds(CapPoolCertDecode, CapClock)
-			spec := envSpec{flags: &f.chain, config: true, needs: needs}
+			spec := envSpec{flags: &f.chain, config: true, needs: needs, extras: &f.extra}
 			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, wo WireOptions) error {
 				res, err := poolops.RetirePool{
 					Store: s.Store, Addresses: env.AddressInspector, Params: env.Params, Tip: env.Tip, Utxos: env.Utxos,
 					Pipeline: a.poolPipeline(s, env), PoolCerts: env.PoolCertDecoder, Clock: env.Clock, NetworkID: env.NetworkID,
-				}.Run(ctx, poolops.RetireRequest{Pool: args[0], Payer: args[1], Message: f.messages})
+					Files: env.MetadataFiles, Encrypter: env.MsgEncrypter,
+				}.Run(ctx, poolops.RetireRequest{Pool: args[0], Payer: args[1], Message: f.messages, Extras: f.extra.ex, Passphrase: f.extra.pass})
 				if err != nil {
 					return f.hint(err)
 				}
@@ -615,6 +618,7 @@ protocol's maximum before a fee is spent.`,
 		},
 	}
 	cmd.Flags().StringArrayVar(&f.messages, "message", nil, "CIP-20 message line, at most 64 bytes (repeatable)")
+	f.extra.add(cmd, &f.messages, extraCert)
 	cmd.Flags().BoolVar(&f.yes, "yes", false, "not accepted: this command is always asked")
 	addChainFlags(cmd, &f.chain, true)
 	return cmd

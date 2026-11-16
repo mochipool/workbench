@@ -176,11 +176,11 @@ func recvOne(t *testing.T, s *Server) []byte {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	b, via, err := s.Receive(ctx)
-	if err != nil || via != ports.ViaNetwork {
-		t.Fatalf("Receive = %v, %v", via, err)
+	got, err := s.Receive(ctx)
+	if err != nil || got.Via() != ports.ViaNetwork {
+		t.Fatalf("Receive = %v, %v", got.Via(), err)
 	}
-	return b
+	return got.Envelope
 }
 
 // An unenrolled node key gets nothing: no byte, no Admit call, no frame read.
@@ -300,8 +300,8 @@ func TestFrameLimit(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	if b, _, err := s.Receive(ctx); err == nil {
-		t.Fatalf("a fourth frame was delivered: %v", b)
+	if b, err := s.Receive(ctx); err == nil {
+		t.Fatalf("a fourth frame was delivered: %v", b.Envelope)
 	}
 }
 
@@ -372,7 +372,7 @@ func TestPerKeyRate(t *testing.T) {
 		go WriteFrame(h.remote, []byte("x"))
 		ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 		defer cancel()
-		_, _, err := s.Receive(ctx)
+		_, err := s.Receive(ctx)
 		h.remote.Close()
 		<-h.done
 		return err == nil
@@ -408,6 +408,28 @@ func TestRevokedNodeKey(t *testing.T) {
 	h.remote.Close()
 }
 
+// The allow-list is checked in the same critical section that reserves the
+// connection, under the lock Revoke takes: a connection cannot be admitted
+// once the key is revoked, and the key is admitted again after Allow.
+// spec: SPO-Xparty-INV-005, SPO-Xparty-INV-018
+func TestAdmitConnChecksTheAllowListUnderTheLock(t *testing.T) {
+	s := testServer(t, ServerConfig{})
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	s.Revoke(key1)
+	if s.admitConn(key1, a) {
+		t.Fatal("a revoked key was admitted")
+	}
+	if len(s.byKey[key1]) != 0 || s.active != 0 {
+		t.Fatalf("a refused connection holds a slot: %d live, %d active", len(s.byKey[key1]), s.active)
+	}
+	s.Allow(key1)
+	if !s.admitConn(key1, a) {
+		t.Fatal("an allowed key was refused")
+	}
+}
+
 func TestServerCloseUnblocksReceiveAndConnections(t *testing.T) {
 	s, err := NewServer(ServerConfig{Allowed: []party.NodeKey{key1}, Admit: admitAll})
 	if err != nil {
@@ -415,7 +437,7 @@ func TestServerCloseUnblocksReceiveAndConnections(t *testing.T) {
 	}
 	h := dial(s, key1, true) // silent connection, not yet registered
 	errc := make(chan error, 1)
-	go func() { _, _, err := s.Receive(context.Background()); errc <- err }()
+	go func() { _, err := s.Receive(context.Background()); errc <- err }()
 	time.Sleep(50 * time.Millisecond)
 	s.Close()
 	if err := <-errc; !errors.Is(err, ports.ErrClosed) {
@@ -501,7 +523,7 @@ func TestConnectionLifetime(t *testing.T) {
 	defer close(stop)
 	go func() { // drain
 		for {
-			if _, _, err := s.Receive(context.Background()); err != nil {
+			if _, err := s.Receive(context.Background()); err != nil {
 				return
 			}
 		}

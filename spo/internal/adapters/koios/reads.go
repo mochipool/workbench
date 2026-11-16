@@ -372,13 +372,27 @@ func (c *Client) RewardAccount(ctx context.Context, stake chain.StakeAddress) (c
 	return chain.Value(acc), nil
 }
 
+// ErrSubmitOutcomeUnknown is returned by Submit when the request may have
+// reached Koios but the answer did not come back (a transport failure, a
+// timeout, a 202 whose body is not a transaction id): the transaction may be in
+// the mempool. Resubmitting blindly can only be refused by the node as a
+// duplicate or double-spend, so the caller queries the transaction id first
+// (`spo tx` / the chain's tx_status) and resubmits only when it is not there.
+var ErrSubmitOutcomeUnknown = errors.New("koios submittx: the outcome is unknown: the transaction may have been accepted; query its transaction id before resubmitting")
+
 // Submit implements ports.TxSubmitter: POST /submittx with the binary
 // transaction as application/cbor (SPO-Clight-EXT-012). Koios answers 202
 // with the id, possibly quoted (SPO-Clight-OUT-026); anything other than 64
 // hex characters is refused (SPO-Clight-PRE-003); other statuses carry a
-// short body prefix (SPO-Clight-PRE-004). Not retried here: the outcome of a
-// failed submission is for the caller to establish (SPO-Clight-INV-008 notes
-// the upstream retry is harmless, but a silent retry hides the first error).
+// short body prefix (SPO-Clight-PRE-004).
+//
+// It is a single attempt: the request does not set retry, so a failure is never
+// repeated here (SPO-Clight-INV-008; upstream's five attempts are not ported,
+// because a silent retry hides the first error). A failure after the request
+// may have been sent is returned as ErrSubmitOutcomeUnknown, wrapping the cause;
+// an HTTP status other than 202 is a definite answer and is not.
+//
+// spec: SPO-Clight-INV-008
 func (c *Client) Submit(ctx context.Context, signedTx []byte) (chain.TxID, error) {
 	if len(signedTx) == 0 {
 		return chain.TxID{}, errors.New("koios submittx: empty transaction")
@@ -386,12 +400,16 @@ func (c *Client) Submit(ctx context.Context, signedTx []byte) (chain.TxID, error
 	body, err := c.expect(ctx, request{op: "submittx", method: "POST", path: "/submittx",
 		body: signedTx, contentType: "application/cbor", auth: true, long: true}, 202)
 	if err != nil {
-		return chain.TxID{}, err
+		var st *statusError
+		if errors.As(err, &st) || ctx.Err() != nil || strings.Contains(err.Error(), "build request") {
+			return chain.TxID{}, err // an answer, or the request was never sent
+		}
+		return chain.TxID{}, fmt.Errorf("%w: %v", ErrSubmitOutcomeUnknown, err)
 	}
 	id := strings.TrimSpace(strings.ReplaceAll(string(body), `"`, ""))
 	tx, err := chain.ParseTxID(id)
 	if err != nil {
-		return chain.TxID{}, fmt.Errorf("koios submittx: answer %q is not a transaction id: %w", prefix(body), err)
+		return chain.TxID{}, fmt.Errorf("%w: koios answered 202 with %q, which is not a transaction id: %v", ErrSubmitOutcomeUnknown, prefix(body), err)
 	}
 	return tx, nil
 }

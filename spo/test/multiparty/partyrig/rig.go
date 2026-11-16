@@ -92,15 +92,46 @@ type Workspace struct {
 	Clock    *Clock
 	Chain    *Chain
 	Identity parties.InitResult
-	// Owned and Utxos are the signer's own view of its funds (SPO-Xparty-PR-002);
-	// nil by default, as a signer with no chain view of its own.
-	Owned ports.OwnedAddresses
-	Utxos ports.UtxoReader
+	// Owned, Resolver and Addresses are the signer's own view of its funds
+	// (SPO-Xparty-PR-002): the credentials it holds, a resolver of inputs by
+	// reference and the address inspector. The zero values are a signer that
+	// owns nothing and has no chain view of its own.
+	Owned     party.OwnedKeys
+	Resolver  ports.UtxoResolver
+	Addresses ports.AddressInspector
 	// Gate is the re-authentication of Approve; the default approves and
 	// counts.
 	Gate *Gate
 	keys map[[28]byte]custody.KeyRef
 	mu   sync.Mutex
+}
+
+// ForeignInputs is a signer's own chain view in which every input exists and
+// is at somebody else's enterprise key address: no input is the signer's, none
+// is a script's. It is the rig's default so that a request that came over a
+// network, which needs every input resolved (SPO-Xparty-PRE-007), is not
+// refused for that reason alone in the tests of something else. Set
+// Workspace.Resolver to nil for a signer with no chain view.
+type ForeignInputs struct{}
+
+// Source implements ports.UtxoResolver.
+func (ForeignInputs) Source() chain.Source { return "the rig's foreign view" }
+
+// ResolveUtxos implements ports.UtxoResolver.
+func (ForeignInputs) ResolveUtxos(_ context.Context, refs []chain.OutRef) (map[chain.OutRef]chain.Reading[chain.ResolvedUtxo], error) {
+	b := append([]byte{0x60}, make([]byte, 28)...)
+	for i := 1; i < len(b); i++ {
+		b[i] = 0xee
+	}
+	addr, err := chain.Bech32Encode("addr_test", b)
+	if err != nil {
+		return nil, err
+	}
+	out := map[chain.OutRef]chain.Reading[chain.ResolvedUtxo]{}
+	for _, r := range refs {
+		out[r] = chain.Value(chain.ResolvedUtxo{Address: chain.Address(addr), Lovelace: 10_000_000})
+	}
+	return out, nil
 }
 
 // Gate is a test ports.ApprovalGate: it counts the calls and refuses when
@@ -141,7 +172,7 @@ func NewWithNode(t *testing.T, name string, clock *Clock, ch *Chain, node *party
 		t.Fatal(err)
 	}
 	w := &Workspace{T: t, Name: name, Dir: dir, Store: st, Kit: envelope.Kit{Store: st, Vault: st}, Clock: clock, Chain: ch,
-		Gate: &Gate{}, keys: map[[28]byte]custody.KeyRef{}}
+		Gate: &Gate{}, keys: map[[28]byte]custody.KeyRef{}, Addresses: native.Ledger{}, Resolver: ForeignInputs{}}
 	res, err := parties.InitIdentity{Store: st, Kit: w.Kit, Clock: clock}.Run(context.Background(), parties.InitRequest{Label: name, Node: node})
 	if err != nil {
 		t.Fatal(err)
@@ -163,8 +194,12 @@ func (w *Workspace) Coordinator() multisig.Coordinator {
 
 // Signer is the signer role of this workspace.
 func (w *Workspace) Signer() multisig.Signer {
+	var res multisig.OwnResolver
+	if w.Resolver != nil {
+		res = multisig.OwnProvider(w.Resolver) // the rig's resolver is this signer's own
+	}
 	return multisig.Signer{Node: w.Node(), Signers: native.Signers{Vault: w.Store}, Keys: w, NetworkMagic: Magic,
-		Owned: w.Owned, Utxos: w.Utxos, Gate: w.Gate}
+		Owned: w.Owned, Resolver: res, Addresses: w.Addresses, Gate: w.Gate}
 }
 
 // Outbox is this workspace's outbox.
@@ -254,6 +289,18 @@ func (w *Workspace) EnrollScoped(other *Workspace, name string, roles []party.Ro
 		w.T.Fatal(err)
 	}
 	return p
+}
+
+// SetScope changes the scope of the party named name, as an operator narrowing
+// what a coordinator may ask.
+func (w *Workspace) SetScope(name string, scope party.Scope) {
+	w.T.Helper()
+	if err := w.Store.Update(context.Background(), func(wr ports.Writer) error {
+		_, err := w.Registry.SetScope(wr, name, scope)
+		return err
+	}); err != nil {
+		w.T.Fatal(err)
+	}
 }
 
 // Revoke revokes the party named name, with the coordinator hook when this

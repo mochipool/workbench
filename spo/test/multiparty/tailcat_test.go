@@ -3,9 +3,13 @@ package multiparty
 import (
 	"context"
 	"errors"
+	"net"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"go4.org/mem"
 	"tailscale.com/tailcfg"
 	"tailscale.com/tstest/integration"
 	"tailscale.com/types/key"
@@ -153,6 +157,9 @@ func newNetWorldWide(t *testing.T, wide bool) *netWorld {
 		t.Fatal(err)
 	}
 	cl, err := tailcat.NewClient(tailcat.ClientConfig{Address: secretAddr, NodeKey: copyOf(t, node), Coordinator: w.C.Identity.Fingerprint,
+		// A fresh Hello is the first frame of every connection, built here
+		// where the identity is, not in the adapter.
+		Hello:           func(ctx context.Context) ([]byte, error) { return nw.bob.NewHello(ctx, "coordinator") },
 		ExpectServerKey: &got.Node, Logf: quiet, DialTimeout: 20 * time.Second})
 	if err != nil {
 		t.Fatal(err)
@@ -162,26 +169,26 @@ func newNetWorldWide(t *testing.T, wide bool) *netWorld {
 	return nw
 }
 
-func (n *netWorld) coordReceive(t *testing.T) []byte {
+func (n *netWorld) coordReceive(t *testing.T) ports.Received {
 	t.Helper()
 	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	raw, via, err := n.server.Receive(rctx)
-	if err != nil || via != ports.ViaNetwork {
-		t.Fatalf("coordinator Receive = %v, %v", via, err)
+	got, err := n.server.Receive(rctx)
+	if err != nil || got.Via() != ports.ViaNetwork {
+		t.Fatalf("coordinator Receive = %v, %v", got.Via(), err)
 	}
-	return raw
+	return got
 }
 
-func (n *netWorld) bobReceive(t *testing.T) []byte {
+func (n *netWorld) bobReceive(t *testing.T) ports.Received {
 	t.Helper()
 	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	raw, via, err := n.client.Receive(rctx)
-	if err != nil || via != ports.ViaNetwork {
-		t.Fatalf("bob Receive = %v, %v", via, err)
+	got, err := n.client.Receive(rctx)
+	if err != nil || got.Via() != ports.ViaNetwork {
+		t.Fatalf("bob Receive = %v, %v", got.Via(), err)
 	}
-	return raw
+	return got
 }
 
 // bobSilent asserts nothing reaches bob in a second.
@@ -189,8 +196,8 @@ func (n *netWorld) bobSilent(t *testing.T) {
 	t.Helper()
 	rctx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	if raw, _, err := n.client.Receive(rctx); err == nil {
-		t.Fatalf("%d bytes reached bob", len(raw))
+	if got, err := n.client.Receive(rctx); err == nil {
+		t.Fatalf("%d bytes reached bob", len(got.Envelope))
 	} else if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal(err)
 	}
@@ -213,10 +220,10 @@ func TestTailcatTwoOwnerPoolRegistration(t *testing.T) {
 	}
 
 	// Bob connects with a Hello: he has nothing else to send.
-	if err := n.bob.Hello(ctx, "coordinator", n.client); err != nil {
+	if err := n.client.Connect(ctx); err != nil {
 		t.Fatal(err)
 	}
-	h, err := coord.Handle(ctx, n.coordReceive(t), ports.ViaNetwork)
+	h, err := coord.Handle(ctx, n.coordReceive(t))
 	if err != nil || h.Refused || h.Effect != "hello" {
 		t.Fatalf("hello = %+v, %v", h, err)
 	}
@@ -230,7 +237,7 @@ func TestTailcatTwoOwnerPoolRegistration(t *testing.T) {
 			t.Fatalf("slot %s: %s %v", r.Name, r.Status, r.Err)
 		}
 	}
-	if h, err := n.bob.Handle(ctx, n.bobReceive(t), ports.ViaNetwork); err != nil || h.Refused || h.Effect != "stored" {
+	if h, err := n.bob.Handle(ctx, n.bobReceive(t)); err != nil || h.Refused || h.Effect != "stored" {
 		t.Fatalf("bob = %+v, %v", h, err)
 	}
 	rv := w.reviewAndApprove(n.bob)
@@ -240,7 +247,7 @@ func TestTailcatTwoOwnerPoolRegistration(t *testing.T) {
 	if _, err := w.B.Outbox().Flush(ctx, n.client.Transport()); err != nil {
 		t.Fatal(err)
 	}
-	h, err = coord.Handle(ctx, n.coordReceive(t), ports.ViaNetwork)
+	h, err = coord.Handle(ctx, n.coordReceive(t))
 	if err != nil || h.Refused || h.Effect != "filled" || !h.Complete {
 		t.Fatalf("response = %+v, %v", h, err)
 	}
@@ -265,6 +272,167 @@ func TestTailcatTwoOwnerPoolRegistration(t *testing.T) {
 	_ = custody.RoleStake
 }
 
+// handleHello takes the Hello that opens a connection off the server and has
+// the coordinator handle it, which re-arms bob's unanswered requests.
+func (n *netWorld) handleHello(t *testing.T, coord multisig.Coordinator) {
+	t.Helper()
+	h, err := coord.Handle(ctx, n.coordReceive(t))
+	if err != nil || h.Refused || h.Effect != "hello" {
+		t.Fatalf("hello = %+v, %v", h, err)
+	}
+}
+
+// noRefusalEvents asserts that no security event of w is a refused envelope,
+// message or first frame: a normal reconnect is not an attack.
+func noRefusalEvents(t *testing.T, w *partyrig.Workspace) {
+	t.Helper()
+	for _, e := range w.Events() {
+		if strings.Contains(e.Kind, "refused") && e.Kind != "request-refused-by-signer" {
+			t.Errorf("%s: a security event for a normal reconnect: %+v", w.Name, e)
+		}
+	}
+}
+
+// The reviewer's lockout: after one accepted response over tailcat, bob can
+// connect again, and again. Each connection opens with a fresh Hello that the
+// server admits; the accepted response is not sent again; no security event is
+// written for it.
+// spec: SPO-Xparty-INV-018, SPO-Xparty-INV-017, SPO-Xparty-INV-021
+func TestTailcatReconnectAfterAnAcceptedResponse(t *testing.T) {
+	n := newNetWorld(t)
+	w := n.world
+	w.open()
+	coord := w.coordinator()
+	if err := n.client.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	n.handleHello(t, coord)
+	if _, err := coord.RequestSignatures(ctx, multisig.RequestInput{Ref: poolRef, Purpose: "register mypool"}, n.server.Transport()); err != nil {
+		t.Fatal(err)
+	}
+	if h, err := n.bob.Handle(ctx, n.bobReceive(t)); err != nil || h.Effect != "stored" {
+		t.Fatalf("bob = %+v, %v", h, err)
+	}
+	w.reviewAndApprove(n.bob)
+	if _, err := w.B.Outbox().Flush(ctx, n.client.Transport()); err != nil {
+		t.Fatal(err)
+	}
+	if h, err := coord.Handle(ctx, n.coordReceive(t)); err != nil || h.Effect != "filled" {
+		t.Fatalf("response = %+v, %v", h, err)
+	}
+	refused := n.server.Stats().Refused
+	for i := range 2 {
+		n.client.Disconnect()
+		if err := w.B.Outbox().Rearm(ctx); err != nil { // what Pump.Run does on a new connection
+			t.Fatal(err)
+		}
+		if err := n.client.Connect(ctx); err != nil {
+			t.Fatalf("connection %d: %v", i+2, err)
+		}
+		n.handleHello(t, coord)
+		if sent, err := w.B.Outbox().Flush(ctx, n.client.Transport()); err != nil || sent != 0 {
+			t.Fatalf("connection %d: the accepted response was sent again (%d, %v)", i+2, sent, err)
+		}
+		// Nothing is asked again for an answered request; the one thing the
+		// coordinator has for bob is the announcement that the collection is
+		// closed, which goes out once, on the first connection after it.
+		items, _ := w.C.Outbox().Pending(ctx)
+		for _, it := range items {
+			if it.Type == string(party.TypeSigningRequest) {
+				t.Fatalf("connection %d: the answered request is pending again: %+v", i+2, it)
+			}
+		}
+		sent, err := w.C.Outbox().Flush(ctx, n.server.Transport())
+		if err != nil || sent != len(items) {
+			t.Fatalf("connection %d: sent %d of %d (%v)", i+2, sent, len(items), err)
+		}
+		for range sent {
+			if h, err := n.bob.Handle(ctx, n.bobReceive(t)); err != nil || h.Refused || h.Effect != "closed" {
+				t.Fatalf("connection %d: bob = %+v, %v", i+2, h, err)
+			}
+		}
+		if i == 1 && sent != 0 {
+			t.Fatalf("the announcement went out again on connection 3")
+		}
+	}
+	if st := n.server.Stats(); st.Refused != refused {
+		t.Fatalf("the server closed %d connections for their first frame", st.Refused-refused)
+	}
+	noRefusalEvents(t, w.C)
+	noRefusalEvents(t, w.B)
+}
+
+// lossy is a sender that says it wrote and drops the envelope: a connection
+// that died with the frame in flight.
+type lossy struct{ dropped int }
+
+func (l *lossy) Send(context.Context, party.Fingerprint, []byte) error { l.dropped++; return nil }
+
+// A response whose write was lost is recovered over tailcat: bob connects again,
+// the coordinator, which still has no answer, sends the same request, bob
+// answers it from his stored response without signing again, and the slot is
+// filled and the registration submitted.
+// spec: SPO-Xparty-INV-017, SPO-Xparty-INV-021
+func TestTailcatLostResponseIsRecoveredByTheResentRequest(t *testing.T) {
+	n := newNetWorld(t)
+	w := n.world
+	w.open()
+	coord := w.coordinator()
+	if err := n.client.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	n.handleHello(t, coord)
+	if _, err := coord.RequestSignatures(ctx, multisig.RequestInput{Ref: poolRef, Purpose: "register mypool"}, n.server.Transport()); err != nil {
+		t.Fatal(err)
+	}
+	first := n.bobReceive(t)
+	if h, err := n.bob.Handle(ctx, first); err != nil || h.Effect != "stored" {
+		t.Fatalf("bob = %+v, %v", h, err)
+	}
+	w.reviewAndApprove(n.bob)
+	// The write is lost.
+	drop := &lossy{}
+	if sent, err := w.B.Outbox().Flush(ctx, ports.NetworkTransport(drop)); err != nil || sent != 1 {
+		t.Fatalf("flush = %d, %v", sent, err)
+	}
+	if items, _ := w.B.Outbox().Pending(ctx); len(items) != 0 {
+		t.Fatalf("the response is still pending after its write succeeded: %+v", items)
+	}
+	// bob connects again: a fresh Hello, and the coordinator sends its
+	// unanswered request again, the same envelope.
+	n.client.Disconnect()
+	if err := n.client.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	n.handleHello(t, coord)
+	if sent, err := w.C.Outbox().Flush(ctx, n.server.Transport()); err != nil || sent != 1 {
+		t.Fatalf("the coordinator re-sent %d requests (%v)", sent, err)
+	}
+	again := n.bobReceive(t)
+	if string(again.Envelope) != string(first.Envelope) {
+		t.Fatal("the re-sent request is not the same envelope")
+	}
+	gate := w.B.Gate.Count()
+	if h, err := n.bob.Handle(ctx, again); err != nil || h.Effect != "response-resent" {
+		t.Fatalf("duplicate = %+v, %v", h, err)
+	}
+	if w.B.Gate.Count() != gate {
+		t.Fatal("bob's key was used again for a request he had answered")
+	}
+	if _, err := w.B.Outbox().Flush(ctx, n.client.Transport()); err != nil {
+		t.Fatal(err)
+	}
+	h, err := coord.Handle(ctx, n.coordReceive(t))
+	if err != nil || h.Refused || h.Effect != "filled" || !h.Complete {
+		t.Fatalf("response = %+v, %v", h, err)
+	}
+	if w.sub.count() != 1 {
+		t.Fatalf("%d submitted", w.sub.count())
+	}
+	noRefusalEvents(t, w.C)
+	noRefusalEvents(t, w.B)
+}
+
 // (c) A pool cold key is never carried over tailcat: the coordinator refuses
 // to create the request, and a request that a lying coordinator sends anyway
 // is refused by the signer. By file the same request is accepted.
@@ -286,10 +454,10 @@ func TestTailcatColdKeyRequestIsRefusedByBothEnds(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Bob connects.
-	if err := n.bob.Hello(ctx, "coordinator", n.client); err != nil {
+	if err := n.client.Connect(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if h, _ := coord.Handle(ctx, n.coordReceive(t), ports.ViaNetwork); h.Effect != "hello" {
+	if h, _ := coord.Handle(ctx, n.coordReceive(t)); h.Effect != "hello" {
 		t.Fatalf("hello = %+v", h)
 	}
 	// The coordinator will not create the request for the network.
@@ -312,7 +480,7 @@ func TestTailcatColdKeyRequestIsRefusedByBothEnds(t *testing.T) {
 	if err := n.server.Send(ctx, w.B.Identity.Fingerprint, env); err != nil {
 		t.Fatal(err)
 	}
-	h, err := n.bob.Handle(ctx, n.bobReceive(t), ports.ViaNetwork)
+	h, err := n.bob.Handle(ctx, n.bobReceive(t))
 	if err != nil || h.Refused || h.Effect != "refused" || h.Reason != party.RefuseColdKeyOverNetwork.String() {
 		t.Fatalf("bob = %+v, %v", h, err)
 	}
@@ -325,7 +493,7 @@ func TestTailcatColdKeyRequestIsRefusedByBothEnds(t *testing.T) {
 	// The same request by file is not refused for the transport (ADR 0005).
 	forged.Collection = party.CollectionID{8}
 	env2 := partyrig.Seal(t, w.C, w.B, forged, 5*time.Minute)
-	if h, err := n.bob.Handle(ctx, env2, ports.ViaFile); err != nil || h.Refused || h.Effect != "stored" {
+	if h, err := n.bob.Handle(ctx, ports.FileReceived(env2)); err != nil || h.Refused || h.Effect != "stored" {
 		t.Fatalf("by file = %+v, %v", h, err)
 	}
 }
@@ -366,9 +534,8 @@ func TestTailcatUnenrolledNodeKeyAndUnenrolledIdentity(t *testing.T) {
 	zed := partyrig.New(t, "zed", w.clock, w.chain.Chain)
 	zed.Enroll(w.C, "coordinator", []party.Role{party.RoleCoordinator}, nil)
 	env := partyrig.Seal(t, zed, w.C, party.Hello{}, time.Minute)
-	if err := n.client.Send(ctx, w.C.Identity.Fingerprint, env); err != nil {
-		t.Fatal(err)
-	}
+	closeZed := n.rawFirstFrame(t, n.node, env)
+	defer closeZed()
 	deadline := time.Now().Add(10 * time.Second)
 	// It failed before the signature step: noise, in its own ring, never in
 	// the security log (INV-023).
@@ -397,27 +564,49 @@ func TestTailcatUnenrolledNodeKeyAndUnenrolledIdentity(t *testing.T) {
 	n.bobSilent(t)
 }
 
-// capture is a sender that keeps what it is given.
-type capture struct{ got [][]byte }
-
-func (c *capture) Send(_ context.Context, _ party.Fingerprint, env []byte) error {
-	c.got = append(c.got, append([]byte(nil), env...))
-	return nil
-}
-
-func (n *netWorld) newBobClient(t *testing.T) *tailcat.Client {
+// rawFirstFrame dials the coordinator with the library's own client and the
+// node key given, and writes env as the very first frame: no Hello of its own,
+// as an enrolled but hostile peer would. tailcat.Client cannot do this: it
+// always opens with a fresh Hello.
+// It returns the function that closes the connection and the client: one node
+// key has one live tailcat client, so each is closed before the next dials.
+func (n *netWorld) rawFirstFrame(t *testing.T, node *secret.Buffer, env []byte) (closeIt func()) {
 	t.Helper()
 	addr, err := n.server.Address()
 	if err != nil {
 		t.Fatal(err)
 	}
-	cl, err := tailcat.NewClient(tailcat.ClientConfig{Address: addr, NodeKey: copyOf(t, n.node), Coordinator: n.world.C.Identity.Fingerprint,
-		ExpectServerKey: &n.invite.Node, Logf: quiet, DialTimeout: 20 * time.Second})
-	if err != nil {
+	var text string
+	addr.Use(func(b []byte) error { text = string(b); return nil })
+	addr.Destroy()
+	var priv key.NodePrivate
+	node.Use(func(raw []byte) error { priv = key.NodePrivateFromRaw32(mem.B(raw)); return nil })
+	raw := &tc.Client{Server: tc.Addr(text), Key: priv, Logf: quiet}
+	var once sync.Once
+	var conn net.Conn
+	closeIt = func() {
+		once.Do(func() {
+			if conn != nil {
+				conn.Close()
+			}
+			dctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			raw.DrainTCP(dctx)
+			cancel()
+			raw.Close()
+		})
+	}
+	t.Cleanup(closeIt)
+	dctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	var err2 error
+	conn, err2 = raw.DialTCPPort(dctx, tailcat.DefaultPort)
+	if err2 != nil {
+		t.Fatal(err2)
+	}
+	if err := tailcat.WriteFrame(conn, env); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { cl.Close() })
-	return cl
+	return closeIt
 }
 
 func waitEvent(t *testing.T, w *partyrig.Workspace, kind string) {
@@ -456,26 +645,13 @@ func TestTailcatFirstFrameIsBoundToTheTunnelPeer(t *testing.T) {
 	carol := partyrig.NewWithNode(t, "carol", w.clock, w.chain.Chain, &cpub)
 	w.C.EnrollScoped(carol, "carol", []party.Role{party.RoleSigner}, party.Scope{KeyRoles: []custody.Role{custody.RoleStake}, Pools: []string{w.bech}})
 	n.server.Allow(cpub)
-	caddr, err := n.server.Address()
-	if err != nil {
-		t.Fatal(err)
-	}
-	carolClient, err := tailcat.NewClient(tailcat.ClientConfig{Address: caddr, NodeKey: cnode, Coordinator: w.C.Identity.Fingerprint,
-		ExpectServerKey: &n.invite.Node, Logf: quiet, DialTimeout: 20 * time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { carolClient.Close() })
-
 	// Bob's genuine Hello, taken off the wire by carol and replayed as her
 	// own first frame.
-	var grab capture
-	if err := n.bob.Hello(ctx, "coordinator", &grab); err != nil || len(grab.got) != 1 {
-		t.Fatalf("hello: %v", err)
-	}
-	if err := carolClient.Send(ctx, w.C.Identity.Fingerprint, grab.got[0]); err != nil {
+	grab, err := n.bob.NewHello(ctx, "coordinator")
+	if err != nil {
 		t.Fatal(err)
 	}
+	closeCarol := n.rawFirstFrame(t, cnode, grab)
 	waitEvent(t, w.C, "first-frame-refused")
 	if !w.C.HasEvent("first-frame-refused", "node key") {
 		t.Errorf("not refused for the node key: %v", w.C.Events())
@@ -495,11 +671,10 @@ func TestTailcatFirstFrameIsBoundToTheTunnelPeer(t *testing.T) {
 		}
 	}
 
+	closeCarol()
 	// Bob himself: his Hello over his own connection is accepted, and he has a route.
-	if err := n.client.Send(ctx, w.C.Identity.Fingerprint, grab.got[0]); err != nil {
-		t.Fatal(err)
-	}
-	h, err := coord.Handle(ctx, n.coordReceive(t), ports.ViaNetwork)
+	closeBob := n.rawFirstFrame(t, n.node, grab)
+	h, err := coord.Handle(ctx, n.coordReceive(t))
 	if err != nil || h.Refused || h.Effect != "hello" {
 		t.Fatalf("bob's hello = %+v, %v", h, err)
 	}
@@ -512,30 +687,28 @@ func TestTailcatFirstFrameIsBoundToTheTunnelPeer(t *testing.T) {
 	}
 
 	// The same Hello, now accepted, is a replay as a first frame on a new connection.
+	closeBob()
 	before := countEvents(w.C, "first-frame-refused")
-	again := n.newBobClient(t)
-	if err := again.Send(ctx, w.C.Identity.Fingerprint, grab.got[0]); err != nil {
-		t.Fatal(err)
-	}
+	closeReplay := n.rawFirstFrame(t, n.node, grab)
 	waitEventCount(t, w.C, "first-frame-refused", before+1)
 	if !w.C.HasEvent("first-frame-refused", "already accepted") {
 		t.Errorf("not refused as a replay: %v", w.C.Events())
 	}
 
-	// A first frame that is not a Hello or a response: refused although bob
-	// sends it from his own node.
-	// (One node key, one live client: bob's earlier connections go first.)
-	again.Close()
-	n.client.Close()
-	before = countEvents(w.C, "first-frame-refused")
-	third := n.newBobClient(t)
-	closed := partyrig.Seal(t, w.B, w.C, party.CollectionClosed{Collection: party.CollectionID{1}, Outcome: party.OutcomeDiscarded}, time.Minute)
-	if err := third.Send(ctx, w.C.Identity.Fingerprint, closed); err != nil {
-		t.Fatal(err)
-	}
-	waitEventCount(t, w.C, "first-frame-refused", before+1)
-	if !w.C.HasEvent("first-frame-refused", "CollectionClosed") {
-		t.Errorf("not refused for its type: %v", w.C.Events())
+	// A first frame that is not a Hello is refused although bob sends it from
+	// his own node: a CollectionClosed, and a response, whose id is fresh (the
+	// lockout of the reviewer: a first frame is a Hello only).
+	for name, body := range map[string]party.Body{
+		"CollectionClosed": party.CollectionClosed{Collection: party.CollectionID{1}, Outcome: party.OutcomeDiscarded},
+		"SigningRefusal":   party.SigningRefusal{Collection: party.CollectionID{1}, Request: party.MessageID{9}, Reason: party.RefuseDeclined},
+	} {
+		closeReplay()
+		before = countEvents(w.C, "first-frame-refused")
+		closeReplay = n.rawFirstFrame(t, n.node, partyrig.Seal(t, w.B, w.C, body, time.Minute))
+		waitEventCount(t, w.C, "first-frame-refused", before+1)
+		if !w.C.HasEvent("first-frame-refused", name) {
+			t.Errorf("%s: not refused for its type: %v", name, w.C.Events())
+		}
 	}
 }
 
@@ -588,5 +761,26 @@ func TestTailcatAllowListFollowsTheRegistry(t *testing.T) {
 	}
 	if _, err := tailcat.NewServer(tailcat.ServerConfig{Allowed: allowed, Admit: func([]byte, party.NodeKey) (party.Fingerprint, error) { return party.Fingerprint{}, nil }}); !errors.Is(err, tailcat.ErrEmptyAllowList) {
 		t.Fatalf("a server with an empty allow-list: %v", err)
+	}
+}
+
+// A Hello that Handle would refuse (a lifetime beyond five minutes) is refused
+// at the first frame, over the real transport, and leaves no route (N5).
+// spec: SPO-Xparty-INV-018, SPO-Xparty-INV-021, SPO-Xparty-INV-027
+func TestTailcatFirstFrameWithALongHelloLeavesNoRoute(t *testing.T) {
+	n := newNetWorld(t)
+	w := n.world
+	long := partyrig.Seal(t, w.B, w.C, party.Hello{}, 30*time.Minute)
+	closeBob := n.rawFirstFrame(t, n.node, long)
+	defer closeBob()
+	waitEvent(t, w.C, "first-frame-refused")
+	if !w.C.HasEvent("first-frame-refused", "5 minutes") {
+		t.Errorf("not refused for its lifetime: %v", w.C.Events())
+	}
+	if peers := n.server.Peers(); len(peers) != 0 {
+		t.Fatalf("a refused Hello got a route: %v", peers)
+	}
+	if err := n.server.Send(ctx, w.B.Identity.Fingerprint, []byte("for bob")); !errors.Is(err, ports.ErrNoRoute) {
+		t.Fatalf("bob's route: %v", err)
 	}
 }

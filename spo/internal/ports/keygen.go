@@ -83,9 +83,11 @@ type HardwareKey struct {
 	SigningFile []byte
 }
 
-// HardwareKeyExporter exports a key from a hardware wallet. No adapter
-// implements it yet: the generation use cases refuse a hardware holder
-// before any effect because no signer profile offers the export (ADR 0008).
+// HardwareKeyExporter exports a key from a hardware wallet. The hwcli adapter
+// implements it (Session and Lazy), with `address key-gen` and `node key-gen`.
+// The generation use cases (app/hwkeys) plan against the signer's profile first
+// and refuse, before any effect, a key the device's profile does not offer to
+// export (ADR 0008). No command in cmd/spo wires a hardware exporter yet.
 type HardwareKeyExporter interface {
 	Signer
 	ExportHardwareKey(ctx context.Context, key custody.KeyRef, path string) (HardwareKey, error)

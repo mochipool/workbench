@@ -241,6 +241,42 @@ func (b *Bundle) AddHistory(date, action string) error {
 	return nil
 }
 
+// addHistoryWith appends `{date, action, <key>: value}` to history.
+func (b *Bundle) addHistoryWith(date, action, key string, value json.RawMessage) error {
+	hist, err := b.root.Array("history")
+	if err != nil {
+		return err
+	}
+	e := NewObject()
+	e.Set("date", Str(date))
+	e.Set("action", Str(action))
+	e.Set(key, value)
+	hist = append(hist, e.Compact())
+	b.root.Set("history", joinArray(hist))
+	return nil
+}
+
+// SubmittedAssetUpdates lists the asset record updates that `execute`
+// recorded in the history as submitted, as the compact JSON each holds
+// (with its `txid`), oldest first.
+func (b *Bundle) SubmittedAssetUpdates() ([]string, error) {
+	raws, err := b.root.Array("history")
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, r := range raws {
+		var e map[string]json.RawMessage
+		if json.Unmarshal(r, &e) != nil {
+			continue
+		}
+		if v, ok := e[KeyAssetSubmitted]; ok {
+			out = append(out, string(compactJSON(v)))
+		}
+	}
+	return out, nil
+}
+
 func joinArray(items []json.RawMessage) json.RawMessage {
 	var b bytes.Buffer
 	b.WriteByte('[')
@@ -561,7 +597,23 @@ type QueuedEntry struct {
 	StakeName, StakingAddr, DelegName, DRepName                      string
 	PoolTicker, PoolMetaURL, PoolMetaHash, RegistrationProtectionKey string
 	EnvelopeType, CborHex                                            string
+	// AssetPending is the port's own `spoAssetPending` field of a queued
+	// mint or burn: the compact JSON of the asset record update that waits
+	// for the submission. Empty for every other entry. Upstream's readers
+	// ignore a key they do not name.
+	AssetPending string
 }
+
+// Port-only keys. A transaction entry or a history entry carries them next to
+// upstream's fields; upstream reads its own keys by name with jq and ignores
+// the rest (SPO-Ptransfer-OUT-010).
+const (
+	// KeyAssetPending is the queue entry's field.
+	KeyAssetPending = "spoAssetPending"
+	// KeyAssetSubmitted is the history entry's field, written by `execute`
+	// after a submit: the update of the asset record, submitted.
+	KeyAssetSubmitted = "spoAssetSubmitted"
+)
 
 // Queue lists the queued transactions in order.
 func (b *Bundle) Queue() ([]QueuedEntry, error) {
@@ -584,7 +636,7 @@ func (b *Bundle) Queue() ([]QueuedEntry, error) {
 			FromName: str("fromAddr"), FromAddr: str("sendFromAddr"), ToName: str("toAddr"), ToAddr: str("sendToAddr"),
 			StakeName: str("stakeAddr"), StakingAddr: str("stakingAddr"), DelegName: str("delegName"), DRepName: str("drepName"),
 			PoolTicker: str("poolMetaTicker"), PoolMetaURL: str("poolMetaUrl"), PoolMetaHash: str("poolMetaHash"),
-			RegistrationProtectionKey: str("regProtectionKey")}
+			RegistrationProtectionKey: str("regProtectionKey"), AssetPending: str(KeyAssetPending)}
 		if tx, ok := loose["txJSON"]; ok {
 			var env struct {
 				Type    string `json:"type"`
@@ -701,8 +753,22 @@ func (b *Bundle) CompleteSubmit(cborHex, txid, date string) error {
 		}
 	}
 	b.root.Set("address", all.Compact())
-	if err := b.AddHistory(date, entry.HistoryText(txid)); err != nil {
-		return err
+	if entry.AssetPending == "" {
+		if err := b.AddHistory(date, entry.HistoryText(txid)); err != nil {
+			return err
+		}
+	} else {
+		// The result of the submit travels back with the file, in the same
+		// history entry as upstream's text: the offline machine applies it to
+		// its asset record (assets.SettleFromBundle).
+		upd, err := ParseObject([]byte(entry.AssetPending))
+		if err != nil {
+			return fmt.Errorf("the asset update of the queued transaction is damaged: %w", err)
+		}
+		upd.Set("txid", Str(txid))
+		if err := b.addHistoryWith(date, entry.HistoryText(txid), KeyAssetSubmitted, upd.Compact()); err != nil {
+			return err
+		}
 	}
 	raws, _ := b.root.Array("transactions")
 	raws = append(raws[:entry.Position-1], raws[entry.Position:]...)

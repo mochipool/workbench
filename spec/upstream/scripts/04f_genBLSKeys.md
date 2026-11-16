@@ -116,3 +116,5 @@ Use case `GenerateBlsKey(pool, protection)` on aggregate `StakePool` (its `BlsKe
 ## Open questions
 
 * Whether mainnet will gain this script once the BLS key becomes mandatory is not settled by source; re-check at the next upstream tag.
+
+> **Observed 2026-11-16:** the pinned cardano-cli 11.2.3.0 runs `dijkstra node key-gen-BLS`. The text envelopes it writes have the types `BlsVerificationKey_bls12-381-BLS-Signature-Mininimal-Signature-Size` and `BlsSigningKey_bls12-381-BLS-Signature-Mininimal-Signature-Size` (note "Mininimal": a typo of the cli) with the descriptions `BLS12-381 verification key` and `BLS12-381 signing key`; the verification key is a CBOR byte string of 96 bytes (`5860`, 196 hex digits) and the signing key one of 32 bytes (`5820`, 68 hex digits), indented by four spaces. bursa's envelopes spell the type "Minimal"; the native generator writes the cli's spelling. The same cli has no command that reads a BLS key back, so the shape is what the parity test compares.

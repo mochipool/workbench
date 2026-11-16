@@ -32,15 +32,40 @@ type Deps struct {
 	// where signing keys are not sealed (--upstream-layout).
 	OpenUpstream func(dir string) (ports.Store, error)
 
+	// OpenUpstreamSource opens an upstream-layout directory to be read as the
+	// source of a workspace import (nothing in it is changed).
+	OpenUpstreamSource func(dir string) (UpstreamSource, error)
+
+	// WorkspaceAuditor makes the recorder of dangerous workspace operations
+	// (export, unprotect) over a store; reason is the operator's, kept with
+	// each event. dir is the workspace directory: a store with no place for
+	// the log (the upstream layout) keeps it in a file there.
+	WorkspaceAuditor func(dir string, store ports.Store, reason string) ports.WorkspaceAuditor
+
+	// RefOfFile maps an upstream file name (`pool.node.skey`) to its artefact.
+	RefOfFile func(file string) (ports.Ref, bool)
+
 	// Wire builds the Env a command runs in, from the open store (nil to
 	// only inspect what the configuration yields) and the options. It
 	// constructs; it does not touch the network. Adding a command never
 	// needs a change here.
 	Wire func(store ports.Store, o WireOptions) (*Env, error)
 
+	// MapError turns the typed errors an adapter declares (this package
+	// imports none) into what the operator should do next, with Explain. It
+	// returns an error it does not know unchanged. Nil maps nothing.
+	MapError func(error) error
+
 	// Genesis returns the genesis files the release set bundles for a
 	// network, or ok=false when the binary has no manifest or no entry.
 	Genesis func(network string) (shelley, byron string, ok bool)
+}
+
+// UpstreamSource is an upstream-layout directory opened for an import.
+type UpstreamSource interface {
+	ports.Store
+	ports.Vault
+	ports.SourceLister
 }
 
 // WorkspaceConfig mirrors spo.toml (see adapters/config).
@@ -48,7 +73,24 @@ type WorkspaceConfig struct {
 	Network string
 	Mode    string
 	Koios   *KoiosConfig // nil: no Koios provider configured
+	// Hardware is the optional [hardware] section; nil keeps every default.
+	Hardware *HardwareConfig
+	// Handles is the optional [handles] section; nil keeps the network's API.
+	Handles *HandlesConfig
 }
+
+// HardwareConfig is the [hardware] section. Zero values keep the defaults.
+type HardwareConfig struct {
+	// WaitSeconds bounds the wait for the device to answer (default 60).
+	WaitSeconds int
+	// MinLedger, MinTrezor and MinKeystone override the minimum app or
+	// firmware version of that vendor (dotted numbers).
+	MinLedger, MinTrezor, MinKeystone string
+}
+
+// HandlesConfig is the [handles] section: URL overrides the ADA Handle API
+// root of the network.
+type HandlesConfig struct{ URL string }
 
 // KoiosConfig is the [koios] section. URL empty means the network's public
 // endpoint.
@@ -69,6 +111,8 @@ type NetworkPreset struct {
 	ByronToShelleyEpochs uint64
 	KoiosURL             string
 	LightParametersURL   string
+	// HandleURL is the ADA Handle API root, "" where the network has none.
+	HandleURL string
 }
 
 // ConfigOps reads and writes spo.toml. Load's error satisfies

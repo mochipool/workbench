@@ -48,9 +48,9 @@ key, its signing key and its files first (upstream asks, with the default No).`
 			var res governance.CommitteeKeysGenerated
 			var err error
 			if cold {
-				res, err = governance.GenerateCommitteeColdKeys{Store: s.Store, Keys: env.ComColdKeys, Deriver: env.GovDeriver, Mnemonics: env.Mnemonics, Params: env.Params}.Run(ctx, req)
+				res, err = governance.GenerateCommitteeColdKeys{Store: s.Store, Keys: env.ComColdKeys, Deriver: env.GovDeriver, Mnemonics: env.Mnemonics, Params: env.Params, Hardware: env.Hardware}.Run(ctx, req)
 			} else {
-				res, err = governance.GenerateCommitteeHotKeys{Store: s.Store, Keys: env.ComHotKeys, Deriver: env.GovDeriver, Mnemonics: env.Mnemonics, Params: env.Params}.Run(ctx, req)
+				res, err = governance.GenerateCommitteeHotKeys{Store: s.Store, Keys: env.ComHotKeys, Deriver: env.GovDeriver, Mnemonics: env.Mnemonics, Params: env.Params, Hardware: env.Hardware}.Run(ctx, req)
 			}
 			if err != nil {
 				return err
@@ -77,7 +77,7 @@ machine. The certificate is stored as <hot>.cc-hot.cert after the transaction
 was sent.`,
 		Args: cobra.ExactArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			spec := envSpec{flags: &f.chain, config: true, needs: govTxNeeds(CapCerts, CapCommittee)}
+			spec := envSpec{flags: &f.chain, config: true, needs: govTxNeeds(CapCerts, CapCommittee), extras: &f.extra}
 			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, wo WireOptions) error {
 				var details []string
 				for _, d := range []struct {
@@ -89,7 +89,7 @@ was sent.`,
 					}
 				}
 				uc := governance.AuthorizeCommitteeHotKey{Base: a.govBase(s, env, &f, govConfirmer{a: a, details: details}), Certs: env.Certs, Committee: env.Committee}
-				res, err := uc.Run(ctx, governance.AuthorizeRequest{Cold: args[0], Hot: args[1], Payer: args[2], Message: f.messages})
+				res, err := uc.Run(ctx, governance.AuthorizeRequest{Cold: args[0], Hot: args[1], Payer: args[2], Message: f.messages, Extras: f.extra.ex, Passphrase: f.extra.pass})
 				if err != nil {
 					return f.hint(err)
 				}
@@ -121,7 +121,7 @@ and cannot queue a transaction for an offline machine. The certificate is stored
 as <cold>.cc-cold-ret.cert after the transaction was sent.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			spec := envSpec{flags: &f.chain, config: true, needs: govTxNeeds(CapCerts, CapCommittee)}
+			spec := envSpec{flags: &f.chain, config: true, needs: govTxNeeds(CapCerts, CapCommittee), extras: &f.extra}
 			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, wo WireOptions) error {
 				var details, notes []string
 				if b := readPublic(ctx, s.Store, ports.Ref{Name: committeeStem(args[0]), Kind: ports.CCColdHash}); b != nil {
@@ -142,7 +142,7 @@ as <cold>.cc-cold-ret.cert after the transaction was sent.`,
 				uc := governance.ResignCommitteeColdKey{Base: a.govBase(s, env, &f, govConfirmer{a: a, details: details, notes: notes}), Certs: env.Certs,
 					Committee: env.Committee, Anchors: governance.AnchorSource{Fetcher: env.AnchorFetcher},
 					Verifier: env.AnchorVerifier, AnchorUnverifiedAcknowledged: f.anchorUnverified}
-				res, err := uc.Run(ctx, governance.ResignRequest{Cold: args[0], Payer: args[1], URL: f.anchorURL, Hash: f.anchorHash, Message: f.messages})
+				res, err := uc.Run(ctx, governance.ResignRequest{Cold: args[0], Payer: args[1], URL: f.anchorURL, Hash: f.anchorHash, Message: f.messages, Extras: f.extra.ex, Passphrase: f.extra.pass})
 				if err != nil {
 					return f.hint(err)
 				}

@@ -119,3 +119,5 @@ Use case `BuildPollAnswer(questionTxHash)` on aggregate `PollResponse` (the `com
 
 * Whether CIP-94 defines the question hash over the CBOR re-encoding exactly as this script builds it (definite-length, key order 0 then 1). Settle by checking CIP-94 and a real poll transaction.
 * Koios response shape for a transaction without metadata (an entry with `metadata: null`, which leads to SPO-13a-PRE-003, versus an empty array, which leads to SPO-13a-PRE-002) depends on the Koios release.
+
+> **Observed 2026-11-16:** run through the workbench in light mode against a stand-in Koios that answers `tx_metadata` with a hand-written label-94 poll, the testnet script writes `spopoll_<hash>.cbor` with the same bytes as the port's `BuildPollAnswer` (`spo/test/parity/poll_scripts_test.go`). No real poll transaction was recorded; the Koios shape of label 94 (`"0"` lines, `"1"` option line arrays) is the one the script reads.

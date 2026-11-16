@@ -68,12 +68,8 @@ func TestApproveNeedsTheGate(t *testing.T) {
 func TestUnsetTransportKindIsANetworkAtTheCoordinator(t *testing.T) {
 	s := newScene(t, sceneOpt{cold: true})
 	unset := partyrig.NewPipe(ports.ViaUnknown)
+	// With no sender at all (queue only) the cold slot is not created.
 	res, err := s.C.Coordinator().RequestSignatures(ctx, multisig.RequestInput{Ref: s.ref}, unset.Transport())
-	if !errors.Is(err, multisig.ErrTransportKind) || res != nil {
-		t.Fatalf("a sender of no kind: %+v, %v", res, err)
-	}
-	// With no sender at all (queue only) the cold slot is still not created.
-	res, err = s.C.Coordinator().RequestSignatures(ctx, multisig.RequestInput{Ref: s.ref}, multisig.Transport{})
 	if err != nil || len(res) != 2 || res[0].Status != multisig.SlotRequested || !errors.Is(res[1].Err, multisig.ErrColdKeyOverNetwork) {
 		t.Fatalf("queue only: %+v, %v", res, err)
 	}
@@ -83,8 +79,11 @@ func TestUnsetTransportKindIsANetworkAtTheCoordinator(t *testing.T) {
 	if unset.Sent != 0 {
 		t.Fatal("something was sent through a transport of no kind")
 	}
-	// The kind cannot be made by hand: the zero Transport has none.
-	if (ports.Transport{}).Kind().Known() || ports.ViaUnknown.IsFile() {
+	// There is no constructor with a kind parameter: a sender is paired with a
+	// kind only by FileTransport or NetworkTransport, so no transport of an
+	// unstated kind has a sender, and the zero Transport has none.
+	if (ports.Transport{}).Kind().Known() || ports.ViaUnknown.IsFile() || ports.NetworkTransport(unset).Kind() != ports.ViaNetwork ||
+		ports.FileTransport(unset).Kind() != ports.ViaFile || (ports.Received{}).Via().IsFile() {
 		t.Fatal("an unstated kind is a file")
 	}
 }
@@ -102,12 +101,12 @@ func TestSignerEnforcesExpiryAndSizeOnReceipt(t *testing.T) {
 		return s.sealFrom(s.C, s.B, req, s.clock.Now(), s.clock.Now().Add(expires))
 	}
 	// The ttl slot is 500 seconds away: a request that lives 10 minutes outlives it.
-	h, err := s.B.Signer().Handle(ctx, long(10*time.Minute), ports.ViaFile)
+	h, err := s.B.Signer().Handle(ctx, ports.FileReceived(long(10*time.Minute)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	mustRefuse(t, h, party.ErrRequestExpiry.Error())
-	h, _ = s.B.Signer().Handle(ctx, long(2*time.Minute), ports.ViaFile)
+	h, _ = s.B.Signer().Handle(ctx, ports.FileReceived(long(2*time.Minute)))
 	if h.Refused || h.Effect != "stored" {
 		t.Fatalf("a request inside its ttl: %+v", h)
 	}
@@ -115,16 +114,16 @@ func TestSignerEnforcesExpiryAndSizeOnReceipt(t *testing.T) {
 	big := mustForged(s, func(r *party.SigningRequest) {
 		r.TxBody = append(r.TxBody, make([]byte, party.DefaultMaxTxSize)...)
 	})
-	h, _ = s.B.Signer().Handle(ctx, s.sealFrom(s.C, s.B, big, s.clock.Now(), s.clock.Now().Add(2*time.Minute)), ports.ViaFile)
+	h, _ = s.B.Signer().Handle(ctx, ports.FileReceived(s.sealFrom(s.C, s.B, big, s.clock.Now(), s.clock.Now().Add(2*time.Minute))))
 	mustRefuse(t, h, "maxTxSize")
 	small := s.B.Signer()
 	small.MaxTxSize = 100
-	h, _ = small.Handle(ctx, s.sealFrom(s.C, s.B, mustForged(s, body), s.clock.Now(), s.clock.Now().Add(2*time.Minute)), ports.ViaFile)
+	h, _ = small.Handle(ctx, ports.FileReceived(s.sealFrom(s.C, s.B, mustForged(s, body), s.clock.Now(), s.clock.Now().Add(2*time.Minute))))
 	mustRefuse(t, h, "maxTxSize")
 	// A protocol parameter above the bound does not raise it.
 	huge := s.B.Signer()
 	huge.MaxTxSize = 1 << 30
-	h, _ = huge.Handle(ctx, s.sealFrom(s.C, s.B, big, s.clock.Now(), s.clock.Now().Add(2*time.Minute)), ports.ViaFile)
+	h, _ = huge.Handle(ctx, ports.FileReceived(s.sealFrom(s.C, s.B, big, s.clock.Now(), s.clock.Now().Add(2*time.Minute))))
 	mustRefuse(t, h, "maxTxSize")
 }
 
@@ -135,7 +134,7 @@ func TestRequestWithoutAGenesisIsRefused(t *testing.T) {
 	sg := s.B.Signer()
 	sg.Chain.Genesis = nil
 	sg.Chain.Tip = s.chain // the slot is known; the time of the ttl slot is not
-	h, err := sg.Handle(ctx, s.forgedRequest(nil), ports.ViaFile)
+	h, err := sg.Handle(ctx, ports.FileReceived(s.forgedRequest(nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,21 +175,21 @@ func TestInviteIsBoundToTheEnrolledNodeKeyAndAtomic(t *testing.T) {
 	now := s.clock.Now()
 	right := party.Invite{Address: "tailcat://secret", Node: coordNode}
 	wrong := party.Invite{Address: "tailcat://secret", Node: party.NodeKey{0x66}}
-	h, _ := sg.Handle(ctx, s.sealFrom(s.C, s.B, wrong, now, now.Add(time.Hour)), ports.ViaFile)
+	h, _ := sg.Handle(ctx, ports.FileReceived(s.sealFrom(s.C, s.B, wrong, now, now.Add(time.Hour))))
 	mustRefuse(t, h, "node key")
 	if len(stored) != 0 {
 		t.Fatal("an invitation for another node key was stored")
 	}
 	env := s.sealFrom(s.C, s.B, right, now, now.Add(time.Hour))
-	if _, err := sg.Handle(ctx, env, ports.ViaFile); err == nil {
+	if _, err := sg.Handle(ctx, ports.FileReceived(env)); err == nil {
 		t.Fatal("a failing hook was not reported")
 	}
 	fail = false
-	h, err := sg.Handle(ctx, env, ports.ViaFile) // the same envelope: the id was not recorded
+	h, err := sg.Handle(ctx, ports.FileReceived(env)) // the same envelope: the id was not recorded
 	if err != nil || h.Refused || h.Effect != "invite" || len(stored) != 1 {
 		t.Fatalf("after the hook worked: %+v, %v", h, err)
 	}
-	if h, _ = sg.Handle(ctx, env, ports.ViaFile); !h.Refused {
+	if h, _ = sg.Handle(ctx, ports.FileReceived(env)); !h.Refused {
 		t.Fatal("a stored invitation was taken twice")
 	}
 }
@@ -204,7 +203,7 @@ func TestCollectionExpiresAtTheTTLSlot(t *testing.T) {
 	s := newScene(t, sceneOpt{})
 	resp := s.readyResponse()
 	s.chain.SetSlot(s.ttl) // the tip reaches the ttl slot: the transaction is invalid from here on
-	h, err := s.C.Coordinator().Handle(ctx, resp, ports.ViaFile)
+	h, err := s.C.Coordinator().Handle(ctx, ports.FileReceived(resp))
 	if err != nil || !h.Refused || !strings.Contains(h.Reason, party.ErrCollectionNotOpen.Error()) {
 		t.Fatalf("at the ttl slot: %+v, %v", h, err)
 	}
@@ -223,7 +222,7 @@ func TestCollectionClosedMustNameTheBodyHash(t *testing.T) {
 	now := s.clock.Now()
 	closed := func(c party.CollectionID, o party.Outcome, id []byte) multisig.Handled {
 		env := s.sealFrom(s.C, s.B, party.CollectionClosed{Collection: c, Outcome: o, TxID: id}, now, now.Add(time.Hour))
-		h, err := s.B.Signer().Handle(ctx, env, ports.ViaFile)
+		h, err := s.B.Signer().Handle(ctx, ports.FileReceived(env))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -245,9 +244,10 @@ func TestCollectionClosedMustNameTheBodyHash(t *testing.T) {
 
 // ---- L5: a network send is not a delivery ---------------------------------------------------
 
-// Over a network the envelope stays pending after it was sent, goes out again
-// after a new connection, and stops when the answer it asks for arrives. A
-// duplicate request is answered with the stored response.
+// Over a network a request stays pending after it was sent, goes out again
+// (same id) after a new connection, and stops when the answer it asks for
+// arrives. A duplicate request is answered with the stored response, which is
+// sent once.
 // spec: SPO-Xparty-INV-017, SPO-Xparty-SEC-003
 func TestNetworkSendsAreRepeatedUntilAnswered(t *testing.T) {
 	s := newScene(t, sceneOpt{kind: ports.ViaNetwork})
@@ -272,11 +272,11 @@ func TestNetworkSendsAreRepeatedUntilAnswered(t *testing.T) {
 	}
 	reqs := s.cb.Take()
 	// The signer answers; the duplicate is answered with the stored response, not signed twice.
-	if h, _ := s.B.Signer().Handle(ctx, reqs[0], ports.ViaNetwork); h.Effect != "stored" {
+	if h, _ := s.B.Signer().Handle(ctx, ports.NetworkReceived(reqs[0])); h.Effect != "stored" {
 		t.Fatalf("first = %+v", h)
 	}
 	s.bobApproves()
-	h, err := s.B.Signer().Handle(ctx, reqs[0], ports.ViaNetwork)
+	h, err := s.B.Signer().Handle(ctx, ports.NetworkReceived(reqs[0]))
 	if err != nil || h.Effect != "response-resent" || s.B.Gate.Count() != 1 {
 		t.Fatalf("duplicate = %+v, %v, gate %d", h, err, s.B.Gate.Count())
 	}
@@ -288,9 +288,9 @@ func TestNetworkSendsAreRepeatedUntilAnswered(t *testing.T) {
 	if items, _ := s.C.Outbox().Pending(ctx); len(items) != 0 {
 		t.Fatalf("a settled request is still pending: %+v", items)
 	}
-	// The signer's response is Sent, not Delivered, until the collection closes.
-	if items, _ := s.B.Outbox().Pending(ctx); len(items) != 1 || !items[0].Sent || items[0].Delivered {
-		t.Fatalf("the response: %+v", items)
+	// The response was delivered when its write succeeded: it is not sent again.
+	if items, _ := s.B.Outbox().Pending(ctx); len(items) != 0 {
+		t.Fatalf("the response is still pending: %+v", items)
 	}
 }
 
@@ -304,21 +304,50 @@ func TestFileSendsAreDeliveredOnce(t *testing.T) {
 	}
 }
 
-// The scope enrolled for a signer is mirrored before a request is sent: the
-// key role must be one it is asked for, and a body with no pool needs it to be
-// unscoped.
+// What a coordinator asks of a signer is limited by the slot assignment and the
+// signer's own checks, not by the scope recorded for the signer: that scope is
+// what it may ask of us (SPO-Xparty-INV-010, L-d). A signer enrolled with a
+// scope that names another pool, or another key role, is still assignable.
 // spec: SPO-Xparty-INV-010, SPO-Xparty-PRE-003
-func TestCoordinatorMirrorsTheScopeBeforeSending(t *testing.T) {
+func TestCoordinatorDoesNotUseTheSignersScope(t *testing.T) {
 	s := newScene(t, sceneOpt{})
 	narrow := partyrig.New(t, "narrow", s.clock, s.chain)
 	s.C.EnrollScoped(narrow, "payonly", []party.Role{party.RoleSigner}, party.Scope{KeyRoles: []custody.Role{custody.RolePayment}, Pools: []string{s.bech}})
 	poolless := partyrig.New(t, "poolless", s.clock, s.chain)
-	s.C.EnrollScoped(poolless, "unscoped-no", []party.Role{party.RoleSigner}, party.Scope{KeyRoles: []custody.Role{custody.RoleStake}, Pools: []string{chain.PoolID{0xee}.Bech32()}})
-	for name, partyName := range map[string]string{"a key role it is not asked for": "payonly", "a pool the body does not concern": "unscoped-no"} {
+	s.C.EnrollScoped(poolless, "otherpool", []party.Role{party.RoleSigner}, party.Scope{KeyRoles: []custody.Role{custody.RoleStake}, Pools: []string{chain.PoolID{0xee}.Bech32()}})
+	for name, partyName := range map[string]string{"a key role it is not asked for": "payonly", "a pool the body does not concern": "otherpool"} {
 		req := multisig.OpenRequest{Name: "m" + strings.ReplaceAll(name, " ", ""), Body: s.body, TTL: s.ttl,
 			Slots: []pool.Slot{{Name: "bob.staking", Role: custody.RoleStake, KeyHash: s.bobHash, Holder: custody.HolderRemote, Party: partyName}}}
-		if _, err := s.C.Coordinator().Open(ctx, req); err == nil || !strings.Contains(err.Error(), "outside the sender's scope") {
+		if _, err := s.C.Coordinator().Open(ctx, req); err != nil {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+}
+
+// The size limit is on the body and the auxiliary data together: a body and
+// auxiliary data that are each within maxTxSize and are not together are
+// refused on receipt, and the coordinator does not seal such a request.
+// spec: SPO-Xparty-INV-008
+func TestSizeLimitCountsAuxiliaryData(t *testing.T) {
+	s := newScene(t, sceneOpt{})
+	req := mustForged(s, func(r *party.SigningRequest) { r.AuxData = make([]byte, 200) })
+	size := len(req.TxBody)
+	sg := s.B.Signer()
+	sg.MaxTxSize = size + 199 // the body alone is well within it, the body and the aux are one byte over
+	h, err := sg.Handle(ctx, ports.FileReceived(s.sealFrom(s.C, s.B, req, s.clock.Now(), s.clock.Now().Add(2*time.Minute))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustRefuse(t, h, "(200 bytes) together exceed maxTxSize")
+	sg.MaxTxSize = size + 200 // exactly at the limit: passes the size check (the body has no aux hash, so it is refused later and elsewhere)
+	h, _ = sg.Handle(ctx, ports.FileReceived(s.sealFrom(s.C, s.B, mustForged(s, func(r *party.SigningRequest) { r.AuxData = make([]byte, 200) }), s.clock.Now(), s.clock.Now().Add(2*time.Minute))))
+	if h.Refused {
+		t.Fatalf("at the limit: %+v", h)
+	}
+	// The coordinator checks before it seals.
+	c := s.C.Coordinator()
+	c.MaxTxSize = 10
+	if _, err := c.RequestSignatures(ctx, multisig.RequestInput{Ref: s.ref}, s.cb.Transport()); err == nil || !strings.Contains(err.Error(), "maxTxSize") {
+		t.Fatalf("a coordinator sealed a request over maxTxSize: %v", err)
 	}
 }

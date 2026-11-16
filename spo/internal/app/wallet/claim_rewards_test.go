@@ -11,6 +11,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
+	"github.com/mochipool/workbench/spo/internal/domain/txparam"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -408,5 +409,51 @@ func TestClaimSkipIsExplicitAndTheDestinationIsShown(t *testing.T) {
 	res, err := r.uc.Run(ctx, ClaimRequest{Stake: "w", Destination: "d", Payer: "p"})
 	if err != nil || !res.ApprovalSkipped || r.l.count("confirm") != 0 {
 		t.Errorf("%+v %v", res, err)
+	}
+}
+
+type memFiles map[string][]byte
+
+func (m memFiles) ReadMetadataFile(p string) ([]byte, error) {
+	if b, ok := m[p]; ok {
+		return b, nil
+	}
+	return nil, ports.ErrNotFound
+}
+
+// The extra parameters of a certificate script reach a claim: a metadata file
+// and a message are in the body, a missing file is the domain's refusal before
+// anything is read from the chain.
+func TestClaimTakesMessageAndMetadataExtras(t *testing.T) {
+	r := newClaimRig(t)
+	r.uc.Files = memFiles{"m.json": []byte(`{"721":{"name":"demo"}}`)}
+	ex, err := txparam.Parse([]string{"m.json", "msg:hello"}, txparam.ForCertificate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.uc.Run(ctx, ClaimRequest{Stake: "w", Destination: "p", Extras: &ex}); err != nil {
+		t.Fatal(err)
+	}
+	body := claimBody(t, r.queue.got[0])
+	if len(body.MetadataFiles) != 1 || body.MetadataFiles[0].Name != "m.json" || len(body.Message) != 1 || body.Message[0] != "hello" {
+		t.Errorf("metadata %+v message %v", body.MetadataFiles, body.Message)
+	}
+
+	r = newClaimRig(t)
+	r.uc.Files = memFiles{}
+	ex, _ = txparam.Parse([]string{"gone.json"}, txparam.ForCertificate)
+	if _, err := r.uc.Run(ctx, ClaimRequest{Stake: "w", Destination: "p", Extras: &ex}); !errors.Is(err, txparam.ErrBadMetadataFile) {
+		t.Errorf("a missing file: %v", err)
+	}
+	if len(r.queue.got) != 0 || r.l.count("confirm") != 0 {
+		t.Error("something ran before the refusal")
+	}
+	// Without extras nothing changes.
+	r = newClaimRig(t)
+	if _, err := r.uc.Run(ctx, ClaimRequest{Stake: "w", Destination: "p", Message: []string{"x"}}); err != nil {
+		t.Fatal(err)
+	}
+	if b := claimBody(t, r.queue.got[0]); len(b.MetadataFiles) != 0 || len(b.Message) != 1 {
+		t.Errorf("%+v", b)
 	}
 }

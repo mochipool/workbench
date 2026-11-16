@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -31,12 +32,57 @@ type Koios struct {
 	URL string
 }
 
+// Hardware tunes the hardware wallet signer ([hardware]). Every zero value
+// keeps the adapter's default.
+type Hardware struct {
+	// WaitSeconds bounds the wait for a device to answer (1 to 3600; default 60).
+	WaitSeconds int
+	// MinLedger, MinTrezor and MinKeystone override the minimum app or
+	// firmware version of a vendor: dotted decimal numbers such as "8.0.8".
+	MinLedger, MinTrezor, MinKeystone string
+}
+
+// Handles overrides the ADA Handle API root of the network ([handles]).
+type Handles struct {
+	URL string
+}
+
 // Config is the content of spo.toml.
 type Config struct {
 	Network string
 	Mode    string
 	// Koios is nil when no Koios provider is configured.
 	Koios *Koios
+	// Hardware and Handles are nil when the file has no such section.
+	Hardware *Hardware
+	Handles  *Handles
+}
+
+var versionText = regexp.MustCompile(`^[0-9]+(\.[0-9]+){1,3}$`)
+
+// MaxWaitSeconds is the longest wait for a device that spo.toml may ask for.
+const MaxWaitSeconds = 3600
+
+func (h *Hardware) validate() error {
+	if h.WaitSeconds < 0 || h.WaitSeconds > MaxWaitSeconds {
+		return fmt.Errorf("[hardware] wait_seconds must be 1 to %d", MaxWaitSeconds)
+	}
+	for k, v := range map[string]string{"min_ledger": h.MinLedger, "min_trezor": h.MinTrezor, "min_keystone": h.MinKeystone} {
+		if v != "" && !versionText.MatchString(v) {
+			return fmt.Errorf("[hardware] %s %q is not a version such as 8.0.8", k, v)
+		}
+	}
+	return nil
+}
+
+// HandleURL is the ADA Handle API root in effect: the override, else the
+// preset's ("" where the network has none).
+func (c Config) HandleURL() string {
+	if c.Handles != nil && c.Handles.URL != "" {
+		return c.Handles.URL
+	}
+	p, _ := PresetFor(c.Network)
+	return p.HandleURL
 }
 
 // Path returns the configuration file of a workspace directory.
@@ -66,6 +112,11 @@ func (c Config) Validate() error {
 	}
 	if c.Mode == ModeLight && c.Koios == nil {
 		return errors.New("mode light needs a [koios] section: light mode asks a third-party provider, and the workspace must name it (run: spo provider set koios)")
+	}
+	if c.Hardware != nil {
+		if err := c.Hardware.validate(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -109,6 +160,46 @@ func Parse(data []byte) (Config, error) {
 					return Config{}, fmt.Errorf("line %d: unknown key %q in [koios]", e.val.line, e.key)
 				}
 			}
+		case "hardware":
+			c.Hardware = &Hardware{}
+			for _, e := range sec.entries {
+				switch e.key {
+				case "wait_seconds":
+					if e.val.kind != kindInt {
+						return Config{}, fmt.Errorf("line %d: key \"hardware.wait_seconds\" must be a whole number", e.val.line)
+					}
+					if e.val.i < 1 || e.val.i > MaxWaitSeconds {
+						return Config{}, fmt.Errorf("line %d: [hardware] wait_seconds must be 1 to %d", e.val.line, MaxWaitSeconds)
+					}
+					c.Hardware.WaitSeconds = int(e.val.i)
+				case "min_ledger":
+					if c.Hardware.MinLedger, err = e.val.str("hardware.min_ledger"); err != nil {
+						return Config{}, err
+					}
+				case "min_trezor":
+					if c.Hardware.MinTrezor, err = e.val.str("hardware.min_trezor"); err != nil {
+						return Config{}, err
+					}
+				case "min_keystone":
+					if c.Hardware.MinKeystone, err = e.val.str("hardware.min_keystone"); err != nil {
+						return Config{}, err
+					}
+				default:
+					return Config{}, fmt.Errorf("line %d: unknown key %q in [hardware]", e.val.line, e.key)
+				}
+			}
+		case "handles":
+			c.Handles = &Handles{}
+			for _, e := range sec.entries {
+				switch e.key {
+				case "url":
+					if c.Handles.URL, err = e.val.str("handles.url"); err != nil {
+						return Config{}, err
+					}
+				default:
+					return Config{}, fmt.Errorf("line %d: unknown key %q in [handles]", e.val.line, e.key)
+				}
+			}
 		default:
 			return Config{}, fmt.Errorf("line %d: unknown section [%s]", sec.line, sec.name)
 		}
@@ -144,6 +235,23 @@ func Marshal(c Config) ([]byte, error) {
 		b.WriteString("\n[koios]\n")
 		if c.Koios.URL != "" {
 			fmt.Fprintf(&b, "url = %s\n", quote(c.Koios.URL))
+		}
+	}
+	if h := c.Hardware; h != nil {
+		b.WriteString("\n[hardware]\n")
+		if h.WaitSeconds > 0 {
+			fmt.Fprintf(&b, "wait_seconds = %d\n", h.WaitSeconds)
+		}
+		for _, kv := range [][2]string{{"min_ledger", h.MinLedger}, {"min_trezor", h.MinTrezor}, {"min_keystone", h.MinKeystone}} {
+			if kv[1] != "" {
+				fmt.Fprintf(&b, "%s = %s\n", kv[0], quote(kv[1]))
+			}
+		}
+	}
+	if c.Handles != nil {
+		b.WriteString("\n[handles]\n")
+		if c.Handles.URL != "" {
+			fmt.Fprintf(&b, "url = %s\n", quote(c.Handles.URL))
 		}
 	}
 	return []byte(b.String()), nil

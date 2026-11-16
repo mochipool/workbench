@@ -51,8 +51,17 @@ type Settle struct {
 //
 // spec: SPO-11a-MODE-002, SPO-11b-MODE-002
 func (s Settle) OnSubmitted(ctx context.Context, id chain.TxID) error {
+	_, _, err := s.apply(ctx, id)
+	return err
+}
+
+// apply applies and removes the pending update of the transaction and says
+// whether there was one. A second call finds none and changes nothing.
+func (s Settle) apply(ctx context.Context, id chain.TxID) (assets.Pending, bool, error) {
+	var got assets.Pending
+	var found bool
 	pref := ports.Ref{Name: id.String(), Kind: ports.AssetPending}
-	return s.Store.Update(ctx, func(w ports.Writer) error {
+	err := s.Store.Update(ctx, func(w ports.Writer) error {
 		b, err := w.Get(pref)
 		if errors.Is(err, ports.ErrNotFound) {
 			return nil
@@ -71,7 +80,43 @@ func (s Settle) OnSubmitted(ctx context.Context, id chain.TxID) error {
 		if err := applyIn(w, ports.Ref{Name: p.Record, Kind: ports.AssetFile}, c); err != nil {
 			return err
 		}
+		got, found = p, true
 		return w.Delete(pref)
+	})
+	return got, found, err
+}
+
+// UpdateHook implements ports.AssetUpdateHook for the machine that runs
+// `offline execute`. When the workspace holds the pending update of the
+// transaction (the queuing and the executing machine are one) it applies that
+// through Settle. Otherwise, when it holds the asset record the update names
+// (a copy of the record on the online machine), it applies the update the
+// queue entry carried. A workspace with neither does nothing.
+type UpdateHook struct {
+	Store ports.Store
+	Clock ports.Clock
+}
+
+// OnSubmittedUpdate implements ports.AssetUpdateHook.
+func (h UpdateHook) OnSubmittedUpdate(ctx context.Context, id chain.TxID, update string) error {
+	if _, found, err := (Settle{Store: h.Store, Clock: h.Clock}).apply(ctx, id); err != nil || found {
+		return err
+	}
+	p, err := assets.ParsePending([]byte(update))
+	if err != nil {
+		return err
+	}
+	c, err := p.Change(h.Clock.Now())
+	if err != nil {
+		return err
+	}
+	ref := ports.Ref{Name: p.Record, Kind: ports.AssetFile}
+	return h.Store.Update(ctx, func(w ports.Writer) error {
+		ok, err := w.Exists(ref)
+		if err != nil || !ok {
+			return err
+		}
+		return applyIn(w, ref, c)
 	})
 }
 
@@ -106,6 +151,7 @@ func (s SettlingSubmitter) Submit(ctx context.Context, tx []byte) (chain.TxID, e
 }
 
 var (
-	_ ports.PostSubmitHook = Settle{}
-	_ ports.TxSubmitter    = SettlingSubmitter{}
+	_ ports.PostSubmitHook  = Settle{}
+	_ ports.AssetUpdateHook = UpdateHook{}
+	_ ports.TxSubmitter     = SettlingSubmitter{}
 )

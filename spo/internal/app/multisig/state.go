@@ -26,6 +26,11 @@ type slotState struct {
 	Expires     int64  `json:"expires,omitempty"`
 	To          string `json:"to,omitempty"`      // hex fingerprint the request was sealed to
 	Refusal     string `json:"refusal,omitempty"` // the signer's last refusal, as text
+	// Answered is the hex message id of the response or refusal accepted for
+	// the slot. The same envelope arriving again (the signer answers a
+	// re-sent request with its stored response) is acknowledged, not refused
+	// as a replay (SPO-Xparty-INV-017).
+	Answered string `json:"answered,omitempty"`
 }
 
 type collState struct {
@@ -80,6 +85,25 @@ func (s *coordState) find(id party.CollectionID) *collState {
 		}
 	}
 	return nil
+}
+
+// isAnswer reports whether id is the message id of an accepted response or
+// refusal of any slot.
+func (s *coordState) isAnswer(id string) bool {
+	for _, cs := range s.Collections {
+		for _, ss := range cs.Slots {
+			if ss.Answered == id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// answeredBy reports whether id is the accepted answer of that very slot.
+func (s *coordState) answeredBy(cid party.CollectionID, slot party.SlotID, id string) bool {
+	cs := s.find(cid)
+	return cs != nil && cs.Slots[int(slot)].Answered == id
 }
 
 // track adds a collection to the state if it is not there and returns it.

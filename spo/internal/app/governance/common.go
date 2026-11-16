@@ -7,9 +7,12 @@
 //
 // Every use case is one workflow. Where a key is held and whether the
 // signed transaction is submitted or queued are decided by the composition:
-// a hardware holder is refused up front by the signing plan (ADR 0008), and
-// the hardware ids of the specs are waived until the hardware signer adapter
-// exists. Where upstream exits 0 after a failed query or a refusal, the use
+// a hardware holder is decided up front by the signing plan against the
+// device's profile (ADR 0008) and the shared pipeline brings the body to
+// hardware form before it is shown (txflow.Pipeline.Canonicalizer); the
+// refusals the specs keep (a hardware payer for a governance action, SPO-25b-PRE-002;
+// a hardware key mixed with a key-file key, SPO-Ptx-PRE-006) are explicit.
+// Where upstream exits 0 after a failed query or a refusal, the use
 // case returns an error. A chain answer that is Unknown is never taken as "not
 // there" (ADR 0006).
 package governance
@@ -28,6 +31,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/domain/stake"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
+	"github.com/mochipool/workbench/spo/internal/domain/txparam"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -207,6 +211,10 @@ type Base struct {
 	DefTTL uint64
 	// Selection chooses the inputs; empty means SelectAll.
 	Selection txbuild.SelectionStrategy
+	// Files and Encrypter are needed only by a request with Extras that name
+	// metadata files or ask for message encryption.
+	Files     ports.MetadataFileReader
+	Encrypter ports.MessageEncrypter
 }
 
 // Result is what a transaction use case did. Nothing in it is secret.
@@ -290,11 +298,50 @@ type txRun struct {
 	votes   []txbuild.VoteAttachment
 	props   []txbuild.ProposalAttachment
 	message []string
+	// extras and pass are the extra parameters of the request; nil for none.
+	extras  *txparam.Extras
+	pass    *ports.Secret
 	params  chain.ProtocolParameters
 	summary ports.TxSummary
 	queued  ports.QueuedTx
 	// ttl overrides the default validity (25b: tip + 25000), zero keeps it.
 	ttl uint64
+	// refuseMixed refuses a hardware key together with a key-file key
+	// (SPO-Ptx-PRE-006: 23c and 23e).
+	refuseMixed bool
+	// unrestricted is the operator's consent to the device's unrestricted mode
+	// (SPO-21b-PR-001, SPO-24b-PR-001), set by the use case from its request.
+	unrestricted bool
+}
+
+// ErrUnrestrictedNeeded: the transaction needs the device's unrestricted mode
+// and the operator did not allow it (SPO-21b-PR-001, SPO-24b-PR-001: declining
+// ends the script with exit 2). It is never implied.
+var ErrUnrestrictedNeeded = errors.New("the hardware wallet can sign this transaction only in unrestricted mode, which the operator has not allowed")
+
+func (r txRun) prepareOptions() txflow.PrepareOptions {
+	return txflow.PrepareOptions{RefuseMixed: r.refuseMixed, Unrestricted: r.unrestricted}
+}
+
+// changeKeys are the hardware keys declared to the device so it recognises the
+// change output: the payment key and the payer's staking key when it is stored
+// as a hardware file (SPO-21b-INV-006, SPO-23c-INV-006).
+func (b Base) changeKeys(ctx context.Context, r txRun) []custody.KeyRef {
+	if r.payer.holder != custody.HolderHardware {
+		return nil
+	}
+	keys := []custody.KeyRef{{Role: custody.RolePayment, Holder: custody.HolderHardware, Owner: r.payer.name}}
+	stem := strings.TrimSuffix(r.payer.name, ".payment")
+	if stem == r.payer.name {
+		return keys
+	}
+	_ = b.Store.View(ctx, func(rd ports.Reader) error {
+		if ok, err := rd.Exists(ports.Ref{Name: stem, Kind: ports.StakingHwsFile}); err == nil && ok {
+			keys = append(keys, custody.KeyRef{Role: custody.RoleStake, Holder: custody.HolderHardware, Owner: stem})
+		}
+		return nil
+	})
+	return keys
 }
 
 func (b Base) slots(r txRun) []txflow.Slot {
@@ -305,7 +352,7 @@ func (b Base) slots(r txRun) []txflow.Slot {
 // early refuses what the signing plan refuses (a hardware holder) before any
 // chain read, with a draft that has the features of the attachments.
 func (b Base) early(r txRun) error {
-	_, err := b.Pipeline.Prepare(txbuild.Draft{Certificates: r.certs, Votes: r.votes, Proposals: r.props, Message: r.message}, b.slots(r), uint(1+len(r.signers)))
+	_, err := b.Pipeline.PrepareWith(txbuild.Draft{Certificates: r.certs, Votes: r.votes, Proposals: r.props, Message: r.message}, b.slots(r), uint(1+len(r.signers)), r.prepareOptions())
 	return err
 }
 
@@ -316,6 +363,13 @@ func (b Base) early(r txRun) error {
 // spec: SPO-Ptx-INV-006, SPO-Ptx-INV-010
 func (b Base) execute(ctx context.Context, r txRun) (txflow.Result, ports.TxSummary, error) {
 	if err := b.Pipeline.Check(); err != nil {
+		return txflow.Result{}, ports.TxSummary{}, err
+	}
+	// The extra parameters are resolved before any network access.
+	//
+	// spec: SPO-Pparam-IF-010, SPO-Pparam-IF-016
+	meta, err := txflow.ResolveExtras(txflow.ExtrasPorts{Files: b.Files, Encrypter: b.Encrypter}, r.extras, r.message, r.pass)
+	if err != nil {
 		return txflow.Result{}, ports.TxSummary{}, err
 	}
 	tip, err := b.Tip.Tip(ctx)
@@ -354,8 +408,13 @@ func (b Base) execute(ctx context.Context, r txRun) (txflow.Result, ports.TxSumm
 	if err != nil {
 		return txflow.Result{}, ports.TxSummary{}, err
 	}
+	if r.extras != nil {
+		if draft, err = meta.Attach(draft); err != nil {
+			return txflow.Result{}, ports.TxSummary{}, err
+		}
+	}
 	witnesses := uint(1 + len(r.signers))
-	prep, err := b.Pipeline.Prepare(draft, b.slots(r), witnesses)
+	prep, err := b.Pipeline.PrepareWith(draft, b.slots(r), witnesses, r.prepareOptions())
 	if err != nil {
 		return txflow.Result{}, ports.TxSummary{}, err
 	}
@@ -369,7 +428,7 @@ func (b Base) execute(ctx context.Context, r txRun) (txflow.Result, ports.TxSumm
 		return txflow.Result{}, ports.TxSummary{}, err
 	}
 	res, err := b.Pipeline.Execute(ctx, txflow.Input{Draft: draft, Params: r.params, TTL: ttl, Prepared: prep, Witnesses: witnesses,
-		Summary: sum, Queued: r.queued})
+		Summary: sum, Queued: r.queued, HardwareChangeKeys: b.changeKeys(ctx, r)})
 	return res, sum, err
 }
 

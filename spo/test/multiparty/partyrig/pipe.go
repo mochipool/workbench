@@ -42,17 +42,30 @@ func (p *Pipe) Send(_ context.Context, _ party.Fingerprint, env []byte) error {
 }
 
 // Receive implements ports.EnvelopeReceiver.
-func (p *Pipe) Receive(ctx context.Context) ([]byte, ports.TransportKind, error) {
+func (p *Pipe) Receive(ctx context.Context) (ports.Received, error) {
 	select {
 	case <-p.cond:
 	case <-ctx.Done():
-		return nil, 0, ctx.Err()
+		return ports.Received{}, ctx.Err()
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	b := p.q[0]
 	p.q = p.q[1:]
-	return b, p.Kind, nil
+	return Received(b, p.Kind), nil
+}
+
+// Received labels bytes as a transport of the kind delivered them. The rig's
+// pipes are transports; a test that hands an envelope straight to a Handle
+// plays the transport too.
+func Received(b []byte, kind ports.TransportKind) ports.Received {
+	switch kind {
+	case ports.ViaFile:
+		return ports.FileReceived(b)
+	case ports.ViaNetwork:
+		return ports.NetworkReceived(b)
+	}
+	return ports.Received{Envelope: b} // no kind stated: a network for the cold-key rule
 }
 
 // Take removes and returns everything queued.
@@ -71,4 +84,14 @@ func (p *Pipe) Take() [][]byte {
 func (p *Pipe) Put(env []byte) { _ = p.Send(context.Background(), party.Fingerprint{}, env) }
 
 // Transport is the pipe as the sending side of multisig.
-func (p *Pipe) Transport() multisig.Transport { return ports.NewTransport(p, p.Kind) }
+// A pipe of no stated kind has the zero Transport, which no constructor
+// makes with a sender.
+func (p *Pipe) Transport() multisig.Transport {
+	switch p.Kind {
+	case ports.ViaFile:
+		return ports.FileTransport(p)
+	case ports.ViaNetwork:
+		return ports.NetworkTransport(p)
+	}
+	return ports.Transport{}
+}

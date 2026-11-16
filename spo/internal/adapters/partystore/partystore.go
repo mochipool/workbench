@@ -208,8 +208,30 @@ func (Registry) Put(w ports.Writer, p party.Party) error {
 		if q.Name == p.Name {
 			return party.ErrNameTaken
 		}
+		if p.Identity.Node != nil && q.Identity.Node != nil && *p.Identity.Node == *q.Identity.Node {
+			return party.ErrNodeKeyInUse
+		}
 	}
 	return store(w, append(ps, p))
+}
+
+// SetScope changes what the named party may ask of us as a coordinator
+// (SPO-Xparty-INV-010) and returns the party. A request already received is
+// checked against the scope as it is when the operator approves it, not as it
+// was when the request arrived (SPO-Xparty-INV-016).
+func (Registry) SetScope(w ports.Writer, name string, scope party.Scope) (party.Party, error) {
+	ps, err := load(w)
+	if err != nil {
+		return party.Party{}, err
+	}
+	for i, p := range ps {
+		if p.Name != name {
+			continue
+		}
+		ps[i].Scope = scope
+		return ps[i], store(w, ps)
+	}
+	return party.Party{}, ports.ErrNotFound
 }
 
 // Revoke sets the named party to revoked and returns it.

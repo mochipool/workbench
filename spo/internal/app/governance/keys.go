@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/mochipool/workbench/spo/internal/app/hwkeys"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/governance"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -16,7 +17,8 @@ import (
 // word of upstream's 21a, 23a and 23b for the software paths: `cli` is
 // KeysRandom, `mnemonics` is KeysMnemonic. `enc` is not ported at generation
 // (the decision of 04c and 03a); hardware holders are refused up front through
-// the holder, and their ids are waived until the hardware signer adapter exists.
+// the holder when no hardware exporter is wired; with one, the plan decides
+// against the device profile and the key is exported at the path of the specs.
 type KeySource string
 
 // Key sources.
@@ -59,7 +61,8 @@ type keyKit struct {
 	existing []ports.Kind
 	// replaceable: the hot key may be replaced on request.
 	replaceable bool
-	// mnemoOnlyCheck: the mnemonics file is checked only for the mnemonic source.
+	// hw exports the key of a hardware holder; nil keeps the upfront refusal.
+	hw ports.HardwareKeyExporter
 }
 
 type keysGenerated struct {
@@ -75,12 +78,23 @@ func (kit keyKit) run(ctx context.Context, st ports.Store, mn ports.MnemonicGene
 	if req.Account > MaxDerivationIndex || req.Index > MaxDerivationIndex {
 		return res, ErrDerivationRange
 	}
+	keyRef := custody.KeyRef{Role: kit.role, Holder: req.Holder, Owner: nm}
+	onDevice := hwkeys.Hardware(keyRef)
+	switch {
+	case onDevice:
+		// A hardware key has no mnemonic; the account and index select its path
+		// (SPO-21a-INV-002, SPO-23a-INV-002, SPO-23b-INV-002).
+		if req.Source != KeysRandom && req.Source != "" || req.Mnemonic != nil {
+			return res, fmt.Errorf("%w: a hardware key has no mnemonic or derived source", ErrOptionNotUsed)
+		}
+		req.Source = KeysRandom
+	}
 	switch req.Source {
 	case KeysRandom:
-		if req.Account != 0 || req.Index != 0 || req.Mnemonic != nil {
+		if !onDevice && (req.Account != 0 || req.Index != 0 || req.Mnemonic != nil) {
 			return res, fmt.Errorf("%w: account, index and mnemonic are for derived keys", ErrOptionNotUsed)
 		}
-		if kit.gen == nil {
+		if kit.gen == nil && !onDevice {
 			return res, ErrNotConfigured
 		}
 	case KeysMnemonic:
@@ -93,8 +107,9 @@ func (kit keyKit) run(ctx context.Context, st ports.Store, mn ports.MnemonicGene
 	if req.Replace && !kit.replaceable {
 		return res, fmt.Errorf("%w: only a hot key can be replaced", ErrOptionNotUsed)
 	}
-	// The hardware holder is refused before anything else.
-	if _, err := custody.PlanGeneration(custody.KeyRef{Role: kit.role, Holder: req.Holder, Owner: nm}); err != nil {
+	// The plan decides before anything else: with no hardware exporter a
+	// hardware holder is refused, with one the device profile is checked.
+	if _, err := hwkeys.Plan(kit.hw, keyRef); err != nil {
 		return res, err
 	}
 	if params != nil {
@@ -142,9 +157,16 @@ func (kit keyKit) run(ctx context.Context, st ports.Store, mn ports.MnemonicGene
 		words.Destroy()
 	}()
 	var err error
+	var hwsfile []byte
 	switch req.Source {
 	case KeysRandom:
-		if pair, err = kit.gen(ctx); err != nil {
+		if onDevice {
+			hk, err := hwkeys.Export(ctx, kit.hw, keyRef, hwkeys.Options{Account: req.Account, Index: req.Index})
+			if err != nil {
+				return res, err
+			}
+			pair.VKey, hwsfile = hk.VKey, hk.SigningFile
+		} else if pair, err = kit.gen(ctx); err != nil {
 			return res, fmt.Errorf("generate %s key: %w", kit.role, err)
 		}
 	case KeysMnemonic:
@@ -196,7 +218,11 @@ func (kit keyKit) run(ctx context.Context, st ports.Store, mn ports.MnemonicGene
 		if err := w.Put(ports.Ref{Name: nm, Kind: kit.vkey}, pair.VKey); err != nil {
 			return err
 		}
-		if err := w.PutSecret(ports.Ref{Name: nm, Kind: kit.skey}, pair.SKey); err != nil {
+		if onDevice {
+			if err := w.Put(ports.Ref{Name: nm, Kind: kit.hws}, hwsfile); err != nil {
+				return err
+			}
+		} else if err := w.PutSecret(ports.Ref{Name: nm, Kind: kit.skey}, pair.SKey); err != nil {
 			return err
 		}
 		return w.Put(ports.Ref{Name: nm, Kind: kit.aux}, aux)
@@ -237,6 +263,8 @@ type GenerateDRepKeys struct {
 	// Params gives the era gate (SPO-21a-PRE-003); nil skips it. A pre-Conway
 	// era is an error here, where upstream exits 0 and creates nothing.
 	Params ports.ProtocolParametersReader
+	// Hardware exports the key of a hardware holder; nil keeps the upfront refusal.
+	Hardware ports.HardwareKeyExporter
 }
 
 // DRepKeysGenerated is the result. It carries no signing key and no mnemonic.
@@ -272,6 +300,7 @@ func (uc GenerateDRepKeys) Run(ctx context.Context, req GenerateKeysRequest) (DR
 	if uc.Deriver != nil {
 		kit.derive = uc.Deriver.DeriveDRep
 	}
+	kit.hw = uc.Hardware
 	g, err := kit.run(ctx, uc.Store, uc.Mnemonics, uc.Params, req, nm)
 	if err != nil {
 		return DRepKeysGenerated{}, err
@@ -306,6 +335,8 @@ type GenerateCommitteeColdKeys struct {
 	Deriver   ports.GovernanceDeriver
 	Mnemonics ports.MnemonicGenerator
 	Params    ports.ProtocolParametersReader
+	// Hardware exports the key of a hardware holder; nil keeps the upfront refusal.
+	Hardware ports.HardwareKeyExporter
 }
 
 // Run generates the cold key.
@@ -325,6 +356,7 @@ func (uc GenerateCommitteeColdKeys) Run(ctx context.Context, req GenerateKeysReq
 	if uc.Deriver != nil {
 		kit.derive = uc.Deriver.DeriveCommitteeCold
 	}
+	kit.hw = uc.Hardware
 	g, err := kit.run(ctx, uc.Store, uc.Mnemonics, uc.Params, req, nm)
 	if err != nil {
 		return CommitteeKeysGenerated{}, err
@@ -343,6 +375,8 @@ type GenerateCommitteeHotKeys struct {
 	Deriver   ports.GovernanceDeriver
 	Mnemonics ports.MnemonicGenerator
 	Params    ports.ProtocolParametersReader
+	// Hardware exports the key of a hardware holder; nil keeps the upfront refusal.
+	Hardware ports.HardwareKeyExporter
 }
 
 // Run generates the hot key.
@@ -362,6 +396,7 @@ func (uc GenerateCommitteeHotKeys) Run(ctx context.Context, req GenerateKeysRequ
 	if uc.Deriver != nil {
 		kit.derive = uc.Deriver.DeriveCommitteeHot
 	}
+	kit.hw = uc.Hardware
 	g, err := kit.run(ctx, uc.Store, uc.Mnemonics, uc.Params, req, nm)
 	if err != nil {
 		return CommitteeKeysGenerated{}, err

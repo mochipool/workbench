@@ -34,3 +34,14 @@ type PolicyIDCalculator interface {
 type PostSubmitHook interface {
 	OnSubmitted(ctx context.Context, txid chain.TxID) error
 }
+
+// AssetUpdateHook is told, by the executor of the offline queue, that a
+// transaction whose queue entry carried an asset record update (the
+// `spoAssetPending` field) has been submitted. update is that field's JSON.
+// The hook applies the update to the asset record when this workspace holds
+// the record or the pending update, and does nothing otherwise: the online
+// machine usually holds neither. The result also travels back to the offline
+// machine in the history of the transfer file (assets.SettleFromBundle).
+type AssetUpdateHook interface {
+	OnSubmittedUpdate(ctx context.Context, txid chain.TxID, update string) error
+}

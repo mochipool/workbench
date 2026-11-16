@@ -5,11 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 
 	"github.com/mochipool/workbench/spo/internal/adapters/cli"
 	"github.com/mochipool/workbench/spo/internal/adapters/config"
 	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/sqlitestore"
+	"github.com/mochipool/workbench/spo/internal/adapters/storeaudit"
 	"github.com/mochipool/workbench/spo/internal/platform/seal"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -60,7 +63,22 @@ func newDeps(out, errw io.Writer, term cli.Terminal) cli.Deps {
 			},
 		},
 		OpenUpstream: func(dir string) (ports.Store, error) { return fsstore.Open(dir) },
-		Wire:         wire,
+		OpenUpstreamSource: func(dir string) (cli.UpstreamSource, error) {
+			s, err := fsstore.Open(dir)
+			if err != nil {
+				return nil, err
+			}
+			return readOnlySource{s}, nil
+		},
+		WorkspaceAuditor: func(dir string, store ports.Store, reason string) ports.WorkspaceAuditor {
+			if _, plain := store.(*fsstore.Store); plain {
+				store = auditFile{dir: dir}
+			}
+			return &storeaudit.Auditor{Store: store, Reason: reason}
+		},
+		RefOfFile: fsstore.RefOf,
+		Wire:      func(store ports.Store, o cli.WireOptions) (*cli.Env, error) { return wireTo(errw, store, o) },
+		MapError:  mapError,
 	}
 }
 
@@ -109,6 +127,12 @@ func loadConfig(dir string) (cli.WorkspaceConfig, error) {
 	if c.Koios != nil {
 		out.Koios = &cli.KoiosConfig{URL: c.Koios.URL}
 	}
+	if h := c.Hardware; h != nil {
+		out.Hardware = &cli.HardwareConfig{WaitSeconds: h.WaitSeconds, MinLedger: h.MinLedger, MinTrezor: h.MinTrezor, MinKeystone: h.MinKeystone}
+	}
+	if c.Handles != nil {
+		out.Handles = &cli.HandlesConfig{URL: c.Handles.URL}
+	}
 	return out, nil
 }
 
@@ -117,6 +141,12 @@ func toConfig(c cli.WorkspaceConfig) config.Config {
 	if c.Koios != nil {
 		out.Koios = &config.Koios{URL: c.Koios.URL}
 	}
+	if h := c.Hardware; h != nil {
+		out.Hardware = &config.Hardware{WaitSeconds: h.WaitSeconds, MinLedger: h.MinLedger, MinTrezor: h.MinTrezor, MinKeystone: h.MinKeystone}
+	}
+	if c.Handles != nil {
+		out.Handles = &config.Handles{URL: c.Handles.URL}
+	}
 	return out
 }
 
@@ -124,6 +154,107 @@ func presetFor(network string) (cli.NetworkPreset, bool) {
 	p, ok := config.PresetFor(network)
 	return cli.NetworkPreset(p), ok
 }
+
+// auditFile keeps the workspace audit log of an upstream-layout directory in
+// one file next to the keys, because that layout has no record for it. The
+// store holds only that record; the file holds names the operator gave, counts
+// and a reason, never key material. It is not part of the upstream layout, so
+// an import lists it as an unknown file.
+type auditFile struct{ dir string }
+
+// AuditFileName is the audit log of an upstream-layout directory.
+const AuditFileName = ".spo-workspace-audit.json"
+
+// legacyAuditFileName is the name before the file became a dotfile; it is read
+// when the new one is absent and removed when the log is next written.
+const legacyAuditFileName = "spo-workspace-audit.json"
+
+func (a auditFile) path() string { return filepath.Join(a.dir, AuditFileName) }
+
+func (a auditFile) View(_ context.Context, fn func(ports.Reader) error) error {
+	return fn(auditTx{a})
+}
+
+func (a auditFile) Update(_ context.Context, fn func(ports.Writer) error) error {
+	return fn(auditTx{a})
+}
+
+type auditTx struct{ a auditFile }
+
+var errAuditOnly = errors.New("this record store holds the audit log only")
+
+func (t auditTx) Get(ref ports.Ref) ([]byte, error) {
+	if ref != storeaudit.Ref {
+		return nil, errAuditOnly
+	}
+	b, err := os.ReadFile(t.a.path())
+	if errors.Is(err, os.ErrNotExist) {
+		b, err = os.ReadFile(filepath.Join(t.a.dir, legacyAuditFileName))
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, ports.ErrNotFound
+	}
+	return b, err
+}
+
+func (t auditTx) Exists(ref ports.Ref) (bool, error) {
+	_, err := t.Get(ref)
+	if errors.Is(err, ports.ErrNotFound) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func (t auditTx) Put(ref ports.Ref, data []byte) error {
+	if ref != storeaudit.Ref {
+		return errAuditOnly
+	}
+	tmp, err := os.CreateTemp(t.a.dir, ".audit-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp.Name(), t.a.path()); err != nil {
+		return err
+	}
+	_ = os.Remove(filepath.Join(t.a.dir, legacyAuditFileName))
+	return nil
+}
+
+func (t auditTx) PutSecret(ports.Ref, *secret.Buffer) error { return errAuditOnly }
+func (t auditTx) Delete(ports.Ref) error                    { return errAuditOnly }
+
+// readOnlySource is an upstream-layout directory that an import only reads:
+// every write is refused, so a mistake in the import cannot change the source.
+type readOnlySource struct{ s *fsstore.Store }
+
+var errReadOnlySource = errors.New("the import source is read-only")
+
+func (r readOnlySource) View(ctx context.Context, fn func(ports.Reader) error) error {
+	return r.s.View(ctx, fn)
+}
+func (r readOnlySource) Update(context.Context, func(ports.Writer) error) error {
+	return errReadOnlySource
+}
+func (r readOnlySource) Open(ctx context.Context, ref ports.Ref) (*secret.Buffer, error) {
+	return r.s.Open(ctx, ref)
+}
+func (r readOnlySource) List(ctx context.Context) (ports.SourceListing, error) { return r.s.List(ctx) }
 
 // sealedStore adapts *sqlitestore.Store to cli.SealedStore.
 type sealedStore struct{ s *sqlitestore.Store }
@@ -153,7 +284,11 @@ func (w sealedStore) RekeyKeepPassphrase(ctx context.Context, p *secret.Buffer) 
 	key, err := w.s.Rekey(ctx, []sqlitestore.Credential{sqlitestore.PassphraseCredential(p)})
 	return key, mapStoreErr(err)
 }
-func (w sealedStore) Notices() []string { return w.s.Notices() }
+
+// List enumerates the artefacts of the sealed workspace (ports.SourceLister),
+// for the workspace export.
+func (w sealedStore) List(ctx context.Context) (ports.SourceListing, error) { return w.s.List(ctx) }
+func (w sealedStore) Notices() []string                                     { return w.s.Notices() }
 func (w sealedStore) Head() cli.Head {
 	seq, mac := w.s.Head()
 	return cli.Head{Seq: seq, MAC: mac}

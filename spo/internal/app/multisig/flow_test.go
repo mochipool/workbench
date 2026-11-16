@@ -208,7 +208,7 @@ func TestPRE002RefusalsAtTheCoordinator(t *testing.T) {
 			resp := s.readyResponse()
 			env := tc.run(s, resp)
 			before := s.collection() // after a revocation, which unassigns the slot (INV-005)
-			h, err := s.C.Coordinator().Handle(ctx, env, ports.ViaFile)
+			h, err := s.C.Coordinator().Handle(ctx, ports.FileReceived(env))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -235,21 +235,41 @@ func TestPRE002RefusalsAtTheCoordinator(t *testing.T) {
 	}
 }
 
-// A replayed response is refused, and the first took effect once.
-// spec: SPO-Xparty-PRE-002, SPO-Xparty-INV-007
+// A replayed response is acknowledged without effect when it is the answer the
+// coordinator accepted for its slot (the signer answers a re-sent request with
+// its stored response), and the first took effect once. Every other replay is
+// refused: here a response that is not an accepted answer.
+// spec: SPO-Xparty-PRE-002, SPO-Xparty-INV-007, SPO-Xparty-INV-017
 func TestReplayRefused(t *testing.T) {
 	s := newScene(t, sceneOpt{})
 	resp := s.readyResponse()
-	if h, err := s.C.Coordinator().Handle(ctx, resp, ports.ViaFile); err != nil || h.Effect != "filled" {
+	if h, err := s.C.Coordinator().Handle(ctx, ports.FileReceived(resp)); err != nil || h.Effect != "filled" {
 		t.Fatalf("first = %+v, %v", h, err)
 	}
 	before := s.collection()
-	h, err := s.C.Coordinator().Handle(ctx, resp, ports.ViaFile)
+	nEvents := len(events(s.C))
+	h, err := s.C.Coordinator().Handle(ctx, ports.FileReceived(resp))
+	if err != nil || h.Refused || h.Effect != "acknowledged" {
+		t.Fatalf("the accepted answer again = %+v, %v", h, err)
+	}
+	s.unchanged(before)
+	if n := len(events(s.C)); n != nEvents {
+		t.Fatalf("a duplicate of an accepted answer wrote %d events", n-nEvents)
+	}
+	// A message that is a replay and is not an accepted answer is refused:
+	// the Hello of the party, twice.
+	hello, err := s.B.Signer().NewHello(ctx, "coord")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h, err := s.C.Coordinator().Handle(ctx, ports.FileReceived(hello)); err != nil || h.Effect != "hello" {
+		t.Fatalf("hello = %+v, %v", h, err)
+	}
+	h, err = s.C.Coordinator().Handle(ctx, ports.FileReceived(hello))
 	if err != nil {
 		t.Fatal(err)
 	}
 	mustRefuse(t, h, envelope.ErrReplayed.Error())
-	s.unchanged(before)
 }
 
 // The same refusals whatever the transport said: an envelope handed in as
@@ -261,7 +281,7 @@ func TestChecksIgnoreTheTransport(t *testing.T) {
 		resp := s.readyResponse()
 		bad := append([]byte(nil), resp...)
 		bad[len(bad)/2] ^= 1
-		h, err := s.C.Coordinator().Handle(ctx, bad, via)
+		h, err := s.C.Coordinator().Handle(ctx, partyrig.Received(bad, via))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -283,7 +303,7 @@ func TestPRE005RefusalsAndTheRest(t *testing.T) {
 	respond := func(s *scene, r party.SigningResponse) multisig.Handled {
 		s.t.Helper()
 		env := s.sealFrom(s.B, s.C, r, s.clock.Now(), s.clock.Now().Add(time.Hour))
-		h, err := s.C.Coordinator().Handle(ctx, env, ports.ViaFile)
+		h, err := s.C.Coordinator().Handle(ctx, ports.FileReceived(env))
 		if err != nil {
 			s.t.Fatal(err)
 		}
@@ -398,7 +418,7 @@ func TestDuplicateOfTheCompletingResponseIsAcknowledged(t *testing.T) {
 	send := func() multisig.Handled {
 		env := s.sealFrom(s.B, s.C, party.SigningResponse{Collection: s.cid(), Slot: 0, Request: id, Witness: party.EncodeWitness(w.VKey, w.Signature)},
 			s.clock.Now(), s.clock.Now().Add(time.Hour))
-		h, err := s.C.Coordinator().Handle(ctx, env, ports.ViaFile)
+		h, err := s.C.Coordinator().Handle(ctx, ports.FileReceived(env))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -436,7 +456,8 @@ func TestPRE006Refusals(t *testing.T) {
 		signer func(s *scene) multisig.Signer
 	}{
 		{"no key with that hash and role", party.RefuseNoKey, sceneOpt{}, func(s *scene, r *party.SigningRequest) { r.KeyHash = [28]byte{1, 2, 3} }, nil},
-		{"the key's role is another", party.RefuseNoKey, sceneOpt{}, func(s *scene, r *party.SigningRequest) { r.KeyRole = custody.RolePayment }, nil},
+		{"the key's role is another", party.RefuseNoKey, sceneOpt{}, func(s *scene, r *party.SigningRequest) { r.KeyRole = custody.RolePoolCold }, nil},
+		{"a payment request needs an unscoped coordinator", party.RefuseOutOfScope, sceneOpt{}, func(s *scene, r *party.SigningRequest) { r.KeyRole = custody.RolePayment }, nil},
 		{"wrong network", party.RefuseWrongNetwork, sceneOpt{}, func(s *scene, r *party.SigningRequest) { r.NetworkMagic = 764824073 }, nil},
 		{"the body hash is not the hash of the body", party.RefuseBodyHash, sceneOpt{}, func(s *scene, r *party.SigningRequest) { r.BodyHash[0] ^= 1 }, nil},
 		{"the body does not decode (an unknown key)", party.RefuseBodyDecode, sceneOpt{}, func(s *scene, r *party.SigningRequest) {
@@ -470,7 +491,7 @@ func TestPRE006Refusals(t *testing.T) {
 			if tc.signer != nil {
 				signer = tc.signer(s)
 			}
-			h, err := signer.Handle(ctx, env, s.cb.Kind)
+			h, err := signer.Handle(ctx, partyrig.Received(env, s.cb.Kind))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -504,7 +525,7 @@ func TestPRE006Refusals(t *testing.T) {
 func TestColdKeyRequestOverFileIsAccepted(t *testing.T) {
 	s := newScene(t, sceneOpt{cold: true})
 	env := s.forgedRequest(func(r *party.SigningRequest) { r.KeyRole, r.KeyHash = custody.RolePoolCold, [28]byte(s.poolID) })
-	h, err := s.B.Signer().Handle(ctx, env, ports.ViaFile)
+	h, err := s.B.Signer().Handle(ctx, ports.FileReceived(env))
 	if err != nil || h.Refused || h.Effect != "stored" {
 		t.Fatalf("handled = %+v, %v", h, err)
 	}
@@ -590,6 +611,8 @@ func TestOpenRefusesASlotWithoutAnEnrolledSigner(t *testing.T) {
 			Holder: custody.HolderRemote, Party: partyName}}}
 	}
 	other := partyrig.New(t, "other", s.clock, s.chain)
+	// A signer enrolled for another pool is a signer: the Scope of a party is
+	// what it may ask of us, not what we may ask of it (SPO-Xparty-INV-010).
 	s.C.Enroll(other, "otherpool", []party.Role{party.RoleSigner}, []string{chain.PoolID{0xee}.Bech32()})
 	coonly := partyrig.New(t, "coonly", s.clock, s.chain)
 	s.C.Enroll(coonly, "coonly", []party.Role{party.RoleCoordinator}, []string{s.bech})
@@ -597,7 +620,6 @@ func TestOpenRefusesASlotWithoutAnEnrolledSigner(t *testing.T) {
 	for name, tc := range map[string]struct{ party, want string }{
 		"no party":                     {"", "assigned to no party"},
 		"a party that is not enrolled": {"stranger", "not enrolled"},
-		"a signer for another pool":    {"otherpool", "outside the sender's scope"},
 		"a party that is not a signer": {"coonly", "roles"},
 		"a revoked party":              {"xav", "revoked"},
 	} {
@@ -674,7 +696,7 @@ func TestOfflineModeHasNoNetworkTransport(t *testing.T) {
 	if _, err := (multisig.Outbox{Store: s.C.Store, Clock: s.clock, Offline: true}).Flush(ctx, s.cb.Transport()); !errors.Is(err, multisig.ErrOffline) {
 		t.Errorf("flush into a network: %v", err)
 	}
-	if _, err := off.Handle(ctx, []byte("x"), ports.ViaNetwork); !errors.Is(err, multisig.ErrOffline) {
+	if _, err := off.Handle(ctx, ports.NetworkReceived([]byte("x"))); !errors.Is(err, multisig.ErrOffline) {
 		t.Errorf("handle from a network: %v", err)
 	}
 	// By file it works.

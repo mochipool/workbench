@@ -270,7 +270,31 @@ func CheckMessages(lines []string) error {
 // spec: SPO-Pparam-IF-020, SPO-Pparam-IF-021, SPO-Pparam-IF-023, SPO-Pparam-PRE-001, SPO-Pparam-PRE-003,
 // spec: SPO-Pparam-PRE-005
 func Parse(words []string, acc Accepts) (Extras, error) {
+	return ParseWith(words, acc, Options{})
+}
+
+// Options carry what a front end holds outside the words: the message lines
+// it was given as flags, kept verbatim (a line may hold a `|`, which a `msg:`
+// word would split), and the encryption mode it was asked for.
+type Options struct {
+	// Messages are checked like the lines of a `msg:` word and count as
+	// messages for the encryption rule, so the mode survives although the
+	// words hold no `msg:`. They are NOT added to Extras.Messages: the
+	// caller passes them to the use case itself, which joins them with the
+	// ones in Extras (txflow.ResolveExtras).
+	Messages []string
+	// Encryption is the mode asked for outside the words ("" or "basic"); an
+	// `enc:` word, when present, wins.
+	Encryption string
+}
+
+// ParseWith is Parse with Options.
+func ParseWith(words []string, acc Accepts, opt Options) (Extras, error) {
+	if err := CheckMessages(opt.Messages); err != nil {
+		return Extras{}, err
+	}
 	var ex Extras
+	ex.Encryption = strings.ToLower(trimBlanks(opt.Encryption))
 	for _, w := range words {
 		switch {
 		case w == "":
@@ -379,10 +403,11 @@ func Parse(words []string, acc Accepts) (Extras, error) {
 	// An unsupported mode is refused in every script (INV-001: upstream
 	// sends the messages in clear in five of them). With no message the mode
 	// has no effect and no error (IF-013).
-	if len(ex.Messages) > 0 && ex.Encryption != "" && ex.Encryption != "basic" {
+	haveMessages := len(ex.Messages) > 0 || len(opt.Messages) > 0
+	if haveMessages && ex.Encryption != "" && ex.Encryption != "basic" {
 		return Extras{}, fmt.Errorf("%w: %q (only basic exists)", ErrBadEncryption, ex.Encryption)
 	}
-	if len(ex.Messages) == 0 {
+	if !haveMessages {
 		ex.Encryption = ""
 	}
 	return ex, nil

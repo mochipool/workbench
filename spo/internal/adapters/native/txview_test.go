@@ -155,8 +155,8 @@ func TestViewPoolRegistrationAndRetirement(t *testing.T) {
 	if r.Kind != party.CertPoolRetirement || r.Pool != [28]byte(rs.Operator) || r.Epoch == nil || *r.Epoch != 77 {
 		t.Errorf("retirement %+v", r)
 	}
-	if ids := v.ConcernedPools(); len(ids) != 1 || ids[0] != [28]byte(rs.Operator) {
-		t.Errorf("PoolIDs %v", ids)
+	if sp := party.ScopePartsOf(custody.RoleStake, v); len(sp.Pools) != 1 || sp.Pools[0] != chain.PoolID(rs.Operator).Bech32() || len(sp.Unscoped) != 0 {
+		t.Errorf("the parts that name a pool: %+v", sp)
 	}
 	f := v.FeaturesFor(custody.RolePoolCold)
 	if _, ok := f[custody.FeatPoolRegistrationOwner]; ok {
@@ -433,7 +433,9 @@ func TestViewAuxData(t *testing.T) {
 	}
 	for name, raw := range map[string][]byte{"array with scripts": {0x82, 0xa0, 0x81, 0x80}, "tagged map with scripts": {0xd9, 0x01, 0x03, 0xa2, 0x00, 0xa0, 0x01, 0x80},
 		"a key that is not a label": {0xa1, 0x61, 'x', 0x01}, "an escape in text": {0xa1, 0x01, 0x62, 0x1b, 'x'},
-		"a tag in a value": {0xa1, 0x01, 0xc2, 0x41, 0x01}, "a label twice": {0xa2, 0x01, 0x01, 0x01, 0x02}} {
+		"a line separator in text":      {0xa1, 0x01, 0x64, 'a', 0xe2, 0x80, 0xa8},
+		"a paragraph separator in text": {0xa1, 0x01, 0x64, 'a', 0xe2, 0x80, 0xa9},
+		"a tag in a value":              {0xa1, 0x01, 0xc2, 0x41, 0x01}, "a label twice": {0xa2, 0x01, 0x01, 0x01, 0x02}} {
 		if _, err := (TxViewer{}).ViewAux(raw); err == nil {
 			t.Errorf("%s was shown", name)
 		}

@@ -321,7 +321,7 @@ func (r *prig) mustGenerate() GeneratedPool {
 
 func (r *prig) pipeline(queue bool) txflow.Pipeline {
 	signer := native.VaultSigner{Vault: r.store}
-	p := txflow.Pipeline{Signers: pdir{signer}, Min: r.led, Fees: recFees{r.led, r.calls}, Bodies: r.led, Assembler: r.led, Confirmer: r.conf}
+	p := txflow.Pipeline{Signers: pdir{signer}, Min: r.led, Fees: recFees{r.led, r.calls}, Bodies: r.led, Assembler: r.led, Confirmer: r.conf, Canonicalizer: idCanon{}}
 	if queue {
 		p.Queue = r.queue
 	} else {

@@ -26,6 +26,11 @@ type Coordinator struct {
 	TxIDs ports.TxIDCalculator
 	// NetworkMagic is the workspace's network, put in every request.
 	NetworkMagic uint32
+	// MaxTxSize is the protocol's maxTxSize; zero takes the upper bound
+	// party.DefaultMaxTxSize. The body and its auxiliary data together may not
+	// exceed it, which is checked before a request is sealed
+	// (SPO-Xparty-INV-008).
+	MaxTxSize int
 	// Complete runs the use case that assembles and submits (or queues) a
 	// complete collection: for a pool registration, RegisterPool.Run on the
 	// stored collection (SPO-Xparty-OUT-005). It is a callback so that this
@@ -92,6 +97,13 @@ func (c Coordinator) bodyOf(coll pool.Collection) ([]byte, party.TxView, []byte,
 	if err := party.CheckAuxData(v, aux); err != nil {
 		return nil, party.TxView{}, nil, err
 	}
+	limit := party.DefaultMaxTxSize
+	if c.MaxTxSize > 0 {
+		limit = min(c.MaxTxSize, limit)
+	}
+	if err := party.CheckTxSize(len(body), len(aux), limit); err != nil {
+		return nil, party.TxView{}, nil, err
+	}
 	if len(aux) > 0 {
 		if _, err := c.Viewer.ViewAux(aux); err != nil {
 			return nil, party.TxView{}, nil, err
@@ -100,21 +112,12 @@ func (c Coordinator) bodyOf(coll pool.Collection) ([]byte, party.TxView, []byte,
 	return body, v, aux, nil
 }
 
-func poolsOf(v party.TxView) []string {
-	var out []string
-	for _, id := range v.ConcernedPools() {
-		out = append(out, chain.PoolID(id).Bech32())
-	}
-	return out
-}
-
 // assignable is SPO-Xparty-PRE-003 for one slot: a slot whose key a remote
-// party holds names an active enrolled signer, and the request is inside the
-// scope enrolled for it, which mirrors the rule the signer applies to us
-// (SPO-Xparty-INV-010): the slot's key role is one of its key roles, every
-// pool the body concerns is one of its pools, a body that concerns none needs
-// it to be unscoped.
-func assignable(ps []party.Party, s pool.Slot, pools []string) (party.Party, error) {
+// party holds names an active enrolled signer. What we ask of a signer is
+// limited by the slot assignment and by the signer's own checks; the Scope
+// recorded for a party is what it may ask of us (SPO-Xparty-INV-010) and is
+// not read here.
+func assignable(ps []party.Party, s pool.Slot) (party.Party, error) {
 	if s.Party == "" {
 		return party.Party{}, fmt.Errorf("%w: %s", ErrUnassigned, s.Name)
 	}
@@ -124,9 +127,6 @@ func assignable(ps []party.Party, s pool.Slot, pools []string) (party.Party, err
 		}
 		if !p.Active() || !p.HasRole(party.RoleSigner) {
 			return party.Party{}, fmt.Errorf("%w: %s is %s, roles %v", ErrNotSigner, p.Name, p.State, p.Roles)
-		}
-		if err := party.CheckScope(p.Scope, s.Role, pools); err != nil {
-			return party.Party{}, fmt.Errorf("%w: %s: %v", ErrNotSigner, p.Name, err)
 		}
 		return p, nil
 	}
@@ -191,7 +191,7 @@ func (c Coordinator) Open(ctx context.Context, req OpenRequest) (CollectionRef, 
 		if err != nil {
 			return err
 		}
-		_, view, _, err := c.bodyOf(coll)
+		_, _, _, err = c.bodyOf(coll)
 		if err != nil {
 			return err
 		}
@@ -201,7 +201,7 @@ func (c Coordinator) Open(ctx context.Context, req OpenRequest) (CollectionRef, 
 		}
 		for _, s := range coll.Slots {
 			if s.Holder == custody.HolderRemote {
-				if _, err := assignable(ps, s, poolsOf(view)); err != nil {
+				if _, err := assignable(ps, s); err != nil {
 					return err
 				}
 			}
@@ -304,7 +304,7 @@ func (c Coordinator) RequestSignatures(ctx context.Context, in RequestInput, tr 
 		if st := l.coll.StateAtTip(slotNow); st != pool.CollectionOpenIncomplete {
 			return fmt.Errorf("%w: it is %s", ErrNotOpen, st)
 		}
-		body, view, aux, err := c.bodyOf(l.coll)
+		body, _, aux, err := c.bodyOf(l.coll)
 		if err != nil {
 			return err
 		}
@@ -341,7 +341,7 @@ func (c Coordinator) RequestSignatures(ctx context.Context, in RequestInput, tr 
 			case s.Holder != custody.HolderRemote:
 				r.Status = SlotLocal
 			default:
-				p, err := assignable(ps, s, poolsOf(view))
+				p, err := assignable(ps, s)
 				if err != nil {
 					r.Status, r.Err = SlotRefused, err
 					break
@@ -455,10 +455,16 @@ func (r *refusal) Unwrap() error { return r.err }
 // Handled{Refused: true}; nothing is ever sent back for it (INV-006).
 //
 // The checks do not depend on how the envelope arrived (SPO-Xparty-SEC-002).
-// via only reaches the audit record.
+// How it arrived is set by the transport that delivered it and only reaches
+// the audit record and the offline rule (SPO-Xparty-INV-024).
 //
-// spec: SPO-Xparty-PRE-002, SPO-Xparty-PRE-005, SPO-Xparty-INV-006, SPO-Xparty-INV-007, SPO-Xparty-INV-010, SPO-Xparty-INV-014, SPO-Xparty-INV-015, SPO-Xparty-INV-021, SPO-Xparty-SEC-002, SPO-Xparty-OUT-004, SPO-Xparty-OUT-005
-func (c Coordinator) Handle(ctx context.Context, raw []byte, via ports.TransportKind) (Handled, error) {
+// A response that was accepted and arrives again, which a signer does when it
+// answers a re-sent request from its stored response, is acknowledged without
+// effect and without a security event (SPO-Xparty-INV-017).
+//
+// spec: SPO-Xparty-PRE-002, SPO-Xparty-PRE-005, SPO-Xparty-INV-006, SPO-Xparty-INV-007, SPO-Xparty-INV-010, SPO-Xparty-INV-014, SPO-Xparty-INV-015, SPO-Xparty-INV-017, SPO-Xparty-INV-021, SPO-Xparty-INV-024, SPO-Xparty-SEC-002, SPO-Xparty-OUT-004, SPO-Xparty-OUT-005
+func (c Coordinator) Handle(ctx context.Context, rcv ports.Received) (Handled, error) {
+	raw, via := rcv.Envelope, rcv.Via()
 	if c.Offline && !via.IsFile() {
 		return Handled{}, ErrOffline
 	}
@@ -474,6 +480,7 @@ func (c Coordinator) Handle(ctx context.Context, raw []byte, via ports.Transport
 	}
 	var o ports.OpenedEnvelope
 	var body party.Body
+	var answered, dup bool // dup: the id is that of an accepted answer; answered: it is that slot's
 	err = c.Store.View(ctx, func(r ports.Reader) error {
 		lookup, ps, err := c.loadParties(r)
 		if err != nil {
@@ -486,7 +493,13 @@ func (c Coordinator) Handle(ctx context.Context, raw []byte, via ports.Transport
 		if err != nil {
 			return err
 		}
-		body, err = o.Admit(func(id party.MessageID) (bool, error) { return c.Replay.Seen(r, id, now) },
+		body, err = o.Admit(func(id party.MessageID) (bool, error) {
+			if st.isAnswer(hexMsg(id)) {
+				dup = true
+				return false, nil // INV-017: acknowledged below, if it names its own slot
+			}
+			return c.Replay.Seen(r, id, now)
+		},
 			func(sender party.Party, t party.Type, b party.Body) error {
 				return c.authorise(r, st, ps, o, sender, t, b)
 			})
@@ -499,6 +512,29 @@ func (c Coordinator) Handle(ctx context.Context, raw []byte, via ports.Transport
 		return Handled{}, err
 	}
 	h := Handled{Type: o.Type(), Sender: o.Sender().Fingerprint, HasSender: true}
+	if dup {
+		err = c.Store.View(ctx, func(r ports.Reader) error {
+			st, err := readCoord(r)
+			if err != nil {
+				return err
+			}
+			switch m := body.(type) {
+			case party.SigningResponse:
+				answered = st.answeredBy(m.Collection, m.Slot, hexMsg(o.ID()))
+			case party.SigningRefusal:
+				answered = st.answeredBy(m.Collection, m.Slot, hexMsg(o.ID()))
+			}
+			return nil
+		})
+		if err != nil {
+			return Handled{}, err
+		}
+		if answered {
+			h.Effect, h.Reason = "acknowledged", "duplicate of an accepted answer"
+			return h, nil
+		}
+		return c.refuse(ctx, o, ports.ErrReplay, now)
+	}
 	err = c.Store.Update(ctx, func(w ports.Writer) error {
 		var err error
 		switch m := body.(type) {
@@ -515,12 +551,7 @@ func (c Coordinator) Handle(ctx context.Context, raw []byte, via ports.Transport
 	if errors.As(err, &rf) {
 		// The refusal was found while applying the effect: nothing of the
 		// effect was kept; the reason is recorded on its own.
-		ev := eventOf(now, "message-refused", "", 0, [32]byte{})
-		ev.Peer, ev.Reason, ev.Detail = o.Sender().Fingerprint.String(), rf.err.Error(), string(o.Type())
-		if uerr := c.Store.Update(ctx, func(w ports.Writer) error { return appendEvent(w, ev) }); uerr != nil {
-			return Handled{}, uerr
-		}
-		return Handled{Type: o.Type(), Sender: o.Sender().Fingerprint, HasSender: true, Refused: true, Reason: rf.err.Error()}, nil
+		return c.refuse(ctx, o, rf.err, now)
 	}
 	if err != nil {
 		return Handled{}, err
@@ -533,11 +564,29 @@ func (c Coordinator) Handle(ctx context.Context, raw []byte, via ports.Transport
 	return h, nil
 }
 
+// refuse records the refusal of an authenticated sender's message, coalesced
+// per sender and reason (SPO-Xparty-INV-023), and returns the Handled for it.
+func (c Coordinator) refuse(ctx context.Context, o ports.OpenedEnvelope, why error, now time.Time) (Handled, error) {
+	ev := eventOf(now, "message-refused", "", 0, [32]byte{})
+	ev.Peer, ev.Reason, ev.Detail = o.Sender().Fingerprint.String(), why.Error(), string(o.Type())
+	if uerr := c.Store.Update(ctx, func(w ports.Writer) error { return appendRefusal(w, ev) }); uerr != nil {
+		return Handled{}, uerr
+	}
+	return Handled{Type: o.Type(), Sender: o.Sender().Fingerprint, HasSender: true, Refused: true, Reason: why.Error()}, nil
+}
+
 func (c Coordinator) onHello(w ports.Writer, o ports.OpenedEnvelope, now time.Time) (Handled, error) {
-	// A Hello only authenticates the connection. Its id is kept until its
-	// expiry, at most five minutes (SPO-Xparty-INV-021).
+	// A Hello authenticates the connection, and it is how the coordinator
+	// learns that a signer is connected: every request of that signer that
+	// has no answer yet is sent again, with the same message id, until its slot
+	// is filled or it expires (SPO-Xparty-INV-017, INV-021). The Hello's id is
+	// kept until its expiry, at most five minutes.
 	if err := c.Replay.Record(w, o.Sender().Fingerprint, o.ID(), o.Expires(), now); err != nil {
 		return Handled{}, &refusal{err}
+	}
+	from := o.Sender().Fingerprint
+	if err := rearm(w, &from); err != nil {
+		return Handled{}, err
 	}
 	ev := eventOf(now, "hello", "", 0, [32]byte{})
 	ev.Peer = o.Sender().Fingerprint.String()
@@ -558,6 +607,7 @@ func (c Coordinator) onRefusal(w ports.Writer, o ports.OpenedEnvelope, m party.S
 		return Handled{}, &refusal{party.ErrStaleRequest}
 	}
 	ss.Refusal = m.Reason.String()
+	ss.Answered = hexMsg(o.ID())
 	cs.Slots[int(m.Slot)] = ss
 	if err := writeJSON(w, coordRef, st); err != nil {
 		return Handled{}, err
@@ -656,6 +706,11 @@ func (c Coordinator) onResponse(w ports.Writer, o ports.OpenedEnvelope, m party.
 	}
 	l.coll = next
 	if err := c.saveCollection(w, l); err != nil {
+		return h, err
+	}
+	ss.Answered = hexMsg(o.ID())
+	cs.Slots[int(m.Slot)] = ss
+	if err := writeJSON(w, coordRef, st); err != nil {
 		return h, err
 	}
 	if err := settleRequest(w, ss.LastRequest); err != nil { // the answer arrived: stop re-sending the request
@@ -772,6 +827,11 @@ func (c Coordinator) Close(ctx context.Context, ref CollectionRef, outcome party
 				}
 			}
 			cs.Closed = string(outcome)
+			// A closed collection asks for nothing more: its requests are not
+			// sent again when the signer connects.
+			if err := settleCollection(w, cs.ID); err != nil {
+				return err
+			}
 			ev := eventOf(now, "collection-"+string(outcome), cs.ID, 0, [32]byte{})
 			if outcome == party.OutcomeSubmitted {
 				ev.Detail = txid.String()

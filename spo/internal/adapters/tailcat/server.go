@@ -121,7 +121,7 @@ var (
 // Transport is the server as the sending side of multisig: its kind is a
 // network, so a pool cold key request never goes through it
 // (SPO-Xparty-PRE-004).
-func (s *Server) Transport() ports.Transport { return ports.NewTransport(s, ports.ViaNetwork) }
+func (s *Server) Transport() ports.Transport { return ports.NetworkTransport(s) }
 
 // NewServer checks the configuration. It does not touch the network: the
 // refusal for an empty allow-list is here, before anything exists to start.
@@ -289,17 +289,16 @@ func (s *Server) acceptLoop() {
 	}
 }
 
-func (s *Server) isAllowed(k party.NodeKey) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.allowed[k]
-}
-
-// admitConn applies the per-key rate, the live connections of the key and the
-// connection cap, and reserves a slot for c.
+// admitConn checks that the key is still allowed, applies the per-key rate,
+// the live connections of the key and the connection cap, and reserves a slot
+// for c, all under the lock that Revoke takes: a connection cannot be
+// admitted after Revoke has closed the key's live ones.
 func (s *Server) admitConn(peer party.NodeKey, c net.Conn) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.allowed[peer] {
+		return false
+	}
 	now := s.now()
 	recent := s.recent[peer][:0:0]
 	for _, t := range s.recent[peer] {
@@ -374,7 +373,7 @@ func (s *Server) serve(c net.Conn, peer party.NodeKey, known bool) {
 		s.mu.Unlock()
 	}()
 	s.accepted.Add(1)
-	if !known || !s.isAllowed(peer) || !s.admitConn(peer, c) {
+	if !known || !s.admitConn(peer, c) {
 		s.refused.Add(1)
 		return
 	}
@@ -456,15 +455,15 @@ func writeWithContext(ctx context.Context, pc *peerConn, idle time.Duration, env
 	return err
 }
 
-// Receive returns the next frame from any peer, as ports.ViaNetwork.
-func (s *Server) Receive(ctx context.Context) ([]byte, ports.TransportKind, error) {
+// Receive returns the next frame from any peer, as a network delivery.
+func (s *Server) Receive(ctx context.Context) (ports.Received, error) {
 	select {
 	case env := <-s.inbox:
-		return env, ports.ViaNetwork, nil
+		return ports.NetworkReceived(env), nil
 	case <-ctx.Done():
-		return nil, 0, ctx.Err()
+		return ports.Received{}, ctx.Err()
 	case <-s.done:
-		return nil, 0, ports.ErrClosed
+		return ports.Received{}, ports.ErrClosed
 	}
 }
 

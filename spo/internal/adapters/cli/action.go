@@ -282,7 +282,7 @@ and the ids the proposals will have are printed after submission.`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			files := args[1:]
-			spec := envSpec{flags: &f.chain, config: true, needs: govTxNeeds(CapActionFiles)}
+			spec := envSpec{flags: &f.chain, config: true, needs: govTxNeeds(CapActionFiles), extras: &f.extra}
 			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, wo WireOptions) error {
 				var details []string
 				for _, name := range files {
@@ -306,7 +306,7 @@ and the ids the proposals will have are printed after submission.`,
 				}
 				uc := governance.RegisterAction{Base: a.govBase(s, env, &f, govConfirmer{a: a, details: details}), Actions: env.ActionFiles,
 					Rewards: env.Rewards, AllowUnverified: f.allowUnverified}
-				res, err := uc.Run(ctx, governance.RegisterActionRequest{Payer: args[0], Files: files, Message: f.messages})
+				res, err := uc.Run(ctx, governance.RegisterActionRequest{Payer: args[0], Files: files, Message: f.messages, Extras: f.extra.ex, Passphrase: f.extra.pass})
 				if err != nil {
 					var ge *governance.GuardrailsError
 					if errors.As(err, &ge) {

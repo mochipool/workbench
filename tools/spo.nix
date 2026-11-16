@@ -98,7 +98,7 @@ let
     pname = "spo-parity";
     # Some upstream scripts read their confirmation from the controlling
     # terminal; the tests drive those through script(1).
-    nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.util-linux pkgs.jq ];
+    nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.util-linux pkgs.jq pkgs.openssl ];
     checkPhase = ''
       runHook preCheck
       export HOME=$TMPDIR
@@ -108,12 +108,14 @@ let
       # workbench manifest gives the upstream scripts, so both sides of the
       # opcert parity test use one genesis.
       export SPO_PARITY_SHELLEY_GENESIS_PREVIEW=$(${pkgs.jq}/bin/jq -r .networks.preview.common.genesisfile ${workbench.toolchain})
-      go test -count=1 -v ./test/parity/ | tee parity.log
+      go test -count=1 -timeout 30m -v ./test/parity/ | tee parity.log
       # cardano-signer is a prebuilt binary that cannot run in the sandbox
       # (tools/cardano-signer.nix), so the tests that need it skip here and
       # run in the development loop. Any other skip fails the check.
       skips=$(grep -c -- "--- SKIP" parity.log || true)
-      allowed=$(grep -c "cardano-signer cannot run here" parity.log || true)
+      # Besides the signer, two tests need the network on purpose (they ask
+      # or record the live Koios service) and are opt-in.
+      allowed=$(grep -c -e "cardano-signer cannot run here" -e "set SPO_PARITY_NETWORK=1" -e "set SPO_PARITY_RECORD_AIRGAP" parity.log || true)
       if [ "$skips" != "$allowed" ]; then
         echo "a parity test was skipped; the check must run them all"
         exit 1

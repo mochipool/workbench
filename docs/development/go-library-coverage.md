@@ -25,7 +25,7 @@ Only `bursa`'s root package, `bursa/bip32` and `bursa/kesagent/wire` can be impo
 | Random non-derived payment, stake and cold keys | **ours**: `crypto/ed25519` plus an envelope (`native.SoftwareKeys`) | oracle | The seed is drawn into guarded memory and the envelope is written straight into guarded memory. `cardano-cli key verification-key` derives the same verification key from our signing key; `stake-pool id` over the cold key equals `chain.PoolIDOf`. Types and descriptions are those `address key-gen`, `stake-address key-gen` and `node key-gen` write. |
 | Opcert issue-counter envelope | **ours** | | |
 | Bech32 with an arbitrary prefix | `btcutil/bech32` (already a dependency of `gouroboros`) | read | |
-| Calidus id (CIP-151) | **ours** | | A blake2b-224 hash with a header byte. |
+| Calidus id (CIP-151) | **ours** (`domain/cose.CalidusID`) | oracle | Header byte `a1` and the blake2b-224 hash of the Calidus public key, bech32 prefix `calidus`; equal to cardano-signer's `calidusIdBech` for the public test phrase (`TestCip88MatchesCardanoSigner`, `TestCalidusAndVotingKeysMatchCardanoSigner`). The derivation (`native.SoftwareKeys.DeriveCalidus`, `DeriveVoting`) is ours on `bursa` and `bip32`: the Calidus key is the payment key `1852H/1815H/<a>H/0/<i>` with the descriptions cardano-signer writes, the voting key is `1694H/1815H/<a>H/0/<i>` with the CIP-36 envelope types; `bursa.GetCalidusKey` is the payment derivation too, but writes other envelope types, so it is not used. |
 
 ## Certificates and operational certificates
 
@@ -69,8 +69,8 @@ Apollo v2.2.1 is a complete builder on the same `gouroboros` and `bursa` types, 
 | --- | --- | --- | --- |
 | Witness with a normal or extended key | `bursa.CreateWitness`, `WitnessTransaction` | oracle | Byte-equal to `transaction witness` for both key forms. A normal key is expanded with `ed25519.NewKeyFromSeed`; an extended key becomes the 96-byte `XPrv` (key 64, chain code 32). cardano-cli's witness text envelope holds `[vkey, signature]` only, without a leading witness-type element. |
 | Verify a witness against a body and a key hash (M3) | `common.VerifyVKeySignature` plus **ours** for the key-hash match | run | |
-| CIP-8 message signing and verification | `bursa.SignData`, `VerifyData` | run | Not yet compared with cardano-signer. |
-| CIP-36 Catalyst registration, CIP-88 v2 Calidus registration | nobody in Go | | Ported last (D9). cardano-signer stays as the adapter until we write them. |
+| CIP-8 message signing and verification | **ours** (`domain/cose`, signature in `native/cip8.go`) | oracle | Not `bursa.SignData`: it always writes `{"hashed": false}`, so it cannot carry cardano-signer's `--hashed` payload (the 28-byte blake2b-224 hash with the flag `true`). COSE_Sign1 and COSE_Key are byte-equal to `cardano-signer sign --cip8` for payment and stake keys, extended and normal, with and without `--hashed`, for base, enterprise and reward addresses, and each side verifies the other's output (`TestCip8SignMatchesCardanoSigner`). |
+| CIP-36 Catalyst registration, CIP-88 v2 Calidus registration | **ours** (`domain/cose`, `native/cip36.go`, `native/cip88.go`) | oracle | Hand-written definite-length CBOR, no library in the domain. The metadata CBOR (`--out-cbor`) and JSON (`--json`) are byte-equal to `cardano-signer sign --cip36` and `sign --cip88` for single and weighted delegations, two purposes, extended and normal keys; `verify --cip88` accepts the Go output and `domain/cose.VerifyCip36`/`VerifyCip88` accept the tool's (`TestCip36MatchesCardanoSigner`, `TestCip88MatchesCardanoSigner`). Layouts are in the notes of `spec/upstream/scripts/15_calidusPoolKey.md` and `09a_catalystVote.md`. cardano-signer is no longer needed for either; the QR code of `09a` stays unported (no catalyst-toolbox in the toolchain, payload unspecified). |
 | CIP-83 encrypted message metadata | **ours** (`native/cip83.go`) on `crypto/aes`, `crypto/cipher`, `crypto/pbkdf2` | oracle | Byte-equal to `openssl enc -e -aes-256-cbc -pbkdf2 -iter 10000 -a -S <salt>` once the `Salted__` header (which `-S` omits) is put back, and `openssl enc -d` reads the port's output and the port reads `openssl`'s (`TestMessageEncryptionMatchesOpenSSL`). The plaintext is `jq -crM` of the message array plus a newline: jq escapes DEL as `\u007f` and nothing else `encoding/json` would escape, so the encoder is ours. |
 | CIP-100, CIP-108 and CIP-119 anchor document verification | nobody in Go | | Needs JSON-LD canonicalisation. cardano-signer stays as the adapter. The anchor hash itself is `common.Blake2b256Hash`. |
 
@@ -96,7 +96,7 @@ So the hardware signer is an adapter over the pinned cardano-hw-cli (X6). The up
 | --- | --- | --- |
 | cardano-cli | Test oracle only | Build and CI machines |
 | cardano-hw-cli | Hardware-wallet signing and key export | A machine that signs with a device |
-| cardano-signer | CIP-36, CIP-88 and CIP-100 operations, until written natively | A machine that runs those use cases |
+| cardano-signer | CIP-100 operations (CIP-36 and CIP-88 are native; it stays the oracle of their parity tests) | A machine that runs those use cases |
 | gpg | Reading and writing upstream `enc` key files | A machine that imports or exports them |
 | cardano-node | Nothing at run time; the `n2c` adapter talks to a node the operator already runs | |
 

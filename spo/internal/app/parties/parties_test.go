@@ -313,3 +313,52 @@ func TestEventLogsAreSeparate(t *testing.T) {
 		t.Fatalf("eviction: %d events, first %d, last %d, ring %d", len(evs), evs[0].Slot, evs[len(evs)-1].Slot, len(ring))
 	}
 }
+
+// Refusals of an authenticated sender are coalesced: the same kind, sender and
+// reason is one entry with a counter and the time last seen, and one sender
+// cannot make more distinct entries than the cap, whatever reasons it provokes.
+// Another sender is not affected.
+// spec: SPO-Xparty-INV-023
+func TestRefusalsAreCoalescedPerSender(t *testing.T) {
+	w := newWS(t)
+	at := w.clk.t
+	log := func(peer, reason string) {
+		if err := w.store.Update(ctx, func(wr ports.Writer) error {
+			return parties.AppendRefusal(wr, parties.Event{At: at, Kind: "message-refused", Peer: peer, Reason: reason})
+		}); err != nil {
+			t.Fatal(err)
+		}
+		at = at.Add(time.Second)
+	}
+	var es []parties.Event
+	read := func() {
+		if err := w.store.View(ctx, func(r ports.Reader) error { var err error; es, err = parties.Events(r); return err }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 100 {
+		log("mallory", "same reason")
+	}
+	read()
+	if len(es) != 1 || es[0].Count != 100 || es[0].LastSeen.Equal(es[0].At) {
+		t.Fatalf("100 equal refusals: %+v", es)
+	}
+	for i := range 500 { // a sender provoking a new reason each time
+		log("mallory", fmt.Sprintf("reason %d", i))
+	}
+	log("alice", "an honest refusal")
+	read()
+	nMallory, count := 0, 0
+	for _, e := range es {
+		if e.Peer == "mallory" {
+			nMallory++
+			count += e.Count
+		}
+	}
+	if nMallory > parties.MaxRefusalEntriesPerSender+1 || count != 600 {
+		t.Fatalf("mallory has %d entries counting %d refusals", nMallory, count)
+	}
+	if es[len(es)-1].Peer != "alice" || es[len(es)-1].Count != 1 {
+		t.Fatalf("alice's refusal: %+v", es[len(es)-1])
+	}
+}

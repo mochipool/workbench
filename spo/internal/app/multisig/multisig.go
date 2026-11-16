@@ -224,7 +224,7 @@ func (n Node) refusalEvent(ctx context.Context, local ports.EnvelopeOpener, err 
 		if !known {
 			return appendNoise(w, ev)
 		}
-		return appendEvent(w, ev)
+		return appendRefusal(w, ev)
 	}); uerr != nil {
 		return h, uerr
 	}
@@ -233,7 +233,7 @@ func (n Node) refusalEvent(ctx context.Context, local ports.EnvelopeOpener, err 
 
 // ErrFirstFrame: the first frame of a network connection is not what
 // SPO-Xparty-INV-018 allows.
-var ErrFirstFrame = errors.New("the first frame of a connection must be a Hello or a response from the party that owns the connection's node key")
+var ErrFirstFrame = errors.New("the first frame of a connection must be a Hello from the party that owns the connection's node key")
 
 // AllowList is the node keys the tailcat server may admit: those of the
 // active parties that are a signer or a machine and have one, and no other
@@ -251,7 +251,9 @@ func (n Node) AllowList(ctx context.Context) ([]party.NodeKey, error) {
 // Admit is the first-frame check of a network transport (SPO-Xparty-INV-018).
 // The envelope must pass steps 1 to 6 of SPO-Xparty-PRE-002 against the
 // enrolled parties (so its sender is active and its signature verified); its
-// type must be a Hello or a response (SigningResponse, SigningRefusal); its
+// type must be a Hello (the client sends a fresh one first on every
+// connection); its sender must hold the signer role and its lifetime must be
+// at most party.MaxHelloLifetime; its
 // sender's enrolled node key must be peer, the node key tailcat authenticated
 // for the connection, so that an allow-listed node cannot present another
 // party's envelope as its own; and its message id must not be in the replay log.
@@ -259,6 +261,8 @@ func (n Node) AllowList(ctx context.Context) ([]party.NodeKey, error) {
 // tailcat's ServerConfig.Admit calls it. The frame is not consumed: the
 // transport passes it on and Handle runs the whole check again, and records
 // the id.
+//
+// spec: SPO-Xparty-INV-018, SPO-Xparty-INV-021, SPO-Xparty-INV-027
 func (n Node) Admit(ctx context.Context, raw []byte, peer party.NodeKey) (party.Fingerprint, error) {
 	local, err := n.Kit.Local(ctx)
 	if err != nil {
@@ -279,9 +283,21 @@ func (n Node) Admit(ctx context.Context, raw []byte, peer party.NodeKey) (party.
 		}
 		fp = o.Sender().Fingerprint
 		switch o.Type() {
-		case party.TypeHello, party.TypeSigningResponse, party.TypeSigningRefusal:
+		case party.TypeHello:
 		default:
 			first = fmt.Errorf("%w: it is a %s", ErrFirstFrame, o.Type())
+			return nil
+		}
+		// The first-frame check includes what Handle would refuse afterwards:
+		// the sender must hold the signer role and the Hello's lifetime must be
+		// the allowed one, so that a refused Hello never gets a route
+		// (SPO-Xparty-INV-018, INV-021, INV-027).
+		if aerr := party.Authorise(o.Sender(), party.TypeHello, party.Concern{}); aerr != nil {
+			first = fmt.Errorf("%w: %w", ErrFirstFrame, aerr)
+			return nil
+		}
+		if lerr := party.CheckHelloExpiry(o.Created(), o.Expires()); lerr != nil {
+			first = fmt.Errorf("%w: %w", ErrFirstFrame, lerr)
 			return nil
 		}
 		if node := o.Sender().Identity.Node; node == nil || *node != peer {
@@ -300,7 +316,7 @@ func (n Node) Admit(ctx context.Context, raw []byte, peer party.NodeKey) (party.
 	if err == nil && first != nil {
 		ev := eventOf(now, "first-frame-refused", "", 0, [32]byte{})
 		ev.Peer, ev.Reason = fp.String(), first.Error()
-		if uerr := n.Store.Update(ctx, func(w ports.Writer) error { return appendEvent(w, ev) }); uerr != nil {
+		if uerr := n.Store.Update(ctx, func(w ports.Writer) error { return appendRefusal(w, ev) }); uerr != nil {
 			return party.Fingerprint{}, uerr
 		}
 		return party.Fingerprint{}, first

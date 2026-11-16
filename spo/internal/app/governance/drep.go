@@ -12,6 +12,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/governance"
 	"github.com/mochipool/workbench/spo/internal/domain/stake"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
+	"github.com/mochipool/workbench/spo/internal/domain/txparam"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -151,6 +152,16 @@ type RegisterDRepRequest struct {
 	DRep, Payer string
 	URL, Hash   string
 	Message     []string
+	// Extras are the parsed extra parameters (txparam.Parse with
+	// txparam.ForCertificate); Passphrase is the `pass:` of Extras. Optional.
+	Extras     *txparam.Extras
+	Passphrase *ports.Secret
+	// Unrestricted is the operator's consent to the device's unrestricted mode
+	// (`--allow-unrestricted-mode`, SPO-21b-PR-001: asked, default Yes, in the
+	// hardware-payer and key-file-DRep form; declining exits 2). Never implied:
+	// the CLI sets it only after the operator agreed. Without it that form is
+	// refused with ErrUnrestrictedNeeded.
+	Unrestricted bool
 	// AllowAnchorClear lets an update without an anchor replace the anchor a
 	// registered DRep has with none (SPO-21b-INV-003; port note).
 	AllowAnchorClear bool
@@ -193,8 +204,14 @@ func (uc RegisterDRep) Run(ctx context.Context, req RegisterDRepRequest) (Result
 	}); err != nil {
 		return Result{}, err
 	}
-	probe := stake.Certificate{Spec: stake.Spec{Kind: stake.CertDRepUpdate, Stake: dr.hash}}
-	run := txRun{payer: pay, signers: []txflow.Slot{dr.slot()}, certs: []stake.Certificate{probe}, message: req.Message}
+	// The early probe asks the plan for the features of a registration; whether
+	// this run registers or updates is decided from the chain's answer, and the
+	// plan is made again for the real certificate before any device prompt.
+	probe := stake.Certificate{Spec: stake.Spec{Kind: stake.CertDRepRegistration, Stake: dr.hash, Deposit: 1}}
+	run := txRun{payer: pay, signers: []txflow.Slot{dr.slot()}, certs: []stake.Certificate{probe}, message: req.Message, extras: req.Extras, pass: req.Passphrase, unrestricted: req.Unrestricted}
+	if err := drepUnrestricted(&run, pay, dr); err != nil {
+		return Result{}, err
+	}
 	if err := uc.early(run); err != nil {
 		return Result{}, err
 	}
@@ -279,6 +296,16 @@ type RetireDRep struct {
 type RetireDRepRequest struct {
 	DRep, Payer string
 	Message     []string
+	// Extras are the parsed extra parameters (txparam.Parse with
+	// txparam.ForCertificate); Passphrase is the `pass:` of Extras. Optional.
+	Extras     *txparam.Extras
+	Passphrase *ports.Secret
+	// Unrestricted is the operator's consent to the device's unrestricted mode
+	// (`--allow-unrestricted-mode`, SPO-21b-PR-001: asked, default Yes, in the
+	// hardware-payer and key-file-DRep form; declining exits 2). Never implied:
+	// the CLI sets it only after the operator agreed. Without it that form is
+	// refused with ErrUnrestrictedNeeded.
+	Unrestricted bool
 }
 
 // Run retires the DRep.
@@ -315,7 +342,10 @@ func (uc RetireDRep) Run(ctx context.Context, req RetireDRepRequest) (Result, er
 		return Result{}, err
 	}
 	probe := stake.Certificate{Spec: stake.Spec{Kind: stake.CertDRepRetirement, Stake: dr.hash, Deposit: 1}}
-	run := txRun{payer: pay, signers: []txflow.Slot{dr.slot()}, certs: []stake.Certificate{probe}, message: req.Message}
+	run := txRun{payer: pay, signers: []txflow.Slot{dr.slot()}, certs: []stake.Certificate{probe}, message: req.Message, extras: req.Extras, pass: req.Passphrase, unrestricted: req.Unrestricted}
+	if err := drepUnrestricted(&run, pay, dr); err != nil {
+		return Result{}, err
+	}
 	if err := uc.early(run); err != nil {
 		return Result{}, err
 	}
@@ -548,4 +578,21 @@ func (uc CheckDRep) resolve(ctx context.Context, word string) (governance.Creden
 		return out, err
 	}
 	return governance.Credential{}, fmt.Errorf("%w: %q", ErrBadWord, word)
+}
+
+// drepUnrestricted applies SPO-21b-PR-001 and SPO-21b-SEC-003: a hardware payer
+// with a key-file DRep key signs a transaction whose certificate the device does
+// not own, which only unrestricted mode allows. The mode is the operator's
+// explicit consent (the request field), never implied; without it this form is
+// refused before any device prompt. In the other forms (both on the device, both
+// key files, key-file payer with a hardware DRep) the mode is not used.
+//
+// spec: SPO-21b-PR-001, SPO-21b-SEC-003, SPO-21b-INV-006, SPO-21d-INV-004
+func drepUnrestricted(run *txRun, pay payer, dr drepInputs) error {
+	needs := pay.holder == custody.HolderHardware && dr.holder != custody.HolderHardware
+	if needs && !run.unrestricted {
+		return ErrUnrestrictedNeeded
+	}
+	run.unrestricted = needs
+	return nil
 }

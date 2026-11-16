@@ -11,6 +11,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/stake"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
+	"github.com/mochipool/workbench/spo/internal/domain/txparam"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -68,6 +69,15 @@ type ClaimRewards struct {
 	Approval  ApprovalPolicy
 	DefTTL    uint64
 	Selection txbuild.SelectionStrategy
+	// Files and Encrypter are needed only by a request with Extras that name
+	// metadata files or ask for message encryption.
+	Files     ports.MetadataFileReader
+	Encrypter ports.MessageEncrypter
+	// Canonicalizer brings the body to hardware form when a key is held by a
+	// hardware wallet; nil refuses a hardware plan (txflow.ErrNoCanonicalizer).
+	Canonicalizer ports.HardwareCanonicalizer
+	// Handles resolves an ADA Handle destination; nil refuses handles.
+	Handles HandleResolver
 }
 
 // ClaimRequest is one claim. Stake and Destination are as the operator typed
@@ -78,6 +88,10 @@ type ClaimRequest struct {
 	Destination string
 	Payer       string
 	Message     []string
+	// Extras are the parsed extra parameters (txparam.Parse with
+	// txparam.ForCertificate); Passphrase the `pass:` of Extras. Optional.
+	Extras     *txparam.Extras
+	Passphrase *ports.Secret
 }
 
 // ClaimResult is what happened. Nothing in it is secret.
@@ -85,8 +99,11 @@ type ClaimResult struct {
 	txflow.Result
 	Withdrawn   chain.Lovelace
 	Destination string
-	Payer       string
-	Source      chain.Source
+	// Handle is set when the destination was an ADA Handle: the handle and the
+	// address it resolved to, both (ADR 0006).
+	Handle *HandleDestination
+	Payer  string
+	Source chain.Source
 }
 
 // Run claims the rewards.
@@ -113,6 +130,12 @@ func (uc ClaimRewards) Run(ctx context.Context, req ClaimRequest) (ClaimResult, 
 		return ClaimResult{}, errors.New("a claim needs a stake account and a destination")
 	}
 	if err := txbuild.ValidateMessage(req.Message); err != nil {
+		return ClaimResult{}, err
+	}
+	// The extra parameters are resolved before any file or network access:
+	// the metadata files are read and the message is encrypted.
+	meta, err := txflow.ResolveExtras(txflow.ExtrasPorts{Files: uc.Files, Encrypter: uc.Encrypter}, req.Extras, req.Message, req.Passphrase)
+	if err != nil {
 		return ClaimResult{}, err
 	}
 	// The stake name always ends in `.staking` upstream, so `w` and
@@ -152,7 +175,7 @@ func (uc ClaimRewards) Run(ctx context.Context, req ClaimRequest) (ClaimResult, 
 			return fmt.Errorf("%w: %s", ErrNoStakeKey, sn)
 		}
 		// The destination follows the grammar of 01_sendLovelaces.
-		dst, err = SendLovelaces{Addresses: uc.Addresses}.resolveDestination(r, req.Destination)
+		dst, err = SendLovelaces{Addresses: uc.Addresses, Handles: uc.Handles}.resolveDestination(r, req.Destination)
 		if err != nil {
 			return err
 		}
@@ -203,6 +226,12 @@ func (uc ClaimRewards) Run(ctx context.Context, req ClaimRequest) (ClaimResult, 
 	}); err != nil {
 		return ClaimResult{}, err
 	}
+	// An ADA Handle destination is resolved and verified here, outside the store
+	// view, and shown as the handle and its address (ADR 0006). A handle names no
+	// stored payer: the fee payer must be given (SPO-01claimRewards-PRE-001).
+	if dst, err = resolveHandle(ctx, uc.Handles, dst); err != nil {
+		return ClaimResult{}, err
+	}
 
 	// Addresses.
 	sInfo, err := uc.Addresses.InspectAddress(chain.Address(stakeAddr))
@@ -229,14 +258,16 @@ func (uc ClaimRewards) Run(ctx context.Context, req ClaimRequest) (ClaimResult, 
 
 	stakeHash := stake.KeyHash(*sInfo.StakeKeyHash)
 	pipe := txflow.Pipeline{Signers: uc.Signers, Min: uc.Min, Fees: uc.Fees, Bodies: uc.Bodies, Assembler: uc.Assembler,
-		Confirmer: uc.Confirmer, Submitter: uc.Submitter, Queue: uc.Queue, Approval: txflow.ApprovalPolicy(uc.Approval)}
+		Confirmer: uc.Confirmer, Submitter: uc.Submitter, Queue: uc.Queue, Approval: txflow.ApprovalPolicy(uc.Approval),
+		Canonicalizer: uc.Canonicalizer}
 	slots := []txflow.Slot{
 		{Label: "payment", Key: custody.KeyRef{Role: custody.RolePayment, Holder: payHolder, Owner: pay.name}, Hash: *pInfo.PaymentKeyHash},
 		{Label: "stake", Key: custody.KeyRef{Role: custody.RoleStake, Holder: stakeHolder, Owner: sn}, Hash: txbuild.KeyHash(stakeHash)},
 	}
-	// A hardware holder is refused before anything is read from the chain.
+	// A hardware holder the plan cannot serve, and a hardware key mixed with a
+	// key-file key (SPO-Ptx-PRE-006), are refused before anything is read from the chain.
 	probe := txbuild.Draft{Withdrawals: []txbuild.Withdrawal{{Reward: stakeAddr, Credential: stakeHash, Amount: 1}}, Message: req.Message}
-	if _, err := pipe.Prepare(probe, slots, stake.StakeWitnesses); err != nil {
+	if _, err := pipe.PrepareWith(probe, slots, stake.StakeWitnesses, txflow.PrepareOptions{RefuseMixed: true}); err != nil {
 		return ClaimResult{}, mapPipelineErr(err)
 	}
 
@@ -303,13 +334,19 @@ func (uc ClaimRewards) Run(ctx context.Context, req ClaimRequest) (ClaimResult, 
 	if err != nil {
 		return ClaimResult{}, err
 	}
-	prep, err := pipe.Prepare(draft, slots, stake.StakeWitnesses)
+	if req.Extras != nil {
+		if draft, err = meta.Attach(draft); err != nil {
+			return ClaimResult{}, err
+		}
+	}
+	prep, err := pipe.PrepareWith(draft, slots, stake.StakeWitnesses, txflow.PrepareOptions{RefuseMixed: true})
 	if err != nil {
 		return ClaimResult{}, mapPipelineErr(err)
 	}
 
 	res, err := pipe.Execute(ctx, txflow.Input{
 		Draft: draft, Params: params, TTL: ttl, Prepared: prep, Witnesses: stake.StakeWitnesses,
+		HardwareChangeKeys: hardwareChangeKeys(ctx, uc.Store, slots[0].Key),
 		Summary: ports.TxSummary{Kind: "rewards withdrawal", Source: pay.name, SourceAddr: pay.addr, Destination: dst.name, DestAddr: dst.addr,
 			Amount: fmt.Sprintf("%d", acct.Withdrawable), Account: sn, StakeAddr: stakeAddr, Withdrawal: acct.Withdrawable,
 			Attachments: draft.AttachmentLines(), Sources: []chain.Source{uc.Rewards.Source()}},
@@ -320,7 +357,7 @@ func (uc ClaimRewards) Run(ctx context.Context, req ClaimRequest) (ClaimResult, 
 	if err != nil {
 		return ClaimResult{}, mapPipelineErr(err)
 	}
-	return ClaimResult{Result: res, Withdrawn: acct.Withdrawable, Destination: dst.name, Payer: pay.name, Source: uc.Rewards.Source()}, nil
+	return ClaimResult{Result: res, Withdrawn: acct.Withdrawable, Destination: dst.name, Handle: dst.handle, Payer: pay.name, Source: uc.Rewards.Source()}, nil
 }
 
 // mapPipelineErr gives the pipeline's refusals the names this package

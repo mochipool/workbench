@@ -127,6 +127,9 @@ python3 spec/tools/specctl.py coverage --tests spo --config spo/spec-coverage.to
 
 Things that will bite:
 
+* **Hardware wallets are untested on real devices.** The adapter is built and tested against a stand-in tool. Before relying on it, work through [the device checklist](./hardware-device-checklist.md).
+
+* **The multi-party stack passed its fifth security review** with operating conditions (ADR 0005, `spec/extensions/Xparty.md`). Four fix rounds preceded it and two of them left a fail-open edge, so any change to `domain/party`, `app/multisig` or the transports needs a regression test that fails without the change, and an Opus review. The wiring obligations a command must meet are listed in ADR 0005 (address inspector always set; resolver only through `OwnProvider`/`OwnSnapshot`; `Received` only from a transport; a real approval gate).
 * **The sealed store passed its seventh security review** with operating conditions (ADR 0003). Its history matters: each of the first five fix rounds introduced a new defect, mostly around rekeying, locking and SQLite's side files. Change `spo/internal/adapters/sqlitestore` only with a regression test per change and an Opus review afterwards. **Multi-party signing is not yet cleared**: see the *Status* table in the concerns page.
 * **Parity tests that need cardano-signer skip inside the Nix sandbox.** The signer is a prebuilt binary whose interpreter path cannot be patched, so it does not run there. Run them in the development loop: `source <scratch>/env.sh` style variables as described in `spo/test/parity/parity_test.go`, then `go test ./test/parity/`. The Nix check allows exactly that skip and fails on any other.
 * **Tailcat adds about 18 MB** to the binary and a large test-only dependency set (concern T8).

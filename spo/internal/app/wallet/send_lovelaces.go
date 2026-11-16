@@ -30,7 +30,7 @@ var (
 	// ErrBadDestination: the destination is not a stored address, a
 	// payment address or an ADA Handle.
 	ErrBadDestination = errors.New("the destination is not a stored address name, a payment address or an ADA Handle")
-	// ErrAdaHandleUnsupported: ADA Handle resolution is not ported yet.
+	// ErrAdaHandleUnsupported: no handle resolver is wired (SendLovelaces.Handles).
 	ErrAdaHandleUnsupported = errors.New("ADA Handle destinations are not supported yet; give the address or the name of a stored address")
 	// ErrNetworkMismatch: an address belongs to another network.
 	ErrNetworkMismatch = errors.New("the address belongs to a different network")
@@ -98,6 +98,13 @@ type SendLovelaces struct {
 	// metadata files or ask for message encryption.
 	Files     ports.MetadataFileReader
 	Encrypter ports.MessageEncrypter
+	// Canonicalizer brings the body to the form a hardware wallet accepts. It is
+	// needed exactly when the paying key is held by a hardware wallet; nil with
+	// a hardware payer refuses upfront (txflow.ErrNoCanonicalizer). Handles
+	// resolves an ADA Handle destination (Caddr/resolveAdahandle); nil keeps the
+	// refusal of ErrAdaHandleUnsupported.
+	Canonicalizer ports.HardwareCanonicalizer
+	Handles       HandleResolver
 }
 
 // SendRequest is one payment. Source and Destination are as the operator
@@ -115,6 +122,24 @@ type SendRequest struct {
 	// Passphrase is the `pass:` passphrase of Extras, for `enc:basic`; nil
 	// means the default. The caller owns it and destroys it.
 	Passphrase *ports.Secret
+	// CoSign adds a second signature to the payment (13b's pool cold key): its
+	// witness is made and verified like the payment's and counted in the fee.
+	// Optional.
+	CoSign *CoSigner
+	// ExtraFiles are metadata files the caller already holds in memory (13b's
+	// poll answer from 13a); they follow the files of Extras.
+	ExtraFiles []txbuild.MetadataFile
+}
+
+// CoSigner is a second signature of a payment.
+type CoSigner struct {
+	Label string
+	Key   custody.KeyRef
+	// Hash is the key hash the witness must prove.
+	Hash txbuild.KeyHash
+	// RequiredSigner lists Hash in the body's required signers (body key 14,
+	// `--required-signer-hash`).
+	RequiredSigner bool
 }
 
 // SendResult is what happened. Nothing in it is secret.
@@ -130,7 +155,11 @@ type SendResult struct {
 	Queued    bool // appended to the offline queue
 	// ApprovalSkipped is true when the confirmation was skipped by policy.
 	ApprovalSkipped bool
-	Destination     string // the name or address the money was sent to
+	Destination     string // the name or address the money was sent to; for an ADA Handle, the handle
+	// Handle is set when the destination was an ADA Handle: the handle and the
+	// address it resolved to, both (ADR 0006). The same two are in the
+	// confirmation summary (Destination and DestAddr) and the queue entry.
+	Handle *HandleDestination
 	// MetadataFiles names the user metadata files attached.
 	MetadataFiles []string
 	// Encrypted is true when the message lines are CIP-83 encrypted.
@@ -159,6 +188,10 @@ func normalizeName(s string) (string, error) {
 type resolved struct {
 	name string
 	addr chain.Address
+	// pendingHandle is an ADA Handle destination not yet resolved; handle is
+	// the verified resolution (the name is then the handle).
+	pendingHandle string
+	handle        *HandleDestination
 }
 
 func readAddress(r ports.Reader, name string) (chain.Address, bool, error) {
@@ -207,6 +240,8 @@ func (uc SendLovelaces) Run(ctx context.Context, req SendRequest) (SendResult, e
 		return SendResult{}, err
 	}
 
+	meta.Files = append(meta.Files, req.ExtraFiles...)
+
 	srcName, err := normalizeName(req.Source)
 	if err != nil {
 		return SendResult{}, fmt.Errorf("source: %w", err)
@@ -242,6 +277,11 @@ func (uc SendLovelaces) Run(ctx context.Context, req SendRequest) (SendResult, e
 		dst, err = uc.resolveDestination(r, req.Destination)
 		return err
 	}); err != nil {
+		return SendResult{}, err
+	}
+	// An ADA Handle is resolved outside the store view (it asks the network) and
+	// shown as the handle and the address it resolved to.
+	if dst, err = resolveHandle(ctx, uc.Handles, dst); err != nil {
 		return SendResult{}, err
 	}
 
@@ -313,6 +353,9 @@ func (uc SendLovelaces) Run(ctx context.Context, req SendRequest) (SendResult, e
 	if draft, err = meta.Attach(draft); err != nil {
 		return SendResult{}, err
 	}
+	if req.CoSign != nil && req.CoSign.RequiredSigner {
+		draft.RequiredSigners = []txbuild.KeyHash{req.CoSign.Hash}
+	}
 
 	// The signing plan is made from the draft's features before the body is
 	// finalised, shown or confirmed (ADR 0008).
@@ -321,35 +364,65 @@ func (uc SendLovelaces) Run(ctx context.Context, req SendRequest) (SendResult, e
 		return SendResult{}, err
 	}
 	keyRef := custody.KeyRef{Role: custody.RolePayment, Holder: holder, Owner: src.name}
-	plan, err := ports.PlanSignatures(uc.Signers, []custody.Slot{{
+	slots := []custody.Slot{{
 		Label:  "payment",
 		Key:    keyRef,
 		Demand: custody.Demand{Role: custody.RolePayment, Operation: custody.OpWitnessTx, Features: feats},
-	}})
+	}}
+	// witnessHash is the key hash each planned witness must prove.
+	witnessHash := map[custody.KeyRef]txbuild.KeyHash{keyRef: *srcInfo.PaymentKeyHash}
+	nWit := txbuild.SendWitnesses
+	if req.CoSign != nil {
+		// A second signature, whose key hash 13b lists in the body's required
+		// signers: the fee counts its witness (SPO-13b-INV-001).
+		slots = append(slots, custody.Slot{Label: req.CoSign.Label, Key: req.CoSign.Key,
+			Demand: custody.Demand{Role: req.CoSign.Key.Role, Operation: custody.OpWitnessTx, Features: feats}})
+		witnessHash[req.CoSign.Key] = req.CoSign.Hash
+		nWit++
+	}
+	plan, err := ports.PlanSignatures(uc.Signers, slots)
 	if err != nil {
 		return SendResult{}, err
 	}
-	signer, err := uc.Signers.SignerFor(keyRef)
-	if err != nil {
-		return SendResult{}, err
+	witnessers := map[custody.KeyRef]ports.TxWitnesser{}
+	hardware := false
+	for _, sl := range plan.Slots() {
+		signer, err := uc.Signers.SignerFor(sl.Key)
+		if err != nil {
+			return SendResult{}, err
+		}
+		wt, ok := signer.(ports.TxWitnesser)
+		if !ok {
+			return SendResult{}, ErrNoSigner
+		}
+		witnessers[sl.Key] = wt
+		hardware = hardware || sl.Key.Holder == custody.HolderHardware
 	}
-	witnesser, ok := signer.(ports.TxWitnesser)
-	if !ok {
-		return SendResult{}, ErrNoSigner
+	if hardware && uc.Canonicalizer == nil {
+		return SendResult{}, txflow.ErrNoCanonicalizer
 	}
-	if uint(len(plan.Slots())) != txbuild.SendWitnesses {
-		return SendResult{}, fmt.Errorf("%w: the plan has %d signatures, the fee is estimated for %d", ErrMisconfigured, len(plan.Slots()), txbuild.SendWitnesses)
+	if uint(len(plan.Slots())) != nWit {
+		return SendResult{}, fmt.Errorf("%w: the plan has %d signatures, the fee is estimated for %d", ErrMisconfigured, len(plan.Slots()), nWit)
 	}
 
 	// Stages 6 to 8: fee, balance, the one body. Nothing below changes it.
 	//
 	// spec: SPO-Ptx-INV-010
+	//
+	// A hardware wallet accepts one body form. Every body of the fee loop is
+	// brought to it, before the body is shown, confirmed or signed: the fee is
+	// estimated for it and its id is the id displayed and witnessed
+	// (SPO-Xparty-INV-012, SPO-Ctx-EXT-001, SPO-Ptx-EXT-005).
+	build := uc.Bodies.BuildBody
+	if hardware {
+		build = txflow.CanonicalBodies(ctx, uc.Canonicalizer, build, ports.HardwareTxOptions{})
+	}
 	bal, err := draft.Balance(ttl, txbuild.Ledger{
 		MinOutput: func(o txbuild.Output) (chain.Lovelace, error) { return uc.Min.MinOutput(params, o) },
 		Fee: func(b txbuild.TxBody) (chain.Lovelace, error) {
-			return uc.Fees.EstimateFee(params, b, txbuild.SendWitnesses)
+			return uc.Fees.EstimateFee(params, b, nWit)
 		},
-		Build: uc.Bodies.BuildBody,
+		Build: build,
 	})
 	if err != nil {
 		return SendResult{}, err
@@ -357,7 +430,7 @@ func (uc SendLovelaces) Run(ctx context.Context, req SendRequest) (SendResult, e
 
 	// Stage 10, first look: refuse an oversize transaction before the
 	// operator is asked.
-	est, err := uc.Fees.EstimateSize(bal.Body, txbuild.SendWitnesses)
+	est, err := uc.Fees.EstimateSize(bal.Body, nWit)
 	if err != nil {
 		return SendResult{}, err
 	}
@@ -397,11 +470,24 @@ func (uc SendLovelaces) Run(ctx context.Context, req SendRequest) (SendResult, e
 	// the body and the key the address names before anything is assembled.
 	var witnesses []txbuild.Witness
 	for _, slot := range plan.Slots() {
-		w, err := witnesser.Witness(ctx, slot.Key, bal.Body)
+		var w txbuild.Witness
+		var err error
+		witnesser := witnessers[slot.Key]
+		if hw, isHW := witnesser.(ports.HardwareWitnesser); isHW && slot.Key.Holder == custody.HolderHardware {
+			// The change keys let the device recognise the change output when the
+			// body has two outputs (SPO-01sendLovelaces-EXT-002).
+			var change []custody.KeyRef
+			if len(bal.Spec.Outputs) == 2 {
+				change = hardwareChangeKeys(ctx, uc.Store, slot.Key)
+			}
+			w, err = hw.WitnessWith(ctx, slot.Key, bal.Body, ports.HardwareTxOptions{ChangeKeys: change})
+		} else {
+			w, err = witnesser.Witness(ctx, slot.Key, bal.Body)
+		}
 		if err != nil {
 			return SendResult{}, fmt.Errorf("witness for the %s key of %s: %w", slot.Key.Role, slot.Key.Owner, err)
 		}
-		if err := txbuild.VerifyWitness(bal.Body, w, *srcInfo.PaymentKeyHash); err != nil {
+		if err := txbuild.VerifyWitness(bal.Body, w, witnessHash[slot.Key]); err != nil {
 			return SendResult{}, fmt.Errorf("witness for the %s key of %s: %w", slot.Key.Role, slot.Key.Owner, err)
 		}
 		witnesses = append(witnesses, w)
@@ -420,7 +506,7 @@ func (uc SendLovelaces) Run(ctx context.Context, req SendRequest) (SendResult, e
 	// Stage 12: submit or queue exactly what was confirmed.
 	res := SendResult{TxID: signed.ID, Fee: bal.Spec.Fee, TTL: bal.Spec.TTL, Outputs: bal.Spec.Outputs,
 		Inputs: len(bal.Spec.Inputs), Size: len(signed.CBOR), SignedTx: signed.CBOR, ApprovalSkipped: skipped,
-		Destination: dst.name, Encrypted: meta.Encryption != ""}
+		Destination: dst.name, Handle: dst.handle, Encrypted: meta.Encryption != ""}
 	for _, f := range meta.Files {
 		res.MetadataFiles = append(res.MetadataFiles, f.Name)
 	}
@@ -471,7 +557,10 @@ func (uc SendLovelaces) resolveDestination(r ports.Reader, word string) (resolve
 		return resolved{name: lit, addr: chain.Address(lit)}, nil
 	}
 	if h := strings.ToLower(lit); handleRoot.MatchString(h) || handleSub.MatchString(h) {
-		return resolved{}, fmt.Errorf("%w: %s", ErrAdaHandleUnsupported, h)
+		if uc.Handles == nil {
+			return resolved{}, fmt.Errorf("%w: %s", ErrAdaHandleUnsupported, h)
+		}
+		return resolved{name: h, pendingHandle: h}, nil
 	}
 	return resolved{}, fmt.Errorf("%w: %q", ErrBadDestination, word)
 }

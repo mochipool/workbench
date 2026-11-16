@@ -36,8 +36,9 @@ type Party struct {
 	Fingerprint Fingerprint
 	Name        string // the operator's local name for it
 	Roles       []Role
-	// Scope is what a signing request between us and this party may be about
-	// (SPO-Xparty-INV-010). The zero Scope allows nothing.
+	// Scope is what this party, as a coordinator, may ask of us
+	// (SPO-Xparty-INV-010). It is never what we may ask of it. The zero Scope
+	// allows nothing.
 	Scope      Scope
 	State      State
 	EnrolledAt time.Time
@@ -57,6 +58,10 @@ var (
 	ErrNameTaken         = errors.New("party: that local name is already in use")
 	ErrAlreadyEnrolled   = errors.New("party: that identity is already enrolled")
 	ErrAlreadyRevoked    = errors.New("party: already revoked")
+	// ErrNodeKeyInUse: another enrolled party already has that tailcat node
+	// key (SPO-Xparty-INV-018). A node key names one machine's connection;
+	// two parties sharing it could be taken for each other.
+	ErrNodeKeyInUse = errors.New("party: another enrolled party already has that node key")
 )
 
 var (
@@ -69,8 +74,10 @@ type Enrollment struct {
 	Document Document
 	Name     string // local name, chosen by the operator
 	Roles    []Role
-	// Scope is required for a coordinator or a signer: the operator names
-	// the key roles and the pools (or Unscoped); there is no default.
+	// Scope is required for a coordinator: the operator names the key roles
+	// and the pools (or Unscoped) it may ask for; there is no default. It is
+	// kept for a signer too but never read: what we ask of a signer is not
+	// limited by it.
 	Scope        Scope
 	Confirmation string // the first four fingerprint groups, as typed (PR-001)
 }
@@ -105,8 +112,8 @@ func Enroll(e Enrollment, existing []Party, now time.Time) (Party, error) {
 	if err != nil {
 		return Party{}, err
 	}
-	if (slices.Contains(roles, RoleCoordinator) || slices.Contains(roles, RoleSigner)) && scope.Empty() {
-		return Party{}, fmt.Errorf("%w: a coordinator or signer needs a scope: key roles, and pools or unscoped", ErrInvalidEnrollment)
+	if slices.Contains(roles, RoleCoordinator) && scope.Empty() {
+		return Party{}, fmt.Errorf("%w: a coordinator needs a scope: key roles, and pools or unscoped", ErrInvalidEnrollment)
 	}
 	fp := id.Fingerprint()
 	if !ConfirmPrefix(fp, e.Confirmation) {
@@ -118,6 +125,9 @@ func Enroll(e Enrollment, existing []Party, now time.Time) (Party, error) {
 		}
 		if q.Name == e.Name {
 			return Party{}, ErrNameTaken
+		}
+		if id.Node != nil && q.Identity.Node != nil && *id.Node == *q.Identity.Node {
+			return Party{}, fmt.Errorf("%w: %s", ErrNodeKeyInUse, q.Name)
 		}
 	}
 	return Party{Identity: id, Fingerprint: fp, Name: e.Name, Roles: roles, Scope: scope,
@@ -154,7 +164,7 @@ type Concern struct {
 //
 //   - SigningRequest, CollectionClosed and Invite need the coordinator role.
 //     What a SigningRequest may ask is the sender's Scope, decided by
-//     CheckScope once the body is decoded.
+//     CheckScope once the body is decoded (and again at approval).
 //   - SigningResponse and SigningRefusal need the signer role and that the
 //     sender is the signer assigned to the slot.
 //   - Hello needs the signer role (SPO-Xparty-INV-021).

@@ -156,15 +156,15 @@ Changes `mode` in `spo.toml`. `light` is refused while there is no `[koios]` sec
 
 Prints what the environment of this workspace's configuration provides, from the same `Env` the commands use. It opens no store and uses no network.
 
-* **Chain capabilities**: for each of `tip`, `sync-check`, `opcert-counter`, `protocol-parameters`, `utxo`, `reward-account`, `pool-state`, `drep-state`, `reward-account-crosscheck`, `tx-submit`, `tx-queue`, and the governance readers `committee-state`, `governance-actions`, `constitution`, `last-enacted-action`, `stake-distribution`, `epoch`, `voting-summary`, `drep-state-crosscheck`, the provider that supplies it (and its endpoint), or under **Not available** the reason and the remedy, for example "offline mode has no transaction submitter; queue to a transfer file instead" or "no chain provider is configured: spo provider set koios".
-* **Local**: clock, genesis, key generation (`kes-keygen`, `vrf-keygen`, `cold-keygen`, `payment-keygen`, `stake-keygen`), `mnemonic-generation`, `wallet-derivation`, `address-building`, address inspection, minimum output, fee estimation, transaction body and assembly, `certificate-building` and `certificate-decoding`, and for the governance commands `drep-keygen`, `committee-cold-keygen`, `committee-hot-keygen`, `governance-derivation`, `vote-file`, `action-file` (always), `anchor-fetch` (light) and `anchor-verification` (never: no verifier is built), and for the pool commands `pool-certificate-building`, `pool-certificate-decoding`, `metadata-hash`, `tx-id` and `tx-view` (always), `transfer-file` (always: the bundle at `--transfer-file`) and `extract-sink` (always), `era` (offline with a transfer file; light, from the Koios tip), `transfer-attach` (offline, with a transfer file), `metadata-fetch` (light) and `ticker-protection` (never: see [Pool registration](#pool-registration-and-retirement)).
+* **Chain capabilities**: for each of `tip`, `sync-check`, `opcert-counter`, `protocol-parameters`, `utxo`, `reward-account`, `pool-state`, `drep-state`, `reward-account-crosscheck`, `tx-submit`, `tx-queue`, and the governance readers `committee-state`, `governance-actions`, `constitution`, `last-enacted-action`, `stake-distribution`, `epoch`, `voting-summary`, `drep-state-crosscheck`, `ada-handle` and `poll-question`, the provider that supplies it (and its endpoint), or under **Not available** the reason and the remedy, for example "offline mode has no transaction submitter; queue to a transfer file instead" or "no chain provider is configured: spo provider set koios".
+* **Local**: clock, genesis, key generation (`kes-keygen`, `vrf-keygen`, `cold-keygen`, `payment-keygen`, `stake-keygen`), `mnemonic-generation`, `wallet-derivation`, `address-building`, address inspection, minimum output, fee estimation, transaction body and assembly, `certificate-building` and `certificate-decoding`, and for the Calidus and Catalyst commands `calidus-keygen`, `voting-keygen` and `registration-signing` (always) and `calidus-registrations` (never: no provider reads them yet), and for the governance commands `drep-keygen`, `committee-cold-keygen`, `committee-hot-keygen`, `governance-derivation`, `vote-file`, `action-file` (always), `anchor-fetch` (light) and `anchor-verification` (never: no verifier is built), and for the pool commands `pool-certificate-building`, `pool-certificate-decoding`, `metadata-hash`, `tx-id` and `tx-view` (always), for the extra parameters and native assets `metadata-file`, `message-encryption` and `policy-id` (always), for the workspace commands `verification-key-derivation` (always) and `key-encryption` (upstream's gpg envelope: only where the binary has a toolchain manifest with `gpg`; needed only for upstream's encrypted keys), `transfer-file` (always: the bundle at `--transfer-file`) and `extract-sink` (always), `era` (offline with a transfer file; light, from the Koios tip), `transfer-attach` (offline, with a transfer file), `metadata-fetch` (light) and `ticker-protection` (never: see [Pool registration](#pool-registration-and-retirement)), `bls-keygen` (always) and `hardware-wallet` (only where the binary has a toolchain manifest that provides `cardano-hw-cli`, a network with a magic, and a workspace; whether a device is connected is not probed: `capabilities` never starts the tool, see [Hardware wallets](#hardware-wallets)). `ada-handle` is present in light mode and absent offline with the reason; `poll-question` is present in light mode (Koios) only.
 * **Signers**: each signer with its profile (role, then the operations it can do).
 
 Offline mode lists `utxo`, `protocol-parameters`, `tx-queue`, `reward-account` and `drep-state` only when the transfer file (`offlineTransfer.json` in the workspace directory) exists. Light mode takes the protocol parameters from the network's hosted light-mode parameters file, as upstream does, and everything else from Koios. Online mode names the missing cardano-node socket adapter. The Koios adapter reads the committee (`GET /committee_info`), the open governance actions with their votes (`/proposal_list`, `/proposal_votes`), the epoch and era (`/tip`) and the voting summary of an action (`/proposal_voting_summary`); the constitution and the last enacted action ids come from the hosted light-mode parameters document, as upstream's light mode takes them. Every field follows the three-valued rule: an empty, failed or uninterpretable answer is unknown, never none. No adapter reads the DRep and pool stake distribution (upstream's light mode does not; `stake-distribution` is absent in every mode, with the reason) or a second DRep source (`drep-state-crosscheck`). Offline mode has none of the governance readers. Readers are picked up by type assertion when an adapter gains the interface.
 
 ### `pool keys generate POOL`
 
-Generates the pool's cold key pair and its operational certificate issue counter (at 0). Prints the pool id as hex and bech32. The signing key is stored in the workspace and never printed. Needs: `cold-keygen`. Refused when any cold artefact of the pool exists.
+Generates the pool's cold key pair and its operational certificate issue counter (at 0). Prints the pool id as hex and bech32. The signing key is stored in the workspace and never printed. Needs: `cold-keygen`. Refused when any cold artefact of the pool exists. `--hardware [--index N]` makes the key on a hardware wallet instead (see [Hardware wallets](#hardware-wallets)); it needs `hardware-wallet` and not `cold-keygen`.
 
 ### `pool vrf generate POOL`
 
@@ -228,6 +228,7 @@ Shows the counter of the pool's last block on the chain (with its source), the n
 
 ```
 spo wallet new NAME [--stake] [--mnemonic | --mnemonic-in-fd N] [--account N] [--index N]
+               [--hardware [--multisig] [--hybrid]]
 ```
 
 Creates a wallet in the workspace. Signing keys and any mnemonic are never printed.
@@ -238,6 +239,7 @@ Creates a wallet in the workspace. Signing keys and any mnemonic are never print
 | `NAME --stake` | random payment and stake keys, the base address and the stake address | adds `stake-keygen` |
 | `NAME --mnemonic` | the same, derived (CIP-1852) from a freshly generated 24-word phrase | `mnemonic-generation`, `wallet-derivation`, `address-building` |
 | `NAME --mnemonic-in-fd N` | the same, derived from the phrase read from file descriptor N (a trailing newline is dropped; case and spacing are normalised) | `wallet-derivation`, `address-building` |
+| `NAME --hardware` | the payment key on a hardware wallet (a hardware signing file is stored, never a private key); with `--stake` the stake key too, or with `--hybrid` a stake key from the workspace | `hardware-wallet`, `address-building` (`stake-keygen` with `--hybrid`) |
 
 `--mnemonic` and `--mnemonic-in-fd` imply `--stake` and are mutually exclusive. `--account` and `--index` (0 to 2147483647) select the derivation path `1852H/1815H/ACCOUNTH/{0,2}/INDEX` and are refused without one of them. The phrase is never read from the command line or the environment. A generated phrase is stored sealed in the workspace and is not shown; the command that displays it does not exist yet (the audited export use case is not built), so for now such a wallet is recoverable only from a workspace backup. All flag combinations are checked, and the needs stated, before the workspace is opened. An existing wallet of that name is not overwritten. The network is the workspace's (`mainnet` gives `addr1...`, others `addr_test1...`).
 
@@ -266,17 +268,46 @@ The summary (source, destination, outputs with assets, fee, valid-until slot, ch
 | `--yes` | Approve without asking. |
 | `--transfer-file PATH` | The offline transfer file. Default: `offlineTransfer.json` in the workspace directory. It must exist (made by `01_workOffline.sh new` on the online machine). |
 | `--offline`, genesis options | As for `pool opcert issue`. The offline slot needs a Shelley genesis. |
+| extra parameters | `--metadata-file`, `--encrypt-messages`, `--message-passphrase-fd`, `--utxo-limit`, `--only-utxo-with-asset`, `--skip-utxo-with-asset`, `--input`: see [Extra parameters](#extra-parameters). |
 
 ### `wallet claim-rewards`
 
 ```
-spo wallet claim-rewards STAKE DESTINATION [--payer NAME] [--message TEXT]... [--yes] [--transfer-file PATH]
+spo wallet claim-rewards STAKE DESTINATION [--payer NAME] [--message TEXT]... [--metadata-file FILE]...
+     [--metadata-record NAME]... [--encrypt-messages] [--yes] [--transfer-file PATH]
      [--offline] [--shelley-genesis FILE] [--byron-genesis FILE] [--byron-to-shelley-epochs N]
 ```
 
-Withdraws the whole reward balance of a stored stake account to `DESTINATION` (a stored address name or an address), upstream `01_claimRewards`. The fee is paid by `--payer`; when it is not given the destination pays, if it is a stored address. The stake key and the payment key sign. The balance is read once at the start; a stale one only makes the ledger reject the transaction, so one source is enough and there are no policy flags. Needs: the `wallet send` needs and `reward-account`. Confirmation, `--yes`, `--message`, `--transfer-file` and the output are as for `wallet send`; the summary adds the account and the withdrawal.
+Withdraws the whole reward balance of a stored stake account to `DESTINATION` (a stored address name or an address), upstream `01_claimRewards`. The fee is paid by `--payer`; when it is not given the destination pays, if it is a stored address. The stake key and the payment key sign. The balance is read once at the start; a stale one only makes the ledger reject the transaction, so one source is enough and there are no policy flags. Needs: the `wallet send` needs and `reward-account`. Confirmation, `--yes`, `--message`, `--transfer-file` and the output are as for `wallet send`; the summary adds the account and the withdrawal. The message and metadata extras (`--metadata-file`, `--metadata-record`, `--encrypt-messages`, `--message-passphrase-fd`) are taken as by the other certificate commands; the UTxO flags are not.
 
 Offline, the balance comes from the transfer file, which must hold the stake address (`01_workOffline.sh add`); an address it does not hold is an unknown answer and the command stops.
+
+### Extra parameters
+
+Upstream's transaction scripts take free-form words after their arguments (`msg:`, `enc:`, `pass:`, a metadata file name, `utxolimit:`, `onlyutxowithasset:`, `skiputxowithasset:`, a `txhash#ix` list). Here they are flags, one surface for every command that takes them. Each flag is turned into the equivalent upstream word and read by the same grammar (`txparam.Parse`, with the acceptance row of the command), so a refusal is the grammar's: a metadata file that is not `.json` or `.cbor`, an `--input` that is not `TXHASH#INDEX`, a `--utxo-limit` that is not a whole number above zero, an asset filter that is not a policy id (with or without a hex asset name), a message line over 64 bytes. These are refused before the workspace is opened and before any prompt.
+
+| Flag | Meaning | Where |
+| --- | --- | --- |
+| `--message TEXT` | One CIP-20 line, at most 64 bytes, kept as typed (a `|` is part of the line). Repeatable. | every transaction command |
+| `--metadata-file FILE` | Attach a `.json` or `.cbor` metadata file as further labels of the transaction's metadata, in command-line order. Read in place, never changed. Repeatable. Needs `metadata-file`. | every transaction command |
+| `--metadata-record NAME` | Attach a registration record of the workspace as metadata, by the name `pool calidus register-metadata` or `catalyst register` printed (`NAME.calidus-registration.json` or `NAME.vote-registration.cbor`; the extension gives the format). The record is read through the workspace and no file is written. Repeatable. Needs `metadata-file`. | every transaction command |
+| `--encrypt-messages` | CIP-83 `basic` encryption of the `--message` lines. Without a message it has no effect. Needs `message-encryption`. | every transaction command |
+| `--message-passphrase-fd N` | The encryption passphrase, read from this inherited descriptor. Without it the passphrase is asked for without echo, twice; an empty entry means the CIP-83 default `cardano`. There is no flag, argument or variable that carries the passphrase, and it is never printed or stored. | with `--encrypt-messages` |
+| `--utxo-limit N` | Spend at most `N` UTxOs of the source. | `wallet send`, `wallet send-assets` |
+| `--only-utxo-with-asset ID` | Spend only UTxOs that hold the asset (a policy id, or a policy id followed by the asset name in hex). Repeatable. | `wallet send`, `wallet send-assets` |
+| `--skip-utxo-with-asset ID` | Never spend UTxOs that hold the asset. Repeatable. | `wallet send`, `wallet send-assets` |
+| `--input TXHASH#IX` | Spend exactly these UTxOs. Repeatable. | `wallet send`, `wallet send-assets`, `asset mint`, `asset burn` |
+
+"Every transaction command" is `wallet send`, `wallet send-assets`, `asset mint`, `asset burn`, `stake register`, `stake delegate`, `stake vote-delegate`, `stake deregister`, `pool register`, `pool retire`, `drep register` (also an update), `drep retire`, `committee authorize`, `committee resign`, `vote submit` and `action submit`. `wallet claim-rewards` is one of the certificate-type commands here: it takes the message and metadata extras and not the UTxO flags. The certificate commands do not take the UTxO flags (upstream ignores them there). A pool registration whose witness collection is already open refuses any extra, as it refuses `--message`.
+
+### `wallet send-assets`
+
+```
+spo wallet send-assets FROM TO ASSET[=AMOUNT]... [--lovelace N] [--keep-policy POLICY-ID]... [--sum-duplicates]
+     [--message TEXT]... [--yes] [--transfer-file PATH] [--offline] [genesis options] [extra parameters]
+```
+
+Sends native assets with the lovelace they need (upstream `01_sendAssets`). Each `ASSET[=AMOUNT]` is one selection: `POLICY.NAME=100`, `POLICYHEX+NAMEHEX=100`, `asset1...=100` (fingerprint), `POLICY.PREFIX*=ALL` or `POLICYHEX+PREFIX*=ALL` (a bulk selection needs `ALL`), `NAME.asset=100` (the record of `asset mint`), or the keywords `ALLASSETS` and `FORCEADA`. An amount is a positive number or `ALL`. The words are read by the domain's selection grammar (`assets.ParseSelections`), so its refusals apply. An asset named twice is refused unless `--sum-duplicates`. `--lovelace N` sends at least that much with the assets (raised to the destination's minimum); `--keep-policy` is for `ALLASSETS`. Needs, confirmation, modes and output are those of `wallet send`; the summary shows each asset of each output, and the output lists what was sent.
 
 ### Stake commands: shared rules
 
@@ -385,14 +416,23 @@ The type is decided from the chain when a pool reader exists (light mode) and fr
 
 `--allow-pending` leaves the slots whose signer is not in this workspace empty. The collection stays open, a witness transfer file `POOL_SLOT_ID.witness` is written to the workspace for each open slot, the output lists each open slot with its role and holder, and the command exits 0 saying `waiting for N signature(s)`. Without the flag a registration that cannot be assembled yet is an error. Import each signed file with `pool witness import`, then run `pool register` again: the stored collection is final, so `--type` and `--message` are refused while it is open, and one confirmation remains.
 
-### `pool witness import`, `pool witness status`
+### `pool witness import`, `pool witness status`, `info`, `sign`, `clear`
 
 ```
 spo pool witness import POOL FILE [--overwrite] [--offline] [genesis options]
 spo pool witness status POOL [--offline] [genesis options]
+spo pool witness info POOL [--offline] [genesis options]
+spo pool witness sign FILE --key NAME [--offline] [genesis options]
+spo pool witness clear POOL [--yes]
 ```
 
 `import` verifies the signed witness in `FILE` against the stored body hash and the key hash of its slot, and stores it. The file carries no authenticated sender, and the output says so. A slot that already holds a witness is replaced only with `--overwrite`. `status` prints the lifecycle (`Draft`, `CertificateIssued`, `CollectingWitnesses`, `Registered`, `RetirementScheduled`) and, for an open collection, its id, body hash, payer, TTL, the state at the current slot (`OpenIncomplete`, `OpenComplete`, `Expired`) and each slot with its holder and whether it is signed. Needs: `tx-id` (import also `tip`, `genesis`); `status` shows the current slot when it can.
+
+`info` (upstream `05d info`) reports the collection of a pool: id, type, ticker, payer, valid-until slot, the state at the current slot and each slot signed or open (with the witness file it waits for). An expired collection is reported in full and the command fails. Needs: `genesis`, `tip`, `tx-id`.
+
+`sign` (upstream `05d sign`) runs on the signer's machine with the transfer file and the signer's keys only. It checks the file (valid JSON, window open at the current slot, not signed yet, `NAME.staking` is the key the witness was requested for), **decodes the transaction body and prints it in full** (inputs, outputs, fee, validity, every certificate with its fields, withdrawals, mint, votes, required signers), and signs only after you answer yes at the terminal (default No). No flag answers that question and without a terminal the command refuses: a transaction is never signed unseen. A body with parts that cannot be shown in full (proposals, a mint, scripts, datums, collateral, reference inputs) or for another network is refused. On success the file is rewritten in place with the witness and the date; send it back and import it. A key on a hardware wallet signs through the device. Needs: `signers`, `genesis`, `tip`, `clock`, `tx-view`, `tx-id`.
+
+`clear` (upstream `05d clear`) discards the open collection after asking (default No; `--yes` answers yes). Witness files on disk are not touched.
 
 ### `pool status`
 
@@ -415,7 +455,7 @@ spo pool retire POOL PAYER [--message TEXT]... [--transfer-file PATH] [--offline
 
 Governance commands follow the stake commands: the same transaction options (`--message TEXT`, `--yes`, `--transfer-file PATH`, `--offline`, the genesis options), the same confirmation (default No; no terminal and no `--yes` refuses) and the same `wallet send` needs, checked before the passphrase is asked. Each command adds the needs named below; a refusal lists every missing capability with its reason. Key material and mnemonics are never printed. The summary names the account, the payer, the certificate, votes or proposals, the deposit paid or refunded, the fee, the valid-until slot, the sources and the checks not made. A **Details** block adds what the public files hold: the DRep id, the anchor URL and hash, each vote as voter role, action id (hex and `gov_action1...`) and decision, each proposal as kind, deposit, return address and anchor. With `--yes` the same summary is printed after signing, attachments, deposit and refund included: the use case returns the summary it prepared.
 
-Four policy flags exist, never on by default and never implied by a mode. A refusal that one of them would lift names it and what it gives up.
+Five policy flags exist, never on by default and never implied by a mode. A refusal that one of them would lift names it and what it gives up.
 
 | Flag | Where | Gives up |
 | --- | --- | --- |
@@ -423,16 +463,19 @@ Four policy flags exist, never on by default and never implied by a mode. A refu
 | `--single-source` | `drep retire` | The corroboration of the DRep deposit the refund rests on. A second DRep source (capability `drep-state-crosscheck`) corroborates it; none exists in any mode today, so the command needs the flag. A false answer from one provider can cost the deposit. The summary says the read rested on one source. |
 | `--allow-unverified` | `action submit` | The check that the deposit-return stake address is registered, when no reader answers. A wrong answer only makes the ledger reject the transaction. The summary lists the skipped check. |
 | `--allow-anchor-clear` | `drep register` | Lets an update without an anchor replace the anchor the DRep has on chain with none. |
+| `--allow-unrestricted` | `drep register`, `drep retire`, `vote submit` | Starts the question that allows a hardware wallet's unrestricted signing mode; see [Hardware wallets](#hardware-wallets). The flag allows nothing by itself. |
 
 An anchor is `--anchor-url URL` (https or ipfs, at most 128 characters) with `--anchor-hash HEX`. Where the mode downloads documents (light) the document is hashed and its own hash replaces `--anchor-hash`. Where it does not (offline) both are required together and the hash is recorded as given. `drep register` and `committee resign` give an anchor the same policy as `vote create` (`drep register` for CIP-119, `committee resign` for CIP-100): with an anchor and no verifier they are refused, before anything is read, unless `--anchor-unverified` is given, and the decision is recorded and printed as `Decision: the anchor document was not verified`.
 
 ### `drep keys generate`, `committee keys generate-cold`, `committee keys generate-hot`
 
 ```
-spo drep keys generate NAME [--mnemonic | --mnemonic-in-fd N] [--account N] [--index N]
+spo drep keys generate NAME [--mnemonic | --mnemonic-in-fd N] [--account N] [--index N] [--hardware]
 spo committee keys generate-cold NAME [same options]
 spo committee keys generate-hot NAME [--replace] [same options]
 ```
+
+`--hardware` makes the key on a hardware wallet (`--account` and `--index` then select the device path, and the mnemonic options are refused); it needs `hardware-wallet` instead of the key generator. See [Hardware wallets](#hardware-wallets).
 
 Upstream `21a`, `23a`, `23b`. Stores `NAME.drep.{vkey,skey,id}` or `NAME.cc-cold.*` / `NAME.cc-hot.*` (`vkey`, `skey`, `hash`); prints the id or hash in every spelling, never the signing key. `--mnemonic` derives the key (CIP-1852, role 3, 4 or 5) from a fresh 24-word phrase stored sealed and not shown; `--mnemonic-in-fd N` derives it from a phrase read from descriptor N; `--account` and `--index` select the path and need one of them. An existing key is refused; `--replace` (hot key only) deletes the old key, its signing key and its files first. Needs: `drep-keygen`, `committee-cold-keygen` or `committee-hot-keygen` (`governance-derivation` with a mnemonic, plus `mnemonic-generation` for a fresh phrase). The era is checked when parameters are available.
 
@@ -499,7 +542,7 @@ spo address NAME|ADDRESS [--offline] [--transfer-file PATH]
      [--shelley-genesis FILE] [--byron-genesis FILE] [--byron-to-shelley-epochs N]
 ```
 
-Upstream `01_queryAddress`. `NAME` is a stored address (`NAME`, or `NAME.staking` for the stake address); an address is used as given. An ADA Handle is refused (not supported yet). Needs: address-inspection and one of utxo, reward-account.
+Upstream `01_queryAddress`. `NAME` is a stored address (`NAME`, or `NAME.staking` for the stake address); an address is used as given. An ADA Handle (`$name`, `$sub@name`) is resolved (see [ADA Handles](#ada-handles)); the report shows the handle and the address it resolved to. Needs: address-inspection and one of utxo, reward-account.
 
 For a payment address: the UTxOs (reference and lovelace; native assets with policy, name and CIP-14 fingerprint; datum hash), the total lovelace and the asset totals. For a stake address: the registration deposit, the rewards, the pool and vote delegation and the governance deposits that will be refunded to it. Every line names the source that stated it (`[koios preview]`, `[offline transfer file]`); a value the source did not state is printed as "not stated" with the reason, never as zero. An address with no funds and an unregistered stake address are errors.
 
@@ -521,11 +564,11 @@ Writes a new transfer file: the protocol parameters, the era, the work mode, an 
 
 ### `offline info`
 
-Shows the general information (usable or not, era, versions, last action, history length), the addresses with their balances, the DReps, the queued transactions (position, type, era, date, names, and the fee and id computed from the signed transaction), and the attached files by name and size. Every other field of a queue entry is the file writer's claim and is not compared with the transaction; the output says so. A missing file is an error.
+Shows the general information (usable or not, era, versions, last action, history length), the addresses with their balances, the DReps, the queued transactions (position, type, era, date, names, and the fee and id computed from the signed transaction), and the attached files by name and size. Every other field of a queue entry is the file writer's claim and is not compared with the transaction; the output says so. A missing file is an error. When the history records submitted asset record updates (a mint or burn that `offline execute` submitted), a line says so and names `spo asset settle`; `info` itself writes nothing.
 
 ### `offline execute [N] [--yes]`
 
-Submits the `N`th queued transaction (default 1) through the chain provider (light mode). It first checks that the UTxOs of the paying address, and the rewards for a withdrawal, are as in the snapshot. It then prints a summary (the entry, the tx id computed from the signed transaction, the provider, `WARNING` lines, `checked` lines and `NOT CHECKED` lines) and asks `Submit this transaction? [y/N]`; the default is No, and no terminal without `--yes` refuses. A declined run submits nothing and leaves the queue as it was (exit `1`). `--yes` is the explicit skip of the question: the summary is still printed (after the run, from what the checks found), the skip is reported, and the exit status is as for any other run. The entry is removed from the queue only after the submission. Pool registrations also check the published metadata hash. Needs: transfer-file, clock, tx-submit, utxo, reward-account, tx-id.
+Submits the `N`th queued transaction (default 1) through the chain provider (light mode). It first checks that the UTxOs of the paying address, and the rewards for a withdrawal, are as in the snapshot. It then prints a summary (the entry, the tx id computed from the signed transaction, the provider, `WARNING` lines, `checked` lines and `NOT CHECKED` lines) and asks `Submit this transaction? [y/N]`; the default is No, and no terminal without `--yes` refuses. A declined run submits nothing and leaves the queue as it was (exit `1`). `--yes` is the explicit skip of the question: the summary is still printed (after the run, from what the checks found), the skip is reported, and the exit status is as for any other run. The entry is removed from the queue only after the submission. A queued asset mint or burn carries its asset record update in the queue entry (the port's own field `spoAssetPending`, which upstream's readers ignore). After the submit the update is added to that entry's `tx submit` history line (`spoAssetSubmitted`), so the result travels back with the file, and it is applied at once if this workspace holds the pending update or the asset record; a workspace that holds neither (the usual online machine) changes nothing. A failure to apply it never fails the submission and is printed as a notice. See `asset mint` and `asset settle`. Pool registrations also check the published metadata hash. Needs: transfer-file, clock, tx-submit, utxo, reward-account, tx-id.
 
 ### `offline attach FILE [--name NAME]`, `offline extract [--dir DIR] [--overwrite]`
 
@@ -534,6 +577,170 @@ Submits the `N`th queued transaction (default 1) through the chain provider (lig
 ### `offline clear transactions|history|files [--yes]`
 
 Removes the queue, the history or the attached files and records that in the history. Clearing the queue or the files discards work that is stored nowhere else, so you are asked first (default No; `--yes` approves). Clearing the history is not asked.
+
+## Native assets
+
+### `policy new NAME [--lifetime SLOTS] [--hardware]`
+
+`--hardware` makes the policy key on a hardware wallet (path `1855H/1815H/0H`) and asks the device for the policy id, which must equal the id computed from the script; see [Hardware wallets](#hardware-wallets).
+
+Creates the minting policy `NAME` (upstream `10_genPolicy`, software keys): a payment-type key (signing key sealed in the workspace, never printed), the native script that requires its signature, and the policy id. `--lifetime SLOTS` makes the script expire that many slots after the current slot, which needs `genesis` and `tip` (offline: the clock); without it the policy never expires. The four artefacts are written together or not at all; an existing policy is refused. The output names the policy id, the key hash and the expiry. Needs: payment-keygen, policy-id.
+
+### `asset mint POLICY.ASSET AMOUNT PAYER`, `asset burn POLICY.ASSET AMOUNT PAYER`
+
+```
+spo asset mint|burn POLICY.ASSET AMOUNT PAYER [--yes] [--message TEXT]... [--transfer-file PATH]
+     [--offline] [genesis options] [--metadata-file FILE]... [--encrypt-messages] [--input TXHASH#IX]...
+```
+
+Mints or burns `AMOUNT` (a positive number) of the asset `ASSET` (letters and digits, or `{hex}`) under the stored policy `POLICY` (upstream `11a`, `11b`). `PAYER` names the stored address that pays the fee and receives the asset. The policy key and the payer's key sign. The use case refuses an expired policy, a policy id that does not match its script, and a burn of more than the inputs hold. Needs: those of `wallet send`, plus policy-id and clock. Confirmation, `--yes`, modes and output are those of `wallet send`.
+
+The asset record `POLICY.ASSET` keeps the `minted` total. It is updated when the transaction is **submitted**: at once in light mode. A mint or burn that is only queued (offline mode) changes no record. Two things are kept for it: a pending update in the workspace under the transaction id, and the same update inside the queue entry of the transfer file, so it crosses the air gap with the transaction. When `offline execute` submits the entry (on the online machine, which usually holds neither the policy key nor the record) the submission is written into the file's history; carry the file back and run `asset settle` on the machine that holds the record. This is the air-gap flow of a mint:
+
+1. offline: `policy new p`, then `asset mint p.tok 100 PAYER` (the transaction is queued);
+2. carry the transfer file to the online machine and run `offline execute`;
+3. carry the file back and run `asset settle`: the record shows the minted amount, once.
+
+Upstream writes the record when it queues the transaction; the port writes it when the submission is known (hazard H9). Show the record with `asset show`.
+
+### `asset settle`
+
+```
+spo asset settle [--dry-run] [--discard-unmatched] [--transfer-file PATH]
+```
+
+Reads the history of the transfer file that came back from the online machine and applies, to the asset records of this workspace, every queued mint or burn that `offline execute` submitted and whose pending update waits here. Each is applied exactly once: the pending update is removed in the same commit, so a second run changes nothing and says so. An update whose transaction is still queued is reported as waiting. An update the file knows nothing about (neither queued nor submitted) is reported as unmatched and kept, because the file may simply be the wrong one; if its transaction was removed with `offline clear transactions`, `--discard-unmatched` drops the update, which is never applied. `--dry-run` prints what would be applied or discarded and changes nothing. The output names each transaction id. Needs: transfer-file, clock. Opens the workspace; needs no chain.
+
+### `asset show POLICY.ASSET`
+
+Prints the asset record (a JSON document: `minted`, the identifying fields, `lastAction`, the `meta*` keys an operator edits). It holds no secret. Before anything was submitted it says there is no record yet. Opens the workspace; needs no chain.
+
+## Calidus pool key and Catalyst registration
+
+Both register a key by a signed metadata record and neither submits anything: the registration is stored in the workspace (as `NAME_yymmddHHMMSS.calidus-registration.json` or `NAME_yymmddHHMMSS.vote-registration.cbor`) and put on the chain by an ordinary payment that carries it, `spo wallet send PAYER PAYER MIN --metadata-record NAME.…`, upstream's `01_sendLovelaces <wallet> <wallet> min <file>`. No command writes the record to a file. Signing goes through the signing plan (ADR 0008): the vault signer signs CIP-88 and CIP-36 registrations (capability `registration-signing`), and a pool cold key or stake key held on a hardware wallet is refused before anything is built. No command prints a signing key or a recovery phrase.
+
+### `pool calidus new NAME [--mnemonic-in-fd N] [--account N] [--index N]`
+
+Derives the Calidus key (CIP-151) along `1852H/1815H/ACCOUNTH/0/INDEX` (default `0/0`) from a 24-word phrase and stores `NAME.calidus.vkey`, `.skey`, `.mnemonics` and `.id` together or not at all; existing ones are refused. `--mnemonic-in-fd N` reads the phrase from descriptor `N`; without it a fresh phrase is generated and stored sealed, never shown (there is no random-seed path, as upstream has none). Prints the Calidus id and the public key. Needs: `calidus-keygen`, and `mnemonic-generation` without `--mnemonic-in-fd`.
+
+### `pool calidus register-metadata CALIDUS POOL [--nonce N]`
+
+Builds the CIP-88 version 2 registration of the Calidus key `CALIDUS` for `POOL` and signs it with the pool's cold key (upstream `15 genmeta`). Prints the Calidus id, the pool id, the nonce and the stored record's name, and the exact follow-up `spo wallet send <payer> <payer> MIN --metadata-record NAME`. `--nonce` defaults to the current slot of the work mode; where the mode has none (offline without genesis) on a testnet the command asks for `--nonce`. The command has no `--submit-with`: the follow-up is printed, not run. Needs: signers, `registration-signing`, clock.
+
+### `pool calidus status CALIDUS-ID|KEY|POOL|NAME|all`
+
+Lists the Calidus keys registered on chain for a pool, a Calidus id or key (upstream `15 query`). The capability `calidus-registrations` is absent in every mode: no provider adapter reads CIP-88 registrations yet, and the command says so and stops.
+
+### `catalyst key new NAME [--mnemonic-in-fd N] [--account N] [--index N]`
+
+Derives the voting key (CIP-36) along `1694H/1815H/ACCOUNTH/0/INDEX` and stores `NAME.voting.vkey`, `.skey`, `.pkey` and `.mnemonics`. The phrase is read or generated as for `pool calidus new`. Prints the public key (`cvote_vk`). Needs: `voting-keygen`, and `mnemonic-generation` without `--mnemonic-in-fd`.
+
+### `catalyst register STAKE REWARDS --vote-key NAME[:WEIGHT]... [--nonce N] [--purpose N]`
+
+Delegates the voting power of the stake account `STAKE` to the voting keys and signs the CIP-36 registration with its stake key (upstream `09a genmeta`). A `--vote-key` is the name of a stored voting key, a public key in hex or a `cvote_vk` text; `WEIGHT` defaults to 1; repeat the flag for several. `REWARDS` is a stored address name or a payment address of the network. `--nonce` defaults to the current slot as above; `--purpose` to 0 (Catalyst). Prints the nonce, the keys with their weights, the rewards address, the stored record's name and the follow-up send command. Needs: signers, `registration-signing`, clock. The QR code of the Catalyst mobile app is **not built**: there is no command for it.
+
+## Moving between the upstream layout and the sealed workspace
+
+### `workspace import DIR`
+
+```
+spo workspace import DIR [--owner NAME]... [--password-fd N] [--keep-encrypted] [--overwrite]
+```
+
+Reads `DIR` (an upstream-layout directory; it is opened read-only and never changed) and stores what it holds in the sealed workspace, owner by owner. Each signing key is checked against its verification key, and each address against its keys (`verification-key-derivation`, `address-inspection`). An owner is imported whole or not at all. Files that are not artefacts of the catalogue are listed as `ignored`. It does not apply with `--upstream-layout`.
+
+A key that upstream encrypted needs its password: `--password-fd N`, else a prompt without echo when such a key is met (the source is looked at first). That needs `key-encryption` (gpg); without it the command names the missing tool and says gpg is needed only for upstream's encrypted keys. `--keep-encrypted` stores such a key in upstream's encrypted form without decrypting (no password, no gpg). Existing artefacts are kept and their owner refused unless `--overwrite`.
+
+The result is a table:
+
+```
+OWNER   ARTEFACT       STATUS   REASON
+pool-a  pool-a.node.skey  done
+bad     bad.addr.skey  failed   the verification key does not belong to the signing key
+```
+
+It holds owners, artefact names, statuses and reasons, never key material. The exit status is `1` when any owner was not imported.
+
+### `workspace export DIR`
+
+```
+spo workspace export DIR [--owner NAME]... (--password-fd N | --plaintext) [--overwrite] [--reason TEXT] [--yes]
+```
+
+Writes the pools and wallets of the sealed workspace into `DIR` in the upstream layout, with the same names, modes and contents the upstream scripts expect. `DIR` must be new or empty (`--overwrite` allows a directory that is not). You must choose how the signing keys leave: `--password-fd N` encrypts each in upstream's gpg form with the password read from that descriptor (needs `key-encryption`); `--plaintext` writes them in clear, and needs the word `plaintext` typed at the prompt (`--yes` types it). Mnemonics have no protected form and are written only with `--plaintext`. Giving both, or neither, is refused. It does not apply with `--upstream-layout`.
+
+The audit record is written to the workspace (operation, owners, counts of keys written in clear and protected, whether a password was used, `--reason`) **before** any key is written; if it cannot be made, nothing is exported. `store verify` covers it like any other change. The output is the table of `import`, with each secret's protection (`PLAINTEXT` or `encrypted`), and the exit status is `1` when any owner was not exported. A refused or failed export leaves no empty directory behind.
+
+### `key protect FILE`, `key unprotect FILE`
+
+```
+spo --upstream-layout key protect FILE [--password-fd N]
+spo --upstream-layout key unprotect FILE [--password-fd N] [--reason TEXT] [--yes]
+```
+
+Encrypts a plain signing key file of an upstream-layout directory in place in upstream's form (`protect`, upstream `01_protectKey enc`), or decrypts it (`unprotect`, `dec`). `FILE` is the upstream file name (`pool.node.skey`, `wallet.skey`). The password is read from `--password-fd N`, else asked for without echo (twice for `protect`) and must be strong in upstream's sense. `protect` checks that the new file decrypts to the same key before it replaces the old one. `unprotect` writes the key in clear: it needs the typed word `plaintext` (or `--yes`) and an audit record, kept in the dotfile `.spo-workspace-audit.json` in that directory (`workspace import` lists it as ignored, without a warning). Without `--upstream-layout` both return that keys in the sealed store are always protected. Needs: key-encryption (gpg).
+
+## Hardware wallets
+
+> **Untested on real devices.** The hardware path is built and tested against a stand-in for `cardano-hw-cli`, not against a Ledger, Trezor or Keystone. Before relying on it, work through the [device checklist](../development/hardware-device-checklist.md) with throw-away keys on a test network.
+
+The device is driven by the release set's pinned `cardano-hw-cli` (a Node tool). It is wired only when the binary has a toolchain manifest that provides it (`nix run .#spo`); otherwise capability `hardware-wallet` is absent with that reason and every `--hardware` command refuses, listing it, before anything is asked. The device is not opened to describe the environment or to start a command: the first step that needs it (the signing plan) opens it, and a software-only command never touches it. While waiting for the device, `spo` prints on stderr `Connect and unlock your device and open the Cardano app` with the time left (default 60 seconds, `[hardware] wait_seconds` in [spo.toml](./spo-toml.md)).
+
+What a device may hold is decided by its vendor and app version, before anything is built or shown ([ADR 0008](../explanation/adr/0008-capability-typed-ports.md)): for example a Trezor is refused for a pool cold key with one message and is never asked to generate one. Only the public key and the derivation path of a hardware key are stored (the hardware signing file); a private key never leaves the device.
+
+**Key generation** takes `--hardware` (the holder becomes the device) and the variants of the key:
+
+| Command | Hardware flags |
+| --- | --- |
+| `wallet new NAME` | `--hardware`, `--account N`, `--index N`, `--multisig` (purpose 1854H for the payment key), `--hybrid` (with `--stake`: payment key on the device, stake key in the workspace). Not with `--mnemonic`. |
+| `pool keys generate POOL` | `--hardware`, `--index N` (path `1853H/1815H/0H/NH`) |
+| `drep keys generate`, `committee keys generate-cold`, `committee keys generate-hot` | `--hardware`, `--account N`, `--index N` |
+| `policy new NAME` | `--hardware` |
+
+`--multisig`, `--hybrid` and the path numbers without `--hardware` are refused.
+
+**Transactions** need no flag: when a key of the transaction is held on a device, the body is first brought to the form the device accepts, so the summary you are shown carries the id of the body that is signed, then the device witnesses exactly that body and you confirm on the device. `pool opcert issue` for a hardware cold key is issued by the device and checked before it is stored. A hardware key cannot be combined with a key held in the workspace in one transaction, except where the specs allow it.
+
+**Unrestricted mode.** A device signs a certificate or vote that is not its own only in unrestricted mode (`drep register`, `drep retire` and `vote submit` with several votes can need it). `--allow-unrestricted` does not allow it: it only starts a question that says what the mode means and asks yes or no, default No. `--yes` does not answer that question, and without a terminal the command refuses. Without the flag the question is never asked and consent is never given; a command that needs the mode then fails with `the hardware wallet can sign this transaction only in unrestricted mode`.
+
+**Errors**, each with what to do next:
+
+| Error | Meaning and remedy |
+| --- | --- |
+| no device | none answered in time: connect, unlock, open the Cardano app; `[hardware] wait_seconds` waits longer |
+| device too old | update the Cardano app or firmware; the minimums are `[hardware] min_ledger`, `min_trezor`, `min_keystone` |
+| rejected | you declined on the device; nothing was signed, submitted or stored |
+| disconnected | the device went away; reconnect and run again |
+| expert mode required | enable expert mode in the device's Cardano app and use `--allow-unrestricted` |
+| no canonicalizer, mixed holders, not hardware-canonical | the build cannot drive a device, the keys cannot be mixed, or a body was not canonical (a fault; report it) |
+
+## ADA Handles
+
+A payment destination (`wallet send`, `wallet send-assets`, `wallet claim-rewards`, and `poll submit`) and `spo address` accept an ADA Handle, `$name` or `$sub@name`, in any letter case. Capability `ada-handle`: light mode only (a handle is looked up on the chain; offline mode refuses with `ADA Handles can only be resolved with a chain provider, not offline`).
+
+The Handle API is a third party, so its answer is checked against the chain before it is used: a root handle is looked up by who holds the handle asset (Koios `asset_addresses`) and the holder's outputs must hold it exactly once; a sub-handle is read from the Handle API and verified against the chain or the inline datum; anything unverifiable is refused. Only the current handle policy is trusted. **The confirmation shows both the handle and the address it resolved to** (`to  $alice (addr1...)`), before you are asked. The API root is the network's (`https://api.handle.me`, `https://preprod.api.handle.me`, `https://preview.api.handle.me`), or `[handles] url` in [spo.toml](./spo-toml.md).
+
+## Pool BLS keys
+
+### `pool bls generate POOL`
+
+Generates the pool's BLS12-381 key pair (upstream `04f_genBLSKeys`) into the workspace; the signing key is sealed and never printed, the verification key is. Refused on `mainnet`: upstream ships the script in its testnet tree only, and the key is needed in a registration certificate only from protocol version 12. An existing BLS key is refused. Needs: `bls-keygen`.
+
+## SPO polls
+
+CIP-94 polls, upstream `13a` and `13b`. They need the chain (light mode): offline, `poll-question` is absent and the commands refuse before anything is asked.
+
+### `poll show TXHASH`
+
+Prints the question, the numbered options (from 0) and the question hash an answer commits to, with the source. The question is what the chain provider reported. Needs: `poll-question`.
+
+### `poll answer TXHASH [--option N] [--out FILE] [--yes]`
+
+Shows the poll, takes the option (`--option`, or asks), confirms it (default No; `--yes` answers the confirmation) and writes the answer metadata to `FILE` (default `spopoll_<hash>.cbor`; an existing file is not replaced). An option outside the poll is refused.
+
+### `poll submit PAYER DESTINATION AMOUNT POOL [--poll TXHASH [--option N] | --metadata-file ANSWER]`
+
+Sends the answer as a payment that carries it and that the pool's cold key co-signs (a required signer), so it is attributable to the pool. The answer is built here (`--poll`, option asked when not given) or read from a file (`--metadata-file`); a message does not count. The cold key must be in the workspace. All options and needs of `wallet send` apply.
 
 ## Output rules
 

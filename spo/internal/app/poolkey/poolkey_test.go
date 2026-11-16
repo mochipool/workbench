@@ -215,7 +215,7 @@ func TestGenerateCalidusKeyRefusals(t *testing.T) {
 // verifying with the pool's key; the nonce is the mainnet slot of the clock
 // unless given or taken from the tip; the key files are untouched.
 //
-// spec: SPO-15-EXT-003, SPO-15-OUT-002, SPO-15-IF-003, SPO-15-IF-004, SPO-15-MODE-001, SPO-15-MODE-002, SPO-15-INV-004, SPO-15-INV-005, SPO-15-OUT-004, SPO-15-SEC-004, SPO-Pfiles-OUT-036
+// spec: SPO-15-IN-002, SPO-15-EXT-003, SPO-15-OUT-002, SPO-15-IF-003, SPO-15-IF-004, SPO-15-MODE-001, SPO-15-MODE-002, SPO-15-INV-004, SPO-15-INV-005, SPO-15-OUT-004, SPO-15-SEC-004, SPO-Pfiles-OUT-036
 func TestGenerateCalidusRegistration(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()

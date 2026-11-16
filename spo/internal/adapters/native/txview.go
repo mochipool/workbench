@@ -186,14 +186,15 @@ func hash28(it cborItem) (h [28]byte, err error) {
 }
 
 // clean refuses text that is not valid UTF-8 or holds control or format
-// characters (terminal escapes, bidirectional overrides).
+// characters (terminal escapes, bidirectional overrides), or the line and
+// paragraph separators U+2028 and U+2029.
 func clean(it cborItem) (string, error) {
 	if it.major != 3 || !utf8.Valid(it.b) {
 		return "", viewErr("expected UTF-8 text")
 	}
 	for _, r := range string(it.b) {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
-			return "", viewErr("text with a control character")
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == 0x2028 || r == 0x2029 {
+			return "", viewErr("text with a control character or a line separator")
 		}
 	}
 	return string(it.b), nil

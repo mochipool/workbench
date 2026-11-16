@@ -224,40 +224,21 @@ func TestAuthorise(t *testing.T) {
 	}
 }
 
-// The scope rule: the key role is one of the sender's, every pool the body
-// concerns is one of its pools, and a body with no pool needs Unscoped. The
-// zero scope allows nothing.
+// The zero scope allows nothing, and a role that is not named is out of
+// scope whatever the pools (the per-part rule is in TestCheckScopePerPart).
 // spec: SPO-Xparty-INV-010
-func TestCheckScope(t *testing.T) {
-	scoped := Scope{KeyRoles: []custody.Role{custody.RoleStake}, Pools: []string{"poolA"}}
-	unscoped := Scope{KeyRoles: []custody.Role{custody.RolePayment}, Unscoped: true}
-	tests := []struct {
-		name  string
-		s     Scope
-		role  custody.Role
-		pools []string
-		ok    bool
-	}{
-		{"role and pool in scope", scoped, custody.RoleStake, []string{"poolA"}, true},
-		{"other pool", scoped, custody.RoleStake, []string{"poolB"}, false},
-		{"one of two pools out", scoped, custody.RoleStake, []string{"poolA", "poolB"}, false},
-		{"role not named", scoped, custody.RolePoolCold, []string{"poolA"}, false},
-		{"no pool, not unscoped", scoped, custody.RoleStake, nil, false},
-		{"no pool, unscoped", unscoped, custody.RolePayment, nil, true},
-		{"unscoped does not grant a pool", unscoped, custody.RolePayment, []string{"poolA"}, false},
-		{"unscoped does not grant a role", unscoped, custody.RoleStake, nil, false},
-		{"the zero scope", Scope{}, custody.RoleStake, nil, false},
-		{"the zero scope with a pool", Scope{}, custody.RoleStake, []string{"poolA"}, false},
+func TestCheckScopeZero(t *testing.T) {
+	v := TxView{Certificates: []ViewCert{{Kind: CertStakeDelegation, Pool: [28]byte{1}, HasPool: true}}}
+	if err := CheckScope(Scope{}, custody.RoleStake, v); !errors.Is(err, ErrOutOfScope) {
+		t.Errorf("the zero scope: %v", err)
 	}
-	for _, tc := range tests {
-		err := CheckScope(tc.s, tc.role, tc.pools)
-		if (err == nil) != tc.ok || (err != nil && !errors.Is(err, ErrOutOfScope)) {
-			t.Errorf("%s: %v, want ok=%v", tc.name, err, tc.ok)
-		}
+	if !(Scope{}).Empty() || !(Scope{KeyRoles: []custody.Role{custody.RoleStake}}).Empty() || (Scope{KeyRoles: []custody.Role{custody.RoleStake}, Unscoped: true}).Empty() {
+		t.Error("Empty")
 	}
 }
 
-// An enrollment of a coordinator or signer names its scope: no default.
+// An enrollment of a coordinator names its scope: no default. A signer's is
+// never read, so none is required of it.
 // spec: SPO-Xparty-INV-010, SPO-Xparty-IF-002
 func TestEnrollRequiresAScope(t *testing.T) {
 	k := mk(1, "alice")
@@ -275,11 +256,40 @@ func TestEnrollRequiresAScope(t *testing.T) {
 	if _, err := Enroll(e, nil, t0); !errors.Is(err, ErrInvalidEnrollment) {
 		t.Errorf("a key role twice: %v", err)
 	}
-	// A machine party needs none.
-	e = base
-	e.Roles = []Role{RoleMachine}
-	if _, err := Enroll(e, nil, t0); err != nil {
-		t.Errorf("machine: %v", err)
+	// A machine party and a signer need none: what we ask of a signer is not
+	// limited by a scope.
+	for _, r := range []Role{RoleMachine, RoleSigner} {
+		e = base
+		e.Roles = []Role{r}
+		if _, err := Enroll(e, nil, t0); err != nil {
+			t.Errorf("%s: %v", r, err)
+		}
+	}
+}
+
+// A node key names one machine: a second party with the key already enrolled
+// is refused, revoked or not.
+// spec: SPO-Xparty-INV-018
+func TestEnrollRefusesASharedNodeKey(t *testing.T) {
+	node := NodeKey{7}
+	a, b := mk(1, "alice"), mk(2, "bob")
+	a.id.Node, b.id.Node = &node, &node
+	first, err := Enroll(Enrollment{Document: a.doc("a"), Name: "alice", Roles: []Role{RoleSigner}, Confirmation: typed(a.id.Fingerprint())}, nil, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := Enrollment{Document: b.doc("b"), Name: "bob", Roles: []Role{RoleSigner}, Confirmation: typed(b.id.Fingerprint())}
+	if _, err := Enroll(second, []Party{first}, t0); !errors.Is(err, ErrNodeKeyInUse) {
+		t.Fatalf("shared node key: %v", err)
+	}
+	revoked, _ := Revoke(first)
+	if _, err := Enroll(second, []Party{revoked}, t0); !errors.Is(err, ErrNodeKeyInUse) {
+		t.Fatalf("shared with a revoked party: %v", err)
+	}
+	b.id.Node = nil
+	second.Document = b.doc("b")
+	if _, err := Enroll(second, []Party{first}, t0); err != nil {
+		t.Fatalf("no node key: %v", err)
 	}
 }
 

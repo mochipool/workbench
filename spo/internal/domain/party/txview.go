@@ -1,11 +1,9 @@
 package party
 
 import (
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 )
@@ -174,35 +172,6 @@ type ViewProposal struct {
 	// does not take apart.
 	Action []byte
 	Anchor ViewAnchor
-}
-
-// ConcernedPools lists the pools the body concerns, once each, in order of
-// first appearance: the subject of a registration or retirement, the target of
-// a delegation (a stake delegation and every combined delegation
-// certificate), and every stake-pool voter (SPO-Xparty-INV-010).
-func (v TxView) ConcernedPools() [][28]byte {
-	var out [][28]byte
-	add := func(id [28]byte) {
-		if !slices.Contains(out, id) {
-			out = append(out, id)
-		}
-	}
-	for _, c := range v.Certificates {
-		if c.PoolReg != nil {
-			add(c.PoolReg.Operator)
-		}
-		if c.HasPool {
-			add(c.Pool)
-		}
-	}
-	for _, vote := range v.Votes {
-		if h, ok := strings.CutPrefix(vote.Voter, "pool:"); ok {
-			if b, err := hex.DecodeString(h); err == nil && len(b) == 28 {
-				add([28]byte(b))
-			}
-		}
-	}
-	return out
 }
 
 // Undisplayable lists what the body has that a remote signer cannot be shown

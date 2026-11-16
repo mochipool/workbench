@@ -202,7 +202,7 @@ use, without the network and without opening the workspace.`,
 			env.Absent(CapGenesis, genesisWhy)
 			w := a.d.Out
 			fmt.Fprintf(w, "Workspace %s: network %s, mode %s\n\nChain capabilities:\n", a.workspace, cfg.Network, cfg.Mode)
-			chainCaps := []Cap{CapTip, CapSync, CapOpCertCount, CapParams, CapUtxos, CapRewards, CapPools, CapDReps, CapCrossCheck, CapSubmit, CapQueue}
+			chainCaps := []Cap{CapTip, CapSync, CapOpCertCount, CapParams, CapUtxos, CapRewards, CapPools, CapDReps, CapCrossCheck, CapSubmit, CapQueue, CapCalidusRead, CapAdaHandle, CapPollQuestion}
 			chainCaps = append(chainCaps, GovernanceChainCaps...)
 			var absent []Cap
 			for _, c := range chainCaps {
@@ -227,7 +227,7 @@ use, without the network and without opening the workspace.`,
 				}
 			}
 			fmt.Fprintln(w, "\nLocal:")
-			local := append([]Cap{CapClock, CapGenesis, CapKesKeys, CapVrfKeys, CapColdKeys, CapPaymentKeys, CapStakeKeys, CapMnemonics, CapDeriver, CapAddressMake, CapAddress, CapMinOut, CapFees, CapBodies, CapAssemble, CapCerts, CapCertDecode, CapPoolCerts, CapPoolCertDecode, CapMetaHash, CapTxID, CapTxView, CapBundle, CapEras, CapFileSink, CapAttach, CapMetaFetch, CapTickers}, GovernanceLocalCaps...)
+			local := append([]Cap{CapClock, CapGenesis, CapKesKeys, CapVrfKeys, CapColdKeys, CapPaymentKeys, CapStakeKeys, CapMnemonics, CapDeriver, CapAddressMake, CapAddress, CapMinOut, CapFees, CapBodies, CapAssemble, CapCerts, CapCertDecode, CapPoolCerts, CapPoolCertDecode, CapMetaHash, CapTxID, CapTxView, CapMetaFiles, CapMsgEncrypt, CapPolicyID, CapKeyCrypto, CapVKeyDerive, CapCalidusKeys, CapVotingKeys, CapSignatures, CapBundle, CapEras, CapFileSink, CapAttach, CapMetaFetch, CapTickers, CapHardware, CapBLSKeys}, GovernanceLocalCaps...)
 			for _, c := range local {
 				if env.Has(c) {
 					fmt.Fprintf(w, "  %-20s yes\n", c)

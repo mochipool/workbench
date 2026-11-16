@@ -45,6 +45,12 @@ type BodySpec struct {
 	// metadata (SPO-Pparam-OUT-002).
 	MetadataFiles     []MetadataFile
 	MessageEncryption string
+	// RequiredSigners are the key hashes the body lists as required signers
+	// (body key 14, `--required-signer-hash`; 13b adds the pool's cold key).
+	// The ledger encodes a set: the encoder sorts them and drops duplicates, as
+	// cardano-cli does. Each one needs its own witness, so the caller counts it
+	// in the witness count of the fee estimate (SPO-13b-INV-001).
+	RequiredSigners []KeyHash
 }
 
 // Ledger bundles the functions Balance needs.
@@ -249,7 +255,8 @@ func hintSuffix(h string) string {
 func (d Draft) spec(outs []Output, fee chain.Lovelace, ttl uint64) BodySpec {
 	return BodySpec{Inputs: d.Inputs, Outputs: outs, Fee: fee, TTL: ttl, Message: d.Message,
 		Certificates: d.Certificates, Withdrawals: d.Withdrawals, Votes: d.Votes, Proposals: d.Proposals,
-		Mint: d.Mint, MintScripts: d.MintScripts, MetadataFiles: d.MetadataFiles, MessageEncryption: d.MessageEncryption}
+		Mint: d.Mint, MintScripts: d.MintScripts, MetadataFiles: d.MetadataFiles, MessageEncryption: d.MessageEncryption,
+		RequiredSigners: d.RequiredSigners}
 }
 
 // Balance runs stages 6 to 8 of the pipeline: it finds the fee by
