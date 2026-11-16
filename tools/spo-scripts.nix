@@ -35,6 +35,8 @@ let
     pkgs.curl
     pkgs.bc
     pkgs.xxd
+    # gpg encrypts/decrypts "enc" key files (00_common.sh refuses without it)
+    pkgs.gnupg
   ];
 
   # The upstream repo keeps mainnet and testnet script variants in
@@ -94,6 +96,8 @@ let
     );
 
 in {
+  inherit mkParams;
+
   mkCommon = { overrides ? {} }: {
     derivation = mkScripts { inherit overrides; };
     commonInc = mkCommonInc { inherit overrides; };

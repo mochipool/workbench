@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spo-workbench"
+version = "0.1.0"
+description = "Resumable, validated workflow orchestration over the Cardano SPO scripts"
+license = { text = "GPL-3.0-only" }
+requires-python = ">=3.11"
+# Deliberately no runtime dependencies: this tool handles key material, so the
+# trusted code base is the Python standard library plus this package.
+dependencies = []
+
+[project.scripts]
+workbench = "spo_workbench.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["e2e: drives the real SPO scripts (needs SPO_WB_E2E_TOOLCHAIN)"]
