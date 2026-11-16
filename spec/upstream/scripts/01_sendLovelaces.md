@@ -202,6 +202,12 @@ Use case `SendLovelaces(source, destination, amount, extras)` on the `PaymentAcc
 * Offer `ALL` and `MIN` to a destination that may receive assets as an explicit option; upstream keeps assets on the source in every form but `ALLFUNDS`.
 * A remote signer or hardware wallet receives the body and the change-output declarations of SPO-01sendLovelaces-EXT-002 and returns a witness; the paying key stays out of the use case.
 
+## Notes from the oracle (2026-11-16)
+
+* Run offline against a recorded snapshot (`spo/test/parity/send_lovelaces_test.go`, `workbench -y exec 01_sendLovelaces.sh w d <amount>`), the queued transaction is byte-equal to the port's for an explicit amount with and without assets, `ALLFUNDS`, `ALL` without assets and a `msg:` message. `MIN` and `ALL` with assets differ in the two amounts they derive from the minimum output value, by exactly `2 * utxoCostPerByte`, for the reason given under SPO-Cutxo-INV-007 in Cutxo; fee, inputs and addresses are equal.
+* `-y` on the `workbench` command line sets `ENV_SKIP_PROMPT=YES` (SPO-01sendLovelaces-PR-001); the offline entry carries `general.offlineCLI` `11.2.3.0`, the bare version number.
+* **Port decisions** (each recorded in `spo/internal/app/wallet/send_lovelaces_test.go` and `spo/internal/domain/txbuild/txbuild_test.go`): a zero-padded amount is refused at parse time (IF-002 quirk); each output is compared with its own minimum (PRE-003 quirk); a destination file must hold a payment address (IF-008); a Byron destination is refused until the open question below is settled; an ADA Handle is refused with a typed error until Caddr is ported; a decline is `ErrDeclined`, never success; a network mismatch of either address is refused before any query.
+
 ## Open questions
 
 * How `cardano-cli` reads an output amount with a leading zero (`+010`) in `build-raw`. If it reads decimal, the body of an octal-affected run does not balance and the node rejects it. A recorded `build-raw` run settles it.

@@ -1,7 +1,9 @@
 package seal
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 
@@ -39,12 +41,19 @@ func MinKDF() KDFParams { return KDFParams{MemoryKiB: 64 * 1024, Passes: 3, Lane
 // assigns it, so non-test code cannot lower it.
 var kdfFloor = MinKDF()
 
-// Upper bounds, so a modified file cannot make us allocate without limit.
+// Upper bounds, so a modified file cannot make us allocate or compute without
+// limit before any key is checked: 1 GiB, 10 passes. Opening a store refuses a
+// slot above them without running Argon2id.
 const (
-	maxKDFMemoryKiB = 4 * 1024 * 1024 // 4 GiB
-	maxKDFPasses    = 64
+	maxKDFMemoryKiB = 1024 * 1024
+	maxKDFPasses    = 10
 	maxKDFLanes     = 64
 )
+
+// MaxKDF is the heaviest parameter set the binary accepts.
+func MaxKDF() KDFParams {
+	return KDFParams{MemoryKiB: maxKDFMemoryKiB, Passes: maxKDFPasses, Lanes: maxKDFLanes}
+}
 
 // ErrWeakKDF is returned for Argon2id parameters outside the accepted range.
 var ErrWeakKDF = errors.New("seal: key-derivation parameters outside the accepted range")
@@ -64,14 +73,24 @@ func (p KDFParams) validate() error {
 //	Kind     SlotPassphrase or SlotRecovery
 //	KDF      Argon2id parameters (passphrase slots only)
 //	Salt     16 random bytes (passphrase slots only)
+//	Commit   32 bytes: HMAC-SHA256(slot key, labelSlotCommit)
 //	Nonce    24 random bytes
 //	Wrapped  XChaCha20-Poly1305(master key) = 48 bytes
 //
 // The slot key is Argon2id(passphrase, Salt, KDF) for a passphrase slot and
 // HKDF-SHA256(recovery key, info = labelRecoverySlot) for a recovery slot.
+// Passphrases are used as the bytes the operator typed: there is no Unicode
+// normalisation, so a passphrase typed differently (precomposed against
+// combining characters) is a different passphrase.
+//
+// Key commitment. Poly1305 does not commit to the key: a crafted ciphertext
+// can authenticate under several keys. The slot therefore stores Commit and
+// Unwrap compares it, in constant time, with the commitment of the candidate
+// slot key before attempting the AEAD, so a slot opens under exactly one key.
+//
 // Associated data is the canonical CBOR of
 //
-//	[format version, workspace id, slot id, slot kind, kdf]
+//	[format version, workspace id, slot id, slot kind, kdf, commit]
 //
 // where kdf is ["argon2id", memory KiB, passes, lanes, salt] for a passphrase
 // slot and ["hkdf-sha256", info label] for a recovery slot.
@@ -80,6 +99,7 @@ type Slot struct {
 	Kind    string
 	KDF     KDFParams
 	Salt    []byte
+	Commit  []byte
 	Nonce   []byte
 	Wrapped []byte
 }
@@ -100,7 +120,10 @@ func (s Slot) ad(workspaceID []byte) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("%w: slot kind %q", ErrFormat, s.Kind)
 	}
-	return EncodeCanonical([]any{FormatVersion, workspaceID, s.ID, s.Kind, kdf})
+	if len(s.Commit) != MACSize {
+		return nil, fmt.Errorf("%w: slot commitment", ErrFormat)
+	}
+	return EncodeCanonical([]any{FormatVersion, workspaceID, s.ID, s.Kind, kdf, s.Commit})
 }
 
 // slotKey derives the slot's wrapping key from the credential.
@@ -113,13 +136,16 @@ func (s Slot) slotKey(cred *secret.Buffer) (*secret.Buffer, error) {
 		if len(s.Salt) != SaltSize {
 			return nil, ErrFormat
 		}
-		var out *secret.Buffer
+		var k []byte
 		err := cred.Use(func(pw []byte) error {
-			k := argon2.IDKey(pw, s.Salt, s.KDF.Passes, s.KDF.MemoryKiB, s.KDF.Lanes, KeySize)
-			out = secret.Take(k) // wipes k
+			// Argon2id works in heap blocks we cannot wipe (package comment).
+			k = argon2.IDKey(pw, s.Salt, s.KDF.Passes, s.KDF.MemoryKiB, s.KDF.Lanes, KeySize)
 			return nil
 		})
-		return out, err
+		if err != nil {
+			return nil, err
+		}
+		return secret.TryTake(k) // wipes k
 	case SlotRecovery:
 		if cred.Len() != KeySize {
 			return nil, fmt.Errorf("%w: recovery key must be %d bytes", ErrFormat, KeySize)
@@ -130,9 +156,9 @@ func (s Slot) slotKey(cred *secret.Buffer) (*secret.Buffer, error) {
 }
 
 // Unwrap recovers the master key using the passphrase (passphrase slot) or the
-// raw 32-byte recovery key (recovery slot). A wrong credential and a modified
-// slot both give ErrAuth; weak stored KDF parameters give ErrWeakKDF before any
-// work is done.
+// raw 32-byte recovery key (recovery slot). A wrong credential, a mismatched
+// commitment and a modified slot all give ErrAuth; weak or excessive stored
+// KDF parameters give ErrWeakKDF before any work is done.
 func (s Slot) Unwrap(workspaceID []byte, cred *secret.Buffer) (*secret.Buffer, error) {
 	if len(s.Nonce) != NonceSize || len(s.Wrapped) != KeySize+tagSize {
 		return nil, ErrFormat
@@ -146,7 +172,22 @@ func (s Slot) Unwrap(workspaceID []byte, cred *secret.Buffer) (*secret.Buffer, e
 		return nil, err
 	}
 	defer sk.Destroy()
+	var got []byte
+	if err := sk.Use(func(k []byte) error { got = slotCommit(k); return nil }); err != nil {
+		return nil, err
+	}
+	if !hmac.Equal(got, s.Commit) {
+		return nil, ErrAuth
+	}
 	return openToBuffer(sk, s.Nonce, s.Wrapped, ad)
+}
+
+// slotCommit is HMAC-SHA256 under the slot key over labelSlotCommit. The HMAC
+// state copies the key into heap memory (package comment).
+func slotCommit(key []byte) []byte {
+	m := hmac.New(sha256.New, key)
+	m.Write([]byte(labelSlotCommit))
+	return m.Sum(nil)
 }
 
 // NewPassphraseSlot wraps master under a key derived from passphrase.
@@ -171,7 +212,10 @@ func (s sealer) newPassphraseSlot(workspaceID, slotID []byte, master, passphrase
 		return Slot{}, err
 	}
 	slot := Slot{ID: slotID, Kind: SlotPassphrase, KDF: p, Salt: salt, Nonce: nonce}
-	return slot, s.wrap(&slot, workspaceID, master, passphrase)
+	if err := s.wrap(&slot, workspaceID, master, passphrase); err != nil {
+		return Slot{}, err
+	}
+	return slot, nil
 }
 
 // NewRecoverySlot generates a 32-byte recovery key and wraps master under it.
@@ -199,18 +243,20 @@ func (s sealer) newRecoverySlot(workspaceID, slotID []byte, master *secret.Buffe
 	return slot, rk, nil
 }
 
-// wrap fills slot.Wrapped. slot.Nonce, Kind, ID (and KDF, Salt) are set.
+// wrap fills slot.Commit and slot.Wrapped. slot.Nonce, Kind, ID (and KDF,
+// Salt) are set.
 func (s sealer) wrap(slot *Slot, workspaceID []byte, master, cred *secret.Buffer) error {
-	ad, err := slot.ad(workspaceID)
-	if err != nil {
-		return err
-	}
 	sk, err := slot.slotKey(cred)
 	if err != nil {
 		return err
 	}
 	defer sk.Destroy()
 	return sk.Use(func(k []byte) error {
+		slot.Commit = slotCommit(k)
+		ad, err := slot.ad(workspaceID)
+		if err != nil {
+			return err
+		}
 		return master.Use(func(m []byte) error {
 			if len(m) != KeySize {
 				return ErrFormat
@@ -224,3 +270,6 @@ func (s sealer) wrap(slot *Slot, workspaceID []byte, master, cred *secret.Buffer
 
 // NewID returns IDSize random bytes (workspace, slot and record ids).
 func NewID() ([]byte, error) { return readBytes(rand.Reader, IDSize) }
+
+// Validate reports whether p is inside the accepted range (ErrWeakKDF if not).
+func (p KDFParams) Validate() error { return p.validate() }

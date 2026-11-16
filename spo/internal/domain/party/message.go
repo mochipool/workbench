@@ -1,0 +1,345 @@
+package party
+
+import (
+	"errors"
+	"fmt"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/mochipool/workbench/spo/internal/domain/custody"
+)
+
+// Type names a message (the table in spec/extensions/Xparty.md).
+type Type string
+
+const (
+	TypeSigningRequest   Type = "SigningRequest"
+	TypeSigningResponse  Type = "SigningResponse"
+	TypeSigningRefusal   Type = "SigningRefusal"
+	TypeCollectionClosed Type = "CollectionClosed"
+	TypeInvite           Type = "Invite"
+	TypeBundle           Type = "Bundle"
+)
+
+// Types lists every message type.
+func Types() []Type {
+	return []Type{TypeSigningRequest, TypeSigningResponse, TypeSigningRefusal,
+		TypeCollectionClosed, TypeInvite, TypeBundle}
+}
+
+// Valid reports whether t is a known type.
+func (t Type) Valid() bool {
+	for _, k := range Types() {
+		if t == k {
+			return true
+		}
+	}
+	return false
+}
+
+// MessageID is 16 random bytes (SPO-Xparty-OUT-003).
+type MessageID [16]byte
+
+// CollectionID names a witness collection; SlotID a slot within it. The spec
+// does not fix their shape: a collection id is 16 bytes, a slot id a small
+// number.
+type (
+	CollectionID [16]byte
+	SlotID       uint16
+)
+
+// Limits. MaxEnvelopeBytes is SPO-Xparty-INV-008; the others bound what a
+// well-formed peer sends so that a malicious one cannot make us hold more.
+const (
+	MaxEnvelopeBytes = 1 << 20
+	MaxPurposeBytes  = 1024
+	MaxOperationLen  = 64
+	MaxWitnessBytes  = 1024
+	MaxAddressBytes  = 2048
+	MaxBundleTxs     = 1024
+	MaxAttachments   = 256
+	MaxAttachName    = 128
+)
+
+// ErrInvalidBody is returned for a body that breaks a field rule.
+var ErrInvalidBody = errors.New("party: invalid message body")
+
+func bad(format string, a ...any) error {
+	return fmt.Errorf("%w: %s", ErrInvalidBody, fmt.Sprintf(format, a...))
+}
+
+// Body is a message body. Validate checks field sizes and shapes only; what a
+// body means for the receiver's state is the receiver's decision.
+type Body interface {
+	Type() Type
+	Validate() error
+}
+
+// SigningRequest: coordinator to signer.
+// [collection id, slot id, key role, key hash, operation, transaction body
+// CBOR, body hash, ttl slot, network magic, purpose text].
+type SigningRequest struct {
+	Collection   CollectionID
+	Slot         SlotID
+	KeyRole      custody.Role
+	KeyHash      [28]byte // BLAKE2b-224 of the verification key
+	Operation    string
+	TxBody       []byte
+	BodyHash     [32]byte // BLAKE2b-256 of TxBody
+	TTLSlot      uint64
+	NetworkMagic uint32
+	// Purpose is for display only; nothing is derived from it (SPO-Xparty-INV-011).
+	Purpose string
+}
+
+func (SigningRequest) Type() Type { return TypeSigningRequest }
+
+func knownRole(r custody.Role) bool {
+	for _, k := range custody.Roles() {
+		if r == k {
+			return true
+		}
+	}
+	return false
+}
+
+// Validate checks the field rules. The transaction size against the
+// protocol's maxTxSize is CheckTxSize.
+func (m SigningRequest) Validate() error {
+	switch {
+	case !knownRole(m.KeyRole):
+		return bad("key role %q", m.KeyRole)
+	case m.Operation == "" || len(m.Operation) > MaxOperationLen || !cleanText(m.Operation):
+		return bad("operation")
+	case len(m.TxBody) == 0 || len(m.TxBody) > MaxEnvelopeBytes:
+		return bad("transaction body size %d", len(m.TxBody))
+	case len(m.Purpose) > MaxPurposeBytes || !cleanText(m.Purpose):
+		return bad("purpose text")
+	case m.TTLSlot == 0:
+		return bad("ttl slot")
+	}
+	return nil
+}
+
+// CheckTxSize is the transaction half of SPO-Xparty-INV-008.
+func (m SigningRequest) CheckTxSize(maxTxSize int) error {
+	if len(m.TxBody) > maxTxSize {
+		return bad("transaction body is %d bytes, maxTxSize is %d", len(m.TxBody), maxTxSize)
+	}
+	return nil
+}
+
+// SigningResponse: signer to coordinator.
+// [collection id, slot id, request message id, witness CBOR].
+type SigningResponse struct {
+	Collection CollectionID
+	Slot       SlotID
+	Request    MessageID
+	Witness    []byte
+}
+
+func (SigningResponse) Type() Type { return TypeSigningResponse }
+
+func (m SigningResponse) Validate() error {
+	if len(m.Witness) == 0 || len(m.Witness) > MaxWitnessBytes {
+		return bad("witness size %d", len(m.Witness))
+	}
+	return nil
+}
+
+// RefusalReason is the reason code of a SigningRefusal. The codes follow the
+// refusal list of SPO-Xparty-PRE-006, in its order, and add the operator's
+// own decision (SPO-Xparty-PR-002).
+type RefusalReason uint8
+
+const (
+	RefuseNoKey RefusalReason = iota + 1
+	RefuseWrongNetwork
+	RefuseBodyHash
+	RefuseBodyDecode
+	RefuseExpired
+	RefuseColdKeyOverNetwork
+	RefuseCannotSign
+	RefuseDeclined
+)
+
+// Valid reports whether r is a defined code.
+func (r RefusalReason) Valid() bool { return r >= RefuseNoKey && r <= RefuseDeclined }
+
+// SigningRefusal: signer to coordinator.
+// [collection id, slot id, request message id, reason code].
+type SigningRefusal struct {
+	Collection CollectionID
+	Slot       SlotID
+	Request    MessageID
+	Reason     RefusalReason
+}
+
+func (SigningRefusal) Type() Type { return TypeSigningRefusal }
+
+func (m SigningRefusal) Validate() error {
+	if !m.Reason.Valid() {
+		return bad("refusal reason %d", m.Reason)
+	}
+	return nil
+}
+
+// Outcome of a collection.
+type Outcome string
+
+const (
+	OutcomeSubmitted Outcome = "submitted"
+	OutcomeDiscarded Outcome = "discarded"
+	OutcomeExpired   Outcome = "expired"
+)
+
+// CollectionClosed: coordinator to signer.
+// [collection id, outcome: submitted with tx id, discarded, or expired].
+// On the wire the outcome is a text string and the transaction id a byte
+// string, empty unless submitted.
+type CollectionClosed struct {
+	Collection CollectionID
+	Outcome    Outcome
+	TxID       []byte // 32 bytes when submitted, empty otherwise
+}
+
+func (CollectionClosed) Type() Type { return TypeCollectionClosed }
+
+func (m CollectionClosed) Validate() error {
+	switch m.Outcome {
+	case OutcomeSubmitted:
+		if len(m.TxID) != 32 {
+			return bad("submitted needs a 32-byte transaction id")
+		}
+	case OutcomeDiscarded, OutcomeExpired:
+		if len(m.TxID) != 0 {
+			return bad("%s carries no transaction id", m.Outcome)
+		}
+	default:
+		return bad("outcome %q", m.Outcome)
+	}
+	return nil
+}
+
+// Invite: coordinator to signer. [tailcat address, coordinator tailcat node
+// key]. The address is a Secret (SPO-Xparty-SEC-001): it is redacted in
+// every format verb.
+type Invite struct {
+	Address string
+	Node    NodeKey
+}
+
+func (Invite) Type() Type { return TypeInvite }
+
+func (m Invite) Validate() error {
+	if m.Address == "" || len(m.Address) > MaxAddressBytes || !cleanText(m.Address) {
+		return bad("tailcat address")
+	}
+	if zero32(m.Node) {
+		return bad("node key")
+	}
+	return nil
+}
+
+func (m Invite) String() string   { return "Invite{[redacted]}" }
+func (m Invite) GoString() string { return m.String() }
+
+var attachRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+// Attachment is a named blob in a Bundle. The name is a plain label, never a
+// path (SPO-Ptransfer-SEC-001).
+type Attachment struct {
+	Name string
+	Data []byte
+}
+
+// Bundle: machine to machine, the air-gap bundle. [chain snapshot, queued
+// transactions, attachments]; the spec leaves the inner shape open, this is
+// the smallest one: a snapshot blob, a list of transaction blobs, a list of
+// named attachments.
+type Bundle struct {
+	Snapshot     []byte
+	Transactions [][]byte
+	Attachments  []Attachment
+}
+
+func (Bundle) Type() Type { return TypeBundle }
+
+func (m Bundle) Validate() error {
+	if len(m.Transactions) > MaxBundleTxs || len(m.Attachments) > MaxAttachments {
+		return bad("too many items")
+	}
+	total := len(m.Snapshot)
+	for _, t := range m.Transactions {
+		total += len(t)
+	}
+	seen := map[string]bool{}
+	for _, a := range m.Attachments {
+		if !attachRE.MatchString(a.Name) || strings.Contains(a.Name, "..") || seen[a.Name] {
+			return bad("attachment name %q", a.Name)
+		}
+		seen[a.Name] = true
+		total += len(a.Data)
+	}
+	if total > MaxEnvelopeBytes {
+		return bad("bundle is larger than an envelope")
+	}
+	return nil
+}
+
+// Timing (SPO-Xparty-PRE-002, INV-009).
+const (
+	// ClockSkew is how far in the future a created time may be.
+	ClockSkew = 10 * time.Minute
+	// MaxRequestLifetime caps SigningRequest.expires after created (INV-009).
+	MaxRequestLifetime = 7 * 24 * time.Hour
+	// MaxLifetime caps any message's lifetime. The spec does not set it; the
+	// replay log holds an id until expiry, so an unbounded expiry would let
+	// a peer grow it without limit.
+	MaxLifetime = 30 * 24 * time.Hour
+)
+
+// Timing refusals.
+var (
+	ErrExpired    = errors.New("party: message expired")
+	ErrFromFuture = errors.New("party: message created in the future")
+	ErrWindow     = errors.New("party: message validity window is malformed")
+)
+
+// CheckWindow is the time step of SPO-Xparty-PRE-002: expires has not
+// passed, and created is at most ClockSkew ahead. It also refuses a window
+// that ends before it starts or is longer than MaxLifetime.
+func CheckWindow(created, expires, now time.Time) error {
+	if now.After(expires) {
+		return ErrExpired
+	}
+	if created.After(now.Add(ClockSkew)) {
+		return ErrFromFuture
+	}
+	if expires.Before(created) || expires.Sub(created) > MaxLifetime {
+		return ErrWindow
+	}
+	return nil
+}
+
+// ErrRequestExpiry is SPO-Xparty-INV-009.
+var ErrRequestExpiry = errors.New("party: signing request expires later than allowed")
+
+// CheckRequestExpiry is SPO-Xparty-INV-009: expires is no later than the
+// wall-clock time of the body's TTL slot, and no later than 7 days after
+// created. Converting the slot to a time needs the chain's genesis, so the
+// caller passes the result.
+func CheckRequestExpiry(created, expires, ttlTime time.Time) error {
+	if expires.After(ttlTime) || expires.After(created.Add(MaxRequestLifetime)) {
+		return ErrRequestExpiry
+	}
+	return nil
+}
+
+// FileName is the file transport's name for an envelope (SPO-Xparty-IF-004):
+// <type>-<collection id prefix>-<slot>.spo, the prefix being the first 4
+// bytes in hex.
+func FileName(t Type, c CollectionID, s SlotID) string {
+	return fmt.Sprintf("%s-%x-%d.spo", t, c[:4], s)
+}

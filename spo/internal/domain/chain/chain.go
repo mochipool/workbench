@@ -143,7 +143,13 @@ type ProtocolParameters struct {
 	ProtocolMajor              uint64
 	ProtocolMinor              uint64
 	MinFeeRefScriptCostPerByte Rational
-	Raw                        json.RawMessage
+	// MinPoolCost (`minPoolCost`) and PoolRetireMaxEpoch (`poolRetireMaxEpoch`,
+	// the ledger's eMax) are read by the pool use cases. Zero means the
+	// provider did not state them; the use cases then look in Raw and refuse
+	// when neither has them.
+	MinPoolCost        Lovelace
+	PoolRetireMaxEpoch uint64
+	Raw                json.RawMessage
 }
 
 // RewardAccount is the state of a registered stake address. Fields the
@@ -154,4 +160,58 @@ type RewardAccount struct {
 	VoteDelegation Reading[string] // provider's text: drep1..., drep_always_abstain, ...; None: no vote delegation
 	Withdrawable   Lovelace        // rewards available to withdraw
 	Deposit        Reading[Lovelace]
+	// GovActionDeposits lists the governance-action deposits that will be
+	// refunded to this account (stake-address-info govActionDeposits). The
+	// zero value is Unknown: a provider that does not report them has not
+	// said there are none.
+	GovActionDeposits Reading[[]GovActionDeposit]
+}
+
+// GovActionDeposit is one open governance action whose deposit is refunded
+// to a stake address: the action id as "<txid>#<index>" and the amount.
+type GovActionDeposit struct {
+	Action string
+	Amount Lovelace
+}
+
+// DRepID names a DRep by its credential: a key hash or a script hash.
+type DRepID struct {
+	Script bool
+	Hash   [28]byte
+}
+
+// DRepState is a registered DRep as the chain reports it.
+type DRepState struct {
+	ID      DRepID
+	Deposit Lovelace
+}
+
+// PoolStatus is where a registered pool is in its life, as a provider says
+// it (Koios `pool_status`; the node's `query stake-pools` lists a retiring
+// pool as registered). The zero value is PoolRegistered.
+type PoolStatus string
+
+// Pool statuses.
+const (
+	PoolRegistered PoolStatus = ""         // registered, no retirement pending
+	PoolRetiring   PoolStatus = "retiring" // registered, retirement scheduled at RetiringEpoch
+	PoolRetired    PoolStatus = "retired"  // was registered, retirement took effect
+)
+
+// PoolState is a registered stake pool as the chain reports it. Name and
+// ticker are display only. The fields after Ticker are filled by providers
+// that know them; a zero value means "not reported" (SPO-05e-EXT-001).
+type PoolState struct {
+	ID     PoolID
+	Name   string
+	Ticker string
+
+	Status        PoolStatus
+	RetiringEpoch uint64
+	Pledge        Reading[Lovelace]
+	Cost          Reading[Lovelace]
+	Margin        string // decimal text as the provider states it
+	RewardAddress string
+	MetaURL       string
+	MetaHash      string
 }

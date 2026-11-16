@@ -29,6 +29,49 @@ const (
 	KesExpire      Kind = "kes-expire.json"
 )
 
+// Workspace-level records, not owned by a pool or wallet.
+const (
+	// ProviderToken is the API token of a chain provider; the Ref name is
+	// the provider ("koios"). Secret (ADR 0004, concern N3).
+	ProviderToken Kind = "provider.token"
+)
+
+// Wallet artefacts (SPO-Pfiles-OUT-001, OUT-002, OUT-004). The Name of a
+// reference is the operator's name for the address as upstream's scripts
+// take it: `w` for a key-only address made by `02` (files `w.addr`,
+// `w.vkey`, `w.skey`), `w.payment` for the payment account of a wallet made
+// by `03a` (`w.payment.addr`, ...). The stake account of such a wallet is
+// `w` with the Staking kinds (`w.staking.addr`, ...). A dot in a name is
+// allowed by Ref.Validate, so no separate kinds are needed for `.payment.`.
+const (
+	AddrFile       Kind = "addr"         // <name>.addr: one bech32 address, not secret
+	AddrVKey       Kind = "addr.vkey"    // <name>.vkey
+	AddrSKey       Kind = "addr.skey"    // <name>.skey: a payment signing key, secret
+	AddrHwsFile    Kind = "addr.hwsfile" // <name>.hwsfile: hardware signing file, not secret
+	StakingAddr    Kind = "staking.addr" // <name>.staking.addr
+	StakingVKey    Kind = "staking.vkey" // <name>.staking.vkey
+	StakingSKey    Kind = "staking.skey" // <name>.staking.skey: secret
+	StakingHwsFile Kind = "staking.hwsfile"
+	// StakingCert is the stake registration certificate 03b writes
+	// (<name>.staking.cert). 03a refuses to run when it exists
+	// (SPO-03a-PRE-001); the kind is for that check.
+	StakingCert Kind = "staking.cert"
+	// DelegCert is the stake delegation certificate 05b writes
+	// (<name>.deleg.cert), SPO-Pfiles-OUT-007.
+	DelegCert Kind = "deleg.cert"
+	// VoteDelegCert is the vote delegation certificate 22a writes
+	// (<name>.vote-deleg.cert), SPO-Pfiles-OUT-008.
+	VoteDelegCert Kind = "vote-deleg.cert"
+	// StakingDeregCert is the deregistration certificate 08a writes
+	// (<name>.staking.dereg-cert), SPO-Pfiles-OUT-009.
+	StakingDeregCert Kind = "staking.dereg-cert"
+	// DRepVKey is a DRep verification key (<name>.drep.vkey), read by 22a.
+	DRepVKey Kind = "drep.vkey"
+	// PaymentMnemonics is <name>.payment.mnemonics: the 24 words of a
+	// mnemonic-derived wallet, one line. Secret in clear (SPO-Pfiles-OUT-005).
+	PaymentMnemonics Kind = "payment.mnemonics"
+)
+
 type kindInfo struct {
 	secret   bool
 	numbered bool
@@ -40,6 +83,13 @@ var kinds = map[Kind]kindInfo{
 	KesVKey: {numbered: true}, KesSKey: {secret: true, numbered: true},
 	KesCounter: {}, KesCounterNext: {},
 	OpCert: {numbered: true}, KesExpire: {},
+	ProviderToken: {secret: true},
+	AddrFile:      {}, AddrVKey: {}, AddrSKey: {secret: true}, AddrHwsFile: {},
+	StakingAddr: {}, StakingVKey: {}, StakingSKey: {secret: true}, StakingHwsFile: {},
+	StakingCert: {}, PaymentMnemonics: {secret: true},
+	DelegCert: {}, VoteDelegCert: {}, StakingDeregCert: {}, DRepVKey: {},
+	PartyKeys: {secret: true}, PartyIdentity: {}, PartyRecords: {}, PartyReplay: {},
+	TailcatNodeKey: {secret: true}, TailcatPSK: {secret: true}, TailcatAddr: {secret: true},
 }
 
 // Known reports whether k is in the catalogue.
@@ -125,3 +175,28 @@ type Vault interface {
 	// Open returns the secret in guarded memory. The caller destroys it.
 	Open(ctx context.Context, ref Ref) (*secret.Buffer, error)
 }
+
+// Multi-party records (spec/extensions/Xparty.md). Names are the operator's
+// local label: "local" for the workspace's own identity, the coordinator's
+// party name for an address received in an Invite.
+const (
+	// PartyKeys is the local identity's private keys: 64 bytes, the Ed25519
+	// seed then the X25519 scalar (SPO-Xparty-INV-001). Secret.
+	PartyKeys Kind = "party.keys"
+	// PartyIdentity is the local signed public identity document
+	// (SPO-Xparty-INV-003). Not secret; it contains no address (IF-001).
+	PartyIdentity Kind = "party.identity"
+	// PartyRecords holds every enrolled party record, one blob, so a
+	// registry change commits atomically and needs no listing (Store has no
+	// List). Sensitive (SPO-Xparty-OUT-001).
+	PartyRecords Kind = "party.records"
+	// PartyReplay is the replay log (SPO-Xparty-INV-007): message ids with
+	// their expiry, in one blob written in the transaction of the effect.
+	PartyReplay Kind = "party.replay"
+	// TailcatNodeKey is the persistent tailcat node private key (32 bytes),
+	// TailcatPSK the pre-shared key (32 bytes) and TailcatAddr the tailcat
+	// address text. All Secret (SPO-Xparty-SEC-001).
+	TailcatNodeKey Kind = "tailcat.nodekey"
+	TailcatPSK     Kind = "tailcat.psk"
+	TailcatAddr    Kind = "tailcat.addr"
+)

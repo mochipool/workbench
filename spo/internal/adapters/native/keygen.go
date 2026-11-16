@@ -85,12 +85,17 @@ func generate(derive func(seed []byte) (vkey, skey bursa.KeyFile, err error)) (p
 
 // envelope renders a text envelope the way cardano-cli writes one: three
 // fields, four-space indent, trailing newline.
-func envelope(k bursa.KeyFile) ([]byte, error) {
+func envelope(k bursa.KeyFile) ([]byte, error) { return envelopeIndent(k, "    ") }
+
+// envelopeIndent is envelope with another indent. Keys derived from a
+// mnemonic are written by upstream's 03a through cardano-signer and jq,
+// which indent by two spaces.
+func envelopeIndent(k bursa.KeyFile, indent string) ([]byte, error) {
 	b, err := json.MarshalIndent(struct {
 		Type        string `json:"type"`
 		Description string `json:"description"`
 		CborHex     string `json:"cborHex"`
-	}{k.Type, k.Description, k.CborHex}, "", "    ")
+	}{k.Type, k.Description, k.CborHex}, "", indent)
 	if err != nil {
 		return nil, err
 	}

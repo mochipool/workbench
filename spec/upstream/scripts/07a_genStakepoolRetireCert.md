@@ -108,6 +108,12 @@ Use case `GeneratePoolRetirementCertificate(pool, epoch?)` on aggregate `StakePo
 * Check on-chain state (registered, already retiring) and warn: retiring an unregistered pool wastes a transaction.
 * The chosen epoch is fixed at certificate time while submission happens later (07b); a retirement certificate whose epoch has become invalid fails only at the ledger. Record the validity window in the aggregate and recheck at submission.
 
+## Notes from the oracle (2026-11-16)
+
+* Offline against the pinned scripts (`spo/test/parity/pool_scripts_test.go`): the certificate and the descriptor record are byte-equal to upstream's for no epoch (the earliest), an epoch inside the window, the last epoch of the window, an epoch below it (raised) and one above it (lowered).
+* `cardano-cli conway stake-pool deregistration-certificate` writes the description `Stake Pool Retirement Certificate`.
+* The `deregEpoch` field is a string.
+
 ## Open questions
 
 * The ledger's exact rule is `current < epoch <= current + eMax` (the script mirrors it); a preview-network test confirms the boundary `epoch == current + eMax`.

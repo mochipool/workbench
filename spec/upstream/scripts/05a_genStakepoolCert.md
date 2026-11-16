@@ -225,6 +225,21 @@ Use case `GeneratePoolRegistrationCertificate(pool, regProtectionKey?)` on aggre
 * The id, hash and owner writes before later refusals (SPO-05a-OUT-001) are harmless but a transactional port writes nothing on refusal.
 * Registration protection keys belong in a secret store, not in a descriptor that is printed and published.
 
+## Notes from the oracle (2026-11-16)
+
+Run against cardano-cli 11.2.3.0 and the pinned scripts (`spo/test/parity/pool_oracle_test.go`, `spo/test/parity/pool_scripts_test.go`). The Go certificate, the id files, the metadata and the updated descriptor are byte-equal to upstream's, with the same modes.
+
+* **Relay encoding.** An IPv4 relay is written as a little-endian 32-bit word (`203.0.113.7` is `077100cb`), an IPv6 relay as four little-endian words (`2001:db8::1` is `b80d0120 00000000 00000000 01000000`). A port is `null` for a relay without one, a DNS relay is `[1, port, name]`, a multi-host relay `[2, name]`.
+* **IPv4 next to IPv6 fails** (SPO-05a-EXT-001). `--pool-relay-ipv4 a --pool-relay-port 1 --pool-relay-ipv6 b --pool-relay-port 2` is read as one relay with both addresses and then fails on the second port ("Please enter either an IPv4 or IPv6 address for the pool relay"); the same holds in the other order. A relay of another kind between them parses, and two relays of the same address kind parse. A descriptor with adjacent IPv4 and IPv6 relays therefore never produced a certificate. The port refuses it with the same reason (`pool.CheckRelays`).
+* **The margin** is encoded as a tag-30 fraction in lowest terms: `0` is 0/1, `0.01` is 1/100, `0.10` is 1/10, `1.00` is 1/1, `0.333333` is 333333/1000000. cardano-cli refuses `.5` and accepts `1/3`; bc, which SPO-05a-PRE-005 uses, accepts both (and evaluates `1/3` with integer division to 0, so any fraction of that form passes the range check). The port takes decimals only (`pool.ParseMargin`).
+* **Ports and names.** cardano-cli writes a port above 65535 modulo 65536 (70000 becomes 4464) and accepts a DNS name of 69 bytes, which the ledger refuses at decoding (it limits a name to 64 bytes). The port refuses both (SPO-05a-PRE-007: the script does not validate the port).
+* **Owners** are a tag-258 set in key-hash order without repeats: a repeated owner name makes one entry (SPO-05a-PRE-013: duplicates are not detected). The reward account is the 29-byte stake address (`e0` testnet, `e1` mainnet, then the key hash). The metadata is `[url, hash]` or `null`.
+* **`stake-pool metadata-hash`** is blake2b-256 over the file bytes; it refuses a file that is not a JSON object with string `name`, `description`, `ticker` and `homepage`, and a file over 512 bytes.
+* **cardano-cli 11.2.3.0 has no `--bls-signing-key-file`**, so a registration at protocol version 12 (SPO-05a-INV-001) cannot be made here; the port refuses it (`ErrBLSRequired`).
+* The retirement certificate's description is `Stake Pool Retirement Certificate`.
+* **Dummy additional metadata** (SPO-05a-OUT-003): the port writes the same bytes as the script, then stops, as the script's message says.
+* The descriptor is rewritten by `jq`: two-space indent, new keys last, existing keys in place. The port reproduces that layout, so a descriptor the port writes reads back byte-equal.
+
 ## Open questions
 
 * The 65-character and 128-character URL thresholds: whether the ledger's limit on the pool-metadata URL (128 bytes) is the reason for 128, and what the 65 limit protects, is not stated in the source.

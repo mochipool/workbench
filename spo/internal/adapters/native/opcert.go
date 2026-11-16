@@ -16,16 +16,20 @@ import (
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
-// VaultSigner signs with keys that sit in the vault. Today it issues
-// operational certificates with a pool cold key; the key is opened for the
-// call and destroyed after it.
+// VaultSigner signs with keys that sit in the vault. It issues operational
+// certificates with a pool cold key and witnesses transactions with payment
+// and stake keys; a key is opened for the call and destroyed after it.
 type VaultSigner struct {
 	Vault ports.Vault
 }
 
 // Profile implements ports.Signer.
 func (VaultSigner) Profile() custody.Profile {
-	return custody.NewProfile("vault").Allow(custody.RolePoolCold, custody.OpIssueOpCert)
+	return custody.NewProfile("vault").
+		Allow(custody.RolePoolCold, custody.OpIssueOpCert, custody.OpWitnessTx).
+		// A software signer signs a body hash: no limit on features.
+		Allow(custody.RolePayment, custody.OpWitnessTx).
+		Allow(custody.RoleStake, custody.OpWitnessTx)
 }
 
 // coldSeed extracts the 32-byte seed from a cardano-cli StakePoolSigningKey_ed25519

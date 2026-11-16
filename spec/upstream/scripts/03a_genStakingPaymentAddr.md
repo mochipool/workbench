@@ -183,5 +183,10 @@ Use case `GenerateWalletAccount(name, keyType, account?, index?, mnemonics?)` on
 
 ## Open questions
 
-* The exact envelope `type` strings written by cardano-cli, cardano-hw-cli and cardano-signer for these keys are not asserted by the script; an inventory run settles them (see Pfiles open questions).
+* ~~The exact envelope `type` strings written by cardano-cli and cardano-signer~~ Resolved 2026-11-16 (cardano-cli 11.2.3.0, cardano-signer 1.35.0; table in the Pfiles open questions). Observations from the `mnemonics` path under the oracle (`spo/test/parity/software_keys_test.go`):
+  * `cardano-signer keygen --json-extended` writes the signing key as `PaymentExtendedSigningKeyShelley_ed25519_bip32` / `StakeExtendedSigningKeyShelley_ed25519_bip32` with descriptions `Payment Signing Key` / `Stake Signing Key`, mode `0644` until the lock, two-space indent. Its `.output.vkey` is the 64-byte extended key `StakeExtendedVerificationKeyShelley_ed25519_bip32`; `key non-extended-key` keeps the first 32 bytes (the public key, not the chain code) and the script's `jq` rewrites the description and indents by two spaces.
+  * The default derivation type is `icarus`; the root key is the Icarus master key of the phrase's entropy with an empty passphrase. Account 0 index 0, 1/3 and 17/4000 derived natively (bursa `GetAccountKey`, `GetPaymentKey`, `GetStakeKey`) give files byte-identical to the script's, `.mnemonics` and `.addr` included.
+  * Given words are lowercased and runs of spaces squeezed before the count (SPO-03a-IF-004); a generated phrase has 24 words and the file ends with one newline (SPO-03a-OUT-003).
+  * `<name>.payment.addr` has no trailing newline; `<name>.staking.addr` has one (see SPO-Pfiles-OUT-001's correction).
+  * `cli` and `mnemonics` need no terminal: neither prompts.
 * Whether `cardano-hw-cli address key-gen` reports a rejected device prompt with the words `ERROR` or `DISCONNECT`; the script only matches those two (SPO-03a-EXT-002).

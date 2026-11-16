@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 )
 
 // Signer is anything that holds keys and signs with them: the vault, a
@@ -38,6 +39,15 @@ type OpCertIssuer interface {
 	IssueOpCert(ctx context.Context, cold custody.Key[custody.PoolCold], req OpCertRequest) ([]byte, error)
 }
 
+// TxWitnesser makes a witness for a transaction body with a key the signer
+// holds. A software signer signs the body's id; a device parses the body
+// and may refuse it, which the plan has already checked for the features
+// the body contains (ADR 0008).
+type TxWitnesser interface {
+	Signer
+	Witness(ctx context.Context, key custody.KeyRef, body txbuild.TxBody) (txbuild.Witness, error)
+}
+
 // CheckSigner verifies that a signer's profile and its interfaces agree: it
 // must implement the interface of every operation its profile claims. It
 // runs in adapter tests and when the binary wires itself, so a profile that
@@ -53,6 +63,11 @@ func CheckSigner(s Signer) error {
 	if claims[custody.OpIssueOpCert] {
 		if _, ok := s.(OpCertIssuer); !ok {
 			return fmt.Errorf("signer %q claims %s but does not implement OpCertIssuer", p.Name(), custody.OpIssueOpCert)
+		}
+	}
+	if claims[custody.OpWitnessTx] {
+		if _, ok := s.(TxWitnesser); !ok {
+			return fmt.Errorf("signer %q claims %s but does not implement TxWitnesser", p.Name(), custody.OpWitnessTx)
 		}
 	}
 	return nil

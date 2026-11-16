@@ -172,3 +172,4 @@ Use case `RegisterVoteDelegation(stakeAccount, payer, extras)` on aggregate `Sta
 ## Open questions
 
 * The online DRep query passes the same hash as key hash and as script hash; whether the node accepts this for a hash that is only one of the two is assumed by the script. A run against a node settles it.
+* Run offline on 2026-11-16 (`spo/test/parity/stake_scripts_test.go`): with `always-abstain` and with a DRep key hash the queued transaction is byte-equal to the Go use case's. The target selector at character offset 68 reads `8200` for a DRep key hash and `8102` for always-abstain, as SPO-22b-IN-002 says. The script asks its confirmation on the controlling terminal and ignores `ENV_SKIP_PROMPT`.

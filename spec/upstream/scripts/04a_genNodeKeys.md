@@ -140,4 +140,4 @@ Use case `GenerateColdKey(pool, protection, coldKeyIndex?)` on aggregate `StakeP
 
 ## Open questions
 
-* The exact `description` text cardano-cli writes into the fresh counter file ("Next certificate issue number: 0") is not in the script. Settle by running `cardano-cli node key-gen` on the pinned release.
+* ~~The exact `description` text cardano-cli writes into the fresh counter file~~ Resolved 2026-11-16 on cardano-cli 11.2.3.0 (`spo/test/parity/software_keys_test.go`): `node key-gen` writes `Next certificate issue number: 0`, type `NodeOperationalCertificateIssueCounter`, `cborHex` `82005820<cold vkey>`. The cold key types are `StakePoolVerificationKey_ed25519` (`Stake Pool Operator Verification Key`) and `StakePoolSigningKey_ed25519` (`Stake Pool Operator Signing Key`); cardano-cli creates all three files at mode `0600` and the script locks them (SPO-04a-OUT-001). `cli` does not prompt.

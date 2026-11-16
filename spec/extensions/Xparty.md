@@ -17,15 +17,15 @@ Terms: a **party** is one enrolled machine with its own store. The **coordinator
 ## Party identity
 
 - **SPO-Xparty-INV-001** A party identity is an Ed25519 signing key pair and an X25519 encryption key pair, generated at `init` and stored as Secret records. Neither private key ever leaves the store.
-- **SPO-Xparty-INV-002** The fingerprint of an identity is the first 20 bytes of BLAKE2b-256 over the domain string `spo/party/v1`, the Ed25519 public key and the X25519 public key, in that order. It is displayed as 8 groups of 5 lower-case base32 characters.
-- **SPO-Xparty-INV-003** A party's public identity document is canonical CBOR of `[version, label, ed25519 public key, x25519 public key, tailcat node public key or null, created]`, signed with the Ed25519 key. The label is chosen by its owner and is not trusted.
+- **SPO-Xparty-INV-002** The fingerprint of an identity is the first 20 bytes of BLAKE2b-256 over the domain string `spo/party/v1`, the Ed25519 public key and the X25519 public key, in that order. It is displayed as 8 groups of 4 lower-case base32 characters (32 characters, 160 bits).
+- **SPO-Xparty-INV-003** A party's public identity document is canonical CBOR of `[content, signature]`. `content` is the canonical CBOR of `[version, label, ed25519 public key, x25519 public key, tailcat node public key or null, created]`, and `signature` is Ed25519 by that key over the domain string `spo/identity/v1` followed by `content`. The label is chosen by its owner and is not trusted.
 
 ## Enrollment
 
 - **SPO-Xparty-IF-001** `party export` writes the local public identity document. It contains no secret and no tailcat address.
 - **SPO-Xparty-IF-002** `party enroll <document> --as <local name> --role <role>... [--pool <pool>]...` records another party. Roles: `coordinator` (may send signing requests), `signer` (may be sent signing requests), `machine` (the operator's own other machine: may exchange air-gap bundles).
 - **SPO-Xparty-PRE-001** Enrollment refuses a document whose signature does not verify under the Ed25519 key it contains.
-- **SPO-Xparty-PR-001** Enrollment shows the computed fingerprint and requires the operator to type its first two groups, as read out by the other party over a separate channel. There is no default and no flag that skips it.
+- **SPO-Xparty-PR-001** Enrollment shows the computed fingerprint and requires the operator to type its first four groups (80 bits), as read out by the other party over a separate channel. Two groups would leave 40 bits, which an attacker who can generate keys freely can match. There is no default and no flag that skips it.
 - **SPO-Xparty-OUT-001** An enrolled party is a Sensitive record: public keys, fingerprint, local name, roles, pools, tailcat node key, state (`active`, `revoked`), and the enrollment time. Enrollment is an audit event.
 - **SPO-Xparty-INV-004** Enrollment is mutual but not automatic: each side enrolls the other. A party that has enrolled us and that we have not enrolled gets no response at all.
 - **SPO-Xparty-IF-003** `party revoke <name>` sets the state to `revoked`. `party rotate` generates a new local identity and exports a rotation statement signed by the old key; a peer that imports it must confirm the new fingerprint as in SPO-Xparty-PR-001.
@@ -51,10 +51,13 @@ Terms: a **party** is one enrolled machine with its own store. The **coordinator
 | `SigningRefusal` | signer → coordinator | `[collection id, slot id, request message id, reason code]` |
 | `CollectionClosed` | coordinator → signer | `[collection id, outcome: submitted with tx id, discarded, or expired]` |
 | `Invite` | coordinator → signer | `[tailcat address, coordinator tailcat node key]` |
+| `Hello` | signer → coordinator | `[]`: opens a connection when the signer has nothing else to send, so that it can receive pending requests |
 | `Bundle` | machine → machine | the air-gap bundle: chain snapshot, queued transactions, attachments |
 
 - **SPO-Xparty-INV-009** `SigningRequest.expires` is no later than the wall-clock time of the body's TTL slot, and no later than 7 days after `created`.
 - **SPO-Xparty-INV-010** Authorisation by role: `SigningRequest`, `CollectionClosed` and `Invite` need the sender to be a `coordinator` for the pool the body concerns, when it concerns a pool; `SigningResponse` and `SigningRefusal` need the sender to be the `signer` assigned to that slot; `Bundle` needs `machine`.
+- **SPO-Xparty-INV-020** The body hash is BLAKE2b-256 over the transaction body CBOR exactly as carried in the request, which is the transaction id. A signer hashes the bytes it received; it does not re-encode them.
+- **SPO-Xparty-INV-021** `Hello` needs the sender to be a `signer`. It has no effect other than authenticating the connection and is not recorded in the replay log beyond its expiry, which is at most 5 minutes after `created`.
 - **SPO-Xparty-INV-011** The purpose text is for display only. Nothing a signer shows or decides is derived from it (SPO-Xparty-PR-002).
 
 ## Coordinator

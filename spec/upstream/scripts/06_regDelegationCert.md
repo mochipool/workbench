@@ -165,3 +165,4 @@ Use case `RegisterPoolDelegation(stakeAccount, payer, extras)` on aggregate `Sta
 ## Open questions
 
 * The `query stake-pools` listing format is matched by a substring count (`grep` of the bech32 id); a pool id that is a prefix of another line cannot occur, but the output format of the pinned cardano-cli is the assumption. An inventory run settles it.
+* Run offline on 2026-11-16 (`spo/test/parity/stake_scripts_test.go`) against a certificate made by 05b: the queued transaction is byte-equal to the Go use case's. The pool id is the last 56 hex characters of the certificate and the stake credential sits at offset 12, as SPO-06-IN-002 says. The script asks its confirmation on the controlling terminal and ignores `ENV_SKIP_PROMPT`.

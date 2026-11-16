@@ -283,6 +283,19 @@ Use case `RegisterPool(pool, payer, forcedType?)` on aggregate `PoolRegistration
 * Delete the registration certificate in the same transaction as recording the submission; today a crash between submit and deletion leaves a reusable certificate.
 * The hardware-owner flow needs a first-class second phase (delegation certificates per owner) instead of a printed hint (SPO-05c-INV-006).
 
+## Notes from the oracle (2026-11-16)
+
+Run offline against the pinned scripts with a crafted transfer file (`spo/test/parity/pool_scripts_test.go`, `pool_oracle_test.go`).
+
+* The queued transaction (body and signed), the queue entry, the history line and the descriptor record are byte-equal to upstream's for a first registration, a re-registration (the descriptor records an earlier `regSubmitted`) and two owners that both sign locally. The fee uses `2 + owners` witnesses and equals `calculate-min-fee`.
+* The body carries the registration certificate first, then the owners' delegation certificates in descriptor order; the witness set is ordered by key hash, as `transaction assemble` orders it.
+* **The unsigned body** in a witness collection is a text envelope of type `Tx ConwayEra`, description `Ledger Cddl Format` (cardano-cli 11.2.3.0 gives an unsigned body the type of a signed transaction). A key witness is `TxWitness ConwayEra`, description `Key Witness ShelleyEra`, CBOR `[vkey, signature]`.
+* **The witness transfer file** for an owner who signs elsewhere is byte-equal to the Go use case's when both use the same collection id (the clock second) and tip; its fields are those of SPO-05c-OUT-003 in that order.
+* `05d sign` (upstream) on that file gives a witness the Go collection imports; the collection completes and the assembled transaction equals upstream's.
+* **SPO-05d-INV-006 confirmed**: `05d add` takes a witness whose last signature byte was flipped (it compares only the text of the body); the Go import verifies the signature over the body hash and the key hash of the slot, and refuses it before the slot is touched.
+* The port's ticker lookup (hazard H6, requirement SPO-05c-SEC-002) is opt-in and sends the ticker only; the registration protection key is stored in the descriptor (SPO-05a-OUT-012) and never sent.
+* Attaching `<pool>.metadata.json` to the transfer file embeds it as `01_workOffline attach` does; the port's shared attach also adds the history line `attached file '<name>'`, which the inline offer of 05c does not.
+
 ## Open questions
 
 * The behaviour of `cardano-cli transaction witness` for a body that contains owner delegation certificates is cardano-cli's; whether owners must witness a re-registration when their delegation certificates are absent is a ledger rule that a preview-network test settles.

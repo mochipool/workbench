@@ -1,0 +1,225 @@
+package wallet
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/mochipool/workbench/spo/internal/domain/chain"
+	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/ports"
+)
+
+// WalletKeySource says where a wallet's keys come from. It replaces the key
+// type word of upstream's 03a for the software paths: `cli` is
+// WalletKeysRandom, `mnemonics` is WalletKeysMnemonic. `enc` is not ported at
+// generation (same decision as 04c); the hardware, hybrid types are refused
+// up front through the holder.
+type WalletKeySource string
+
+// Key sources.
+const (
+	WalletKeysRandom   WalletKeySource = "random"
+	WalletKeysMnemonic WalletKeySource = "mnemonic"
+)
+
+// MaxDerivationIndex is the largest account or index number upstream accepts
+// (SPO-03a-IF-004; 2^31-1, the hardened range's limit).
+const MaxDerivationIndex = 1<<31 - 1
+
+// ErrDerivationRange means an account or index number is out of range.
+var ErrDerivationRange = errors.New("account and index numbers must be 0 to 2147483647")
+
+// ErrOptionNotUsed means an option does not apply to the key source: upstream
+// silently ignores them, this port refuses.
+var ErrOptionNotUsed = errors.New("option does not apply to this key source")
+
+// GenerateWalletAccount creates one wallet account: payment and stake key
+// pairs, the base address and the stake address (upstream 03a, software key
+// types). The mnemonic of a derived wallet is stored as a secret and never
+// returned.
+type GenerateWalletAccount struct {
+	Store     ports.Store
+	Payment   ports.PaymentKeyGenerator // WalletKeysRandom
+	Stake     ports.StakeKeyGenerator   // WalletKeysRandom
+	Mnemonics ports.MnemonicGenerator   // WalletKeysMnemonic without given words
+	Deriver   ports.WalletDeriver       // WalletKeysMnemonic
+	Addresses ports.AddressBuilder
+	NetworkID uint8
+}
+
+// GenerateWalletRequest is the wallet to create.
+type GenerateWalletRequest struct {
+	// Name is the wallet name: a trailing `.addr` and a leading `./` are
+	// dropped, nothing else (SPO-03a-IF-003).
+	Name   string
+	Holder custody.Holder // empty means the vault
+	Source WalletKeySource
+	// Account and Index select the CIP-1852 path of a mnemonic wallet:
+	// payment 1852H/1815H/<Account>H/0/<Index>, stake
+	// 1852H/1815H/<Account>H/2/<Index>. They must be 0 for random keys.
+	Account, Index uint32
+	// Mnemonic is the phrase to derive from; nil generates a fresh one. The
+	// buffer stays the caller's. Mnemonic source only.
+	Mnemonic *ports.Secret
+}
+
+// WalletGenerated is the result. It carries no signing key and no mnemonic:
+// the mnemonic is shown only by the audited export use case.
+type WalletGenerated struct {
+	Name           string
+	PaymentAddress chain.Address
+	StakeAddress   chain.StakeAddress
+	PaymentVKey    []byte
+	StakeVKey      []byte
+	MnemonicStored bool
+}
+
+// Run creates the wallet. All artefacts are written together or not at all.
+func (uc GenerateWalletAccount) Run(ctx context.Context, req GenerateWalletRequest) (res WalletGenerated, err error) {
+	// spec: SPO-03a-IF-003
+	name, err := normalizeName(req.Name)
+	if err != nil {
+		return res, err
+	}
+	if req.Account > MaxDerivationIndex || req.Index > MaxDerivationIndex {
+		return res, ErrDerivationRange
+	}
+	switch req.Source {
+	case WalletKeysRandom:
+		if req.Account != 0 || req.Index != 0 || req.Mnemonic != nil {
+			return res, fmt.Errorf("%w: account, index and mnemonic are for derived wallets", ErrOptionNotUsed)
+		}
+		if uc.Payment == nil || uc.Stake == nil {
+			return res, ErrNotConfigured
+		}
+	case WalletKeysMnemonic:
+		if uc.Deriver == nil || (req.Mnemonic == nil && uc.Mnemonics == nil) {
+			return res, ErrNotConfigured
+		}
+	default:
+		return res, fmt.Errorf("unknown key source %q", req.Source)
+	}
+
+	if _, err := custody.PlanGeneration(
+		custody.KeyRef{Role: custody.RolePayment, Holder: req.Holder, Owner: name + ".payment"},
+		custody.KeyRef{Role: custody.RoleStake, Holder: req.Holder, Owner: name},
+	); err != nil {
+		return res, err
+	}
+
+	payName := name + ".payment"
+	check := func(r ports.Reader) error {
+		if err := refuseRefs(r, ErrAccountExists,
+			ports.Ref{Name: payName, Kind: ports.AddrVKey}, ports.Ref{Name: payName, Kind: ports.AddrSKey},
+			ports.Ref{Name: payName, Kind: ports.AddrHwsFile}, ports.Ref{Name: payName, Kind: ports.AddrFile},
+			ports.Ref{Name: name, Kind: ports.StakingVKey}, ports.Ref{Name: name, Kind: ports.StakingSKey},
+			ports.Ref{Name: name, Kind: ports.StakingHwsFile}, ports.Ref{Name: name, Kind: ports.StakingAddr},
+			ports.Ref{Name: name, Kind: ports.StakingCert}); err != nil {
+			return err
+		}
+		if req.Source == WalletKeysMnemonic {
+			return refuseRefs(r, ErrMnemonicsExist, ports.Ref{Name: name, Kind: ports.PaymentMnemonics})
+		}
+		return nil
+	}
+	if err := uc.Store.View(ctx, check); err != nil {
+		return res, err
+	}
+
+	var pay, stake ports.KeyPair
+	var words *ports.Secret // the normalised phrase, mnemonic source only
+	defer func() {
+		pay.SKey.Destroy()
+		stake.SKey.Destroy()
+		words.Destroy()
+	}()
+	switch req.Source {
+	case WalletKeysRandom:
+		if pay, err = uc.Payment.GeneratePayment(ctx); err != nil {
+			return res, fmt.Errorf("generate payment key: %w", err)
+		}
+		if stake, err = uc.Stake.GenerateStake(ctx); err != nil {
+			return res, fmt.Errorf("generate stake key: %w", err)
+		}
+	case WalletKeysMnemonic:
+		if words, err = uc.phrase(ctx, req.Mnemonic); err != nil {
+			return res, err
+		}
+		keys, err := uc.Deriver.DeriveWallet(ctx, words, req.Account, req.Index)
+		if err != nil {
+			return res, fmt.Errorf("derive wallet: %w", err)
+		}
+		pay, stake = keys.Payment, keys.Stake
+	}
+
+	payHash, err := vkeyHash(pay.VKey)
+	if err != nil {
+		return res, err
+	}
+	stakeHash, err := vkeyHash(stake.VKey)
+	if err != nil {
+		return res, err
+	}
+	base, err := uc.Addresses.BuildAddress(uc.NetworkID, payHash, &stakeHash)
+	if err != nil {
+		return res, fmt.Errorf("build base address: %w", err)
+	}
+	reward, err := uc.Addresses.BuildStakeAddress(uc.NetworkID, stakeHash)
+	if err != nil {
+		return res, fmt.Errorf("build stake address: %w", err)
+	}
+
+	var file *ports.Secret // the phrase and a newline, as upstream's echo writes it
+	if words != nil {
+		if file, err = ports.MnemonicFile(words); err != nil {
+			return res, err
+		}
+		defer file.Destroy()
+	}
+
+	err = uc.Store.Update(ctx, func(w ports.Writer) error {
+		if err := check(w); err != nil {
+			return err
+		}
+		if file != nil {
+			if err := w.PutSecret(ports.Ref{Name: name, Kind: ports.PaymentMnemonics}, file); err != nil {
+				return err
+			}
+		}
+		if err := w.Put(ports.Ref{Name: payName, Kind: ports.AddrVKey}, pay.VKey); err != nil {
+			return err
+		}
+		if err := w.PutSecret(ports.Ref{Name: payName, Kind: ports.AddrSKey}, pay.SKey); err != nil {
+			return err
+		}
+		if err := w.Put(ports.Ref{Name: name, Kind: ports.StakingVKey}, stake.VKey); err != nil {
+			return err
+		}
+		if err := w.PutSecret(ports.Ref{Name: name, Kind: ports.StakingSKey}, stake.SKey); err != nil {
+			return err
+		}
+		// The base address file has no trailing newline, the stake address
+		// file has one: that is what cardano-cli 11.2.3.0's `address build`
+		// and `stake-address build` write (SPO-Pfiles-OUT-001 correction).
+		if err := w.Put(ports.Ref{Name: payName, Kind: ports.AddrFile}, []byte(base)); err != nil {
+			return err
+		}
+		return w.Put(ports.Ref{Name: name, Kind: ports.StakingAddr}, []byte(reward+"\n"))
+	})
+	if err != nil {
+		return res, err
+	}
+	return WalletGenerated{Name: name, PaymentAddress: base, StakeAddress: reward,
+		PaymentVKey: pay.VKey, StakeVKey: stake.VKey, MnemonicStored: file != nil}, nil
+}
+
+// phrase returns the normalised phrase: the given one, or a fresh one.
+// Normalising lowercases and squeezes spaces as upstream does, then requires
+// 24 words (SPO-03a-IF-004).
+func (uc GenerateWalletAccount) phrase(ctx context.Context, given *ports.Secret) (*ports.Secret, error) {
+	if given == nil {
+		return uc.Mnemonics.GenerateMnemonic(ctx)
+	}
+	return ports.NormalizeMnemonic(given)
+}

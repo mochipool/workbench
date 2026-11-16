@@ -189,6 +189,11 @@ Use case `RetirePool(pool, payer)` on aggregate `StakePool` (retirement state), 
 * The hardware path asks no confirmation before the device is used (unlike 05c); keep the device prompt as the approval, and show the decoded intent (pool id, retirement epoch, fee) to a remote signer.
 * Warn when the reward account is not registered or is about to be deregistered: the deposit refund would be lost.
 
+## Notes from the oracle (2026-11-16)
+
+* Offline against the pinned scripts (`spo/test/parity/pool_scripts_test.go`): the queued transaction, its fee at two witnesses, the queue entry and the descriptor record are byte-equal to upstream's; the body equals `build-raw` with the retirement certificate (`spo/test/parity/pool_oracle_test.go`).
+* SPO-07b-OUT-003 confirmed: the certificate stays after the submission. The port deletes it with the record, and refuses a certificate whose epoch is outside `current+1 .. current+eMax` before a fee is spent (SPO-07b-INV-003 port note).
+
 ## Open questions
 
 * Whether the ledger pays the refund to the reward account in the retirement epoch or the next one, and what happens when that account is unregistered at that time, is ledger behaviour, outside the scripts.

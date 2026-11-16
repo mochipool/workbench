@@ -68,11 +68,16 @@ func EncodeRecoveryKey(key *secret.Buffer) (*secret.Buffer, error) {
 		}
 		grouped = append(grouped, text[i:i+recoveryGroup]...)
 	}
-	return secret.Take(append([]byte(nil), grouped...)), nil
+	return secret.TryTake(append([]byte(nil), grouped...))
 }
 
 // DecodeRecoveryKey parses the text produced by EncodeRecoveryKey and returns
 // the raw 32-byte key in guarded memory.
+//
+// The cleaned copy of the text lives in a slice sized for the longest input
+// that can be valid (recoveryChars characters once separators are dropped);
+// longer input is refused before it is appended, so the slice never grows and
+// no reallocation leaves an unwiped copy behind.
 func DecodeRecoveryKey(text *secret.Buffer) (*secret.Buffer, error) {
 	clean := make([]byte, 0, recoveryChars)
 	raw := make([]byte, recoveryRawLen)
@@ -80,13 +85,16 @@ func DecodeRecoveryKey(text *secret.Buffer) (*secret.Buffer, error) {
 	defer func() { wipe(clean); wipe(raw); wipe(again) }()
 	err := text.Use(func(t []byte) error {
 		for _, c := range t {
-			switch {
-			case c == '-' || c == ' ' || c == '\t' || c == '\n' || c == '\r':
-			case c >= 'a' && c <= 'z':
-				clean = append(clean, c-'a'+'A')
-			default:
-				clean = append(clean, c)
+			if c == '-' || c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+				continue
 			}
+			if len(clean) == recoveryChars {
+				return ErrRecoveryFormat
+			}
+			if c >= 'a' && c <= 'z' {
+				c = c - 'a' + 'A'
+			}
+			clean = append(clean, c)
 		}
 		return nil
 	})
@@ -106,5 +114,5 @@ func DecodeRecoveryKey(text *secret.Buffer) (*secret.Buffer, error) {
 	if subtle.ConstantTimeCompare(raw[KeySize:], recoveryChecksum(raw[:KeySize])) != 1 {
 		return nil, ErrRecoveryChecksum
 	}
-	return secret.Take(append([]byte(nil), raw[:KeySize]...)), nil
+	return secret.TryTake(append([]byte(nil), raw[:KeySize]...))
 }

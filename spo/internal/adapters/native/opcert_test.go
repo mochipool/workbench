@@ -123,7 +123,8 @@ func TestSignerConformanceAndDirectory(t *testing.T) {
 	if _, err := d.SignerFor(custody.KeyRef{Holder: custody.HolderRemote}); err == nil {
 		t.Error("remote accepted")
 	}
-	// A plan for a pool cold key in the vault passes; a payment key is not offered.
+	// A plan for a pool cold key in the vault passes; payment and stake keys
+	// are witnessed by the same signer now (TxWitnesser); a VRF key is not offered.
 	_, err = ports.PlanSignatures(d, []custody.Slot{{
 		Label: "opcert", Key: custody.KeyRef{Role: custody.RolePoolCold, Holder: custody.HolderVault, Owner: "p"},
 		Demand: custody.Demand{Role: custody.RolePoolCold, Operation: custody.OpIssueOpCert},
@@ -135,7 +136,14 @@ func TestSignerConformanceAndDirectory(t *testing.T) {
 		Label: "tx", Key: custody.KeyRef{Role: custody.RolePayment, Holder: custody.HolderVault, Owner: "p"},
 		Demand: custody.Demand{Role: custody.RolePayment, Operation: custody.OpWitnessTx},
 	}})
+	if err != nil {
+		t.Errorf("a payment witness is planned for the vault: %v", err)
+	}
+	_, err = ports.PlanSignatures(d, []custody.Slot{{
+		Label: "tx", Key: custody.KeyRef{Role: custody.RoleVRF, Holder: custody.HolderVault, Owner: "p"},
+		Demand: custody.Demand{Role: custody.RoleVRF, Operation: custody.OpWitnessTx},
+	}})
 	if err == nil {
-		t.Error("the vault signer claims to witness transactions")
+		t.Error("the vault signer claims to witness with a VRF key")
 	}
 }

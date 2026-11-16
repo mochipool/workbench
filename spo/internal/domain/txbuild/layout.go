@@ -1,0 +1,269 @@
+package txbuild
+
+import (
+	"errors"
+	"fmt"
+
+	"github.com/mochipool/workbench/spo/internal/domain/chain"
+	"github.com/mochipool/workbench/spo/internal/domain/stake"
+)
+
+// The pipeline asks the ledger adapter for three things and nothing else.
+type (
+	// MinOutputFunc is the minimum lovelace an output must hold
+	// (SPO-Ptx-EXT-003). The protocol parameters are bound by the caller.
+	MinOutputFunc func(Output) (chain.Lovelace, error)
+	// FeeFunc is the minimum fee of a body with the workflow's fixed
+	// witness count (SPO-Ptx-EXT-002, SPO-Ptx-INV-006).
+	FeeFunc func(TxBody) (chain.Lovelace, error)
+	// BodyFunc builds the body of a spec.
+	BodyFunc func(BodySpec) (TxBody, error)
+)
+
+// BodySpec is everything the body is built from.
+type BodySpec struct {
+	Inputs  []chain.Utxo
+	Outputs []Output
+	Fee     chain.Lovelace
+	TTL     uint64
+	Message []string
+	// Certificates are attached in the order given; Withdrawals are
+	// keyed by reward address in the body.
+	Certificates []stake.Certificate
+	Withdrawals  []Withdrawal
+}
+
+// Ledger bundles the functions Balance needs.
+type Ledger struct {
+	MinOutput MinOutputFunc
+	Fee       FeeFunc
+	Build     BodyFunc
+}
+
+// Balanced is the result of the pipeline up to the body: the outputs, the
+// fee and the one body to be confirmed, signed and sent.
+type Balanced struct {
+	Spec BodySpec
+	Body TxBody
+}
+
+// BelowMinimumError is a refusal of the minimum-value checks. Each output
+// is compared with its own minimum.
+//
+// spec: SPO-Ptx-PRE-002, SPO-Ptx-PRE-003, SPO-01sendLovelaces-PRE-002 .. PRE-006
+type BelowMinimumError struct {
+	Which string // "destination" or "change"
+	Have  chain.Lovelace
+	Need  chain.Lovelace
+	Hint  string
+}
+
+func (e *BelowMinimumError) Error() string {
+	s := fmt.Sprintf("not enough funds: the %s output would hold %d lovelace, the minimum is %d", e.Which, e.Have, e.Need)
+	if e.Hint != "" {
+		s += "; " + e.Hint
+	}
+	return s
+}
+
+// ErrFeeDiverged: the fee loop did not settle.
+var ErrFeeDiverged = errors.New("the fee estimate did not settle")
+
+// layout lays out the outputs for a fee. With check false it computes
+// amounts without refusing (underflows saturate at zero): it is the shape
+// the fee estimate needs before the real fee is known. With check true it
+// applies the minimum-value checks.
+//
+// spec: SPO-01sendLovelaces-OUT-001 .. OUT-006, SPO-01sendLovelaces-PRE-002 .. PRE-006,
+// spec: SPO-Ptx-INV-004, SPO-Ptx-INV-007
+func (d Draft) layout(fee chain.Lovelace, min MinOutputFunc, check bool) ([]Output, error) {
+	total, err := d.Totals()
+	if err != nil {
+		return nil, err
+	}
+	credit, debit, err := d.flows()
+	if err != nil {
+		return nil, err
+	}
+	probe := func(addr chain.Address, assets []chain.AssetAmount) (chain.Lovelace, error) {
+		return min(Output{Address: addr, Lovelace: PlaceholderLovelace, Assets: assets})
+	}
+	// rest is total + credits - fee - spent - deposits, and whether it
+	// went below zero. Credits are withdrawals and refunds, deposits are
+	// the key deposits a registration pays.
+	rest := func(spent chain.Lovelace) (chain.Lovelace, bool, error) {
+		after, err := addL(fee, spent)
+		if err != nil {
+			return 0, false, err
+		}
+		if after, err = addL(after, debit); err != nil {
+			return 0, false, err
+		}
+		avail, err := addL(total.Lovelace, credit)
+		if err != nil {
+			return 0, false, err
+		}
+		if after > avail {
+			return 0, true, nil
+		}
+		return avail - after, false, nil
+	}
+	names := []string{"destination", "change"}
+	hasAssets := len(total.Assets) > 0
+	var outs []Output
+	var short bool
+	var hint string
+	restIdx := 0 // the output that holds total - fee - the rest
+
+	switch {
+	case d.mode == modeChange:
+		// One output: the change, with every asset.
+		var v chain.Lovelace
+		v, short, err = rest(0)
+		outs = []Output{{Address: d.Payer, Lovelace: v, Assets: total.Assets}}
+		names = []string{"change"}
+	case d.mode == modeClaim && d.Destination == d.Payer:
+		var v chain.Lovelace
+		v, short, err = rest(0)
+		outs = []Output{{Address: d.Destination, Lovelace: v, Assets: total.Assets}}
+		names = []string{"destination"}
+	case d.mode == modeClaim:
+		// The payer gets the inputs less the fee, with every asset; the
+		// destination gets exactly the rewards, nothing else.
+		var v chain.Lovelace
+		if fee > total.Lovelace {
+			short = true
+		} else {
+			v = total.Lovelace - fee
+		}
+		outs = []Output{{Address: d.Payer, Lovelace: v, Assets: total.Assets}, {Address: d.Destination, Lovelace: credit}}
+		names = []string{"change", "destination"}
+	case d.Amount.kind == amountAllFunds || (d.Amount.kind == amountAll && !hasAssets):
+		// One output to the destination: everything minus the fee.
+		var v chain.Lovelace
+		v, short, err = rest(0)
+		outs = []Output{{Address: d.Destination, Lovelace: v, Assets: total.Assets}}
+	case d.Amount.kind == amountAll:
+		// The destination gets the rest after the assets' return output.
+		var r, v chain.Lovelace
+		if r, err = probe(d.Payer, total.Assets); err != nil {
+			return nil, err
+		}
+		v, short, err = rest(r)
+		outs = []Output{{Address: d.Destination, Lovelace: v}, {Address: d.Payer, Lovelace: r, Assets: total.Assets}}
+	case d.Amount.kind == amountMin:
+		var m, v chain.Lovelace
+		if m, err = probe(d.Destination, nil); err != nil {
+			return nil, err
+		}
+		v, short, err = rest(m)
+		if m >= total.Lovelace {
+			hint = "use ALL to send everything"
+		}
+		outs = []Output{{Address: d.Destination, Lovelace: m}, {Address: d.Payer, Lovelace: v, Assets: total.Assets}}
+		restIdx = 1
+	case d.Amount.kind == amountLovelaces:
+		var v chain.Lovelace
+		v, short, err = rest(d.Amount.n)
+		if d.Amount.n >= total.Lovelace {
+			hint = "use ALL to send everything"
+		}
+		outs = []Output{{Address: d.Destination, Lovelace: d.Amount.n}, {Address: d.Payer, Lovelace: v, Assets: total.Assets}}
+		restIdx = 1
+	default:
+		return nil, ErrBadAmount
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !check {
+		return outs, nil
+	}
+	// Destination first, so a too-small amount is reported as such, then
+	// the shortfall, then the change.
+	for i, o := range outs {
+		if i == restIdx && short {
+			return nil, fmt.Errorf("%w (%d lovelace in, fee %d)%s", ErrInsufficient, total.Lovelace, fee, hintSuffix(hint))
+		}
+		need, err := min(o)
+		if err != nil {
+			return nil, err
+		}
+		if o.Lovelace < need {
+			return nil, &BelowMinimumError{Which: names[i], Have: o.Lovelace, Need: need, Hint: hint}
+		}
+	}
+	return outs, nil
+}
+
+func hintSuffix(h string) string {
+	if h == "" {
+		return ""
+	}
+	return "; " + h
+}
+
+func (d Draft) spec(outs []Output, fee chain.Lovelace, ttl uint64) BodySpec {
+	return BodySpec{Inputs: d.Inputs, Outputs: outs, Fee: fee, TTL: ttl, Message: d.Message,
+		Certificates: d.Certificates, Withdrawals: d.Withdrawals}
+}
+
+// Balance runs stages 6 to 8 of the pipeline: it finds the fee by
+// building a body with a placeholder fee and asking for the minimum fee
+// with the workflow's fixed witness count, repeats until the estimate
+// settles, applies the minimum-value checks and builds the final body.
+//
+// The loop starts at PlaceholderFee. Its first body has the final shape,
+// where upstream's has dummy amounts of the same size class, so for every
+// payment whose amounts keep their encoding width the fee equals upstream's.
+//
+// spec: SPO-Ptx-EXT-001, SPO-Ptx-EXT-002, SPO-Ptx-INV-005, SPO-Ptx-INV-006,
+// spec: SPO-Ptx-EXT-004, SPO-01sendLovelaces-EXT-001
+func (d Draft) Balance(ttl uint64, l Ledger) (Balanced, error) {
+	fee := PlaceholderFee
+	settled := false
+	for i := 0; i < maxFeeIterations; i++ {
+		outs, err := d.layout(fee, l.MinOutput, false)
+		if err != nil {
+			return Balanced{}, err
+		}
+		body, err := l.Build(d.spec(outs, fee, ttl))
+		if err != nil {
+			return Balanced{}, err
+		}
+		est, err := l.Fee(body)
+		if err != nil {
+			return Balanced{}, err
+		}
+		if est == fee {
+			settled = true
+			break
+		}
+		if i > 0 && est < fee {
+			// An estimate below a fee already tried after the first
+			// step: the fee pays for the body, so keep the larger.
+			settled = true
+			break
+		}
+		fee = est
+	}
+	if !settled {
+		return Balanced{}, ErrFeeDiverged
+	}
+	outs, err := d.layout(fee, l.MinOutput, true)
+	if err != nil {
+		return Balanced{}, err
+	}
+	spec := d.spec(outs, fee, ttl)
+	body, err := l.Build(spec)
+	if err != nil {
+		return Balanced{}, err
+	}
+	// The fee must pay for the body that will actually be sent.
+	if est, err := l.Fee(body); err != nil {
+		return Balanced{}, err
+	} else if est > fee {
+		return Balanced{}, ErrFeeDiverged
+	}
+	return Balanced{Spec: spec, Body: body}, nil
+}

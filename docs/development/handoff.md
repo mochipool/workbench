@@ -39,7 +39,50 @@ Unit tests use stand-ins (`tests/fake_scripts.py`) that reproduce the upstream f
 
 Started 2026-11-16. Read [Go reference implementation: concerns](./go-reference-implementation-concerns.md) and the [ADRs](../explanation/adr/README.md) before touching it. The concerns page has a *Status* table that says what is closed.
 
-State: milestone M0 (decisions and skeleton) is done, and M1 (parity harness) has its first vertical slice: `spo --upstream-layout pool kes generate <pool>` is at parity with upstream `04c` under a differential test. The sealed store does not exist yet, so the binary only works on a directory in the upstream layout, behind that flag.
+State: milestone M0 (decisions and skeleton) is done, and M1 (parity harness) has its first vertical slices: `spo pool kes generate <pool>` is at parity with upstream `04c`, `pool opcert issue` with `04d`, and `spo wallet send` wraps the `SendLovelaces` use case (`01_sendLovelaces`). The sealed store is the default. `spo init` creates a workspace (`workspace.spo`, its head file and `spo.toml`), and every command opens it with a passphrase from the terminal or `--passphrase-fd`. A passphrase change or a new recovery key is a rekey and always revokes the old recovery key; `store recover` is the only reader of a recovery key; a rolled-back file is refused unless `--accept-rollback`. `--upstream-layout` still works on a plain directory, with keys unsealed. Offline mode (clock, transfer file) and light mode (Koios, light-mode parameters file) are wired; online mode (node socket) is not built. Provider API tokens are stored in the sealed store. See [spo CLI](../reference/spo-cli.md) and [spo.toml](../reference/spo-toml.md).
+
+How a command gets what it needs, and how to add one:
+
+* One `Env` carries every capability, each typed by its narrow port (`adapters/cli/env.go`). `cmd/spo/env.go` builds it with `Deps.Wire(store, WireOptions)` from the workspace config, the effective mode, the genesis overrides, the provider token and the transfer-file path. A chain capability is nil when the mode or provider cannot supply it, and the wiring records why (`Env.Absent`). `spo capabilities` prints the same Env.
+* A command is one file in `spo/internal/adapters/cli` with a `*cobra.Command`, registered in `root.go`. It calls `a.withEnv(cmd, envSpec{needs: ...}, fn)`. The needs (`Cap` constants, `OneOf(...)`) are checked on an Env built before the store is opened, so a command that cannot run here fails before any prompt, with one error listing every missing capability and why. Inside `fn`, use the `Env` fields; never nil-check a field. Chain commands add `addChainFlags` (`--offline`, genesis flags, optionally `--transfer-file`).
+* Nothing changes in `cmd/spo` when you add a command. It changes only when you introduce a new adapter, or a new capability: add a field and a `Cap` in `env.go`, give `Env.has` its case, and wire it in `cmd/spo/env.go` for each mode (or record why it is absent).
+* Errors from the store are sentinels in `cli/deps.go`; `explain.go` turns each into one sentence with the remedy, for every command.
+* Tests: fakes in `adapters/cli` (a fake `Deps.Wire`; see `wallet_test.go` for a fixture around the real native ledger), the real adapters in `cmd/spo` on a sealed workspace (`e2e_test.go`; Argon2 runs at its floor, so one workspace is created and copied).
+
+| What | Where |
+| --- | --- | --- |
+| Orchestrator | `workbench` CLI: `init`, `workflows`, `check`, `run`, `resume`, `abandon`, `status`, `runs`, `show`, `exec`, `edit` | `orchestrator/src/spo_workbench/` |
+| Workflows | `kes-rotate` (+ block-producer tar bundle), `claim-rewards`, `send-ada`, `pool-update` | `orchestrator/src/spo_workbench/workflows/` |
+| Engine | Steps with a location (`chain` / `keys` / `any`), filesystem done-probes, non-repeatable steps, artefact digests and drift detection, one open run per workflow, air-gap hand-off via a ticket attached to `offlineTransfer.json` | `engine.py`, `transfer.py`, `journal.py` |
+| Validation | Strict `workbench.toml` schema; per-workflow check-time validation (address network prefixes, `pool.json` limits mirroring `05a`, KES counter consistency, offline hand-off precondition, partial-`04d` guard) | `config.py`, `validate.py`, each workflow's `validate()` |
+| Packaging | `packages.<sys>.workbench`, `apps.<sys>.workbench`, `checks.<sys>.workbench-tests`; toolchain manifest JSON baked into the wrapper | `tools/workbench.nix`, `flake.nix` |
+| Flake fixes | `gnupg` added to the SPO script runtime (needed for `enc` keys); `mkParams` exposed; dev shell no longer clobbers a user's own `~/.common.inc` | `tools/spo-scripts.nix`, `flake.nix` |
+| Spec corpus | Behavioural spec of every upstream script and `00_common.sh` function (67 specs, 2257 requirement ids with source ranges, about 95% of upstream code lines cited; reviewed once by Opus against source, all findings applied), domain model, ports, `specctl` (lint, drift, hunks, gaps, index), `checks.<sys>.spec-lint` | `spec/` |
+| Docs | Diataxis set (tutorials, how-to, reference, explanation); `readme.md` trimmed to a landing page; `RELEASING.md` points into `docs/` | `docs/` |
+
+Commits (jj, colocated): `feat(workbench): ...` then `docs: Diataxis ...` on bookmark `workbench-orchestrator`, merged into `main` with `merge: workbench orchestrator and Diataxis docs`. **Not pushed**: the user pushes.
+
+## Verify the current state
+
+Every one of these must pass before and after your change:
+
+```sh
+nix flake check --accept-flake-config                     # includes workbench-tests (52 unit tests)
+nix build --accept-flake-config -o result-workbench .#workbench
+cd orchestrator && SPO_WB_E2E_WORKBENCH=$PWD/../result-workbench/bin/workbench \
+  nix shell --impure --expr '(import (builtins.getFlake "nixpkgs") {}).python3.withPackages (p: [p.pytest])' \
+  -c sh -c 'PYTHONPATH=src python -m pytest -q -p no:cacheprovider'   # 52 unit + 1 real-script e2e
+```
+
+The e2e test (`tests/test_e2e_real_scripts.py`) drives the real pinned scripts and cardano-cli in offline mode on preview. It needs network access for one light-mode `01_workOffline.sh new`. The tutorial `docs/tutorials/rotate-kes-on-preview.md` was executed verbatim and ends `[DONE]`. Re-run it after changing `kes-rotate`.
+
+Unit tests use stand-ins (`tests/fake_scripts.py`) that reproduce the upstream file contract. When you learn something new about upstream behaviour, encode it in the stand-in first, so the unit tests cannot drift from reality again (this happened once; see Gotchas).
+
+## Go reference implementation (`spo/`)
+
+Started 2026-11-16. Read [Go reference implementation: concerns](./go-reference-implementation-concerns.md) and the [ADRs](../explanation/adr/README.md) before touching it. The concerns page has a *Status* table that says what is closed.
+
+State: milestone M0 (decisions and skeleton) is done, and M1 (parity harness) has its first vertical slice: `spo pool kes generate <pool>` is at parity with upstream `04c` under a differential test. The sealed store is the default. `spo init` creates a workspace (`workspace.spo` plus `spo.toml`), and every command opens it with a passphrase from the terminal or `--passphrase-fd`. `--upstream-layout` still works on a plain directory in the upstream file layout, with keys unsealed, and is refused when `workspace.spo` is present. `pool opcert issue` is wired for offline mode (clock, no chain check) and light mode (Koios, chain check enforced); online mode (node socket) is not built. Provider API tokens cannot be stored until `ports` has a secret kind for them. See [spo CLI](../reference/spo-cli.md) and [spo.toml](../reference/spo-toml.md).
 
 | What | Where |
 | --- | --- |
@@ -55,16 +98,26 @@ State: milestone M0 (decisions and skeleton) is done, and M1 (parity harness) ha
 | Koios adapter with recorded preview responses | `spo/internal/adapters/koios` |
 | Offline tip from the clock, genesis file reader, system clock | `spo/internal/adapters/offline`, `genesisfile`, `systemclock` |
 | Sealing primitives with committed test vectors (ADR 0003) | `spo/internal/platform/seal` |
-| Sealed single-file store: `Store` and `Vault` over SQLite, audit chain, backup and restore. **Not yet wired into a command and not yet reviewed** | `spo/internal/adapters/sqlitestore` |
+| Sealed single-file store: `Store` and `Vault` over SQLite, audit chain, backup and restore. Wired into `init`, `store ...` and every key command; under security review | `spo/internal/adapters/sqlitestore` |
+| Workspace configuration: `spo.toml` with a strict schema, and the network presets | `spo/internal/adapters/config` |
 | KES rotation state and the `GenerateKesKey` use case | `spo/internal/domain/pool`, `spo/internal/app/poolops` |
 | Upstream-layout store (plain files, keys unsealed) | `spo/internal/adapters/fsstore` |
 | Native key generation for KES and VRF (Blink Labs `bursa`), checked against cardano-cli | `spo/internal/adapters/native`, `spo/test/parity/keygen_test.go` |
+| Transaction kernel: draft, amount forms, layout, fee loop, witness check (pure) | `spo/internal/domain/txbuild` |
+| Payment use case `SendLovelaces` (`01_sendLovelaces`): plan, one body, confirm, witness, verify, submit or queue | `spo/internal/app/wallet` |
+| Native ledger side of transactions: body encoding, fee, minimum output, assembly, address inspection; vault witnesses for payment and stake keys | `spo/internal/adapters/native` (`tx.go`, `witness.go`) |
+| Offline transfer file as snapshot reader and transaction queue (atomic write, read-back) | `spo/internal/adapters/transferfile` |
+| The environment of a command (`Env`, `Require`) and the wiring of each mode | `spo/internal/adapters/cli/env.go`, `spo/cmd/spo/env.go` |
 | Differential tests against the pinned upstream scripts | `spo/test/parity` |
 | Which specs are implemented, and the waived ids with reasons | `spo/spec-coverage.toml` |
 
 Verify:
 
 ```sh
+# a sealed workspace without a terminal: passphrase and recovery key on descriptors
+printf 'correct horse battery staple\n' > pw
+nix run --accept-flake-config .#spo -- -C ws init --network preview --passphrase-fd 3 --recovery-key-fd 4 3<pw 4>rk
+nix run --accept-flake-config .#spo -- -C ws --passphrase-fd 3 store verify 3<pw
 nix build --accept-flake-config --no-link -L .#checks.x86_64-linux.spo-tests   # go vet + go test in the sandbox
 nix run --accept-flake-config .#spo -- toolchain check                        # real pinned tools pass the gates
 cd spo && go test -count=1 ./...                                              # fast loop; needs Go 1.27. -count=1 matters: Go caches the import-rule test
@@ -73,6 +126,10 @@ python3 spec/tools/specctl.py coverage --tests spo --config spo/spec-coverage.to
 ```
 
 Things that will bite:
+
+* **The sealed store is not yet cleared for real keys.** It has had four security reviews; the fourth left one required fix (an interrupt during commit can report a committed rekey as failed) and a list of recommended ones. See the *Status* table in the concerns page before relying on it.
+* **Parity tests that need cardano-signer skip inside the Nix sandbox.** The signer is a prebuilt binary whose interpreter path cannot be patched, so it does not run there. Run them in the development loop: `source <scratch>/env.sh` style variables as described in `spo/test/parity/parity_test.go`, then `go test ./test/parity/`. The Nix check allows exactly that skip and fails on any other.
+* **Tailcat adds about 18 MB** to the binary and a large test-only dependency set (concern T8).
 
 * **Nix does not see files jj has not told git about.** After creating files, run `git add -N <paths>` before `nix build`, or the flake fails with "not tracked by Git".
 * **`vendorHash`.** After any change to `spo/go.mod` or `spo/go.sum`, set `vendorHash` in `tools/spo.nix` to the all-`A` placeholder, build, and paste the hash Nix reports.
