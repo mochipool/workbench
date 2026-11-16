@@ -44,6 +44,56 @@ var layout = map[ports.Kind]func(r ports.Ref) string{
 	ports.KesCounterNext: func(r ports.Ref) string { return r.Name + ".kes.counter-next" },
 	ports.OpCert:         func(r ports.Ref) string { return fmt.Sprintf("%s.node-%03d.opcert", r.Name, r.Num) },
 	ports.KesExpire:      func(r ports.Ref) string { return r.Name + ".kes-expire.json" },
+
+	// spec: SPO-Pfiles-OUT-001, SPO-Pfiles-OUT-002, SPO-Pfiles-OUT-004
+	ports.AddrFile:       func(r ports.Ref) string { return r.Name + ".addr" },
+	ports.AddrVKey:       func(r ports.Ref) string { return r.Name + ".vkey" },
+	ports.AddrSKey:       func(r ports.Ref) string { return r.Name + ".skey" },
+	ports.AddrHwsFile:    func(r ports.Ref) string { return r.Name + ".hwsfile" },
+	ports.StakingAddr:    func(r ports.Ref) string { return r.Name + ".staking.addr" },
+	ports.StakingVKey:    func(r ports.Ref) string { return r.Name + ".staking.vkey" },
+	ports.StakingSKey:    func(r ports.Ref) string { return r.Name + ".staking.skey" },
+	ports.StakingHwsFile: func(r ports.Ref) string { return r.Name + ".staking.hwsfile" },
+	ports.StakingCert:    func(r ports.Ref) string { return r.Name + ".staking.cert" },
+	// spec: SPO-Pfiles-OUT-006 to SPO-Pfiles-OUT-009 (certificates), SPO-22a-IN-002 (DRep key)
+	ports.DelegCert:        func(r ports.Ref) string { return r.Name + ".deleg.cert" },
+	ports.VoteDelegCert:    func(r ports.Ref) string { return r.Name + ".vote-deleg.cert" },
+	ports.StakingDeregCert: func(r ports.Ref) string { return r.Name + ".staking.dereg-cert" },
+	ports.DRepVKey:         func(r ports.Ref) string { return r.Name + ".drep.vkey" },
+	// spec: SPO-Pfiles-OUT-005
+	ports.PaymentMnemonics: func(r ports.Ref) string { return r.Name + ".payment.mnemonics" },
+
+	// spec: SPO-Pfiles-OUT-017 to SPO-Pfiles-OUT-023 (the pool descriptor, ids, certificates, metadata, witness transfer files)
+	ports.PoolDescriptor:         func(r ports.Ref) string { return r.Name + ".pool.json" },
+	ports.PoolIDFile:             func(r ports.Ref) string { return r.Name + ".pool.id" },
+	ports.PoolIDBechFile:         func(r ports.Ref) string { return r.Name + ".pool.id-bech" },
+	ports.PoolCert:               func(r ports.Ref) string { return r.Name + ".pool.cert" },
+	ports.PoolDeregCert:          func(r ports.Ref) string { return r.Name + ".pool.dereg-cert" },
+	ports.PoolMetadata:           func(r ports.Ref) string { return r.Name + ".metadata.json" },
+	ports.PoolExtendedMetadata:   func(r ports.Ref) string { return r.Name + ".extended-metadata.json" },
+	ports.PoolAdditionalMetadata: func(r ports.Ref) string { return r.Name + ".additional-metadata.json" },
+	ports.PoolItnSKey:            func(r ports.Ref) string { return r.Name + ".itn.skey" },
+	ports.PoolItnVKey:            func(r ports.Ref) string { return r.Name + ".itn.vkey" },
+	ports.PoolWitnessFile:        func(r ports.Ref) string { return r.Name + ".witness" },
+}
+
+// modes of the kinds that are not locked at 0400: the published metadata is
+// 0444 so it can be copied to a web server (SPO-05a-OUT-006, OUT-007), the
+// additional metadata and the witness transfer files keep the default mode
+// because the operator edits the first and `05d sign` rewrites the second in
+// place (SPO-05a-OUT-003, SPO-05d-OUT-001).
+var modes = map[ports.Kind]os.FileMode{
+	ports.PoolMetadata:           0o444,
+	ports.PoolExtendedMetadata:   0o444,
+	ports.PoolAdditionalMetadata: 0o644,
+	ports.PoolWitnessFile:        0o644,
+}
+
+func modeOf(k ports.Kind) os.FileMode {
+	if m, ok := modes[k]; ok {
+		return m
+	}
+	return modeLocked
 }
 
 // Store is a workspace directory.
@@ -84,6 +134,7 @@ type staged struct {
 	data   []byte         // non-secret content
 	secret *secret.Buffer // secret content (a private copy)
 	delete bool
+	mode   os.FileMode // 0 means modeLocked
 }
 
 type tx struct {
@@ -155,7 +206,7 @@ func (t *tx) Put(r ports.Ref, data []byte) error {
 	if err != nil {
 		return err
 	}
-	t.stage(p, &staged{data: append([]byte(nil), data...)})
+	t.stage(p, &staged{data: append([]byte(nil), data...), mode: modeOf(r.Kind)})
 	return nil
 }
 
@@ -248,6 +299,13 @@ func (s *Store) Update(_ context.Context, fn func(ports.Writer) error) error {
 	return nil
 }
 
+func (st *staged) fileMode() os.FileMode {
+	if st.mode != 0 {
+		return st.mode
+	}
+	return modeLocked
+}
+
 // writeTemp writes the staged content beside its destination with the
 // locked mode already set, so the rename publishes a finished file.
 func writeTemp(dest string, st *staged) (string, error) {
@@ -271,7 +329,7 @@ func writeTemp(dest string, st *staged) (string, error) {
 	if err := f.Sync(); err != nil {
 		return fail(err)
 	}
-	if err := f.Chmod(modeLocked); err != nil {
+	if err := f.Chmod(st.fileMode()); err != nil {
 		return fail(err)
 	}
 	if err := f.Close(); err != nil {

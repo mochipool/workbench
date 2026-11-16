@@ -123,4 +123,6 @@ Use case `GeneratePaymentAccount(name, protection, hwPath?)` on `PaymentAccount`
 
 ## Open questions
 
+* Resolved 2026-11-16 (cardano-cli 11.2.3.0, `spo/test/parity/software_keys_test.go`): `cli` does not prompt; the key types are `PaymentVerificationKeyShelley_ed25519` / `PaymentSigningKeyShelley_ed25519` (`Payment Verification Key` / `Payment Signing Key`); `<name>.addr` is an enterprise address (`addr_test1v...` on preview) written without a trailing newline.
+
 * Whether `cardano-hw-cli` ever reports failure only by exit code with neither `ERROR` nor `DISCONNECT` in its output, which the check at L187 would miss.

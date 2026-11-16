@@ -149,3 +149,103 @@ func TestHostileNamesAreRefused(t *testing.T) {
 		t.Fatalf("something was written: %v", entries)
 	}
 }
+
+// The certificate artefacts keep upstream's file names and the locked mode,
+// and a rewrite replaces them (05b, 08a and 22a replace without a warning).
+//
+// spec: SPO-Pfiles-OUT-006, SPO-Pfiles-OUT-007, SPO-Pfiles-OUT-008, SPO-Pfiles-OUT-009, SPO-05b-OUT-001, SPO-08a-OUT-001, SPO-22a-OUT-001
+func TestCertificateArtefactNames(t *testing.T) {
+	s, dir := open(t)
+	want := map[ports.Kind]string{
+		ports.StakingCert: "w.staking.cert", ports.DelegCert: "w.deleg.cert", ports.VoteDelegCert: "w.vote-deleg.cert",
+		ports.StakingDeregCert: "w.staking.dereg-cert", ports.DRepVKey: "w.drep.vkey",
+	}
+	for round := 0; round < 2; round++ {
+		err := s.Update(ctx, func(w ports.Writer) error {
+			for k := range want {
+				if err := w.Put(ports.Ref{Name: "w", Kind: k}, []byte{byte('0' + round)}); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for k, name := range want {
+		st, err := os.Stat(filepath.Join(dir, name))
+		if err != nil || st.Mode().Perm() != 0o400 {
+			t.Errorf("%s: %v %v", name, st, err)
+		}
+		if b, _ := os.ReadFile(filepath.Join(dir, name)); string(b) != "1" {
+			t.Errorf("%s was not replaced: %q", name, b)
+		}
+		if k.Secret() {
+			t.Errorf("%s must not be secret", k)
+		}
+	}
+}
+
+// The pool artefacts have the upstream file names and modes: the descriptor
+// and the certificates locked, the published metadata readable by all, and the
+// witness transfer file and the additional metadata left writable for the
+// operator and for `05d sign`.
+//
+// spec: SPO-Pfiles-OUT-017, SPO-Pfiles-OUT-018, SPO-Pfiles-OUT-019, SPO-Pfiles-OUT-020, SPO-Pfiles-OUT-021, SPO-Pfiles-OUT-023, SPO-05a-OUT-003, SPO-05d-OUT-001
+func TestPoolArtefactNamesAndModes(t *testing.T) {
+	dir := t.TempDir()
+	st, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[ports.Ref]struct {
+		file string
+		mode os.FileMode
+	}{
+		{Name: "p", Kind: ports.PoolDescriptor}:            {"p.pool.json", 0o400},
+		{Name: "p", Kind: ports.PoolIDFile}:                {"p.pool.id", 0o400},
+		{Name: "p", Kind: ports.PoolIDBechFile}:            {"p.pool.id-bech", 0o400},
+		{Name: "p", Kind: ports.PoolCert}:                  {"p.pool.cert", 0o400},
+		{Name: "p", Kind: ports.PoolDeregCert}:             {"p.pool.dereg-cert", 0o400},
+		{Name: "p", Kind: ports.PoolMetadata}:              {"p.metadata.json", 0o444},
+		{Name: "p", Kind: ports.PoolExtendedMetadata}:      {"p.extended-metadata.json", 0o444},
+		{Name: "p", Kind: ports.PoolAdditionalMetadata}:    {"p.additional-metadata.json", 0o644},
+		{Name: "p_o_17", Kind: ports.PoolWitnessFile}:      {"p_o_17.witness", 0o644},
+		{Name: "p_p.node_17", Kind: ports.PoolWitnessFile}: {"p_p.node_17.witness", 0o644},
+	}
+	if err := st.Update(context.Background(), func(w ports.Writer) error {
+		for ref := range want {
+			if err := w.Put(ref, []byte("x")); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for ref, w := range want {
+		fi, err := os.Stat(filepath.Join(dir, w.file))
+		if err != nil || fi.Mode().Perm() != w.mode {
+			t.Errorf("%v: %v %v", ref, err, fi)
+		}
+	}
+	// The ITN signing key is secret: it is read through the vault, never Get.
+	if err := st.View(context.Background(), func(r ports.Reader) error {
+		if _, err := r.Get(ports.Ref{Name: "p", Kind: ports.PoolItnSKey}); !errors.Is(err, ports.ErrSecretKind) {
+			t.Errorf("%v", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Replacing and deleting a file that is not 0400 works.
+	if err := st.Update(context.Background(), func(w ports.Writer) error {
+		if err := w.Put(ports.Ref{Name: "p_o_17", Kind: ports.PoolWitnessFile}, []byte("y")); err != nil {
+			return err
+		}
+		return w.Delete(ports.Ref{Name: "p", Kind: ports.PoolMetadata})
+	}); err != nil {
+		t.Fatal(err)
+	}
+}

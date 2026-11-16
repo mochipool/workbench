@@ -3,7 +3,7 @@
 # comment line containing `spec:` and the ids, in a *_test.go file under spo/:
 #   // spec: SPO-04c-PRE-001, SPO-04c-PRE-002
 # Add a code here when its use case is implemented.
-implemented = ["04c", "04d"]
+implemented = ["04a", "04b", "04c", "04d", "02", "03a", "01sendLovelaces", "Ptx", "03b", "03c", "05b", "06", "08a", "08b", "22a", "22b", "01claimRewards", "05a", "05c", "05e", "07a", "07b"]
 
 # Requirement ids deliberately not covered, each with a non-empty reason:
 #   "SPO-04c-PR-002" = "display only; the port never shows a password"
@@ -30,3 +30,106 @@ implemented = ["04c", "04d"]
 "SPO-04d-PR-003" = "hardware confirmation prompt: belongs to the hardware signer adapter, which does not exist yet; a hardware-held cold key is refused up front by the signer directory"
 "SPO-04d-EXT-004" = "cardano-hw-cli issue-op-cert not ported: no hardware signer adapter yet (ADR 0008 puts it behind ports.OpCertIssuer)"
 "SPO-04d-EXT-005" = "display of the KES key and pool id in bech32 is not ported; the pool id is derived internally (chain.PoolIDOf, checked against cardano-cli in the parity test)"
+
+# Ptx and 01sendLovelaces: the shared pipeline and the plain payment. Key-file signing,
+# software and offline-queue composition are ported; the rest waits for the named piece.
+"SPO-Ptx-IF-001" = "classification of the command-line words (name normalisation, extra parameters) is the command's and Pparam's; the use case takes a structured SendRequest and normalises names itself (SPO-Pfiles-IN-001, cited in the wallet tests)"
+"SPO-Ptx-IN-003" = "settings are the composition's: DefTTL, the approval policy and the transfer file path are fields; cropTxOutput, queryTokenRegistry and transactionExplorer are display settings with no port yet"
+"SPO-Ptx-MODE-005" = "token registry display is not ported: no Directory port yet; the summary shows raw policy ids and names"
+"SPO-Ptx-EXT-005" = "hardware path (transform, witness, assemble with cardano-hw-cli) waits for the hardware signer adapter; a hardware-held payment key is refused by the signing plan"
+"SPO-Ptx-INV-009" = "hardware change-output key declarations: waits for the hardware signer adapter"
+"SPO-Ptx-PRE-005" = "classification of cardano-hw-cli output (REJECTED, DISCONNECT, ERROR): waits for the hardware signer adapter"
+"SPO-Ptx-PR-001" = "per-witness hardware prompts of 11a, 11b, 24b, 05c, 21b and 21d: not ported with those scripts and the hardware signer adapter"
+"SPO-Ptx-INV-011" = "05c witness collection: 05c is not ported"
+"SPO-Ptx-OUT-004" = "post-submit effects of 05c, 11a, 11b and 07b: those scripts are not ported"
+"SPO-01sendLovelaces-IF-003" = "Pparam is not ported: of the extra parameters only plain `msg:` lines exist, as SendRequest.Message (validated for the 64-byte limit); metadata files, the txhash#index list, utxolimit, skiputxowithasset, onlyutxowithasset, enc and pass are refused by not being offered"
+"SPO-01sendLovelaces-MODE-002" = "the utxolimit, skiputxowithasset, onlyutxowithasset and txhash#index filters belong to Pparam, which is not ported; the offline path spends every UTxO of the snapshot"
+"SPO-01sendLovelaces-EXT-002" = "hardware change-output declaration (--change-output-key-file): waits for the hardware signer adapter"
+"SPO-Ptx-OUT-003" = "the port keeps the body, the witness and the signed transaction in memory and writes no .txbody, .txwitness or .tx file; the cropped display is not ported"
+
+# 03b, 05b, 06, 08a, 08b, 22a, 22b, 03c, 01_claimRewards: the stake use cases. Key-file
+# signing and the offline queue are ported; a hardware holder, of either key, is refused up
+# front by the signing plan (ADR 0008), which covers every hardware/key-file combination.
+"SPO-03b-EXT-003" = "hardware path (the sed of the tag-258 wrapper, cardano-hw-cli witness and assemble): waits for the hardware signer adapter; a hardware-held key is refused by the signing plan"
+"SPO-08b-EXT-002" = "hardware path (cardano-hw-cli witness with both signing files, then assemble): waits for the hardware signer adapter; a hardware-held key is refused by the signing plan"
+"SPO-22b-EXT-001" = "hardware path (cardano-hw-cli witness with both signing files, then assemble); the key-file path is the vault signer, byte-equal to cardano-cli in the parity test: waits for the hardware signer adapter"
+"SPO-08b-EXT-003" = "`transaction sign` of cardano-cli with the network flag: signing is native (VaultSigner), witnesses and assembled transaction are byte-equal to `transaction sign` in the oracle test, and there is no network flag to pass"
+"SPO-03c-PRE-001" = "upstream refuses offline mode; the use case answers from whatever RewardAccountReader it is given, including the offline snapshot (the port note of 03c recommends it), so the refusal is the composition's choice, not the use case's"
+"SPO-06-IF-002" = "Pparam is not ported: of the extra parameters only plain `msg:` lines exist, as the request's Message (validated for the 64-byte limit); metadata files, utxo filters and enc/pass are refused by not being offered"
+"SPO-08b-IF-002" = "Pparam is not ported: of the extra parameters only plain `msg:` lines exist, as the request's Message (validated for the 64-byte limit); metadata files, utxo filters and enc/pass are refused by not being offered"
+"SPO-22b-IF-002" = "Pparam is not ported: of the extra parameters only plain `msg:` lines exist, as the request's Message (validated for the 64-byte limit); metadata files, utxo filters and enc/pass are refused by not being offered"
+"SPO-01claimRewards-IF-006" = "Pparam is not ported: of the extra parameters only plain `msg:` lines exist, as the request's Message (validated for the 64-byte limit); metadata files, utxo filters and enc/pass are refused by not being offered"
+"SPO-01claimRewards-IF-004" = "the fee payer is an explicit ClaimRequest.Payer (the port note), not a word recognised by the existence of `<word>.addr`; the command decides how to read its words"
+
+# 04a, 04b, 02, 03a: software-key paths. enc is not ported at generation; hardware and
+# hybrid paths are refused up front and wait for the hardware signer adapter.
+"SPO-02-EXT-002" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-02-EXT-003" = "hardware path: the use case refuses a hardware holder up front through custody.PlanGeneration; waived until the hardware signer adapter exists"
+"SPO-02-IF-001" = "argument parsing and usage are the command's; the key type word becomes GeneratePaymentRequest.Holder (cli is the vault holder, enc is not ported, hw and hwmulti are refused up front)"
+"SPO-02-IF-003" = "hardware path: the use case refuses a hardware holder up front through custody.PlanGeneration; waived until the hardware signer adapter exists"
+"SPO-02-OUT-001" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-02-OUT-002" = "hardware path: the use case refuses a hardware holder up front through custody.PlanGeneration; waived until the hardware signer adapter exists"
+"SPO-02-PR-001" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-02-PR-002" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-02-SEC-002" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-03a-EXT-002" = "hardware path: the use case refuses a hardware holder up front through custody.PlanGeneration; waived until the hardware signer adapter exists"
+"SPO-03a-IF-001" = "argument parsing and usage are the command's; the key type word becomes GenerateWalletRequest.Source (cli is WalletKeysRandom, mnemonics is WalletKeysMnemonic) and Holder; enc, hybrid and hardware types are not ported"
+"SPO-03a-IF-002" = "argument parsing and usage are the command's; the key type word becomes GenerateWalletRequest.Source (cli is WalletKeysRandom, mnemonics is WalletKeysMnemonic) and Holder; enc, hybrid and hardware types are not ported"
+"SPO-03a-IF-005" = "the table of nine key types: cli and mnemonics are ported (random and derived with root 1852); enc is not ported at generation, hardware, multisig-root and hybrid types are refused up front until the hardware signer adapter exists"
+"SPO-03a-IN-001" = "configuration is the composition's: the address network is the NetworkID field and the tools (cardano-cli, cardano-signer) are replaced by native adapters"
+"SPO-03a-INV-002" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-03a-OUT-001" = "hardware path: the use case refuses a hardware holder up front through custody.PlanGeneration; waived until the hardware signer adapter exists"
+"SPO-03a-PR-001" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-03a-PR-002" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-03a-PRE-003" = "cardano-signer is replaced by the native derivation (verified against cardano-signer in the parity tests); there is no binary to locate or version-check"
+"SPO-03a-PRE-004" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-03a-PRE-005" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-03a-SEC-004" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-03a-SEC-005" = "hardware path: the use case refuses a hardware holder up front through custody.PlanGeneration; waived until the hardware signer adapter exists"
+"SPO-04a-EXT-002" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-04a-EXT-003" = "hardware path: the use case refuses a hardware holder up front through custody.PlanGeneration; waived until the hardware signer adapter exists"
+"SPO-04a-EXT-004" = "hardware path: the use case refuses a hardware holder up front through custody.PlanGeneration; waived until the hardware signer adapter exists"
+"SPO-04a-IF-001" = "argument parsing and usage are the command's; the key type word becomes GenerateColdKeysRequest.Holder (cli is the vault holder, enc is not ported, hw is refused up front)"
+"SPO-04a-IF-002" = "argument parsing and usage are the command's; the key type word becomes GenerateColdKeysRequest.Holder (cli is the vault holder, enc is not ported, hw is refused up front)"
+"SPO-04a-IF-003" = "hardware path: the use case refuses a hardware holder up front through custody.PlanGeneration; waived until the hardware signer adapter exists"
+"SPO-04a-IN-001" = "hardware path: the use case refuses a hardware holder up front through custody.PlanGeneration; waived until the hardware signer adapter exists"
+"SPO-04a-INV-001" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-04a-INV-002" = "hardware path: the use case refuses a hardware holder up front through custody.PlanGeneration; waived until the hardware signer adapter exists"
+"SPO-04a-OUT-002" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-04a-OUT-003" = "hardware path: the use case refuses a hardware holder up front through custody.PlanGeneration; waived until the hardware signer adapter exists"
+"SPO-04a-PR-001" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-04a-PR-002" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-04a-PR-003" = "hardware path: the use case refuses a hardware holder up front through custody.PlanGeneration; waived until the hardware signer adapter exists"
+"SPO-04a-PRE-002" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-04a-PRE-003" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-04a-PRE-004" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-04a-PRE-005" = "hardware path: the use case refuses a hardware holder up front through custody.PlanGeneration; waived until the hardware signer adapter exists"
+"SPO-04a-SEC-002" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-04a-SEC-003" = "hardware path: the use case refuses a hardware holder up front through custody.PlanGeneration; waived until the hardware signer adapter exists"
+"SPO-04b-EXT-002" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-04b-IF-001" = "argument parsing and usage are the command's; the key type word becomes GenerateVrfKeysRequest.Holder (cli is the vault holder, enc is not ported)"
+"SPO-04b-IF-002" = "argument parsing and usage are the command's; the key type word becomes GenerateVrfKeysRequest.Holder (cli is the vault holder, enc is not ported)"
+"SPO-04b-INV-001" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-04b-OUT-002" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-04b-PR-001" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-04b-PR-002" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-04b-PRE-002" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-04b-PRE-003" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-04b-PRE-004" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-04b-SEC-002" = "enc mode (gpg password protection) is not ported at generation: the store's protection replaces it and the upstream encrypted form is written only by the key-protection use case (same decision as 04c)"
+"SPO-04b-SEC-003" = "delivering the VRF key in plaintext to the block producer is the audited export use case, not generation"
+
+# 05a, 05c, 05e, 07a, 07b: pool registration and retirement. The software-key and offline
+# compositions are ported; what waits is named. 05d is not an implemented code: the
+# import side is covered (ImportWitness) and cited, the sign, clear and info sides come later.
+"SPO-05a-OUT-010" = "display only: the use case returns a result that holds no key, and the command prints what it chooses; the descriptor with the protection key is never in a result (SPO-05a-SEC-001, cited)"
+"SPO-05a-SEC-002" = "the ITN and BLS signing keys are read by an external tool from plaintext files; neither is ported (ITN refuses with ErrITNUnsupported, protocol 12 with ErrBLSRequired), so there is no such read"
+"SPO-05c-OUT-004" = "display only: the hint about registering each owner's delegation certificate in a later transaction after a hardware registration; the two-phase hardware-owner flow waits for the hardware signer adapter (SPO-05c-INV-006 is cited for the attachment rule)"
+"SPO-05c-OUT-007" = "temporary files in tempDir: the body, the witnesses and the signed transaction live in memory and in the store; no temporary file is written"
+"SPO-05c-PR-002" = "the hardware confirmation prompt belongs to the hardware signer adapter, which does not exist yet; a hardware holder is refused by the signing plan, or left as a pending slot when AllowPending is set"
+"SPO-05c-PRE-009" = "classification of cardano-hw-cli output (REJECTED, DISCONNECT, ERROR, WARNING) belongs to the hardware signer adapter, which does not exist yet; an unreadable key file is an error of the vault signer (cited by its tests)"
+"SPO-05c-SEC-001" = "signing keys are opened in guarded memory by the vault signer for one witness and destroyed after it (SPO-Ptx-SEC-001, cited by the signer and parity tests); the use case never sees a key"
+"SPO-05c-SEC-004" = "display only: upstream prints the descriptor with the protection key and the message passphrase; the use case returns neither and `pass:` messages are not ported"
+"SPO-07a-OUT-003" = "display only: the command prints the certificate and the descriptor as it chooses"
+"SPO-07b-EXT-001" = "the hardware path (canonical body form, cardano-hw-cli witness, assemble) waits for the hardware signer adapter; a hardware payer or cold key is refused by the signing plan"
+"SPO-07b-SEC-002" = "no temporary file is written, so no signed transaction or body is left world-readable; `pass:` messages are not ported, so no passphrase is shown"

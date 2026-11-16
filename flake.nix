@@ -106,6 +106,7 @@
           # Go reference implementation, bound to this release set's toolchain
           spoBin = import ./tools/spo.nix {
             inherit pkgs lib versions cardano-signer workbench;
+            spoScripts = spo;
             inherit (import nixpkgs-go { inherit system; }) buildGoModule;
             inherit (spoCompat) requirements;
             cardano-cli = cardano-cli-pkgs.cardano-cli;

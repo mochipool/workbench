@@ -18,14 +18,26 @@
 , cardano-hw-cli
 , cardano-signer
 , workbench # tools/workbench.nix: the parity tests' oracle (ADR 0001)
+, spoScripts # tools/spo-scripts.nix: for the per-network genesis paths (mkParams)
 }:
 let
   version = "0.1.0";
 
   orEmpty = v: if v == null then "" else v;
 
+  # Bundled genesis files per network, derived as tools/workbench.nix derives
+  # them for the upstream scripts, so both sides use the same files.
+  networks = lib.mapAttrs
+    (_: network:
+      let params = spoScripts.mkParams { overrides = { inherit network; }; }; in {
+        shelleyGenesis = toString params.genesisfile;
+        byronGenesis = toString params.genesisfile_byron;
+      })
+    { mainnet = "Mainnet"; preprod = "PreProd"; preview = "Preview"; };
+
   toolchain = pkgs.writeText "spo-toolchain.json" (builtins.toJSON {
     release = versions.tools.spo-scripts.version;
+    inherit networks;
     tools = {
       cardano-cli = {
         path = "${cardano-cli}/bin/cardano-cli";
@@ -60,7 +72,7 @@ let
     pname = "spo-unwrapped";
     inherit version;
     src = lib.cleanSource ../spo;
-    vendorHash = "sha256-xJjJYo1XjvhGCCLPFXSZRxxORVKp1rJpIEaeHPMVw7U=";
+    vendorHash = "sha256-2XbuceLZDkrUsr61kOi91kKbDKlsYXf9OpamIv6DVO8=";
     env.CGO_ENABLED = 0;
     subPackages = [ "cmd/spo" ];
     ldflags = [ "-s" "-w" "-X main.version=${version}" ];
@@ -84,6 +96,9 @@ let
   # unit tests.
   parity = unwrapped.overrideAttrs (old: {
     pname = "spo-parity";
+    # Some upstream scripts read their confirmation from the controlling
+    # terminal; the tests drive those through script(1).
+    nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.util-linux pkgs.jq ];
     checkPhase = ''
       runHook preCheck
       export HOME=$TMPDIR
@@ -94,7 +109,12 @@ let
       # opcert parity test use one genesis.
       export SPO_PARITY_SHELLEY_GENESIS_PREVIEW=$(${pkgs.jq}/bin/jq -r .networks.preview.common.genesisfile ${workbench.toolchain})
       go test -count=1 -v ./test/parity/ | tee parity.log
-      if grep -q -- "--- SKIP" parity.log; then
+      # cardano-signer is a prebuilt binary that cannot run in the sandbox
+      # (tools/cardano-signer.nix), so the tests that need it skip here and
+      # run in the development loop. Any other skip fails the check.
+      skips=$(grep -c -- "--- SKIP" parity.log || true)
+      allowed=$(grep -c "cardano-signer cannot run here" parity.log || true)
+      if [ "$skips" != "$allowed" ]; then
         echo "a parity test was skipped; the check must run them all"
         exit 1
       fi

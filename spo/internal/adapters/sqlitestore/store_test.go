@@ -3,10 +3,13 @@ package sqlitestore
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 
@@ -32,6 +35,20 @@ func TestMain(m *testing.M) {
 	// Tests run Argon2id at the accepted minimum (64 MiB, 3 passes): the
 	// floor itself is not lowered here, only the default for new slots.
 	kdfForNewSlots = seal.MinKDF()
+	// A child process started by runWithMemlock lowers its locked-memory limit
+	// before anything touches guarded memory.
+	if v := os.Getenv("SPO_TEST_MEMLOCK"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 64)
+		if err == nil {
+			err = setMemlockLimit(n)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "cannot set the memlock limit:", err)
+			os.Exit(2)
+		}
+	}
+	// A waiting writer gives up quickly in tests.
+	busyTimeoutMS = 300
 	code := m.Run()
 	if tmplDir != "" {
 		os.RemoveAll(tmplDir)
@@ -159,7 +176,7 @@ func TestFailedUpdateWritesNothing(t *testing.T) {
 	if n := count(t, s, "records"); n != 0 {
 		t.Fatalf("%d records after a failed update", n)
 	}
-	if n := count(t, s, "audit"); n != 0 {
+	if n := count(t, s, "audit"); n != 1 { // the row Init wrote
 		t.Fatalf("%d audit rows after a failed update", n)
 	}
 }
@@ -182,8 +199,8 @@ func TestUpdateIsAtomicWhenAWriteFails(t *testing.T) {
 	if b, _ := get(s, counter); string(b) != "000\n" {
 		t.Fatalf("first write leaked: %q", b)
 	}
-	if n := count(t, s, "audit"); n != 1 {
-		t.Fatalf("audit rows %d, want 1", n)
+	if n := count(t, s, "audit"); n != 2 { // Init's row and the one update
+		t.Fatalf("audit rows %d, want 2", n)
 	}
 }
 
@@ -212,7 +229,7 @@ func TestReadYourWritesAndDelete(t *testing.T) {
 		}
 		return nil
 	})
-	if n := count(t, s, "audit"); n != 0 {
+	if n := count(t, s, "audit"); n != 1 {
 		t.Errorf("an update that changed nothing wrote %d audit rows", n)
 	}
 	// Delete of a stored record, then read it.
@@ -313,11 +330,11 @@ func TestVersionsAndAuditRows(t *testing.T) {
 		w.Put(counter, []byte("4")) // repeated put: still one write
 		return nil
 	})
-	if n := count(t, s, "audit"); n != 3 {
-		t.Fatalf("%d audit rows, want 3", n)
+	if n := count(t, s, "audit"); n != 4 {
+		t.Fatalf("%d audit rows, want 4", n)
 	}
 	var raw []byte
-	s.db.QueryRow(`SELECT touched FROM audit WHERE seq = 3`).Scan(&raw)
+	s.db.QueryRow(`SELECT touched FROM audit WHERE seq = 4`).Scan(&raw)
 	var entries []touched
 	if err := cbor.Unmarshal(raw, &entries); err != nil || len(entries) != 3 {
 		t.Fatalf("%v %d entries", err, len(entries))
@@ -330,47 +347,64 @@ func TestVersionsAndAuditRows(t *testing.T) {
 	}
 }
 
-func TestConflictBetweenTwoHandles(t *testing.T) {
+// L2: Update starts with BEGIN IMMEDIATE. A second writer cannot commit
+// while the first is in its callback; it waits for the busy timeout and then
+// gets ports.ErrConflict (not a raw SQLITE_BUSY), and the first update wins.
+func TestSecondWriterGetsConflict(t *testing.T) {
 	a, path := newStore(t)
 	b := openAt(t, path)
 	put(t, a, counter, "0")
+	var inner error
 	err := a.Update(ctx, func(w ports.Writer) error {
-		if _, err := w.Get(counter); err != nil { // pins A's snapshot
+		if _, err := w.Get(counter); err != nil {
 			return err
 		}
-		// Meanwhile B commits a change to the same artefact.
-		if err := b.Update(ctx, func(w2 ports.Writer) error { return w2.Put(counter, []byte("from B")) }); err != nil {
-			t.Fatalf("B: %v", err)
-		}
+		inner = b.Update(ctx, func(w2 ports.Writer) error { return w2.Put(counter, []byte("from B")) })
 		return w.Put(counter, []byte("from A"))
 	})
-	if !errors.Is(err, ports.ErrConflict) {
-		t.Fatalf("A's update: %v, want ErrConflict", err)
+	if err != nil {
+		t.Fatalf("A's update: %v", err)
 	}
-	if got, _ := get(a, counter); string(got) != "from B" {
-		t.Fatalf("after conflict: %q", got)
+	if !errors.Is(inner, ports.ErrConflict) {
+		t.Fatalf("B's update while A holds the write lock: %v, want ErrConflict", inner)
+	}
+	if got, _ := get(b, counter); string(got) != "from A" {
+		t.Fatalf("B sees %q", got)
 	}
 	if err := a.Verify(ctx); err != nil {
 		t.Fatal(err)
 	}
-	// Retrying on a fresh snapshot succeeds.
-	put(t, a, counter, "from A")
-	if got, _ := get(b, counter); string(got) != "from A" {
-		t.Fatalf("B sees %q", got)
+	// Retrying once the lock is free succeeds.
+	put(t, b, counter, "from B")
+	if got, _ := get(a, counter); string(got) != "from B" {
+		t.Fatalf("A sees %q", got)
 	}
 }
 
-func TestConflictOnCreatingTheSameRef(t *testing.T) {
-	a, path := newStore(t)
-	b := openAt(t, path)
-	err := a.Update(ctx, func(w ports.Writer) error {
-		w.Exists(counter)
-		put(t, b, counter, "B")
-		return w.Put(counter, []byte("A"))
-	})
-	if !errors.Is(err, ports.ErrConflict) {
-		t.Fatalf("%v", err)
+// A writer from outside the process (here: a raw connection holding BEGIN
+// IMMEDIATE) is reported as ErrConflict too, not as a driver error.
+func TestBusyIsConflict(t *testing.T) {
+	a, p := newStore(t)
+	put(t, a, counter, "0")
+	raw, err := sql.Open("sqlite", "file:"+p)
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer raw.Close()
+	conn, err := raw.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		t.Fatal(err)
+	}
+	err = a.Update(ctx, func(w ports.Writer) error { return w.Put(counter, []byte("A")) })
+	if !errors.Is(err, ports.ErrConflict) {
+		t.Fatalf("update while another writer holds the lock: %v", err)
+	}
+	conn.ExecContext(ctx, "ROLLBACK")
+	put(t, a, counter, "A") // and it works afterwards
 }
 
 // ---- no plaintext on disk ----
@@ -496,9 +530,15 @@ func TestTamperSwapCiphertexts(t *testing.T) {
 	r0, r1 := ports.Ref{Name: "p", Kind: ports.KesVKey, Num: 0}, ports.Ref{Name: "p", Kind: ports.KesVKey, Num: 1}
 	t0, _ := s.tag(r0)
 	t1, _ := s.tag(r1)
-	exec(t, s, `CREATE TEMP TABLE sw AS SELECT nonce, wrapped_key, ciphertext FROM records WHERE lookup_tag = ?`, t0)
-	exec(t, s, `UPDATE records SET nonce=(SELECT nonce FROM records WHERE lookup_tag=?), wrapped_key=(SELECT wrapped_key FROM records WHERE lookup_tag=?), ciphertext=(SELECT ciphertext FROM records WHERE lookup_tag=?) WHERE lookup_tag=?`, t1, t1, t1, t0)
-	exec(t, s, `UPDATE records SET nonce=(SELECT nonce FROM sw), wrapped_key=(SELECT wrapped_key FROM sw), ciphertext=(SELECT ciphertext FROM sw) WHERE lookup_tag=?`, t1)
+	exec(t, s, `CREATE TEMP TABLE sw AS SELECT nonce, wrapped_key, owner_sealed, ciphertext FROM records WHERE lookup_tag = ?`, t0)
+	exec(t, s, `UPDATE records SET nonce=(SELECT nonce FROM records WHERE lookup_tag=?), wrapped_key=(SELECT wrapped_key FROM records WHERE lookup_tag=?), owner_sealed=(SELECT owner_sealed FROM records WHERE lookup_tag=?), ciphertext=(SELECT ciphertext FROM records WHERE lookup_tag=?) WHERE lookup_tag=?`, t1, t1, t1, t1, t0)
+	exec(t, s, `UPDATE records SET nonce=(SELECT nonce FROM sw), wrapped_key=(SELECT wrapped_key FROM sw), owner_sealed=(SELECT owner_sealed FROM sw), ciphertext=(SELECT ciphertext FROM sw) WHERE lookup_tag=?`, t1)
+	for _, r := range []ports.Ref{r0, r1} {
+		if _, err := get(s, r); !errors.Is(err, ErrVerify) {
+			t.Errorf("%s: the handle's record map missed it: %v", r, err)
+		}
+	}
+	trustRows(t, s) // as if the chain agreed: only the sealing can catch it now
 	for _, r := range []ports.Ref{r0, r1} {
 		if _, err := get(s, r); !errors.Is(err, ErrCorrupt) {
 			t.Errorf("%s: %v", r, err)
@@ -518,6 +558,7 @@ func TestTamperSwapLookupTags(t *testing.T) {
 	exec(t, s, `UPDATE records SET lookup_tag=? WHERE lookup_tag=?`, tmp, t0)
 	exec(t, s, `UPDATE records SET lookup_tag=? WHERE lookup_tag=?`, t0, t1)
 	exec(t, s, `UPDATE records SET lookup_tag=? WHERE lookup_tag=?`, t1, tmp)
+	trustRows(t, s)
 	for _, r := range []ports.Ref{r0, r1} {
 		if _, err := get(s, r); !errors.Is(err, ErrCorrupt) {
 			t.Errorf("%s: %v", r, err)
@@ -528,19 +569,19 @@ func TestTamperSwapLookupTags(t *testing.T) {
 func TestTamperKindClassVersion(t *testing.T) {
 	for name, q := range map[string]string{
 		"kind":    `UPDATE records SET kind = 'kes.skey'`,
-		"class":   `UPDATE records SET class = 'secret'`,
 		"version": `UPDATE records SET version = version + 1`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			s, _ := newStore(t)
 			put(t, s, ports.Ref{Name: "p", Kind: ports.KesVKey, Num: 1}, "v")
 			exec(t, s, q)
+			trustRows(t, s)
 			if _, err := get(s, ports.Ref{Name: "p", Kind: ports.KesVKey, Num: 1}); !errors.Is(err, ErrCorrupt) {
 				t.Errorf("Get: %v", err)
 			}
-			// Kind and class are not in the audit chain: only the associated
-			// data (Get) catches them. A version edit is also a chain mismatch.
-			if err := s.Verify(ctx); name == "version" && !errors.Is(err, ErrVerify) {
+			// The kind is in the record hash the audit chain covers (M1), as
+			// is the version, so Verify sees both without any key.
+			if err := s.Verify(ctx); !errors.Is(err, ErrVerify) {
 				t.Errorf("Verify: %v", err)
 			}
 		})
@@ -548,12 +589,18 @@ func TestTamperKindClassVersion(t *testing.T) {
 }
 
 func TestTamperFieldsOfOneRecord(t *testing.T) {
-	for _, col := range []string{"nonce", "wrapped_key", "ciphertext"} {
+	for _, col := range []string{"nonce", "wrapped_key", "owner_sealed", "ciphertext"} {
 		t.Run(col, func(t *testing.T) {
 			s, _ := newStore(t)
 			put(t, s, counter, "value")
-			exec(t, s, `UPDATE records SET `+col+` = CAST(substr(`+col+`,1,1) || x'00' || substr(`+col+`,3) AS BLOB)`)
-			if _, err := get(s, counter); !errors.Is(err, ErrCorrupt) {
+			exec(t, s, `UPDATE records SET `+col+` = CAST(substr(`+col+`,1,1) || CASE WHEN substr(`+col+`,2,1) = x'00' THEN x'01' ELSE x'00' END || substr(`+col+`,3) AS BLOB)`)
+			// The owner blob is only read by a rekey, so Get does not see it;
+			// the audit chain does.
+			if _, err := get(s, counter); !errors.Is(err, ErrVerify) {
+				t.Errorf("the record map missed it: %v", err)
+			}
+			trustRows(t, s)
+			if _, err := get(s, counter); col != "owner_sealed" && !errors.Is(err, ErrCorrupt) {
 				t.Errorf("Get: %v", err)
 			}
 			if err := s.Verify(ctx); !errors.Is(err, ErrVerify) {
@@ -566,17 +613,21 @@ func TestTamperFieldsOfOneRecord(t *testing.T) {
 func TestVerifyDetectsRollbackOfOneRecord(t *testing.T) {
 	s, _ := newStore(t)
 	put(t, s, counter, "old")
-	exec(t, s, `CREATE TABLE old AS SELECT * FROM records`)
+	exec(t, s, `CREATE TEMP TABLE old AS SELECT * FROM records`)
 	put(t, s, counter, "new")
 	if err := s.Verify(ctx); err != nil {
 		t.Fatal(err)
 	}
-	exec(t, s, `UPDATE records SET version=(SELECT version FROM old), nonce=(SELECT nonce FROM old), wrapped_key=(SELECT wrapped_key FROM old), ciphertext=(SELECT ciphertext FROM old)`)
-	// The old ciphertext is internally valid, so it still opens...
+	exec(t, s, `UPDATE records SET version=(SELECT version FROM old), nonce=(SELECT nonce FROM old), wrapped_key=(SELECT wrapped_key FROM old), owner_sealed=(SELECT owner_sealed FROM old), ciphertext=(SELECT ciphertext FROM old)`)
+	// The old ciphertext is internally valid, so it would open; the handle's
+	// record map knows better, and so does the chain.
+	if b, err := get(s, counter); !errors.Is(err, ErrVerify) {
+		t.Fatalf("rolled-back record: %q %v", b, err)
+	}
+	trustRows(t, s)
 	if b, err := get(s, counter); err != nil || string(b) != "old" {
 		t.Fatalf("rolled-back record: %q %v", b, err)
 	}
-	// ...but the chain knows better.
 	var ve *VerifyError
 	if err := s.Verify(ctx); !errors.As(err, &ve) {
 		t.Fatalf("Verify: %v", err)
@@ -586,7 +637,7 @@ func TestVerifyDetectsRollbackOfOneRecord(t *testing.T) {
 func TestVerifyDetectsInjectedAndRestoredRecords(t *testing.T) {
 	s, _ := newStore(t)
 	put(t, s, counter, "x")
-	exec(t, s, `INSERT INTO records (id, lookup_tag, kind, class, version, nonce, wrapped_key, ciphertext, updated_at) SELECT randomblob(16), randomblob(32), kind, class, 1, nonce, wrapped_key, ciphertext, 0 FROM records`)
+	exec(t, s, `INSERT INTO records (id, lookup_tag, kind, version, nonce, wrapped_key, owner_sealed, ciphertext, updated_at) SELECT randomblob(16), randomblob(32), kind, 1, nonce, wrapped_key, owner_sealed, ciphertext, 0 FROM records`)
 	if err := s.Verify(ctx); !errors.Is(err, ErrVerify) {
 		t.Fatalf("injected: %v", err)
 	}
@@ -595,7 +646,7 @@ func TestVerifyDetectsInjectedAndRestoredRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A deleted record put back is reported.
-	exec(t, s, `CREATE TABLE keep AS SELECT * FROM records`)
+	exec(t, s, `CREATE TEMP TABLE keep AS SELECT * FROM records`)
 	s.Update(ctx, func(w ports.Writer) error { return w.Delete(counter) })
 	exec(t, s, `INSERT INTO records SELECT * FROM keep`)
 	if err := s.Verify(ctx); !errors.Is(err, ErrVerify) {
@@ -605,6 +656,9 @@ func TestVerifyDetectsInjectedAndRestoredRecords(t *testing.T) {
 	exec(t, s, `DELETE FROM records`)
 	put(t, s, counter, "y")
 	exec(t, s, `DELETE FROM records`)
+	if err := s.Update(ctx, func(w ports.Writer) error { return w.Put(counter, []byte("z")) }); !errors.Is(err, ErrVerify) {
+		t.Fatalf("update after the row was removed: %v", err)
+	}
 	if err := s.Verify(ctx); !errors.Is(err, ErrVerify) {
 		t.Fatalf("removed: %v", err)
 	}
@@ -627,7 +681,7 @@ func TestVerifyDetectsAuditTampering(t *testing.T) {
 		"delete last row":   `DELETE FROM audit WHERE seq = 4`,
 		"reorder":           `UPDATE audit SET seq = seq + 100 WHERE seq IN (2,3); UPDATE audit SET seq = CASE seq WHEN 102 THEN 3 ELSE 2 END WHERE seq > 100`,
 		"edit time":         `UPDATE audit SET at = at + 1 WHERE seq = 2`,
-		"edit event":        `UPDATE audit SET event = CAST(substr(event,1,5) || x'00' || substr(event,7) AS BLOB) WHERE seq = 2`,
+		"edit event":        `UPDATE audit SET event = CAST(substr(event,1,5) || CASE WHEN substr(event,6,1) = x'00' THEN x'01' ELSE x'00' END || substr(event,7) AS BLOB) WHERE seq = 2`,
 		"edit touched":      `UPDATE audit SET touched = x'80' WHERE seq = 2`,
 		"edit mac":          `UPDATE audit SET mac = zeroblob(32) WHERE seq = 3`,
 		"edit prev":         `UPDATE audit SET prev_mac = zeroblob(32) WHERE seq = 3`,
@@ -652,7 +706,7 @@ func TestChainsStayValidAcrossHandles(t *testing.T) {
 	if err := b.Verify(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if n := count(t, b, "audit"); n != 2 {
+	if n := count(t, b, "audit"); n != 3 {
 		t.Fatalf("%d audit rows", n)
 	}
 }
@@ -708,12 +762,15 @@ func TestModifiedSlotsAreRefused(t *testing.T) {
 	s := openAt(t, path)
 	exec(t, s, `UPDATE keyslots SET kdf_memory_kib = 1024, kdf_passes = 1 WHERE kind = 'passphrase'`)
 	s.Close()
-	if _, err := Open(path, pw()); !errors.Is(err, seal.ErrWeakKDF) {
+	// L1: the weak slot is skipped (with a notice), not fatal, and no
+	// passphrase slot is left to try.
+	if _, err := Open(path, pw()); !errors.Is(err, ErrWrongCredential) {
 		t.Errorf("weak KDF: %v", err)
 	}
 	// A slot's wrapped key, salt, id or kind edited: authentication fails.
 	for name, q := range map[string]string{
 		"wrapped":       `UPDATE keyslots SET wrapped_key = zeroblob(48) WHERE kind='recovery'`,
+		"commit":        `UPDATE keyslots SET key_commit = zeroblob(32) WHERE kind='recovery'`,
 		"id":            `UPDATE keyslots SET id = randomblob(16) WHERE kind='recovery'`,
 		"workspace id":  `UPDATE meta SET workspace_id = randomblob(16)`,
 		"format weaken": `UPDATE keyslots SET kdf_lanes = 0 WHERE kind='passphrase'`,
@@ -758,8 +815,7 @@ func TestSlotManagement(t *testing.T) {
 		t.Fatalf("%v %v", infos, err)
 	}
 	put(t, s, counter, "x")
-	second := secret.Take([]byte("second passphrase"))
-	id, err := s.AddPassphraseSlot(ctx, second)
+	id, err := s.AddPassphraseSlot(ctx, secret.Take([]byte("second passphrase")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -771,50 +827,32 @@ func TestSlotManagement(t *testing.T) {
 	if b, _ := get(s2, counter); string(b) != "x" {
 		t.Fatal("records unreadable through the second slot")
 	}
-	newID, err := s2.ChangePassphrase(ctx, id, secret.Take([]byte("changed")))
-	if err != nil {
-		t.Fatal(err)
+	// H1: removing or replacing a slot revokes nothing, so the old entry
+	// points refuse and point at Rekey.
+	if err := s2.RemoveSlot(ctx, id); !errors.Is(err, ErrUseRekey) {
+		t.Errorf("RemoveSlot: %v", err)
 	}
-	if err := s2.RemoveSlot(ctx, id); !errors.Is(err, ports.ErrNotFound) {
-		t.Errorf("removing a replaced slot: %v", err)
+	if _, err := s2.ChangePassphrase(ctx, id, secret.Take([]byte("changed"))); !errors.Is(err, ErrUseRekey) {
+		t.Errorf("ChangePassphrase: %v", err)
+	}
+	infos, _ = s2.Slots(ctx)
+	if len(infos) != 3 {
+		t.Fatalf("a refused removal changed the slots: %d", len(infos))
+	}
+	// A new recovery slot works, and does not need a rekey.
+	txt, rid, err := s2.AddRecoverySlot(ctx)
+	if err != nil || rid == nil {
+		t.Fatal(err)
 	}
 	s2.Close()
-	if _, err := Open(path, secret.Take([]byte("second passphrase"))); !errors.Is(err, ErrWrongCredential) {
-		t.Errorf("old passphrase still works: %v", err)
-	}
-	s3, err := Open(path, secret.Take([]byte("changed")))
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Remove the new passphrase slot, then the original ones; never the last.
-	if err := s3.RemoveSlot(ctx, newID); err != nil {
-		t.Fatal(err)
-	}
-	infos, _ = s3.Slots(ctx)
-	if len(infos) != 2 {
-		t.Fatalf("%d slots", len(infos))
-	}
-	if err := s3.RemoveSlot(ctx, infos[0].ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := s3.RemoveSlot(ctx, infos[1].ID); !errors.Is(err, ErrLastSlot) {
-		t.Fatalf("last slot: %v", err)
-	}
-	// A new recovery slot works.
-	txt, rid, err := s3.AddRecoverySlot(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rid == nil {
-		t.Fatal("no slot id")
-	}
-	s3.Close()
 	s4, err := OpenWithRecovery(path, txt)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := s4.Verify(ctx); err != nil {
+		t.Fatal(err)
+	}
 	s4.Close()
-	// Changing a recovery slot as a passphrase slot is refused.
 }
 
 // ---- backup and restore (E3) ----
@@ -884,7 +922,7 @@ func TestBackupVerifyRestoreSignsWithRestoredKey(t *testing.T) {
 	// Leftovers: no temp files in the destination directory.
 	ents, _ := os.ReadDir(filepath.Dir(empty))
 	for _, e := range ents {
-		if e.Name() != "ws.db" {
+		if e.Name() != "ws.db" && e.Name() != "ws.db.head" && e.Name() != "ws.db.head.lock" {
 			t.Errorf("stray file %s", e.Name())
 		}
 	}

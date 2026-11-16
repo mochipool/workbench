@@ -26,10 +26,11 @@ func run(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	var out bytes.Buffer
 	root := NewRoot(Deps{
-		Out: &out, Err: &out, KeyGen: fakeKeyGen{},
-		OpenStore: func(dir string, _ bool) (ports.Store, error) { return fsstore.Open(dir) },
+		Out: &out, Err: &out,
+		Wire:         func(ports.Store, WireOptions) (*Env, error) { return &Env{KesKeys: fakeKeyGen{}}, nil },
+		OpenUpstream: func(dir string) (ports.Store, error) { return fsstore.Open(dir) },
 	})
-	root.SetArgs(args)
+	root.SetArgs(append([]string{"--upstream-layout"}, args...))
 	err := root.ExecuteContext(context.Background())
 	return out.String(), err
 }

@@ -2,7 +2,9 @@ package ports
 
 import (
 	"context"
+	"errors"
 
+	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 )
 
@@ -27,4 +29,64 @@ type KesKeyGenerator interface {
 // VrfKeyGenerator makes VRF key pairs.
 type VrfKeyGenerator interface {
 	GenerateVRF(ctx context.Context) (KeyPair, error)
+}
+
+// ColdKeyGenerator makes pool cold key pairs (cardano-cli `node key-gen`'s
+// key part; the issue counter is a domain artefact, pool.IssueCounter).
+type ColdKeyGenerator interface {
+	GenerateCold(ctx context.Context) (KeyPair, error)
+}
+
+// PaymentKeyGenerator makes random payment key pairs.
+type PaymentKeyGenerator interface {
+	GeneratePayment(ctx context.Context) (KeyPair, error)
+}
+
+// StakeKeyGenerator makes random stake key pairs.
+type StakeKeyGenerator interface {
+	GenerateStake(ctx context.Context) (KeyPair, error)
+}
+
+// MnemonicGenerator makes a fresh 24-word BIP-39 phrase. The words, separated
+// by single spaces and with no trailing newline, are in guarded memory; the
+// caller destroys the buffer.
+type MnemonicGenerator interface {
+	GenerateMnemonic(ctx context.Context) (*secret.Buffer, error)
+}
+
+// ErrInvalidMnemonic means a phrase is not a valid 24-word BIP-39 mnemonic
+// (unknown word or bad checksum). The error never contains the phrase.
+var ErrInvalidMnemonic = errors.New("the mnemonic is not a valid 24-word BIP-39 phrase")
+
+// WalletKeys are the payment and stake key pairs of one wallet account,
+// derived from one mnemonic. The signing keys are extended (BIP32) keys; the
+// verification keys are the non-extended ones.
+type WalletKeys struct {
+	Payment KeyPair
+	Stake   KeyPair
+}
+
+// WalletDeriver derives a wallet account from a mnemonic along the CIP-1852
+// paths 1852H/1815H/<account>H/0/<index> (payment) and
+// 1852H/1815H/<account>H/2/<index> (stake). The mnemonic is the normalised
+// space-separated phrase without a trailing newline; the deriver does not
+// keep it. A bad phrase gives ErrInvalidMnemonic.
+type WalletDeriver interface {
+	DeriveWallet(ctx context.Context, mnemonic *secret.Buffer, account, index uint32) (WalletKeys, error)
+}
+
+// HardwareKey is what a hardware wallet gives for a key: the verification key
+// envelope and the signing file that names the device path. Neither is
+// secret (SPO-Pfiles-OUT-004).
+type HardwareKey struct {
+	VKey        []byte
+	SigningFile []byte
+}
+
+// HardwareKeyExporter exports a key from a hardware wallet. No adapter
+// implements it yet: the generation use cases refuse a hardware holder
+// before any effect because no signer profile offers the export (ADR 0008).
+type HardwareKeyExporter interface {
+	Signer
+	ExportHardwareKey(ctx context.Context, key custody.KeyRef, path string) (HardwareKey, error)
 }

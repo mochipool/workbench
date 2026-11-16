@@ -1,0 +1,257 @@
+package partystore
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/mochipool/workbench/spo/internal/domain/party"
+	"github.com/mochipool/workbench/spo/internal/platform/secret"
+	"github.com/mochipool/workbench/spo/internal/ports"
+)
+
+// memStore is a transactional ports.Store in memory. The real stores' kind
+// catalogues are owned elsewhere: fsstore maps kinds to upstream file names
+// and has no entry for the party kinds yet, so it cannot back these tests.
+type memStore struct {
+	mu   sync.Mutex
+	data map[ports.Ref][]byte
+}
+
+func newMem() *memStore { return &memStore{data: map[ports.Ref][]byte{}} }
+
+type memTx struct {
+	data map[ports.Ref][]byte
+}
+
+func (t *memTx) Get(r ports.Ref) ([]byte, error) {
+	if b, ok := t.data[r]; ok {
+		return append([]byte(nil), b...), nil
+	}
+	return nil, ports.ErrNotFound
+}
+func (t *memTx) Exists(r ports.Ref) (bool, error) { _, ok := t.data[r]; return ok, nil }
+func (t *memTx) Put(r ports.Ref, b []byte) error {
+	if err := r.Validate(); err != nil {
+		return err
+	}
+	t.data[r] = append([]byte(nil), b...)
+	return nil
+}
+func (t *memTx) PutSecret(ports.Ref, *secret.Buffer) error { return ports.ErrSecretKind }
+func (t *memTx) Delete(r ports.Ref) error                  { delete(t.data, r); return nil }
+
+func (m *memStore) View(_ context.Context, fn func(ports.Reader) error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return fn(&memTx{data: m.data})
+}
+
+func (m *memStore) Update(_ context.Context, fn func(ports.Writer) error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cp := make(map[ports.Ref][]byte, len(m.data))
+	for k, v := range m.data {
+		cp[k] = v
+	}
+	if err := fn(&memTx{data: cp}); err != nil {
+		return err // nothing committed
+	}
+	m.data = cp
+	return nil
+}
+
+var t0 = time.Unix(1_800_000_000, 0).UTC()
+
+func mkParty(seed byte, name string) party.Party {
+	id := party.Identity{Label: "l", Ed25519: party.Ed25519Public{seed}, X25519: party.X25519Public{seed, 2}, Created: t0}
+	if seed%2 == 0 {
+		n := party.NodeKey{seed, 9}
+		id.Node = &n
+	}
+	return party.Party{Identity: id, Fingerprint: id.Fingerprint(), Name: name,
+		Roles: []party.Role{party.RoleCoordinator, party.RoleSigner}, Pools: []string{"p1"}, State: party.StateActive, EnrolledAt: t0}
+}
+
+// spec: SPO-Xparty-OUT-001, SPO-Xparty-IF-003, SPO-Xparty-INV-005
+func TestRegistry(t *testing.T) {
+	ctx := context.Background()
+	s, reg := newMem(), Registry{}
+	a, b := mkParty(1, "alice"), mkParty(2, "bob")
+	if err := s.Update(ctx, func(w ports.Writer) error {
+		if err := reg.Put(w, a); err != nil {
+			return err
+		}
+		return reg.Put(w, b)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s.View(ctx, func(r ports.Reader) error {
+		got, err := reg.ByName(r, "bob")
+		if err != nil || got.Fingerprint != b.Fingerprint || got.Identity.Node == nil || *got.Identity.Node != *b.Identity.Node || !got.EnrolledAt.Equal(t0) {
+			t.Fatalf("ByName = %+v, %v", got, err)
+		}
+		got, err = reg.ByFingerprint(r, a.Fingerprint)
+		if err != nil || got.Name != "alice" || got.Identity.Node != nil || len(got.Roles) != 2 || got.Pools[0] != "p1" {
+			t.Fatalf("ByFingerprint = %+v, %v", got, err)
+		}
+		if _, err := reg.ByName(r, "carol"); !errors.Is(err, ports.ErrNotFound) {
+			t.Fatal(err)
+		}
+		if _, err := reg.ByFingerprint(r, party.Fingerprint{}); !errors.Is(err, ports.ErrNotFound) {
+			t.Fatal(err)
+		}
+		if l, _ := reg.List(r); len(l) != 2 || l[0].Name != "alice" {
+			t.Fatalf("List = %+v", l)
+		}
+		return nil
+	})
+	// Duplicates change nothing.
+	err := s.Update(ctx, func(w ports.Writer) error { return reg.Put(w, mkParty(3, "alice")) })
+	if !errors.Is(err, party.ErrNameTaken) {
+		t.Fatal(err)
+	}
+	err = s.Update(ctx, func(w ports.Writer) error { return reg.Put(w, mkParty(1, "other")) })
+	if !errors.Is(err, party.ErrAlreadyEnrolled) {
+		t.Fatal(err)
+	}
+	// Revoke.
+	if err := s.Update(ctx, func(w ports.Writer) error { _, err := reg.Revoke(w, "alice"); return err }); err != nil {
+		t.Fatal(err)
+	}
+	s.View(ctx, func(r ports.Reader) error {
+		got, _ := reg.ByName(r, "alice")
+		if got.State != party.StateRevoked {
+			t.Fatal("not revoked")
+		}
+		return nil
+	})
+	if err := s.Update(ctx, func(w ports.Writer) error { _, err := reg.Revoke(w, "alice"); return err }); !errors.Is(err, party.ErrAlreadyRevoked) {
+		t.Fatal(err)
+	}
+	if err := s.Update(ctx, func(w ports.Writer) error { _, err := reg.Revoke(w, "zed"); return err }); !errors.Is(err, ports.ErrNotFound) {
+		t.Fatal(err)
+	}
+}
+
+func TestRegistryDetectsTampering(t *testing.T) {
+	ctx := context.Background()
+	s := newMem()
+	s.Update(ctx, func(w ports.Writer) error { return Registry{}.Put(w, mkParty(1, "alice")) })
+	// Change a public key in the stored record without the fingerprint.
+	b := s.data[recordsRef]
+	for i := range b {
+		if string(b[i:min(i+7, len(b))]) == `ed25519` {
+			b[i+11] = 'f'
+			break
+		}
+	}
+	err := s.View(ctx, func(r ports.Reader) error { _, err := Registry{}.List(r); return err })
+	if !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// spec: SPO-Xparty-INV-007
+func TestReplayLog(t *testing.T) {
+	ctx := context.Background()
+	s, log := newMem(), Replay{}
+	id := party.MessageID{1}
+	exp := t0.Add(time.Hour)
+	if err := s.Update(ctx, func(w ports.Writer) error { return log.Record(w, id, exp, t0) }); err != nil {
+		t.Fatal(err)
+	}
+	seen := func(at time.Time) bool {
+		var got bool
+		s.View(ctx, func(r ports.Reader) error { got, _ = log.Seen(r, id, at); return nil })
+		return got
+	}
+	if !seen(t0) || !seen(exp) {
+		t.Fatal("recorded id not seen until expiry")
+	}
+	if seen(exp.Add(time.Second)) {
+		t.Fatal("expired id still seen")
+	}
+	if err := s.Update(ctx, func(w ports.Writer) error { return log.Record(w, id, exp, t0) }); !errors.Is(err, ports.ErrReplay) {
+		t.Fatalf("second record: %v", err)
+	}
+	// Expired entries are dropped by the next write; the id may be recorded
+	// again after expiry (it cannot arrive again: the envelope is expired).
+	if err := s.Update(ctx, func(w ports.Writer) error {
+		return log.Record(w, party.MessageID{2}, exp.Add(2*time.Hour), exp.Add(time.Minute))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.data[replayRef]) != entryLen {
+		t.Fatalf("log holds %d bytes, want one entry", len(s.data[replayRef]))
+	}
+}
+
+// The id and the effect commit together or not at all.
+// spec: SPO-Xparty-INV-007
+func TestReplayAtomicWithEffect(t *testing.T) {
+	ctx := context.Background()
+	s, log := newMem(), Replay{}
+	id := party.MessageID{7}
+	effect := ports.Ref{Name: "x", Kind: ports.NodeCounter}
+	boom := errors.New("effect failed")
+	err := s.Update(ctx, func(w ports.Writer) error {
+		if err := log.Record(w, id, t0.Add(time.Hour), t0); err != nil {
+			return err
+		}
+		if err := w.Put(effect, []byte("1")); err != nil {
+			return err
+		}
+		return boom
+	})
+	if !errors.Is(err, boom) {
+		t.Fatal(err)
+	}
+	s.View(ctx, func(r ports.Reader) error {
+		if seen, _ := log.Seen(r, id, t0); seen {
+			t.Fatal("id recorded although the effect failed")
+		}
+		return nil
+	})
+	// Two transactions for one id: the second is refused inside its own transaction.
+	ok := s.Update(ctx, func(w ports.Writer) error { return log.Record(w, id, t0.Add(time.Hour), t0) })
+	dup := s.Update(ctx, func(w ports.Writer) error {
+		if err := log.Record(w, id, t0.Add(time.Hour), t0); err != nil {
+			return err
+		}
+		return w.Put(effect, []byte("2"))
+	})
+	if ok != nil || !errors.Is(dup, ports.ErrReplay) {
+		t.Fatal(ok, dup)
+	}
+	s.View(ctx, func(r ports.Reader) error {
+		if _, err := r.Get(effect); !errors.Is(err, ports.ErrNotFound) {
+			t.Fatal("duplicate's effect was applied")
+		}
+		return nil
+	})
+}
+
+func TestReplayFullAndCorrupt(t *testing.T) {
+	ctx := context.Background()
+	s, log := newMem(), Replay{}
+	big := make([]byte, MaxReplayEntries*entryLen)
+	for i := 0; i < MaxReplayEntries; i++ {
+		big[i*entryLen] = byte(i)
+		big[i*entryLen+1] = byte(i >> 8)
+		big[i*entryLen+2] = 1
+		big[i*entryLen+16+3] = 0x7f // far-future expiry
+	}
+	s.data[replayRef] = big
+	err := s.Update(ctx, func(w ports.Writer) error { return log.Record(w, party.MessageID{0xee}, t0.Add(time.Hour), t0) })
+	if !errors.Is(err, ports.ErrReplayFull) {
+		t.Fatalf("err = %v", err)
+	}
+	s.data[replayRef] = []byte{1, 2, 3}
+	err = s.View(ctx, func(r ports.Reader) error { _, err := log.Seen(r, party.MessageID{}, t0); return err })
+	if !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("err = %v", err)
+	}
+}

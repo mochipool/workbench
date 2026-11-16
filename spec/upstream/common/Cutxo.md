@@ -117,6 +117,10 @@ Called as `calc_minOutUTXO <protocolParametersJson> <txOutString>`. Callers use 
 
 > **Upstream quirk:** When the era is unknown (`nodeEraParam` empty, for example an offline file or light-mode tip without an era), a Babbage-or-later protocol is sized with the array form, two bytes smaller than the map form that the same function uses once the era is known. For the same parameters the minimum therefore differs by `2 * costPerByte` (8 620 lovelace at 4 310). The array form matches the well-known mainnet minimum of 969 750 for a plain base-address output, so the map form is probably the over-estimate. Settling which form the ledger uses needs a differential test against SPO-Cutxo-EXT-001's oracle (see Open questions).
 
+> **Settled 2026-11-16 (cardano-cli 11.2.3.0, `spo/test/parity/tx_oracle_test.go` and `send_lovelaces_test.go`):** the ledger sizes an output in the **array form**. `cardano-cli transaction build-raw` writes `[address, value]` for an output without a datum or a script, and `calculate-min-required-utxo` gives 849 070 for an enterprise address at `utxoCostPerByte` 4 310, which is `(160 + 37) * 4310` with a 37-byte array-form output. With the era known (`protocol.era` is `conway`) upstream's `calc_minOutUTXO` uses the map form and returns 857 690, two bytes (8 620 lovelace) too high. Run against the offline path of `01_sendLovelaces` with the same snapshot, `MIN` sends 857 690 where the ledger's minimum is 849 070, and the return output of `ALL` with assets holds 8 620 more than the minimum. A port uses the array form. It never over-sends, and the amounts of those two forms differ from upstream's by exactly `2 * utxoCostPerByte`.
+
+> **Observed 2026-11-16:** `calculate-min-required-utxo` ignores the lovelace amount in the tx-out text. The same value comes back for 5 000, 1 000 000 and 9 000 000 000 lovelace. The command finds the fixed point: the smallest amount whose own encoding it pays for. A port sizes with that fixed point and does not read the amount; the placeholder `+1000000` of upstream's callers is then harmless.
+
 ### Shelley, Allegra, Mary, Alonzo (word rule)
 
 - **SPO-Cutxo-INV-011** Constants: coin size `k0 = 0`, `k1 = 6`, asset size `k2 = 12`, policy-id size `k3 = 28`, word `k4 = 8`, `utxoEntrySizeWithoutVal = 27`, and `adaOnlyUTxOSize = 27 + k0 = 27`. (src: L1419-L1425)
@@ -148,5 +152,5 @@ Selecting UTxOs by reference (`filterFor_UTXO`) is plain domain logic on the `Tx
 
 ## Open questions
 
-* Which form does the ledger use for Babbage and Conway outputs: map or array? Run `calc_minOutUTXOcli`'s CLI call for a plain base-address output and for one with assets, and compare with SPO-Cutxo-INV-010's vectors.
+* ~~Which form does the ledger use for Babbage and Conway outputs: map or array?~~ Resolved 2026-11-16: the array form (see the note under SPO-Cutxo-INV-007). The vectors of SPO-Cutxo-INV-010 in the array column are the ledger's.
 * The result when neither `utxoCostPerByte`, `coinsPerUTxOByte` nor `utxoCostPerWord` is present: `$(( / 8 ))` is an arithmetic syntax error, and what bash does next is not specified in the source. A test against the real shell would settle it.

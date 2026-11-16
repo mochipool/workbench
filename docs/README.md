@@ -48,6 +48,8 @@ Operator workflows:
 * [Supported systems and networks](./reference/supported-systems-and-networks.md)
 * [workbench CLI](./reference/workbench-cli.md)
 * [workbench.toml](./reference/workbench-toml.md)
+* [spo CLI](./reference/spo-cli.md)
+* [spo.toml](./reference/spo-toml.md)
 * [Workflows](./reference/workflows.md)
 * [Run state](./reference/run-state.md)
 

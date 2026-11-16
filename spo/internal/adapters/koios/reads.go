@@ -18,6 +18,8 @@ var (
 	_ ports.ProtocolParametersReader = (*Client)(nil)
 	_ ports.UtxoReader               = (*Client)(nil)
 	_ ports.RewardAccountReader      = (*Client)(nil)
+	_ ports.PoolStateReader          = (*Client)(nil)
+	_ ports.DRepStateReader          = (*Client)(nil)
 	_ ports.TxSubmitter              = (*Client)(nil)
 )
 
@@ -290,7 +292,8 @@ func (c *Client) Utxos(ctx context.Context, addr chain.Address) ([]chain.Utxo, e
 // Unknown. Unlike upstream, a missing deposit is not defaulted to 2000000
 // (SPO-Clight-OUT-011) and a missing balance is not defaulted to 0
 // (SPO-Clight-OUT-010): a guessed number would look like an answer.
-// Open-proposal deposits (SPO-Clight-EXT-006, OUT-012) are not read yet.
+// Open-proposal deposits come from a second request, see govActionDeposits
+// (SPO-Clight-EXT-006, OUT-012); its failure leaves only that field Unknown.
 func (c *Client) RewardAccount(ctx context.Context, stake chain.StakeAddress) (chain.Reading[chain.RewardAccount], error) {
 	unknown := func(why string) (chain.Reading[chain.RewardAccount], error) {
 		return chain.Unknown[chain.RewardAccount](why), nil
@@ -359,6 +362,7 @@ func (c *Client) RewardAccount(ctx context.Context, stake chain.StakeAddress) (c
 	} else {
 		acc.Deposit = chain.Value(chain.Lovelace(*r.Deposit))
 	}
+	acc.GovActionDeposits = c.govActionDeposits(ctx, stake)
 	return chain.Value(acc), nil
 }
 

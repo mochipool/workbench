@@ -1,7 +1,9 @@
 package sqlitestore
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -16,18 +18,36 @@ import (
 // exist. The copy is made by SQLite's VACUUM INTO at one snapshot (safe while
 // the workspace is open and in WAL mode) and is mode 0600. Records in it are
 // already sealed and it carries the same key slots, so it needs no further
-// encryption and opens with the same passphrase or recovery key.
+// encryption and opens with the same passphrase or recovery key. It has no
+// head file of its own.
 func (s *Store) Backup(ctx context.Context, destPath string) error {
+	_, err := s.BackupWithHead(ctx, destPath)
+	return err
+}
+
+// BackupWithHead is Backup that returns the head (sequence and MAC) of the
+// audit chain in the copy it wrote. Record it where an attacker cannot write:
+// it is what a later restore of this backup can be checked against.
+func (s *Store) BackupWithHead(ctx context.Context, destPath string) (Head, error) {
+	release, err := s.enter(ctx)
+	if err != nil {
+		return Head{}, err
+	}
+	defer release()
+	// A schema with a trigger or view in it would be copied into the backup.
+	if err := s.checkSchemaNow(ctx); err != nil {
+		return Head{}, err
+	}
 	abs, err := filepath.Abs(destPath)
 	if err != nil {
-		return err
+		return Head{}, err
 	}
 	f, err := os.OpenFile(abs, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("%w: %s", ErrExists, abs)
+			return Head{}, fmt.Errorf("%w: %s", ErrExists, abs)
 		}
-		return err
+		return Head{}, err
 	}
 	f.Close()
 	ok := false
@@ -38,16 +58,20 @@ func (s *Store) Backup(ctx context.Context, destPath string) error {
 	}()
 	// VACUUM INTO accepts an empty existing file.
 	if _, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, abs); err != nil {
-		return err
+		return Head{}, err
 	}
 	if err := os.Chmod(abs, 0o600); err != nil {
-		return err
+		return Head{}, err
 	}
 	if err := syncFile(abs); err != nil {
-		return err
+		return Head{}, err
+	}
+	_, h, err := inspectFile(ctx, abs)
+	if err != nil {
+		return Head{}, err
 	}
 	ok = true
-	return nil
+	return h, nil
 }
 
 func syncFile(path string) error {
@@ -68,27 +92,89 @@ func syncDir(dir string) error {
 	return d.Sync()
 }
 
+// withReadOnly runs fn on a read-only, immutable connection to the file at
+// path. Callers use it only on files nobody else can be writing: a backup copy
+// they just made or verified, or a destination they hold exclusively.
+func withReadOnly(path string, fn func(db *sql.DB) error) error {
+	db, err := openDB(path, true, true)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return fn(db)
+}
+
+// inspectFile reads the workspace id and the chain head of a file without a
+// key (both are structural data).
+func inspectFile(ctx context.Context, path string) (ws []byte, h Head, err error) {
+	err = withReadOnly(path, func(db *sql.DB) error {
+		m, err := loadMeta(ctx, db)
+		if err != nil {
+			return err
+		}
+		ws = m.ws
+		h, err = chainHead(ctx, db)
+		return err
+	})
+	return ws, h, err
+}
+
+// RestoreOptions are the choices of RestoreWithOptions.
+type RestoreOptions struct {
+	// Overwrite lets the restore replace an existing destination.
+	Overwrite bool
+	// AllowOlder lets it replace a workspace with a backup that is older than
+	// the workspace (the workspace's last recorded state is not in the
+	// backup's chain). Without it such a restore fails with ErrOlderBackup.
+	AllowOlder bool
+	// AllowOtherWorkspace lets it replace a workspace with a backup of a
+	// different workspace. Without it such a restore fails with
+	// ErrOtherWorkspace.
+	AllowOtherWorkspace bool
+}
+
 // Restore replaces the workspace at destPath with the backup at backupPath,
 // after verifying the backup with the passphrase. The backup is copied beside
 // the destination first and verified there (so the bytes checked are the
 // bytes installed), then moved into place. An existing destination is refused
 // unless overwrite is true; a destination with -wal or -shm files (a workspace
-// that is open or was not closed cleanly) is always refused.
+// that is open or was not closed cleanly) is always refused. Replacing an
+// existing workspace also requires that the backup is of the same workspace
+// and is not older than it: see RestoreWithOptions.
 func Restore(backupPath, destPath string, passphrase *secret.Buffer, overwrite bool) error {
-	return restore(backupPath, destPath, credential{seal.SlotPassphrase, passphrase}, overwrite)
+	return RestoreWithOptions(backupPath, destPath, passphrase, RestoreOptions{Overwrite: overwrite})
+}
+
+// RestoreWithOptions is Restore with options.
+//
+// Replacing an existing destination is checked, without any key, against its
+// workspace id and chain head (and its head file): the backup must be of the
+// same workspace, and its chain must contain the destination's last recorded
+// head, that is, the backup must be the same state or a later one. The swap
+// is done holding an exclusive lock on the destination, which fails with
+// ErrLocked while any handle has it open. The destination's head file is
+// rewritten from the backup, because a restore is deliberate.
+func RestoreWithOptions(backupPath, destPath string, passphrase *secret.Buffer, o RestoreOptions) error {
+	return restore(backupPath, destPath, credential{seal.SlotPassphrase, passphrase}, o)
 }
 
 // RestoreWithRecovery is Restore with the printed recovery key.
 func RestoreWithRecovery(backupPath, destPath string, recovery *secret.Buffer, overwrite bool) error {
+	return RestoreWithRecoveryOptions(backupPath, destPath, recovery, RestoreOptions{Overwrite: overwrite})
+}
+
+// RestoreWithRecoveryOptions is RestoreWithOptions with the printed recovery key.
+func RestoreWithRecoveryOptions(backupPath, destPath string, recovery *secret.Buffer, o RestoreOptions) error {
 	raw, err := seal.DecodeRecoveryKey(recovery)
 	if err != nil {
 		return err
 	}
 	defer raw.Destroy()
-	return restore(backupPath, destPath, credential{seal.SlotRecovery, raw}, overwrite)
+	return restore(backupPath, destPath, credential{seal.SlotRecovery, raw}, o)
 }
 
-func restore(backupPath, destPath string, cred credential, overwrite bool) (err error) {
+func restore(backupPath, destPath string, cred credential, o RestoreOptions) (err error) {
+	ctx := context.Background()
 	src, err := filepath.Abs(backupPath)
 	if err != nil {
 		return err
@@ -100,7 +186,9 @@ func restore(backupPath, destPath string, cred credential, overwrite bool) (err 
 	if src == dest {
 		return errors.New("sqlitestore: backup and destination are the same file")
 	}
-	if _, err := os.Lstat(dest); err == nil && !overwrite {
+	_, statErr := os.Lstat(dest)
+	exists := statErr == nil
+	if exists && !o.Overwrite {
 		return fmt.Errorf("%w: %s (pass overwrite to replace it)", ErrExists, dest)
 	}
 	for _, side := range []string{"-wal", "-shm", "-journal"} {
@@ -141,12 +229,28 @@ func restore(backupPath, destPath string, cred credential, overwrite bool) (err 
 	if err = tmp.Close(); err != nil {
 		return err
 	}
-	if err = verifyFile(tmpPath, cred); err != nil {
+	if _, err = verifyFile(tmpPath, cred, false); err != nil {
 		return fmt.Errorf("sqlitestore: backup does not verify: %w", err)
+	}
+	ws, head, err := inspectFile(ctx, tmpPath)
+	if err != nil {
+		return err
+	}
+	if exists {
+		// Exclusive lock for the check and the swap: nobody may have the
+		// workspace open, and nobody can open it between the two.
+		lock, lerr := lockFile(dest, true)
+		if lerr != nil {
+			return lerr
+		}
+		defer lock.Close()
+		if err = checkReplace(ctx, dest, tmpPath, ws, o); err != nil {
+			return err
+		}
 	}
 	os.Remove(tmpPath + "-shm")
 	os.Remove(tmpPath + "-wal")
-	if overwrite {
+	if o.Overwrite {
 		err = os.Rename(tmpPath, dest)
 	} else {
 		// Link fails if dest appeared meanwhile, so we never clobber.
@@ -157,5 +261,46 @@ func restore(backupPath, destPath string, cred credential, overwrite bool) (err 
 	if err != nil {
 		return err
 	}
+	if err = writeHeadFile(dest, ws, head); err != nil {
+		return err
+	}
 	return syncDir(filepath.Dir(dest))
+}
+
+// checkReplace decides, from structural data only, whether the verified backup
+// at newPath may replace the workspace at dest.
+func checkReplace(ctx context.Context, dest, newPath string, newWS []byte, o RestoreOptions) error {
+	oldWS, oldHead, err := inspectFile(ctx, dest)
+	if err != nil {
+		if o.AllowOtherWorkspace {
+			return nil // the destination is not a readable workspace; the operator said to replace it
+		}
+		return fmt.Errorf("%w: the destination cannot be read as a workspace (%v)", ErrOtherWorkspace, err)
+	}
+	if !bytes.Equal(oldWS, newWS) {
+		if o.AllowOtherWorkspace {
+			return nil
+		}
+		return ErrOtherWorkspace
+	}
+	if o.AllowOlder {
+		return nil
+	}
+	// Every recorded head of the destination must be in the backup's chain.
+	heads := []Head{oldHead}
+	if hws, hh, found, herr := readHeadFile(dest); found && herr == nil && bytes.Equal(hws, oldWS) {
+		heads = append(heads, hh)
+	}
+	return withReadOnly(newPath, func(db *sql.DB) error {
+		for _, h := range heads {
+			ok, err := chainContains(ctx, db, h)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf("%w (destination is at sequence %d)", ErrOlderBackup, h.Seq)
+			}
+		}
+		return nil
+	})
 }

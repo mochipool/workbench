@@ -173,3 +173,4 @@ Use case `DeregisterStakeAddress(stakeAccount, payer, extras)` on aggregate `Sta
 ## Open questions
 
 * Whether `int_from_cbor` on the empty remainder of a pre-Conway certificate always returns non-zero, which triggers the 2000000 fallback (SPO-08b-IN-002); only a run against bash settles it (see Cconv open questions).
+* Run offline on 2026-11-16 (`spo/test/parity/stake_scripts_test.go`): the refund decodes from character offset 68 of the certificate (`83088200581c` is 12 characters and the 56-character credential follows, so `1a001e8480` starts at 68). With a reward balance or a governance deposit in the snapshot the script still queues the transaction, because offline runs none of the checks (SPO-08b-MODE-001); the ledger would reject it. The script ignores `ENV_SKIP_PROMPT` and reads its answer from the controlling terminal: a test must run it on a pseudo terminal (the tests use `script(1)` with `y` on its input).

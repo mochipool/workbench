@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/mochipool/workbench/spo/internal/ports"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -193,4 +194,23 @@ func TestKesKeyGeneration(t *testing.T) {
 		t.Fatalf("port: %v", err)
 	}
 	diff(t, "after second key", snapshot(t, upDir, "mypool"), snapshot(t, portDir, "mypool"))
+}
+
+// SignerUnavailable is the skip reason of tests that need cardano-signer.
+// The Nix check allows exactly this skip and no other.
+const SignerUnavailable = "cardano-signer cannot run here"
+
+// needSigner skips when the pinned cardano-signer cannot be executed. It is
+// a prebuilt binary that keeps the release's ELF interpreter path, because
+// patching it corrupts the appended payload (tools/cardano-signer.nix). It
+// therefore runs on an ordinary distribution but not inside the Nix build
+// sandbox, where that interpreter does not exist. These tests run in the
+// development loop; see the handoff.
+func (e env) needSigner(t *testing.T) {
+	t.Helper()
+	tool, err := e.tc.Tool(context.Background(), ports.CardanoSigner)
+	if err != nil {
+		t.Skipf("%s: %v", SignerUnavailable, err)
+	}
+	_ = tool
 }

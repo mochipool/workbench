@@ -124,3 +124,28 @@ func TestLoad(t *testing.T) {
 		t.Fatalf("%v %v", m, err)
 	}
 }
+
+func TestManifestGenesis(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "m.json")
+	os.WriteFile(p, []byte(`{"release":"r","tools":{},"networks":{"preview":{"shelleyGenesis":"g/shelley.json"}}}`), 0o600)
+	if _, err := Load(p); err == nil {
+		t.Fatal("relative genesis path accepted")
+	}
+	os.WriteFile(p, []byte(`{"release":"r","tools":{},"networks":{"preview":{"shelleyGenesis":"/g/s.json","byronGenesis":"/g/b.json"},"preprod":{}}}`), 0o600)
+	m, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, ok := m.Genesis("preview"); !ok || n.ShelleyGenesis != "/g/s.json" || n.ByronGenesis != "/g/b.json" {
+		t.Errorf("preview: %+v %v", n, ok)
+	}
+	if _, ok := m.Genesis("preprod"); ok {
+		t.Error("an entry without a Shelley genesis counts as present")
+	}
+	if _, ok := m.Genesis("mainnet"); ok {
+		t.Error("missing network present")
+	}
+	if n, ok := New(m, nil).Genesis("preview"); !ok || n.ShelleyGenesis == "" {
+		t.Error("Toolchain.Genesis")
+	}
+}

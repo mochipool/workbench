@@ -98,4 +98,4 @@ Use case `GeneratePoolDelegationCertificate(stakeAccount, poolRef)` on aggregate
 
 ## Open questions
 
-* The `--stake-pool-id` flag accepts both hex and bech32 in the pinned cardano-cli; the script does not distinguish. Confirm by an inventory run.
+* ~~The `--stake-pool-id` flag accepts both hex and bech32 in the pinned cardano-cli; the script does not distinguish. Confirm by an inventory run.~~ Resolved 2026-11-16 on cardano-cli 11.2.3.0 (`spo/test/parity/stake_oracle_test.go`): `--stake-pool-id` accepts 56 hex characters and `pool1...` bech32; both, and `--cold-verification-key-file`, give the same certificate bytes `83028200581c<stake key hash>581c<pool id>` (type `Certificate`, description `Stake Delegation Certificate`). The script's word `./mypool.node.vkey` is not a form it accepts (it drops `.json`, then `.pool`, only).

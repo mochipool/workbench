@@ -29,10 +29,26 @@ type Entry struct {
 	Max     string `json:"max,omitempty"`
 }
 
+// Network holds the genesis files the release set bundles for one network.
+type Network struct {
+	ShelleyGenesis string `json:"shelleyGenesis"`
+	ByronGenesis   string `json:"byronGenesis,omitempty"`
+}
+
 // Manifest is the release-set description baked in by the Nix package.
 type Manifest struct {
 	Release string                   `json:"release"`
 	Tools   map[ports.ToolName]Entry `json:"tools"`
+	// Networks maps a network name (mainnet, preprod, preview) to its
+	// bundled genesis files, so the binary needs no genesis flags.
+	Networks map[string]Network `json:"networks,omitempty"`
+}
+
+// Genesis returns the bundled genesis files of a network; ok is false when
+// the manifest has none for it.
+func (m Manifest) Genesis(network string) (n Network, ok bool) {
+	n, ok = m.Networks[network]
+	return n, ok && n.ShelleyGenesis != ""
 }
 
 // EnvVar names the environment variable that points at the manifest. The Nix
@@ -64,8 +80,18 @@ func Load(path string) (Manifest, error) {
 			return Manifest{}, fmt.Errorf("toolchain: manifest %s: %s path %q is not absolute", path, name, e.Path)
 		}
 	}
+	for name, n := range m.Networks {
+		for what, p := range map[string]string{"shelleyGenesis": n.ShelleyGenesis, "byronGenesis": n.ByronGenesis} {
+			if p != "" && !filepath.IsAbs(p) {
+				return Manifest{}, fmt.Errorf("toolchain: manifest %s: networks.%s.%s %q is not absolute", path, name, what, p)
+			}
+		}
+	}
 	return m, nil
 }
+
+// Genesis returns the bundled genesis files of a network.
+func (t *Toolchain) Genesis(network string) (Network, bool) { return t.manifest.Genesis(network) }
 
 // probe says how a tool reports its version: the arguments to run and which
 // whitespace-separated word of the first output line is the version.

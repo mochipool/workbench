@@ -111,3 +111,7 @@ Use case `GenerateVrfKey(pool, protection)` on aggregate `StakePool` (its `VrfKe
 
 * Seal by default; export plaintext only through the audited `Vault.exportPlaintext` for the block producer.
 * SPO-04b-PRE-003 leaves an orphaned `.vkey` which then triggers SPO-04b-PRE-001 on retry; make generation atomic.
+
+## Open questions
+
+* Resolved 2026-11-16 (cardano-cli 11.2.3.0, `spo/test/parity/software_keys_test.go`): `cli` does not prompt; the files match the native `GenerateVrfKeys` in names, modes, types (`VrfVerificationKey_PraosVRF`, `VrfSigningKey_PraosVRF`) and descriptions (`VRF Verification Key`, `VRF Signing Key`).

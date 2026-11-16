@@ -11,17 +11,15 @@ import (
 	"syscall"
 
 	"github.com/mochipool/workbench/spo/internal/adapters/cli"
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
-	"github.com/mochipool/workbench/spo/internal/adapters/genesisfile"
-	"github.com/mochipool/workbench/spo/internal/adapters/native"
-	"github.com/mochipool/workbench/spo/internal/adapters/offline"
-	"github.com/mochipool/workbench/spo/internal/adapters/systemclock"
 	"github.com/mochipool/workbench/spo/internal/adapters/toolchain"
-	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
+
+// minLockedBuffers is the least number of page-sized secret buffers the
+// locked-memory budget must allow.
+const minLockedBuffers = 64
 
 // version is set at build time with -ldflags.
 var version = "dev"
@@ -34,17 +32,33 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "spo: cannot harden the process:", err)
 		return 1
 	}
+	// Locked memory: every secret lives in locked pages, so the limit is
+	// read once, up front, and a budget too small to work with is refused
+	// with the remedy instead of failing in the middle of a command.
+	if err := secret.Init(); err != nil {
+		fmt.Fprintln(os.Stderr, "spo:", cli.MemlockAdvice+": "+err.Error())
+		return 1
+	}
+	if b := secret.Budget(); !b.Unlimited && b.Limit < minLockedBuffers*uint64(os.Getpagesize()) {
+		fmt.Fprintf(os.Stderr, "spo: the locked-memory limit (RLIMIT_MEMLOCK) leaves %d bytes for secrets, fewer than the %d buffers spo needs. %s\n",
+			b.Limit, minLockedBuffers, cli.MemlockAdvice)
+		return 1
+	}
 	defer secret.Purge()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	deps := cli.Deps{Version: version, Release: "none", Out: os.Stdout, Err: os.Stderr, Toolchain: noToolchain{}}
+	deps := newDeps(os.Stdout, os.Stderr, nil)
 	manifest, err := toolchain.Load(os.Getenv(toolchain.EnvVar))
 	switch {
 	case err == nil:
 		tc := toolchain.New(manifest, execx.OS{})
 		deps.Toolchain, deps.Tools, deps.Release = tc, tc.Names(), tc.Release()
+		deps.Genesis = func(network string) (string, string, bool) {
+			n, ok := tc.Genesis(network)
+			return n.ShelleyGenesis, n.ByronGenesis, ok
+		}
 	case errors.Is(err, toolchain.ErrNoManifest):
 		deps.Toolchain = noToolchain{err: err}
 	default:
@@ -52,16 +66,10 @@ func run() int {
 		return 1
 	}
 
-	deps.KeyGen = native.KeyGen{}
-	deps.OfflineOpCert = offlineOpCert
-	deps.OpenStore = func(dir string, upstreamLayout bool) (ports.Store, error) {
-		if !upstreamLayout {
-			return nil, errors.New("the sealed store is not built yet; pass --upstream-layout to work on a directory in the upstream file layout (keys unsealed)")
-		}
-		return fsstore.Open(dir)
-	}
-
 	if err := cli.NewRoot(deps).ExecuteContext(ctx); err != nil {
+		if errors.Is(err, secret.ErrMemoryLimit) {
+			err = errors.New(cli.MemlockAdvice)
+		}
 		fmt.Fprintln(os.Stderr, "spo:", err)
 		return 1
 	}
@@ -76,34 +84,4 @@ func (n noToolchain) Tool(context.Context, ports.ToolName) (ports.Tool, error) {
 		return ports.Tool{}, n.err
 	}
 	return ports.Tool{}, toolchain.ErrNoManifest
-}
-
-// offlineOpCert wires operational certificate issue for a machine that does
-// not consult the chain.
-func offlineOpCert(store ports.Store, o cli.OfflineOptions) (cli.OpCertWiring, error) {
-	vault, ok := store.(ports.Vault)
-	if !ok {
-		return cli.OpCertWiring{}, errors.New("the store cannot release signing keys to a signer")
-	}
-	signers := native.Signers{Vault: vault}
-	for _, h := range []custody.Holder{custody.HolderVault} {
-		s, err := signers.SignerFor(custody.KeyRef{Role: custody.RolePoolCold, Holder: h})
-		if err != nil {
-			return cli.OpCertWiring{}, err
-		}
-		if err := ports.CheckSigner(s); err != nil {
-			return cli.OpCertWiring{}, err
-		}
-	}
-	clock := systemclock.Clock{}
-	genesis := genesisfile.Shelley{Path: o.ShelleyGenesis}
-	tip := offline.Tip{Clock: clock, Genesis: genesis}
-	if o.ByronEpochs > 0 {
-		byron, err := genesisfile.ReadByron(o.ByronGenesis, o.ByronEpochs)
-		if err != nil {
-			return cli.OpCertWiring{}, err
-		}
-		tip.Byron = &byron
-	}
-	return cli.OpCertWiring{Signers: signers, Tip: tip, Genesis: genesis, Counters: offline.Counters{}, Clock: clock}, nil
 }
