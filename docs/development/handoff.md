@@ -2,7 +2,7 @@
 
 Read this before changing `orchestrator/`, `tools/workbench.nix` or `docs/`. It records what exists, how to prove it still works, what is unfinished, and what we learned about the upstream scripts that the code relies on. The longer-term direction is in [Roadmap: native port](./roadmap-native-port.md).
 
-Last updated: 2026-11-15.
+Last updated: 2026-11-16.
 
 ## Completed
 
@@ -35,11 +35,42 @@ The e2e test (`tests/test_e2e_real_scripts.py`) drives the real pinned scripts a
 
 Unit tests use stand-ins (`tests/fake_scripts.py`) that reproduce the upstream file contract. When you learn something new about upstream behaviour, encode it in the stand-in first, so the unit tests cannot drift from reality again (this happened once; see Gotchas).
 
+## Go reference implementation (`spo/`)
+
+Started 2026-11-16. Read [Go reference implementation: concerns](./go-reference-implementation-concerns.md) and the [ADRs](../explanation/adr/README.md) before touching it. The concerns page has a *Status* table that says what is closed.
+
+State: milestone M0 (decisions and skeleton) is done. The binary has `spo version` and `spo toolchain check`. No use case is ported yet.
+
+| What | Where |
+| --- | --- |
+| Composition root | `spo/cmd/spo` |
+| Process runner: argument vectors only, secrets through inherited pipes, empty environment by default | `spo/internal/platform/execx` |
+| Guarded memory for key material; core dumps disabled at start | `spo/internal/platform/secret` |
+| Release-set gates (upstream's bounds plus an exact match with the pin) | `spo/internal/adapters/toolchain`, manifest from `tools/spo.nix` |
+| Dependency rule and import confinement, enforced as a test | `spo/internal/archtest` |
+
+Verify:
+
+```sh
+nix build --accept-flake-config --no-link -L .#checks.x86_64-linux.spo-tests   # go vet + go test in the sandbox
+nix run --accept-flake-config .#spo -- toolchain check                        # real pinned tools pass the gates
+cd spo && go test ./...                                                       # fast loop; needs Go 1.27
+```
+
+Things that will bite:
+
+* **Nix does not see files jj has not told git about.** After creating files, run `git add -N <paths>` before `nix build`, or the flake fails with "not tracked by Git".
+* **`vendorHash`.** After any change to `spo/go.mod` or `spo/go.sum`, set `vendorHash` in `tools/spo.nix` to the all-`A` placeholder, build, and paste the hash Nix reports.
+* **Go version.** `spo` needs Go 1.27 (tailcat). It is built with the `nixpkgs-go` flake input, which is locked separately from the release set's `nixpkgs`.
+* **KES and VRF key generation cannot use a pipe** with cardano-cli 11.2.3.0. See the finding in the concerns page before writing the `KeyGen` adapter.
+
+Next: milestone M1, the parity harness (concerns C3, C4, S4, X3), then the single-operator slice.
+
 ## Backlog
 
 Ordered by value. Each item has a done-criterion.
 
-1. **CI runs the orchestrator tests.** `.github/workflows/validate-nix.yml` builds an explicit list of checks that does not yet include `workbench-tests`. Done when the `checks` job builds `.#checks.<system>.workbench-tests` on all three systems.
+1. ~~**CI runs the orchestrator tests.**~~ Done 2026-11-16: the `checks` job builds `spec-lint`, `workbench-tests` and `spo-tests` on all three systems. Not yet observed green on GitHub, because nothing has been pushed.
 2. **Independent review.** No second reviewer has read `orchestrator/`. Done when a review (use model `opus`) of engine resume semantics, the ticket import path and `unpack_carried` has been addressed or explicitly waived.
 3. **Real-script coverage of transaction workflows.** `claim-rewards`, `send-ada` and `pool-update` have only been run against stand-ins. Done when each completes on preview with funded throw-away wallets, both air-gapped and not, and any upstream behaviour found is folded into `fake_scripts.py`. Unknowns to settle:
    * ~~what `05c` prompts for in offline mode~~: two confirmations, both default No, plus two attach prompts, default No (from source; see `spec/upstream/scripts/05c_regStakepoolCert.md`);

@@ -45,6 +45,23 @@ jobs:
             .#checks.${{ matrix.system }}.spo-compat \
             .#checks.${{ matrix.system }}.readme-sync
 
+      # Spec corpus lint, orchestrator unit tests, and the Go reference
+      # implementation's vet and unit tests. None needs the haskell toolchain.
+      - name: Spec lint and unit tests
+        run: |
+          nix build --accept-flake-config --no-link -L \
+            .#checks.${{ matrix.system }}.spec-lint \
+            .#checks.${{ matrix.system }}.workbench-tests \
+            .#checks.${{ matrix.system }}.spo-tests
+
+      # Needs the vulnerability database, so it cannot be a sandboxed check.
+      - name: govulncheck (spo)
+        if: matrix.system == 'x86_64-linux'
+        working-directory: spo
+        run: |
+          nix shell --accept-flake-config --inputs-from .. nixpkgs-go#go nixpkgs-go#govulncheck \
+            --command govulncheck ./...
+
       - name: Build binary tools and scripts
         run: |
           nix build --accept-flake-config --no-link -L \

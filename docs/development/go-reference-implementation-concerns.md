@@ -12,19 +12,52 @@ Last updated: 2026-11-16.
 | D2 | **External dependencies stay external**: cardano-node, cardano-cli, cardano-hw-cli, cardano-signer, bech32, gpg and the HTTP services remain separate tools pinned by the flake. | "Single binary" means one Go binary that drives the pinned toolchain. It does not mean a statically linked Cardano stack. The `Ledger`, `KeyGen`, `Signer` (hardware) and `Toolchain` ports get adapters that execute those tools. |
 | D3 | **Tailcat** (`github.com/tailscale/tailcat`) is the first `Transport` adapter for multi-party interaction over the internet. | It replaces the roadmap's "Tailscale/tsnet" assumption; the word "tailcat" in the roadmap was not a typo. Concerns T1–T8 apply. |
 | D4 | **Encryption wherever it is necessary**: at rest, in transit, in exports and in the air-gap bundle. | Concerns E1–E9. |
-| D5 | **The Go binary is new and sits beside the Python `workbench`** (binary `spo`, module in `spo/`). `orchestrator/` is frozen to bug fixes, kept as a test oracle, and retired when the Go binary covers its four workflows. | Settles C1; recorded as an ADR. |
-| D6 | **Key-encryption key: passphrase plus a printed recovery key**, in a key-slot format that can later take a hardware token. | Settles E2. |
-| D7 | **Every record payload is sealed**, not only signing keys. Only opaque ids, kinds and versions are stored in plaintext. | Settles E5. Reading anything, `status` included, needs an unlock. |
-| D8 | **Pool cold keys sign only through the file transport.** There is no override in the first version. Payment, stake, owner, DRep and hardware-wallet keys may sign remotely. | Settles M6. |
+| D5 | **The Go binary is new and sits beside the Python `workbench`** (binary `spo`, module in `spo/`). `orchestrator/` is frozen to bug fixes, kept as a test oracle, and retired when the Go binary covers its four workflows. | Settles C1: [ADR 0001](../explanation/adr/0001-go-binary-beside-the-workbench.md). |
+| D6 | **Key-encryption key: passphrase plus a printed recovery key**, in a key-slot format that can later take a hardware token. | Settles E2: [ADR 0003](../explanation/adr/0003-vault-and-store.md). |
+| D7 | **Every record payload is sealed**, not only signing keys. Only opaque ids, kinds and versions are stored in plaintext. | Settles E5: [ADR 0004](../explanation/adr/0004-data-classification.md). Reading anything, `status` included, needs an unlock. |
+| D8 | **Pool cold keys sign only through the file transport.** There is no override in the first version. Payment, stake, owner, DRep and hardware-wallet keys may sign remotely. | Settles M6: [ADR 0005](../explanation/adr/0005-party-envelope-and-signing-policy.md). |
 | D9 | **The TUI is in scope**, as a second `UI` adapter. PostgreSQL, Kubernetes and a server API are deferred; their ports stay ready. Catalyst, SPO polls, token registry and minting are ported last. | Concerns U1–U2. |
-| D10 | **Chain access must not require a node socket.** HTTP and gRPC providers (for example UTxO RPC as served by TxPipe's Dolos and Blink Labs' tooling, Blockfrost-compatible APIs, Koios) are `ChainQuery` and `Submitter` adapters beside the socket adapter. | Concerns N1–N5. The user has no preview node; settling spec open questions (C3) and acceptance runs use a remote provider. |
+| D10 | **Chain access must not require a node socket.** HTTP and gRPC providers (for example UTxO RPC as served by TxPipe's Dolos and Blink Labs' tooling, Blockfrost-compatible APIs, Koios) are `ChainQuery` and `Submitter` adapters beside the socket adapter. | Concerns N1–N5; [ADR 0006](../explanation/adr/0006-chain-access-providers.md). The user has no preview node; settling spec open questions (C3) and acceptance runs use a remote provider. |
 | D11 | **Tailcat is pinned at v0.7.0**, the latest tag on 2026-11-16. Manual runs use the public DERP relays; sandboxed tests use an in-process relay if a spike shows that works. | T1, T5. |
 
 ## How to use this page
 
+Decisions are recorded in [`docs/explanation/adr/`](../explanation/adr/README.md); its index lists which concerns each record closes.
+
 Every concern has an id (`C1`, `E3`, ...). The ids are stable: an agent that closes one records the decision as an ADR in `docs/explanation/` (or a section of the Go project's design doc), and links it from the concern's row here. The *Done when* column is the closing criterion. Requirement ids (`SPO-...`) point into the spec corpus.
 
 Severity: **blocker** must be settled before code that depends on it is written; **major** before the slice that exercises it ships; **minor** before 1.0.
+
+## Status
+
+Updated as concerns close. A concern not listed here is open.
+
+| Id | State | Evidence |
+| --- | --- | --- |
+| C1, E2, E5, M6 | closed | ADRs 0001, 0003, 0004, 0005 |
+| E1, E3, S1, T3, E7, N1, N2, N4 | decided, not yet implemented | ADRs 0003, 0005, 0006 |
+| C7 | closed | `spo/NOTICE` |
+| X1 | closed | `tools/spo.nix` bakes the manifest; `spo/internal/adapters/toolchain` applies upstream's gates and requires the pinned version exactly; `spo toolchain check` passes against the real release set |
+| X4 | closed for the runner | `spo/internal/platform/execx` takes an argument vector only and refuses shells; `spo/internal/archtest` confines `os/exec` to it. Input validation is per use case |
+| X2 | partly closed, one waiver pending | `execx` passes and captures secrets through inherited pipes, with tests on argv and environment. See the finding below |
+| P1 | partly closed | `packages.<sys>.spo` and `checks.<sys>.spo-tests` build on x86_64-linux; other systems and the parity harness are not yet exercised |
+| P2 | partly closed | CI runs `spec-lint`, `workbench-tests`, `spo-tests` and `govulncheck`; contract tests (X3) do not exist yet |
+| T1 | partly closed | Tailcat pinned at v0.7.0 (D11); confinement to its adapter is enforced by `archtest` |
+
+### Finding under X2: cardano-cli cannot write KES or VRF keys to a pipe
+
+Run against the pinned cardano-cli 11.2.3.0 on 2026-11-16:
+
+* `address key-gen` and `node key-gen` (cold key and counter) write their outputs to `/dev/fd/N` pipes. No file is needed.
+* `node key-gen-KES` and `node key-gen-VRF` fail on a pipe: they create a temporary file beside the destination and rename it (`/dev/fd/: openTempFile: does not exist`).
+
+So X2's "never a temp file" cannot hold for KES and VRF generation through cardano-cli. Planned handling, to be confirmed in an ADR when key generation is implemented:
+
+1. The cardano-cli `KeyGen` adapter gives those two commands a path inside a private `0700` directory on a memory-backed file system (`$XDG_RUNTIME_DIR` or `/dev/shm` on Linux), reads the file into guarded memory, overwrites and removes it. The key is on a file system for milliseconds and never on a disk.
+2. Where no memory-backed file system exists, the adapter refuses unless the operator opts in.
+3. Native generation of KES and VRF keys (the model lists a native `KeyGen` adapter) removes the waiver and is the preferred end state.
+
+KES and VRF keys are the hot keys that must exist in plaintext on the block producer anyway, which is why a waiver here is tolerable and one for cold or payment keys would not be.
 
 ## Strategy and scope
 

@@ -57,6 +57,7 @@ Operator workflows:
 * [Release sets and versioning](./explanation/release-sets-and-versioning.md)
 * [Work modes](./explanation/work-modes.md)
 * [Orchestrator design](./explanation/orchestrator-design.md)
+* [Architecture decision records](./explanation/adr/README.md) for the Go reference implementation
 * [Security model](./explanation/security-model.md)
 
 ## Development

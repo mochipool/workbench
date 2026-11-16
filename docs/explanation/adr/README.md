@@ -1,0 +1,12 @@
+# Architecture decision records
+
+Decisions for the Go reference implementation (`spo/`). Each record closes concerns listed in [Go reference implementation: concerns](../../development/go-reference-implementation-concerns.md). A record is changed only by a later record that supersedes it.
+
+| ADR | Decision | Closes |
+| --- | --- | --- |
+| [0001](./0001-go-binary-beside-the-workbench.md) | The Go binary `spo` sits beside the Python `workbench` | C1 |
+| [0002](./0002-architecture-and-dependencies.md) | Package layout, dependency rule and third-party libraries | C6, X4, U1, T1 (part) |
+| [0003](./0003-vault-and-store.md) | Sealed single-file store: ciphers, key slots, record format, backup | E1, E2, E3, S1, S3 (part) |
+| [0004](./0004-data-classification.md) | What is sealed and how each class is handled | E5 |
+| [0005](./0005-party-envelope-and-signing-policy.md) | One signed and encrypted envelope for every transport; which keys may sign remotely | T3, E7, M6, M7 (part) |
+| [0006](./0006-chain-access-providers.md) | Chain access over HTTP and gRPC providers, and trust in their answers | N1, N2, N4 |
