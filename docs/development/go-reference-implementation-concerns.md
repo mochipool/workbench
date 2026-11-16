@@ -12,15 +12,17 @@ Last updated: 2026-11-16.
 | D2 | **External dependencies stay external**: cardano-node, cardano-cli, cardano-hw-cli, cardano-signer, bech32, gpg and the HTTP services remain separate tools pinned by the flake. | "Single binary" means one Go binary that drives the pinned toolchain. It does not mean a statically linked Cardano stack. The `Ledger`, `KeyGen`, `Signer` (hardware) and `Toolchain` ports get adapters that execute those tools. |
 | D3 | **Tailcat** (`github.com/tailscale/tailcat`) is the first `Transport` adapter for multi-party interaction over the internet. | It replaces the roadmap's "Tailscale/tsnet" assumption; the word "tailcat" in the roadmap was not a typo. Concerns T1–T8 apply. |
 | D4 | **Encryption wherever it is necessary**: at rest, in transit, in exports and in the air-gap bundle. | Concerns E1–E9. |
-| D5 | **The Go binary is new and sits beside the Python `workbench`** (binary `spo`, module in `spo/`). `orchestrator/` is frozen to bug fixes, kept as a test oracle, and retired when the Go binary covers its four workflows. | Settles C1; recorded as an ADR. |
-| D6 | **Key-encryption key: passphrase plus a printed recovery key**, in a key-slot format that can later take a hardware token. | Settles E2. |
-| D7 | **Every record payload is sealed**, not only signing keys. Only opaque ids, kinds and versions are stored in plaintext. | Settles E5. Reading anything, `status` included, needs an unlock. |
-| D8 | **Pool cold keys sign only through the file transport.** There is no override in the first version. Payment, stake, owner, DRep and hardware-wallet keys may sign remotely. | Settles M6. |
+| D5 | **The Go binary is new and sits beside the Python `workbench`** (binary `spo`, module in `spo/`). `orchestrator/` is frozen to bug fixes, kept as a test oracle, and retired when the Go binary covers its four workflows. | Settles C1: [ADR 0001](../explanation/adr/0001-go-binary-beside-the-workbench.md). |
+| D6 | **Key-encryption key: passphrase plus a printed recovery key**, in a key-slot format that can later take a hardware token. | Settles E2: [ADR 0003](../explanation/adr/0003-vault-and-store.md). |
+| D7 | **Every record payload is sealed**, not only signing keys. Only opaque ids, kinds and versions are stored in plaintext. | Settles E5: [ADR 0004](../explanation/adr/0004-data-classification.md). Reading anything, `status` included, needs an unlock. |
+| D8 | **Pool cold keys sign only through the file transport.** There is no override in the first version. Payment, stake, owner, DRep and hardware-wallet keys may sign remotely. | Settles M6: [ADR 0005](../explanation/adr/0005-party-envelope-and-signing-policy.md). |
 | D9 | **The TUI is in scope**, as a second `UI` adapter. PostgreSQL, Kubernetes and a server API are deferred; their ports stay ready. Catalyst, SPO polls, token registry and minting are ported last. | Concerns U1–U2. |
-| D10 | **Chain access must not require a node socket.** HTTP and gRPC providers (for example UTxO RPC as served by TxPipe's Dolos and Blink Labs' tooling, Blockfrost-compatible APIs, Koios) are `ChainQuery` and `Submitter` adapters beside the socket adapter. | Concerns N1–N5. The user has no preview node; settling spec open questions (C3) and acceptance runs use a remote provider. |
+| D10 | **Chain access must not require a node socket.** HTTP and gRPC providers (for example UTxO RPC as served by TxPipe's Dolos and Blink Labs' tooling, Blockfrost-compatible APIs, Koios) are `ChainQuery` and `Submitter` adapters beside the socket adapter. | Concerns N1–N5; [ADR 0006](../explanation/adr/0006-chain-access-providers.md). The user has no preview node; settling spec open questions (C3) and acceptance runs use a remote provider. |
 | D11 | **Tailcat is pinned at v0.7.0**, the latest tag on 2026-11-16. Manual runs use the public DERP relays; sandboxed tests use an in-process relay if a spike shows that works. | T1, T5. |
 
 ## How to use this page
+
+Decisions are recorded in [`docs/explanation/adr/`](../explanation/adr/README.md); its index lists which concerns each record closes.
 
 Every concern has an id (`C1`, `E3`, ...). The ids are stable: an agent that closes one records the decision as an ADR in `docs/explanation/` (or a section of the Go project's design doc), and links it from the concern's row here. The *Done when* column is the closing criterion. Requirement ids (`SPO-...`) point into the spec corpus.
 
