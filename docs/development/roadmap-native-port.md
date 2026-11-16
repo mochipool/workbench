@@ -2,7 +2,7 @@
 
 This is the planned next major piece of work. It replaces orchestrating `gitmachtl/scripts` with a native Python implementation at feature parity. That implementation has stronger controls: a single encrypted store, remote and multi-party signing over a secure channel, and alternative front ends such as a TUI. All of it is built against a structured specification of the upstream scripts that an agent can keep in sync with upstream changes.
 
-Status: **Phase 1 (spec foundation) in progress, ahead of the original scope.** The corpus in [`spec/`](../../spec/README.md) covers every upstream script and every `00_common.sh` function, not only the wrapped ones. Direction agreed with the user on 2026-11-15. The current state is in [Handoff](./handoff.md). The other Phase 0 decisions are still open.
+Status: **Phase 1 (spec foundation) in progress, ahead of the original scope.** The corpus in [`spec/`](../../spec/README.md) covers every upstream script and every `00_common.sh` function, not only the wrapped ones. Direction agreed with the user on 2026-11-15. The current state is in [Handoff](./handoff.md). The other Phase 0 decisions are still open. **2026-11-16:** the user chose Go (one binary, external tools stay external), tailcat as the first transport, a TUI, and chain access without a node socket; this supersedes the Python assumptions below, and settles open questions 3, 4, 6 and 8. Concerns and their closing criteria: [Go reference implementation: concerns](./go-reference-implementation-concerns.md).
 
 ## Why
 
