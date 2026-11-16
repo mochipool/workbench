@@ -26,7 +26,7 @@ type Deps struct {
 	// OpenStore opens the workspace. upstreamLayout selects the plain
 	// directory in upstream's file layout, where signing keys are not sealed.
 	OpenStore func(dir string, upstreamLayout bool) (ports.Store, error)
-	KeyGen    ports.KeyGen
+	KeyGen    ports.KesKeyGenerator
 }
 
 // NewRoot builds the command tree.

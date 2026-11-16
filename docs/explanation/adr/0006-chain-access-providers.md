@@ -10,26 +10,37 @@ Upstream reads the chain through a node socket (online), Koios (light) or a snap
 
 ### Adapters, in build order
 
-| Order | Adapter | Protocol | Why |
+Revised 2026-11-16 after a survey of the Go client libraries ([Go library coverage](../../development/go-library-coverage.md)). Every adapter is in process; none runs cardano-cli or curl.
+
+| Order | Adapter | Protocol and library | Why |
 | --- | --- | --- | --- |
-| 1 | `koios` | HTTPS, JSON | Upstream's light mode. [Clight](../../../spec/upstream/common/Clight.md) specifies every call, so it is the one provider with a parity contract, and it covers pool, reward and governance reads. Needed to settle the spec's open questions (C3). |
+| 1 | `koios` | HTTPS and JSON, our own thin client | Upstream's light mode. [Clight](../../../spec/upstream/common/Clight.md) specifies every call, so it has a parity contract, and it is the only socket-less source of the opcert counter. The community Go client has had no release since May 2024 and lacks the governance endpoints, so the adapter speaks HTTP itself. Needed to settle the spec's open questions (C3). |
 | 2 | `snapshot` | none | Offline mode: serves what an online machine captured. |
-| 3 | `utxorpc` | gRPC | UTxO RPC, as served by Dolos and by Blink Labs' `cardano-node-api` and Dingo. Self-hostable without a full node socket on the operator's machine. |
-| 4 | `nodesocket` | cardano-cli over the local socket | Upstream's online mode, for operators who do run a node. |
-| later | Blockfrost-compatible HTTP, Ogmios, Ouroboros node-to-client over TCP (`gouroboros`) | | Added behind the same port when someone needs them. |
+| 3 | `n2c` | Ouroboros node-to-client through `gouroboros` | Upstream's online mode without cardano-cli. It answers every read we need except asset holders and transaction metadata, including rewards, pool state, the opcert counter the node enforces, DRep, committee and governance state. It needs the node's socket, or that socket forwarded over TCP by the operator. |
+| 4 | `blockfrost` | Blockfrost-compatible HTTP through `blockfrost-go` | Governance, DRep, pool, account and metadata reads without a socket. Blink Labs' Dingo serves the same API, so this adapter is also the path to a self-hosted provider. It lacks the opcert counter and the constitution. |
+| 5 | `utxorpc` | gRPC through `utxorpc/go-sdk` | Parameters, UTxOs by address or asset, submit and wait, tip and era summary, as served by Dolos and Dingo. It has no reward, pool or governance reads, so it is never sufficient alone for pool operations. |
+
+Not planned: Ogmios (the Go client exposes nothing the others lack) and `cardano-node-api` (retired by Blink Labs).
 
 ### Capabilities
 
-A provider rarely answers every `ChainQuery` operation. Each adapter declares the operations it serves. Wiring compares a use case's needs with the configured adapter's capabilities and refuses before any effect when one is missing, which is how upstream treats a script that a work mode does not support.
+A provider rarely answers every read. Following [ADR 0008](./0008-capability-typed-ports.md), `ChainQuery` is a set of narrow reader interfaces, and an adapter implements only the ones it can answer. When a command starts, each reader it needs is resolved from the configured providers, in the operator's order of preference. A command whose needs no configured provider meets stops there and names the missing capability, which is how upstream treats a script that a work mode does not support.
 
-An operator may configure a second provider for the operations the first lacks. Expected starting point, to be confirmed by the contract tests:
+Coverage as read from the client libraries (not yet exercised against live services):
 
-| Operations | `koios` | `utxorpc` | `nodesocket` | `snapshot` |
-| --- | --- | --- | --- | --- |
-| Tip, protocol parameters, UTxOs by address, submit | yes | yes | yes | captured (submit queues) |
-| Reward account | yes | to be confirmed | yes | captured |
-| Pool state, opcert counter | yes | to be confirmed | yes | no |
-| DRep, committee, governance actions, votes | yes | to be confirmed | yes | DRep state only |
+| Read | `koios` | `n2c` | `blockfrost` | `utxorpc` | `snapshot` |
+| --- | --- | --- | --- | --- | --- |
+| Tip, protocol parameters, UTxOs by address, submit | yes | yes | yes | yes | captured (submit queues) |
+| Era history for slot and time conversion | no | yes | partly | yes | captured |
+| Reward account | yes | yes | yes | no | captured |
+| Stake deposit, vote delegation | no | yes | DRep only | no | no |
+| Pool state | yes | yes | yes | no | no |
+| Opcert counter | last block's | the node's | no | no | no |
+| DRep, committee, governance actions, votes | by raw HTTP, to be confirmed | yes | yes, except constitution | no | DRep state only |
+| Asset holders (ADA Handle), transaction metadata | yes | no | yes | by asset: yes | no |
+| Wait for confirmation | poll | mempool only | poll | yes | no |
+
+The two opcert counters differ in meaning: Koios reports the counter of the last block the pool made, and the node reports the counter it will enforce. Both satisfy the rule that a new certificate's counter must exceed it, and the read is in the *harmful if false* class below.
 
 ### Trust in answers (N2)
 

@@ -48,7 +48,8 @@ State: milestone M0 (decisions and skeleton) is done, and M1 (parity harness) ha
 | Guarded memory for key material; core dumps disabled at start | `spo/internal/platform/secret` |
 | Release-set gates (upstream's bounds plus an exact match with the pin) | `spo/internal/adapters/toolchain`, manifest from `tools/spo.nix` |
 | Dependency rule and import confinement, enforced as a test | `spo/internal/archtest` |
-| Ports defined so far: `Toolchain`, `Store`, `Vault`, `KeyGen` | `spo/internal/ports` |
+| Ports defined so far: `Toolchain`, `Store`, `Vault`, `KesKeyGenerator`, `VrfKeyGenerator` | `spo/internal/ports` |
+| Key roles, signer profiles, demands and signing plans (ADR 0008) | `spo/internal/domain/custody` |
 | KES rotation state and the `GenerateKesKey` use case | `spo/internal/domain/pool`, `spo/internal/app/poolops` |
 | Upstream-layout store (plain files, keys unsealed) | `spo/internal/adapters/fsstore` |
 | Native key generation for KES and VRF (Blink Labs `bursa`), checked against cardano-cli | `spo/internal/adapters/native`, `spo/test/parity/keygen_test.go` |
@@ -70,6 +71,8 @@ Things that will bite:
 * **Nix does not see files jj has not told git about.** After creating files, run `git add -N <paths>` before `nix build`, or the flake fails with "not tracked by Git".
 * **`vendorHash`.** After any change to `spo/go.mod` or `spo/go.sum`, set `vendorHash` in `tools/spo.nix` to the all-`A` placeholder, build, and paste the hash Nix reports.
 * **Go version.** `spo` needs Go 1.27 (tailcat). It is built with the `nixpkgs-go` flake input, which is locked separately from the release set's `nixpkgs`.
+* **Check [Go library coverage](./go-library-coverage.md) before writing an adapter.** It says which library function to use, what has only been read and not run, and what we write ourselves.
+* **Capability-typed ports (ADR 0008).** One small interface per capability; no method whose honest implementation is "unsupported". Signatures go through a `custody.Plan`, built before any effect. Do not write a hardware variant of a use case.
 * **Native first (ADR 0007).** New key, signing and ledger operations go in `spo/internal/adapters/native` on Blink Labs' libraries, each with a parity test against the pinned cardano-cli in `spo/test/parity`. Do not add a cardano-cli adapter for something `bursa` or `gouroboros` covers. cardano-cli 11.2.3.0 cannot write KES or VRF keys to a pipe, which is one reason.
 
 How to port a use case (the pattern `GenerateKesKey` sets):
@@ -80,7 +83,7 @@ How to port a use case (the pattern `GenerateKesKey` sets):
 4. Add the spec code to `implemented` in `spo/spec-coverage.toml`; waive what is deliberately not ported, with a reason.
 5. Fold anything the real tools taught you back into the spec.
 
-Next, in order: `04d` and `04e` (needs the `Signer`, `ChainQuery` and `Clock` ports and the Koios adapter), the sealed store (ADR 0003), then send ADA through the shared transaction pipeline. After that the multi-party slice (M3).
+Next, in order: `04d` and `04e` (the opcert signer interface over `bursa.CreateOperationalCertificate`, byte-equal to cardano-cli under the oracle; narrow chain readers; the Koios adapter), the sealed store (ADR 0003), then send ADA through a pipeline built on `gouroboros` types. After that the multi-party slice (M3).
 
 ## Backlog
 

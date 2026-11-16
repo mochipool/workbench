@@ -9,7 +9,6 @@ package native
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 
 	"github.com/blinklabs-io/bursa"
 
@@ -25,46 +24,53 @@ type KeyGen struct{}
 // seedSize is the size of the random seed both key kinds are derived from.
 const seedSize = 32
 
-// Generate implements ports.KeyGen.
+// GenerateKES implements ports.KesKeyGenerator.
 //
 // spec: SPO-04c-EXT-001
-func (KeyGen) Generate(_ context.Context, kind ports.KeyKind) (ports.KeyPair, error) {
+func (KeyGen) GenerateKES(context.Context) (ports.KeyPair, error) {
+	return generate(func(seed []byte) (vkey, skey bursa.KeyFile, err error) {
+		sk, pub, err := bursa.GetKESKeyPair(seed)
+		if err != nil {
+			return vkey, skey, err
+		}
+		defer wipe(sk.Data)
+		if skey, err = bursa.GetKESSKey(sk); err != nil {
+			return vkey, skey, err
+		}
+		vkey, err = bursa.GetKESVKey(pub)
+		return vkey, skey, err
+	})
+}
+
+// GenerateVRF implements ports.VrfKeyGenerator.
+func (KeyGen) GenerateVRF(context.Context) (ports.KeyPair, error) {
+	return generate(func(seed []byte) (vkey, skey bursa.KeyFile, err error) {
+		pub, sk, err := bursa.GetVRFKeyPair(seed)
+		if err != nil {
+			return vkey, skey, err
+		}
+		defer wipe(sk)
+		if skey, err = bursa.GetVRFSKey(sk); err != nil {
+			return vkey, skey, err
+		}
+		vkey, err = bursa.GetVRFVKey(pub)
+		return vkey, skey, err
+	})
+}
+
+// generate derives a pair from a fresh random seed held in guarded memory.
+func generate(derive func(seed []byte) (vkey, skey bursa.KeyFile, err error)) (ports.KeyPair, error) {
 	seed := secret.New(seedSize)
 	defer seed.Destroy()
 
 	var vkey, skey bursa.KeyFile
-	err := seed.Use(func(s []byte) error {
+	if err := seed.Use(func(s []byte) error {
 		var err error
-		switch kind {
-		case ports.KeyKES:
-			sk, pub, e := bursa.GetKESKeyPair(s)
-			if e != nil {
-				return e
-			}
-			defer wipe(sk.Data)
-			if skey, err = bursa.GetKESSKey(sk); err != nil {
-				return err
-			}
-			vkey, err = bursa.GetKESVKey(pub)
-		case ports.KeyVRF:
-			pub, sk, e := bursa.GetVRFKeyPair(s)
-			if e != nil {
-				return e
-			}
-			defer wipe(sk)
-			if skey, err = bursa.GetVRFSKey(sk); err != nil {
-				return err
-			}
-			vkey, err = bursa.GetVRFVKey(pub)
-		default:
-			err = fmt.Errorf("native: cannot generate %q keys", kind)
-		}
+		vkey, skey, err = derive(s)
 		return err
-	})
-	if err != nil {
+	}); err != nil {
 		return ports.KeyPair{}, err
 	}
-
 	vjson, err := envelope(vkey)
 	if err != nil {
 		return ports.KeyPair{}, err
@@ -97,4 +103,7 @@ func wipe(b []byte) {
 	}
 }
 
-var _ ports.KeyGen = KeyGen{}
+var (
+	_ ports.KesKeyGenerator = KeyGen{}
+	_ ports.VrfKeyGenerator = KeyGen{}
+)
