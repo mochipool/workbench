@@ -433,7 +433,7 @@ func (r RefusalReason) String() string {
 	case RefuseOutOfScope:
 		return "outside the coordinator's scope"
 	case RefuseCannotResolveInputs:
-		return "cannot resolve the inputs of a payment-key request"
+		return "cannot resolve the inputs of the request"
 	case RefuseNotASignerInput:
 		return "no input of the body is this signer's"
 	case RefuseUndisplayable:
@@ -442,6 +442,17 @@ func (r RefusalReason) String() string {
 		return "the body spends or acts for a script, whose witness set the signer cannot see"
 	}
 	return "unknown reason"
+}
+
+// Describe is String with the key role the request asked for named, for the
+// reasons whose meaning depends on it: whether the inputs must resolve
+// depends on the role (a payment key always, any other key over a network,
+// SPO-Xparty-PRE-007), so the text says which request it refused.
+func (r RefusalReason) Describe(role custody.Role) string {
+	if r == RefuseCannotResolveInputs {
+		return "cannot resolve the inputs of a " + string(role) + " key request"
+	}
+	return r.String()
 }
 
 // FileName is the file transport's name for an envelope (SPO-Xparty-IF-004):

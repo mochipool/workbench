@@ -73,3 +73,9 @@ ADA Handle (recorded 2026-11-16, Preview, public data): `handle_asset_addresses_
 (`GET https://preview.api.handle.me/handles/00f@hal`) and `handle_asset_utxos_virtual.json` is
 `POST /asset_utxos?select=inline_datum` for its asset name (`_extended` true), whose inline datum states
 the same address the API does. The error cases are hand-written in `handles_test.go`.
+
+Pool import (recorded 2026-11-16, preview): `pool_updates_registered.json` is
+`GET /pool_updates?_pool_bech32=pool1a7h89sr6...` (the pool of `pool_info_registered.json`):
+nine registration updates, newest first. The `PoolInfo` tests reuse `pool_info_registered.json`,
+`pool_info_retiring.json`, `pool_info_retired.json` and `pool_info_unknown.json`; every other
+case (null or absent `op_cert_counter`, malformed rows) is hand-edited in `poolimport_test.go`.

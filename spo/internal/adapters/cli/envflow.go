@@ -107,6 +107,10 @@ type envSpec struct {
 	// transfer file) and needs neither the store nor a passphrase: it runs
 	// without opening the workspace.
 	local bool
+	// sealed makes the command refuse --upstream-layout before anything is
+	// built or asked: it needs the sealed workspace (party identities and
+	// their keys live in it).
+	sealed bool
 }
 
 // withEnv resolves the command's environment, checks its needs, opens the
@@ -117,6 +121,9 @@ func (a *app) withEnv(cmd *cobra.Command, spec envSpec, fn func(ctx context.Cont
 	ctx := cmd.Context()
 	if a.d.Wire == nil {
 		return errors.New("this build has no environment wiring")
+	}
+	if spec.sealed && a.upstream {
+		return errors.New("this command works on a sealed workspace; it does not apply with --upstream-layout (party identities and their keys live in the sealed store)")
 	}
 	if spec.extras != nil {
 		if err := spec.extras.parse(); err != nil {

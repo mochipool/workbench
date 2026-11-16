@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -219,10 +220,15 @@ func (f *fixture) sentRefusal(h multisig.Handled, reason party.RefusalReason, bo
 
 func (f *fixture) refusal(h multisig.Handled, reason party.RefusalReason, body []byte) {
 	f.t.Helper()
-	if h.Refused || h.Effect != "refused" || h.Reason != reason.String() {
+	// The reason for unresolved inputs names the key role asked for.
+	text := reason.String()
+	if reason == party.RefuseCannotResolveInputs {
+		text = "cannot resolve the inputs of a "
+	}
+	if h.Refused || h.Effect != "refused" || !strings.HasPrefix(h.Reason, text) || (reason != party.RefuseCannotResolveInputs && h.Reason != text) {
 		f.t.Fatalf("handled = %+v, want a refusal for %q", h, reason)
 	}
-	if !f.B.HasEvent("request-refused", reason.String()) {
+	if !f.B.HasEvent("request-refused", text) {
 		f.t.Errorf("no audit event for %q: %v", reason, f.B.Events())
 	}
 	if pend, _ := f.signer().Pending(ctx); len(pend) != 0 {

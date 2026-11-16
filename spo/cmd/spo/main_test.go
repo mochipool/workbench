@@ -35,7 +35,13 @@ type fakeTerm struct {
 	secrets []string // consumed in order; "@LASTGROUP" types the last group shown on out
 	lines   []string
 	asked   []string
+	rows    int // the height this terminal reports, when set (an 80 column window)
 }
+
+// Size is the window the terminal reports, when it has one: a real two-owner
+// pool registration needs a taller block than the 24 rows assumed for a
+// terminal that reports nothing.
+func (f *fakeTerm) Size() (int, int, bool) { return 80, f.rows, f.rows > 0 }
 
 func (f *fakeTerm) ReadSecret(_ context.Context, prompt string) (*secret.Buffer, error) {
 	f.asked = append(f.asked, prompt)

@@ -105,3 +105,11 @@ Use case `CheckAssetRegistry(subject | policy.asset)`, read-only, on the `AssetR
 ## Open questions
 
 * None blocking. The exact shape of a registry answer (`<field>.value`, `<field>.sequenceNumber`, signatures) is the registry's contract and is only partially read here.
+
+## Go port notes (2026-11-16)
+
+* **Where it lives.** `ports.TokenRegistryReader` with the adapter `spo/internal/adapters/tokenregistry` (net/http only, https or loopback, a 20 second timeout, a 256 KiB answer limit, at most three https redirects, a fixed generic User-Agent), and the use case `app/registry.CheckTokenMetadata`. The use case only reads.
+* **Observed 2026-11-16** against `https://tokens.cardano.org/metadata/<subject>`: a known subject answers `200` with JSON (the recorded answer for HOSKY is `adapters/tokenregistry/testdata/hosky_answer.json`; it adds `additionalProperties` and orders the members of a property differently from the repository's files); an unknown subject answers `204 No Content` with an empty body. The status is checked (the port note): 204, 404 and an empty 200 are `ErrTokenNotFound`; any other status, a transport failure or a timeout is a different error, so "not found" is never inferred from a failure; a body that is not an entry (or is another subject's) is `ErrRegistryAnswer`.
+* **Comparison.** The result says `published` (the registry's highest sequence number equals the record's), `behind`, `ahead`, `not found`, or `not compared` (a subject argument, or a record with sequence number 0), compares each property with the record's `meta*` field, verifies every attestation with the verifier of 12a (and the policy against the subject, CIP-26) and returns the decoded logo with a PNG and size check. The logo is returned in memory; the port writes no temporary file (SPO-12b-OUT-002, SPO-12b-SEC-001 port note).
+* **Mode.** Offline mode has no registry reader, and the use case refuses before it looks at the argument (SPO-12b-PRE-001). Light mode uses the same reader.
+* **Registry URLs.** The testnet host of the preset (`metadata.cardano-testnet.iohkdev.io`) no longer resolves (2026-11-16); a test network needs the operator's `tokenMetaServer`. The adapter takes any base URL.

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -49,7 +50,30 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	deps := newDeps(os.Stdout, os.Stderr, nil)
+	deps, err := buildDeps(os.Stdout, os.Stderr, nil)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "spo:", err)
+		return 1
+	}
+
+	root := cli.NewRoot(deps)
+	root.AddCommand(tuiCommand(buildDeps))
+	if err := root.ExecuteContext(ctx); err != nil {
+		if errors.Is(err, secret.ErrMemoryLimit) {
+			err = errors.New(cli.MemlockAdvice)
+		}
+		fmt.Fprintln(os.Stderr, "spo:", err)
+		return 1
+	}
+	return 0
+}
+
+// buildDeps wires the adapters to the command tree and loads the toolchain.
+// The TUI calls it for every command it runs, with its own terminal and
+// output, so a command's output and progress lines reach the TUI and never
+// the real terminal.
+func buildDeps(out, errw io.Writer, term cli.Terminal) (cli.Deps, error) {
+	deps := newDeps(out, errw, term)
 	manifest, err := toolchain.Load(os.Getenv(toolchain.EnvVar))
 	switch {
 	case err == nil:
@@ -62,18 +86,9 @@ func run() int {
 	case errors.Is(err, toolchain.ErrNoManifest):
 		deps.Toolchain = noToolchain{err: err}
 	default:
-		fmt.Fprintln(os.Stderr, "spo:", err)
-		return 1
+		return deps, err
 	}
-
-	if err := cli.NewRoot(deps).ExecuteContext(ctx); err != nil {
-		if errors.Is(err, secret.ErrMemoryLimit) {
-			err = errors.New(cli.MemlockAdvice)
-		}
-		fmt.Fprintln(os.Stderr, "spo:", err)
-		return 1
-	}
-	return 0
+	return deps, nil
 }
 
 // noToolchain refuses every tool when the binary runs without a manifest.

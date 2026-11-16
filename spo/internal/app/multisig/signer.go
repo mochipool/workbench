@@ -360,6 +360,15 @@ func (s Signer) Handle(ctx context.Context, rcv ports.Received) (Handled, error)
 	switch m := body.(type) {
 	case party.SigningRequest:
 		if again != nil && again.Response != nil {
+			// A duplicate is answered only over the kind of transport the
+			// request first arrived on: a request that came by file and is
+			// replayed over a network (or the other way) gets no answer, so a
+			// stored response, a pool cold key's above all, is never put on
+			// another transport by a duplicate (SPO-Xparty-INV-017, ADR 0005).
+			if again.Via != via.String() {
+				return Handled{Type: party.TypeSigningRequest, Sender: o.Sender().Fingerprint, HasSender: true, Request: o.ID(), Effect: "duplicate",
+					Reason: "the request first arrived over the " + again.Via + " transport; it is answered there only"}, nil
+			}
 			return s.resend(ctx, o, again, now)
 		}
 		if again != nil { // waiting, signing or refused in silence: nothing to answer, nothing to record
@@ -665,7 +674,7 @@ func (s Signer) onRequest(ctx context.Context, local ports.LocalIdentity, o port
 			return Handled{}, err
 		default:
 			if reason, refuse = fl.Refusal(req.KeyRole, facts.OverNetwork); refuse {
-				detail = reason.String()
+				detail = reason.Describe(req.KeyRole)
 			}
 		}
 	}
@@ -692,8 +701,8 @@ func (s Signer) onRequest(ctx context.Context, local ports.LocalIdentity, o port
 		// A refused request is kept without its body: what an enrolled party
 		// can make us hold is bounded (SPO-Xparty-INV-022).
 		q.Body, q.Aux, q.Purpose, q.Operation = nil, nil, "", ""
-		q.State, q.Reason, q.Silent = reqRefused, reason.String(), !reason.Disclosed()
-		h.Effect, h.Reason = "refused", reason.String()
+		q.State, q.Reason, q.Silent = reqRefused, reason.Describe(req.KeyRole), !reason.Disclosed()
+		h.Effect, h.Reason = "refused", reason.Describe(req.KeyRole)
 		if reason.Disclosed() {
 			// A refusal needs no review: it signs nothing.
 			var err error
@@ -726,7 +735,7 @@ func (s Signer) onRequest(ctx context.Context, local ports.LocalIdentity, o port
 			return nil
 		}
 		ev = eventOf(now, "request-refused", q.Collection, q.Slot, req.BodyHash)
-		ev.Peer, ev.Reason, ev.Detail = o.Sender().Fingerprint.String(), reason.String(), detail
+		ev.Peer, ev.Reason, ev.Detail = o.Sender().Fingerprint.String(), reason.Describe(req.KeyRole), detail
 		if q.Silent {
 			ev.Detail += " (not sent to the coordinator)"
 		}

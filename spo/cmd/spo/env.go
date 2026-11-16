@@ -24,7 +24,7 @@ import (
 )
 
 // chainCaps are the capabilities that depend on the mode.
-var chainCaps = []cli.Cap{cli.CapTip, cli.CapSync, cli.CapOpCertCount, cli.CapParams, cli.CapUtxos, cli.CapRewards, cli.CapPools, cli.CapDReps, cli.CapCrossCheck, cli.CapSubmit, cli.CapQueue, cli.CapCalidusRead, cli.CapAdaHandle, cli.CapPollQuestion}
+var chainCaps = []cli.Cap{cli.CapTip, cli.CapSync, cli.CapOpCertCount, cli.CapParams, cli.CapUtxos, cli.CapRewards, cli.CapPools, cli.CapDReps, cli.CapCrossCheck, cli.CapSubmit, cli.CapQueue, cli.CapCalidusRead, cli.CapAdaHandle, cli.CapPollQuestion, cli.CapTokenRegistry, cli.CapPoolInfo, cli.CapPoolUpdates}
 
 func init() { chainCaps = append(chainCaps, cli.GovernanceChainCaps...) }
 
@@ -33,8 +33,11 @@ func init() { chainCaps = append(chainCaps, cli.GovernanceChainCaps...) }
 const noCalidusReader = "no chain provider reads the Calidus keys registered on chain (CIP-88) yet; the Koios adapter has no reader for them"
 
 // signatureDirectory hands out the vault signer with the signature
-// capabilities for a key held in the vault, and leaves every other holder to
-// the directory of the build.
+// capabilities, and the token-registry attestation, for a key held in the
+// vault, and leaves every other holder to the directory of the build. A
+// hardware key therefore has no registry signer: its profile does not claim the
+// operation, so a signing plan for a registry entry refuses it before anything
+// is read or written.
 type signatureDirectory struct {
 	vault ports.Vault
 	other ports.SignerDirectory
@@ -43,7 +46,7 @@ type signatureDirectory struct {
 // SignerFor implements ports.SignerDirectory.
 func (d signatureDirectory) SignerFor(key custody.KeyRef) (ports.Signer, error) {
 	if key.Holder == custody.HolderVault {
-		return native.VaultSignatures{VaultSigner: native.VaultSigner{Vault: d.vault}}, nil
+		return native.VaultRegistry{VaultSignatures: native.VaultSignatures{VaultSigner: native.VaultSigner{Vault: d.vault}}}, nil
 	}
 	return d.other.SignerFor(key)
 }
@@ -118,19 +121,25 @@ func wireTo(errw io.Writer, store ports.Store, o cli.WireOptions) (*cli.Env, err
 		// (ADR 0008): it also issues operational certificates and witnesses
 		// transactions, so it replaces the plain vault signer.
 		vs := native.VaultSignatures{VaultSigner: native.VaultSigner{Vault: vault}}
-		for _, s := range []ports.Signer{vs} {
+		vr := native.VaultRegistry{VaultSignatures: vs}
+		for _, s := range []ports.Signer{vr} {
 			if err := ports.CheckSigner(s); err != nil {
 				return nil, err
 			}
 			if err := ports.CheckSignatureSigner(s); err != nil {
 				return nil, err
 			}
+			if err := ports.CheckRegistrySigner(s); err != nil {
+				return nil, err
+			}
 			env.SignerKinds = append(env.SignerKinds, s)
 		}
 		env.SignatureSigner = vs
+		env.RegistrySigner = vr
 		env.Signers = signatureDirectory{vault: vault, other: native.Signers{Vault: vault, Hardware: hw}}
 	} else {
 		env.Absent(cli.CapSignatures, "the store cannot release signing keys to a signer")
+		env.Absent(cli.CapRegistrySigning, "the store cannot release signing keys to a signer")
 	}
 
 	env.KesKeys, env.VrfKeys, env.BLSKeys = native.KeyGen{}, native.KeyGen{}, native.KeyGen{}
@@ -153,8 +162,11 @@ func wireTo(errw io.Writer, store ports.Store, o cli.WireOptions) (*cli.Env, err
 	env.Bundle = tf
 	env.Sinks = func(dir string) (ports.FileSink, error) { return transferfile.DirSink{Dir: dir}, nil }
 	env.TxViewer = native.TxViewer{}
+	wireParty(env, store)
 	env.MetadataFiles, env.MsgEncrypter, env.PolicyIDs = fsstore.MetadataFiles{}, native.CIP83{}, led
 	env.VKeyDeriver = native.VKeyDeriver{}
+	env.VKeyEnvelopes, env.VrfVKeys = native.VKeyDeriver{}, native.VRFDeriver{}
+	env.Logos = logoFiles{dir: o.Workspace}
 	wireKeyCrypto(env, o)
 	env.DRepKeys, env.ComColdKeys, env.ComHotKeys, env.GovDeriver = soft, soft, soft, soft
 	env.VoteFiles, env.ActionFiles = led, led
@@ -253,6 +265,10 @@ func wireOffline(env *cli.Env, o cli.WireOptions, f *transferfile.File, clock po
 
 	env.Absent(cli.CapMetaFetch, "offline mode makes no network request: the published metadata is not compared with poolMetaHash here (the hash check runs when the registration is executed online)")
 	env.Absent(cli.CapSync, "offline mode has no chain to check the sync of")
+	env.Absent(cli.CapTokenRegistry, "offline mode makes no network request, so the token registry is not asked; run the command in light mode")
+	const noPoolRead = "offline mode cannot read a pool from the chain: give an info file made on an online machine with pool export-info"
+	env.Absent(cli.CapPoolInfo, noPoolRead)
+	env.Absent(cli.CapPoolUpdates, noPoolRead)
 	env.Absent(cli.CapSubmit, "offline mode has no transaction submitter; queue to a transfer file instead")
 	if st, err := os.Stat(o.TransferFile); err == nil && st.Mode().IsRegular() {
 		env.Utxos, env.Params, env.Queue, env.Eras = f, f, f, f
@@ -310,6 +326,10 @@ func wireLight(env *cli.Env, o cli.WireOptions) error {
 	}
 	env.Tip, env.Sync, env.OpCertCounters = k, k, k
 	env.Utxos, env.Rewards, env.Submitter = k, k, k
+	// The provider this workspace is configured with is the signer's own
+	// chain view in light mode (ADR 0005, obligation 3). Offline mode has none:
+	// its transfer file may have been written by another party.
+	env.OwnUtxos, _ = any(k).(ports.UtxoResolver)
 	// The Koios adapter reads pool and DRep state; the assertions keep the
 	// wiring honest if that ever changes.
 	env.Pools, _ = any(k).(ports.PoolStateReader)
@@ -341,6 +361,9 @@ func wireLight(env *cli.Env, o cli.WireOptions) error {
 		env.Absent(cli.CapLastEnacted, noDoc)
 	}
 	env.Polls, _ = any(k).(ports.PollQuestionReader)
+	env.PoolInfos, _ = any(k).(ports.PoolInfoReader)
+	env.PoolUpdates, _ = any(k).(ports.PoolUpdateReader)
+	wireRegistry(env, o)
 	wireHandles(env, o, k, native.Ledger{})
 	env.Absent(cli.CapStakeDist, "light mode computes no tally from stake distributions (upstream does not: it reads the proposal voting summary, capability voting-summary), and Koios is not asked for them here")
 	governanceReaders(env, k, noGovernanceReader)

@@ -133,6 +133,15 @@ func loadConfig(dir string) (cli.WorkspaceConfig, error) {
 	if c.Handles != nil {
 		out.Handles = &cli.HandlesConfig{URL: c.Handles.URL}
 	}
+	if c.Registry != nil {
+		out.Registry = &cli.RegistryConfig{URL: c.Registry.URL}
+	}
+	if c.Party != nil {
+		out.Party = &cli.PartyConfig{Inbox: c.Party.Inbox, Outbox: c.Party.Outbox}
+	}
+	if c.Tailcat != nil {
+		out.Tailcat = &cli.TailcatConfig{Port: c.Tailcat.Port, DERPMapURL: c.Tailcat.DERPMapURL}
+	}
 	return out, nil
 }
 
@@ -146,6 +155,15 @@ func toConfig(c cli.WorkspaceConfig) config.Config {
 	}
 	if c.Handles != nil {
 		out.Handles = &config.Handles{URL: c.Handles.URL}
+	}
+	if c.Registry != nil {
+		out.Registry = &config.Registry{URL: c.Registry.URL}
+	}
+	if c.Party != nil {
+		out.Party = &config.Party{Inbox: c.Party.Inbox, Outbox: c.Party.Outbox}
+	}
+	if c.Tailcat != nil {
+		out.Tailcat = &config.Tailcat{Port: c.Tailcat.Port, DERPMapURL: c.Tailcat.DERPMapURL}
 	}
 	return out
 }

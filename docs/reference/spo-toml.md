@@ -33,6 +33,17 @@ min_keystone = "1.7.7"
 
 [handles]               # optional
 url = "https://preview.api.handle.me"       # ADA Handle API root override
+
+[registry]              # optional
+url = "https://tokens.cardano.org/metadata"  # token-registry server root
+
+[party]                 # optional; multi-party signing, file transport
+inbox = "party/inbox"   # default; relative to the workspace directory
+outbox = "party/outbox" # default
+
+[tailcat]               # optional; multi-party signing, tailcat transport
+port = 7345             # the one TCP port a coordinator serves and a signer dials
+derp_map_url = "https://controlplane.tailscale.com/derpmap/default"   # relay map override
 ```
 
 | Key | Type | Meaning |
@@ -47,6 +58,16 @@ url = "https://preview.api.handle.me"       # ADA Handle API root override
 | `[hardware] min_ledger`, `min_trezor`, `min_keystone` | string | Minimum app (Ledger) or firmware version of that vendor, dotted numbers such as `8.0.8`. Defaults are upstream's (`8.0.8`, `2.7.2`, `1.7.7`). Lowering one is the operator's decision and the device's profile is judged against it. |
 | `[handles]` | section | ADA Handle API settings. |
 | `[handles] url` | string | Handle API root. When absent, the network's (`mainnet` `https://api.handle.me`, `preprod` `https://preprod.api.handle.me`, `preview` `https://preview.api.handle.me`). `https` is required except for a loopback host. An unusable value makes capability `ada-handle` absent with the reason; other commands are unaffected. |
+| `[registry]` | section | The token-registry server (CIP-26) that `asset meta check` asks. |
+| `[registry] url` | string | The server root; a subject is appended to it (`GET <url>/<subject>`). When absent, mainnet uses the public server `https://tokens.cardano.org/metadata`; **preprod and preview have none**, because the testnet host of upstream's preset (`metadata.cardano-testnet.iohkdev.io`) no longer resolves. On a test network, capability `token-registry` is absent, with that reason, until a `url` is set. `https` is required except for a loopback host; a URL with credentials, a query or a fragment is unusable and makes the capability absent with the reason. Read in light mode only: offline there is no registry. `asset meta generate` needs no registry. |
+| `[party]` | section | Where the file transport keeps its directories. |
+| `[party] inbox` | string | The inbox directory, relative to the workspace directory unless absolute. Default `party/inbox`. It must be a local directory only the operator can write to (not a link, not group- or other-writable, not a network or FUSE file system) and **never a synced folder**. `spo party inbox import` refuses it otherwise. |
+| `[party] outbox` | string | Where `party request export` and the invitations of `party serve` write by default. Default `party/outbox`. |
+| `[tailcat]` | section | The tailcat transport. |
+| `[tailcat] port` | integer | The TCP port a coordinator serves and a signer dials, 1 to 65535. Default 7345. |
+| `[tailcat] derp_map_url` | string | Where tailcat fetches its relay (DERP) map from. Default: tailcat's own. |
+
+The tailcat node key, the pre-shared key and the coordinator's address are **sealed records**, never settings: a key such as `psk`, `node_key`, `address` or `auth_key` is an unknown key and an error. There is no tailcat auth key anywhere: the pre-shared key is part of the address, which a coordinator gives only inside an invitation sealed to one signer.
 
 There is no default provider. `[koios]` is written only after the operator confirms the privacy statement, at `init --mode light` or `provider set koios`.
 
