@@ -1,0 +1,7 @@
+# The upstream revision the specification corpus describes.
+# Keep in lockstep with the `spo-scripts` input in flake.nix / flake.lock.
+# `specctl lint` fails when a spec's upstream_tag differs from `tag`.
+repo = "gitmachtl/scripts"
+tag = "Update-2026-04"
+rev = "85e783f6886b449fbb0bb85f33f8d3a84bb6303d"
+narHash = "sha256-L9rZrmTS52TlABs/ic68dDxPMZ1GFfW0bJJdn8PMeaQ="
