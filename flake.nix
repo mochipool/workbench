@@ -94,6 +94,11 @@
             cardano-hw-cli = cardano-hw-cli.cli;
           };
 
+          # Workflow orchestrator, bound to this release set's toolchain
+          workbench = import ./tools/workbench.nix {
+            inherit pkgs lib spo versions;
+          };
+
           # Base system packages to include
           basePkgs = [
             cardano-node-pkgs.cardano-node
@@ -103,6 +108,7 @@
             cardano-signer
             trezorctl
             doctor
+            workbench
           ];
 
           # Shell generator function
@@ -125,16 +131,23 @@
                 # autocomplete for cardano-hw-cli
                 source ${cardano-hw-cli.autocomplete}/share/cardano-hw-cli/autocomplete.sh
 
-                # Set up common.inc
-                ln -sf ${spoConfig.commonInc} ~/.common.inc
-                # Clean up on exit
-                trap "rm -f ~/.common.inc" EXIT 0
-                echo "Configured for ${network} network"
+                # Point ~/.common.inc at this network's settings, but never
+                # clobber an operator's own file. (`workbench` does not use
+                # it: it writes a workspace-local ./common.inc instead.)
+                if [ ! -e ~/.common.inc ] || [[ "$(readlink ~/.common.inc)" == /nix/store/* ]]; then
+                  ln -sfn ${spoConfig.commonInc} ~/.common.inc
+                  # Remove it on exit only if it is still the link we made
+                  # (another shell may have re-pointed it meanwhile).
+                  trap '[ "$(readlink ~/.common.inc)" = "${spoConfig.commonInc}" ] && rm -f ~/.common.inc' EXIT
+                  echo "Configured for ${network} network"
+                else
+                  echo "warning: ~/.common.inc is your own file; leaving it in place (scripts will use it)" >&2
+                fi
               '';
             };
         in {
           inherit pkgs cardano-node-pkgs cardano-cli-pkgs
-            cardano-hw-cli cardano-signer trezorctl doctor udevRules spo mkNetworkShell;
+            cardano-hw-cli cardano-signer trezorctl doctor udevRules spo workbench mkNetworkShell;
         };
 
       workbench = forAllSystems workbenchFor;
@@ -203,6 +216,7 @@
           cardano-signer = wb.cardano-signer;
           trezorctl = wb.trezorctl;
           doctor = wb.doctor;
+          workbench = wb.workbench;
           spo-scripts-mainnet = (wb.spo.mkCommon { overrides.network = "Mainnet"; }).derivation;
           spo-scripts-testnet = (wb.spo.mkCommon { overrides.network = "PreProd"; }).derivation;
           # Re-exports for convenience (built by upstream flakes / IOG cache)
@@ -219,6 +233,7 @@
               cardano-signer
               trezorctl
               doctor
+              workbench
               spo-scripts-mainnet
             ];
           };
@@ -232,6 +247,8 @@
         in {
           version-manifest = mkAssertion wb.pkgs "version-manifest" manifestFailures;
           spo-compat = mkAssertion wb.pkgs "spo-compat" spoCompat.failures;
+          # Orchestrator unit tests against stand-in scripts (no haskell toolchain).
+          workbench-tests = wb.workbench.tests;
           # The readme's generated requirements section must match the nix data.
           readme-sync = wb.pkgs.runCommand "readme-sync" { } ''
             ${extractBlock wb.pkgs} ${self}/readme.md > actual
@@ -253,6 +270,10 @@
           doctor = {
             type = "app";
             program = "${workbench.${system}.doctor}/bin/workbench-doctor";
+          };
+          workbench = {
+            type = "app";
+            program = "${workbench.${system}.workbench}/bin/workbench";
           };
         } // lib.optionalAttrs pkgs.stdenv.isLinux {
           # Prints (or with --install, installs) the Ledger/Trezor udev rules.
