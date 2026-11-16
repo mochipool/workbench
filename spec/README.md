@@ -15,6 +15,7 @@ This corpus is Phase 1 of [Roadmap: native port](../docs/development/roadmap-nat
 | [`upstream/common/`](./upstream/common/) | One spec per group of `00_common.sh` functions (`C*` codes). Every function is owned by exactly one group. |
 | [`upstream/patterns/`](./upstream/patterns/) | Behaviour shared by many scripts: the transaction pipeline (`Ptx`), the extra-parameter grammar (`Pparam`), workspace artefacts (`Pfiles`), the transfer file (`Ptransfer`). |
 | [`upstream/scripts/`](./upstream/scripts/) | One spec per upstream script, named after the script stem. |
+| [`extensions/`](./extensions/) | Behaviour of the port that upstream does not have, such as party enrollment and multi-party signing ([`Xparty`](./extensions/Xparty.md)). Same id scheme, `kind = "extension"`, no upstream tag and no source ranges. Tests cite these ids like any other. |
 | [`domain/`](./domain/) | The model the reimplementation is built on: bounded contexts, glossary, aggregates, ports, use cases with traceability to requirement ids, and extension points (encryption, multi-party signing, storage back ends). |
 | [`tools/specctl.py`](./tools/specctl.py) | Mechanical checks and upgrade tooling. Standard library only. |
 

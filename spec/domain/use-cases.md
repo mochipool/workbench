@@ -14,8 +14,13 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 
 | Use case | Specs | Requirements |
 | --- | --- | --- |
+| `EnrollParty` | [`Xparty`](../extensions/Xparty.md) | 44 |
+| `ImportSigningResponse` | [`Xparty`](../extensions/Xparty.md) | 44 |
 | `ImportWorkspace` | [`Pfiles`](../upstream/patterns/Pfiles.md) | 51 |
 | `ProtectSigningKey` | [`01protectKey`](../upstream/scripts/01_protectKey.md) | 29 |
+| `RequestSignatures` | [`Xparty`](../extensions/Xparty.md) | 44 |
+| `ReviewSigningRequest` | [`Xparty`](../extensions/Xparty.md) | 44 |
+| `RevokeParty` | [`Xparty`](../extensions/Xparty.md) | 44 |
 | `SealKey` | [`Pfiles`](../upstream/patterns/Pfiles.md) | 51 |
 | `StoreArtefact` | [`Pfiles`](../upstream/patterns/Pfiles.md) | 51 |
 | `UnprotectSigningKey` | [`01protectKey`](../upstream/scripts/01_protectKey.md) | 29 |
@@ -214,4 +219,4 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 | [`25a_genAction`](../upstream/scripts/25a_genAction.md) | Generate a governance action file | governance | 75 | draft |
 | [`25b_regAction`](../upstream/scripts/25b_regAction.md) | Submit governance actions | governance, transaction-construction | 71 | draft |
 
-Totals: 67 specs, 2257 requirements, 78 use cases.
+Totals: 68 specs, 2301 requirements, 83 use cases.

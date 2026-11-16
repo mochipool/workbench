@@ -82,6 +82,10 @@ env_vars = [...]
 * `kind = "pattern"` specs have no `upstream_path`. Their requirements cite files explicitly.
 * Mechanical facts are extracted by regex. When an extracted fact is wrong (a false match), keep the extracted value so lint passes, and explain it in the body. Do not edit the extractor in passing.
 
+## Extension specs
+
+Files under `spec/extensions/` use `kind = "extension"`. They specify behaviour the port adds, not upstream behaviour: they omit `upstream_tag` and every mechanical fact, their requirements have no `(src: ...)` references, and their code starts with `X` (`SPO-Xparty-PRE-005`). Everything else in this contract applies, including the rule that ids are never renumbered.
+
 ## Spec codes
 
 | Kind | Code | Example id |
