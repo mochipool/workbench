@@ -51,6 +51,7 @@ Updated as concerns close. A concern not listed here is open.
 | C5 | in use | Quirk decisions for 04c are recorded in the tests that cite the ids (`generate_kes_test.go`, `root_test.go`) |
 | S4 | partly closed | `spo/internal/adapters/fsstore` covers the pool key and KES artefacts; kinds are added as use cases need them |
 | C2 | in use | First use case at parity: `GenerateKesKey` (04c), 12 ids cited, 8 waived with reasons |
+| M1, T6 | specified, not implemented | [`spec/extensions/Xparty.md`](../../spec/extensions/Xparty.md): identity, enrollment, envelope, messages, coordinator and signer rules, transports, with requirement ids |
 | T1 | partly closed | Tailcat pinned at v0.7.0 (D11); confinement to its adapter is enforced by `archtest` |
 
 ### Finding under X2 (resolved by D12): cardano-cli cannot write KES or VRF keys to a pipe

@@ -30,6 +30,7 @@ from pathlib import Path
 
 SPEC_ROOT = Path(__file__).resolve().parent.parent
 UPSTREAM_SPECS = SPEC_ROOT / "upstream"
+EXTENSION_SPECS = SPEC_ROOT / "extensions"
 VARIANT_DIRS = ("cardano/mainnet", "cardano/testnet")
 COMMON = "00_common.sh"
 
@@ -244,7 +245,8 @@ def parse_spec(path: Path) -> Spec:
 
 
 def load_specs() -> list[Spec]:
-    return [parse_spec(p) for p in sorted(UPSTREAM_SPECS.rglob("*.md")) if p.name != "README.md" and not p.name.startswith("_")]
+    paths = sorted(UPSTREAM_SPECS.rglob("*.md")) + sorted(EXTENSION_SPECS.rglob("*.md"))
+    return [parse_spec(p) for p in paths if p.name != "README.md" and not p.name.startswith("_")]
 
 
 def resolve_ref_file(spec: Spec, f: str | None, scripts: dict[str, Path] | None = None) -> str | None:
@@ -324,9 +326,14 @@ def cmd_lint(args) -> int:
         if not s.meta:
             continue
         kind = s.meta.get("kind")
-        if kind not in ("script", "common", "pattern"):
-            errors.append(f"{rel}: kind must be script|common|pattern")
-        if s.meta.get("upstream_tag") != pinned["tag"]:
+        if kind not in ("script", "common", "pattern", "extension"):
+            errors.append(f"{rel}: kind must be script|common|pattern|extension")
+        in_ext = EXTENSION_SPECS in s.path.parents
+        if (kind == "extension") != in_ext:
+            errors.append(f"{rel}: kind \"extension\" and the extensions/ directory go together")
+        # An extension specifies behaviour of the port that upstream does not have:
+        # it has ids like any spec, but no upstream tag and no source ranges.
+        if kind != "extension" and s.meta.get("upstream_tag") != pinned["tag"]:
             errors.append(f"{rel}: upstream_tag {s.meta.get('upstream_tag')!r} != pinned {pinned['tag']!r}")
         prim = s.primary
         if kind in ("script", "common"):
@@ -360,7 +367,7 @@ def cmd_lint(args) -> int:
             seen[r.id] = s.path
             if not r.id.startswith(f"SPO-{code}-"):
                 errors.append(f"{rel}:{r.line}: id {r.id} does not use this spec's code SPO-{code}-")
-            if not r.refs and kind != "pattern":
+            if not r.refs and kind not in ("pattern", "extension"):
                 warnings.append(f"{rel}:{r.line}: {r.id} has no (src: ...) reference")
             for f, a, b in r.refs:
                 target = resolve_ref_file(s, f, scripts)
