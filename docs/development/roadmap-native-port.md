@@ -2,7 +2,7 @@
 
 This is the planned next major piece of work. It replaces orchestrating `gitmachtl/scripts` with a native Python implementation at feature parity. That implementation has stronger controls: a single encrypted store, remote and multi-party signing over a secure channel, and alternative front ends such as a TUI. All of it is built against a structured specification of the upstream scripts that an agent can keep in sync with upstream changes.
 
-Status: **not started**; direction agreed with the user on 2026-11-15. The current state is in [Handoff](./handoff.md). Start with Phase 0.
+Status: **Phase 1 (spec foundation) in progress, ahead of the original scope.** The corpus in [`spec/`](../../spec/README.md) covers every upstream script and every `00_common.sh` function, not only the wrapped ones. Direction agreed with the user on 2026-11-15. The current state is in [Handoff](./handoff.md). The other Phase 0 decisions are still open.
 
 ## Why
 
@@ -95,7 +95,7 @@ When `spo-scripts` moves to a new `Update-*` tag:
 2. For each changed file, an agent diffs the old and new source, maps every hunk to the requirement ids it touches, and proposes spec edits.
 3. Every hunk ends up classified as **behaviour change** (spec edit plus tests flagged), **no behavioural effect**, or **cosmetic**. The upgrade is done when no hunk is unclassified and the coverage check is green.
 
-`tools/spo-compat.nix` already parses `00_common.sh` for version requirements at evaluation time. It is the precedent for mechanical extraction; extend that idea to whatever the spec can extract mechanically.
+`tools/spo-compat.nix` already parses `00_common.sh` for version requirements at evaluation time. `spec/tools/specctl.py` extends the idea: it extracts per-file and per-function hashes, cardano-cli, hw-cli and signer subcommands, HTTP endpoints and `ENV_*` variables, and lints them against each spec's front matter (`checks.<system>.spec-lint`). The upgrade procedure is in [`spec/README.md`](../../spec/README.md#absorbing-an-upstream-release).
 
 ## Phases
 
@@ -125,7 +125,7 @@ The testnet variant adds `04f_genBLSKeys`, `13a_spoPoll` and `13b_sendSpoPoll`. 
 4. **Key-encryption key source:** passphrase only, or also hardware tokens (YubiKey or the HW wallet itself)?
 5. **Transport security:** Tailscale assumed (confirm "tailcat"), plus which application-level authentication (Noise or mTLS)? Is the signer daemon Python, or Go to embed `tsnet`?
 6. **Air-gap policy:** which key classes may use remote signing by default?
-7. **Spec format:** YAML front matter plus Markdown, or a JSON Schema-validated YAML file per script?
+7. ~~**Spec format:**~~ *Decided 2026-11-15:* Markdown with TOML front matter (parsed by the standard library's `tomllib`, so no dependency), requirement ids `SPO-<code>-<KIND>-<NNN>` with `(src: Lx-Ly)` ranges. Contract: [`spec/format.md`](../../spec/format.md).
 8. **Migration:** does the current `workbench` CLI stay as the front end (recommended, keeping its docs and workflows), with the `ScriptRunner` adapter retired script by script as native use cases land?
 
 ## What carries over from the current orchestrator

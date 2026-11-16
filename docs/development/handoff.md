@@ -14,6 +14,7 @@ Last updated: 2026-11-15.
 | Validation | Strict `workbench.toml` schema; per-workflow check-time validation (address network prefixes, `pool.json` limits mirroring `05a`, KES counter consistency, offline hand-off precondition, partial-`04d` guard) | `config.py`, `validate.py`, each workflow's `validate()` |
 | Packaging | `packages.<sys>.workbench`, `apps.<sys>.workbench`, `checks.<sys>.workbench-tests`; toolchain manifest JSON baked into the wrapper | `tools/workbench.nix`, `flake.nix` |
 | Flake fixes | `gnupg` added to the SPO script runtime (needed for `enc` keys); `mkParams` exposed; dev shell no longer clobbers a user's own `~/.common.inc` | `tools/spo-scripts.nix`, `flake.nix` |
+| Spec corpus | Behavioural spec of every upstream script and `00_common.sh` function (67 specs, 2257 requirement ids with source ranges, about 95% of upstream code lines cited; reviewed once by Opus against source, all findings applied), domain model, ports, `specctl` (lint, drift, hunks, gaps, index), `checks.<sys>.spec-lint` | `spec/` |
 | Docs | Diataxis set (tutorials, how-to, reference, explanation); `readme.md` trimmed to a landing page; `RELEASING.md` points into `docs/` | `docs/` |
 
 Commits (jj, colocated): `feat(workbench): ...` then `docs: Diataxis ...` on bookmark `workbench-orchestrator`, merged into `main` with `merge: workbench orchestrator and Diataxis docs`. **Not pushed**: the user pushes.
@@ -41,9 +42,11 @@ Ordered by value. Each item has a done-criterion.
 1. **CI runs the orchestrator tests.** `.github/workflows/validate-nix.yml` builds an explicit list of checks that does not yet include `workbench-tests`. Done when the `checks` job builds `.#checks.<system>.workbench-tests` on all three systems.
 2. **Independent review.** No second reviewer has read `orchestrator/`. Done when a review (use model `opus`) of engine resume semantics, the ticket import path and `unpack_carried` has been addressed or explicitly waived.
 3. **Real-script coverage of transaction workflows.** `claim-rewards`, `send-ada` and `pool-update` have only been run against stand-ins. Done when each completes on preview with funded throw-away wallets, both air-gapped and not, and any upstream behaviour found is folded into `fake_scripts.py`. Unknowns to settle:
-   * what `05c` prompts for in offline mode;
-   * whether `execute` prompts;
-   * the exit codes `04e` uses on a counter mismatch.
+   * ~~what `05c` prompts for in offline mode~~: two confirmations, both default No, plus two attach prompts, default No (from source; see `spec/upstream/scripts/05c_regStakepoolCert.md`);
+   * ~~whether `execute` prompts~~: always, default No, and `ENV_SKIP_PROMPT` is not honoured (`spec/upstream/scripts/01_workOffline.md`);
+   * ~~the exit codes `04e` uses on a counter mismatch~~: 0 for every completed check, including a FALSE verdict; 1 for usage, offline and not-found; 2 for unsynced or query errors (`spec/upstream/scripts/04e_checkNodeOpCert.md`). The `kes-rotate` probes must parse the verdict, not the exit code.
+
+   These answers come from reading source; confirm them in the preview run.
 4. **`enc` and hardware-wallet paths.** Untested: `kes_key = "enc"` (gpg password prompt, bundle contains an encrypted key) and `.hwsfile` cold keys (`04d` via cardano-hw-cli). Done when each is exercised once with notes in this file.
 5. **Workflows not yet wrapped.** Done per item when it has a workflow, validation, stand-in coverage and a how-to page:
    * pool registration from scratch (`04a`, `04b`, `05a`, `05b`, `05c`, `06`);
