@@ -91,39 +91,6 @@ func TestGenerateActionReadersPerKind(t *testing.T) {
 	}
 }
 
-// ---- B2: the parameter-change sentinel ----------------------------------------------
-
-type paramChangeFiles struct{ fakeActionFiles }
-
-func (paramChangeFiles) BuildActionFile(a governance.Action) (ports.ActionFile, error) {
-	if a.Kind == governance.ParameterChange {
-		return ports.ActionFile{}, fmt.Errorf("%w: native says so", ports.ErrParameterChangeUnsupported)
-	}
-	return fakeActionFiles{}.BuildActionFile(a)
-}
-
-// The sentinel of an unbuilt parameter-change file is exported by the use case
-// package (the CLI matches it with errors.Is, never by text), and an action
-// file adapter that wraps ports.ErrParameterChangeUnsupported is recognised.
-//
-// spec: SPO-25a-IF-016
-func TestGenerateActionParameterChangeSentinel(t *testing.T) {
-	r := newRig(t)
-	uc, _ := r.generateAction()
-	uc.Actions = paramChangeFiles{}
-	_, err := uc.Run(context.Background(), GenerateActionRequest{Return: "owner", Kind: governance.ParameterChange, URL: "https://x.org/a.json", Hash: okAnchor,
-		Params: []governance.ParamChange{{Name: "min-pool-cost", Value: "170000000"}}})
-	if !errors.Is(err, ErrParameterChangeUnsupported) || !errors.Is(err, ports.ErrParameterChangeUnsupported) {
-		t.Fatalf("got %v", err)
-	}
-	if r.store.writes != 0 {
-		t.Error("a refused action wrote a file")
-	}
-	if !errors.Is(fmt.Errorf("x: %w", ErrParameterChangeUnsupported), ports.ErrParameterChangeUnsupported) {
-		t.Error("the use case sentinel is the port's")
-	}
-}
-
 // ---- B3: the signing voter is derived from the vote files --------------------------
 
 // Without --voter the signing key is the stored key of the files' role whose

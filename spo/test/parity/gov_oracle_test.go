@@ -333,6 +333,18 @@ func (k govKit) actionCases(t *testing.T) []actionCase {
 	tw.Guardrails = &sh
 	add("treasury withdrawal with a guardrails script", tw, "create-treasury-withdrawal",
 		cat([]string{"--funds-receiving-stake-key-hash", hex28(recv.Hash), "--transfer", "5000000", "--constitution-script-hash", hex28(sh)}))
+	// A key account and a script account in one withdrawal map: the order of
+	// the entries is the ledger's order of reward accounts, which cardano-cli
+	// writes whatever the order of the flags (the header byte alone would put
+	// the key accounts, e0/e1, before the script accounts, f0/f1).
+	scr := governance.Credential{Hash: policy(0x6b), Script: true}
+	scrAddr := stakeAddrOf(t, scr, false)
+	two := base(governance.TreasuryWithdrawals)
+	two.Withdrawals = []governance.Withdrawal{{Account: recvAddr, Key: recv, Amount: 5_000_000}, {Account: scrAddr, Key: scr, Amount: 7_000_000}}
+	add("treasury withdrawal to a key and a script account, key first", two, "create-treasury-withdrawal", cat([]string{
+		"--funds-receiving-stake-key-hash", hex28(recv.Hash), "--transfer", "5000000", "--funds-receiving-stake-address", string(scrAddr), "--transfer", "7000000"}))
+	add("treasury withdrawal to a key and a script account, script first", two, "create-treasury-withdrawal", cat([]string{
+		"--funds-receiving-stake-address", string(scrAddr), "--transfer", "7000000", "--funds-receiving-stake-key-hash", hex28(recv.Hash), "--transfer", "5000000"}))
 	return cases
 }
 
@@ -357,9 +369,10 @@ func stakeAddrOf(t *testing.T, c governance.Credential, mainnet bool) chain.Stak
 	return chain.StakeAddress(s)
 }
 
-// Action files for the six kinds that need no script evaluation, byte-equal to
-// `governance action create-*`. The guardrails script hash is a flag of the
-// file; evaluating the script is a transaction-time matter.
+// Action files for the six kinds other than the parameter change, byte-equal to
+// `governance action create-*` (the parameter change has its own test,
+// TestGovParameterChangeFilesMatchCardanoCLI). The guardrails script hash is a
+// flag of the file; the script is a witness of the transaction that proposes it.
 //
 // spec: SPO-25a-EXT-005, SPO-25a-EXT-006, SPO-25a-EXT-007, SPO-25a-EXT-008, SPO-25a-EXT-009, SPO-25a-EXT-010, SPO-25a-EXT-012,
 // spec: SPO-25a-OUT-002, SPO-Pfiles-OUT-030, SPO-25b-IN-002
@@ -384,11 +397,6 @@ func TestGovActionFilesMatchCardanoCLI(t *testing.T) {
 				t.Fatalf("cardano-cli's file reads back as %+v (%v)", back.Action, err)
 			}
 		})
-	}
-	// The parameter change is not built by this adapter: a typed refusal.
-	a := governance.Action{Kind: governance.ParameterChange, Deposit: 1, Return: k.stakeAddr, Anchor: govAnchor(t), Params: []governance.ParamChange{{Name: "max-tx-size", Value: "16384"}}}
-	if _, err := led.BuildActionFile(a); err == nil || !strings.Contains(err.Error(), "ParameterChange") {
-		t.Errorf("ParameterChange: %v", err)
 	}
 }
 

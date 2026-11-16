@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/mochipool/workbench/spo/internal/adapters/cli"
 	"github.com/mochipool/workbench/spo/internal/adapters/tui"
+	"github.com/mochipool/workbench/spo/internal/platform/secret"
 )
 
 // depsBuilder makes the dependencies of one command tree with the given
@@ -57,11 +59,40 @@ whole session. The workspace is not opened until a command needs it.`,
 				return err
 			}
 			return tui.Run(cmd.Context(), tui.Options{
-				Factory: tuiFactory(build),
-				Globals: globals,
-				Status:  func() tui.Status { return workspaceStatus(dir, globals) },
+				Factory:  tuiFactory(build),
+				Globals:  globals,
+				Status:   func() tui.Status { return workspaceStatus(dir, globals) },
+				StartDir: dir,
+				Names:    tuiNames(build, dir, globals),
 			})
 		},
+	}
+}
+
+// tuiNames is how the TUI learns the names the workspace holds, for
+// completion: the CLI's own listing (names only), over the session's global
+// flags. It gets a passphrase only when the operator asks the TUI to unlock
+// the names; without one a sealed workspace is not opened.
+func tuiNames(build depsBuilder, dir string, globals []string) tui.NameLister {
+	has := func(flag string) bool {
+		for _, g := range globals {
+			if g == flag+"=true" {
+				return true
+			}
+		}
+		return false
+	}
+	upstream, rollback := has("--upstream-layout"), has("--accept-rollback")
+	return func(ctx context.Context, pass *secret.Buffer) (map[string][]string, error) {
+		deps, err := build(io.Discard, io.Discard, nil)
+		if err != nil {
+			return nil, err
+		}
+		names, err := cli.WorkspaceNames(ctx, deps, dir, upstream, rollback, pass)
+		if errors.Is(err, cli.ErrSealed) {
+			return nil, tui.ErrLocked
+		}
+		return names, err
 	}
 }
 

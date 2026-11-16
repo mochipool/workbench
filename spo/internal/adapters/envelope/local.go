@@ -106,6 +106,16 @@ var ErrNoIdentity = errors.New("envelope: this workspace has no party identity: 
 
 // Local implements ports.IdentityKit.
 func (k Kit) Local(ctx context.Context) (ports.LocalIdentity, error) {
+	p, err := k.private(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return NewLocal(p, k.Rand), nil
+}
+
+// private loads the workspace's own identity with its private keys. The caller
+// destroys it.
+func (k Kit) private(ctx context.Context) (*Private, error) {
 	var raw []byte
 	err := k.Store.View(ctx, func(r ports.Reader) error {
 		var err error
@@ -129,9 +139,5 @@ func (k Kit) Local(ctx context.Context) (ports.LocalIdentity, error) {
 	if err != nil {
 		return nil, fmt.Errorf("the identity's private keys: %w", err)
 	}
-	p, err := NewPrivate(keys, doc.Identity) // takes ownership of keys
-	if err != nil {
-		return nil, err
-	}
-	return NewLocal(p, k.Rand), nil
+	return NewPrivate(keys, doc.Identity) // takes ownership of keys
 }

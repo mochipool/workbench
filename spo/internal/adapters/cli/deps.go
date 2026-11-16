@@ -26,7 +26,10 @@ type Deps struct {
 	Terminal Terminal
 
 	Config ConfigOps
-	Sealed SealedOps
+	// NodeAddressWarning returns the warning to print for a node address that
+	// is plain TCP to a non-loopback host, "" otherwise. Nil: no warning.
+	NodeAddressWarning func(address string) string
+	Sealed             SealedOps
 
 	// OpenUpstream opens a directory in the upstream scripts' file layout,
 	// where signing keys are not sealed (--upstream-layout).
@@ -73,6 +76,15 @@ type WorkspaceConfig struct {
 	Network string
 	Mode    string
 	Koios   *KoiosConfig // nil: no Koios provider configured
+	// Blockfrost is the optional [blockfrost] section: a second provider kind.
+	Blockfrost *BlockfrostConfig
+	// Node is the optional [node] section: a node socket (node-to-client).
+	Node *NodeConfig
+	// Order is [provider] order, the operator's order of preference among the
+	// configured providers (empty: the default order koios, blockfrost).
+	Order []string
+	// SameHostOK is [provider] same_host_ok (see Env.SameHostOK).
+	SameHostOK bool
 	// Hardware is the optional [hardware] section; nil keeps every default.
 	Hardware *HardwareConfig
 	// Handles is the optional [handles] section; nil keeps the network's API.
@@ -82,6 +94,13 @@ type WorkspaceConfig struct {
 	Tailcat *TailcatConfig
 	// Registry is the optional [registry] section: the token-registry server.
 	Registry *RegistryConfig
+}
+
+// NodeConfig is the [node] section: Address is a socket path, unix:PATH or
+// tcp://host:port; TimeoutSeconds bounds each operation (0: the default).
+type NodeConfig struct {
+	Address        string
+	TimeoutSeconds int
 }
 
 // RegistryConfig is the [registry] section: URL is the root of a CIP-26
@@ -109,6 +128,11 @@ type HardwareConfig struct {
 // HandlesConfig is the [handles] section: URL overrides the ADA Handle API
 // root of the network.
 type HandlesConfig struct{ URL string }
+
+// BlockfrostConfig is the [blockfrost] section. URL empty means the network's
+// public endpoint; TokenRecord names the Secret record of the project id (empty:
+// "blockfrost").
+type BlockfrostConfig struct{ URL, TokenRecord string }
 
 // KoiosConfig is the [koios] section. URL empty means the network's public
 // endpoint.

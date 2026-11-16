@@ -42,6 +42,9 @@ type TxSummary struct {
 	SingleSource bool
 	// Unchecked lists the chain checks that were not made, with the reason.
 	Unchecked []string
+	// Notes are statements the command makes about what the summary rests on
+	// (two sources that share a host and were declared independent).
+	Notes []string
 
 	// What the pool use cases add (Kind is "pool registration",
 	// "pool re-registration" or "pool retirement"). Stage says which of the

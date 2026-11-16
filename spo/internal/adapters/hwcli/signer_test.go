@@ -502,8 +502,11 @@ func TestMessageSigningAndPolicyIDThroughTheDevice(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, pub := fakeKey(path)
-	if !bytes.HasSuffix(got.Key, pub) || !ed25519.Verify(pub, payload, got.Sign1[1:]) {
-		t.Error("the signed message does not verify")
+	if !bytes.HasSuffix(got.Key, pub) {
+		t.Error("the COSE key is not the device key")
+	}
+	if v, err := cose.VerifyCip8(got.Sign1, got.Key, payload, true); err != nil || !bytes.Equal(v.Payload, payload) {
+		t.Errorf("the signed message does not verify: %v", err)
 	}
 	argv := r.lastCall("message", "sign")
 	if len(flagValues(argv, "--message-hex")) != 1 || contains(argv, "--hashed") {
@@ -596,5 +599,189 @@ func TestSigningFilesComeFromTheStoreNotFromAnOperatorPath(t *testing.T) {
 	}
 	if _, err := (hwcli.StoreFiles{Store: st}).HardwareSigningFile(context.Background(), hwKey(custody.RolePoolCold, "other")); !errors.Is(err, ports.ErrNotFound) {
 		t.Errorf("%v", err)
+	}
+}
+
+// poolRegistration is a Calidus registration of the pool cold key at path.
+func poolRegistration(path string) cose.Cip88 {
+	_, pub := fakeKey(path)
+	reg := cose.Cip88{PoolID: cose.Blake2b224(pub), Nonce: 77}
+	reg.CalidusPub[0] = 9
+	return reg
+}
+
+// spec: SPO-15-EXT-004, SPO-15-EXT-005, SPO-15-INV-005, SPO-15-INV-006, SPO-15-OUT-003
+// The registration is signed by the pool cold key on the device with the argument vector of the
+// spec (`message sign --message-hex <blake2b-256 of the payload> --signing-path-hwsfile ... --out-file`,
+// no --hashed), and the metadata verifies as a CIP-88 registration of this payload.
+func TestCip88RegistrationSignedOnTheDevice(t *testing.T) {
+	const path = "1853H/1815H/0H/0H"
+	for _, v := range []struct{ vendor, app string }{{"Ledger", "8.0.8"}, {"Keystone", "1.7.7"}} {
+		r := newRig(t, v.vendor, v.app)
+		s := r.open()
+		r.export(s, custody.RolePoolCold, "mypool", path)
+		reg := poolRegistration(path)
+		got, err := s.SignCip88(context.Background(), mustAs[custody.PoolCold](t, hwKey(custody.RolePoolCold, "mypool")), reg)
+		if err != nil {
+			t.Fatalf("%s: %v", v.vendor, err)
+		}
+		if back, err := cose.VerifyCip88(got.CBOR); err != nil || back != reg {
+			t.Errorf("%s: metadata does not verify as the registration: %v", v.vendor, err)
+		}
+		if !strings.Contains(got.JSON, `"867"`) || strings.Contains(got.JSON, `"hashed"`) {
+			t.Errorf("json %s", got.JSON)
+		}
+		argv := r.lastCall("message", "sign")
+		h := reg.PayloadHash()
+		if flagValues(argv, "--message-hex")[0] != hex.EncodeToString(h[:]) || contains(argv, "--hashed") || len(flagValues(argv, "--signing-path-hwsfile")) != 1 || len(flagValues(argv, "--out-file")) != 1 {
+			t.Errorf("argv %v", argv)
+		}
+	}
+	// Trezor: refused by the profile, before the tool is called.
+	r := newRig(t, "Trezor", "2.7.2")
+	s := r.open()
+	if _, err := s.SignCip88(context.Background(), mustAs[custody.PoolCold](t, hwKey(custody.RolePoolCold, "mypool")), poolRegistration(path)); !errors.Is(err, hwcli.ErrNotSupported) {
+		t.Errorf("trezor: %v", err)
+	}
+	if r.called("message") != 0 {
+		t.Error("the tool was called")
+	}
+	// Another pool's key: refused before the device is asked.
+	r = newRig(t, "Ledger", "8.0.8")
+	s = r.open()
+	r.export(s, custody.RolePoolCold, "mypool", path)
+	other := poolRegistration(path)
+	other.PoolID[0] ^= 1
+	if _, err := s.SignCip88(context.Background(), mustAs[custody.PoolCold](t, hwKey(custody.RolePoolCold, "mypool")), other); err == nil || r.called("message") != 0 {
+		t.Errorf("another pool: %v (%d calls)", err, r.called("message"))
+	}
+}
+
+// spec: SPO-15-EXT-005
+// A tool that signs another payload, signs with another key, writes a bad
+// signature, names another address or truncates its output is refused.
+func TestCip88MisbehavingToolIsRefused(t *testing.T) {
+	const path = "1853H/1815H/0H/0H"
+	for _, m := range []string{"msgwrongpayload", "msgbadsig", "msgwrongkey", "msgaddr", "msgtruncated"} {
+		r := newRig(t, "Ledger", "8.0.8", func(f *fakeCfg, _ *hwcli.Config) {})
+		s := r.open()
+		r.export(s, custody.RolePoolCold, "mypool", path)
+		r.fake.Misbehave = m
+		r.writeFake()
+		_, err := s.SignCip88(context.Background(), mustAs[custody.PoolCold](t, hwKey(custody.RolePoolCold, "mypool")), poolRegistration(path))
+		if !errors.Is(err, hwcli.ErrBadDeviceOutput) {
+			t.Errorf("%s: %v", m, err)
+		}
+	}
+}
+
+func stakeRegistration(path string) cose.Cip36 {
+	_, pub := fakeKey(path)
+	var reg cose.Cip36
+	copy(reg.StakePub[:], pub)
+	reg.Delegations = []cose.Delegation{{Weight: 1}}
+	reg.Delegations[0].VotePub[0] = 9
+	reg.Nonce = 99
+	return reg
+}
+
+// spec: SPO-09a-EXT-004, SPO-09a-INV-004
+// With the rewards key on the same device its signing file is passed as
+// --payment-address-signing-key-hwsfile, once the adapter has checked that it is the payment
+// credential of the rewards address; a key that is not, or a stake key, is refused before the device is asked.
+func TestCip36RewardsKeyOnTheSameDevice(t *testing.T) {
+	r := newRig(t, "Ledger", "8.0.8")
+	s := r.open()
+	const stakePath, payPath = "1852H/1815H/0H/2/0", "1852H/1815H/0H/0/0"
+	r.export(s, custody.RoleStake, "w", stakePath)
+	r.export(s, custody.RolePayment, "w", payPath)
+	_, paypub := fakeKey(payPath)
+	h := cose.Blake2b224(paypub)
+	reg := stakeRegistration(stakePath)
+	reg.Address = append(append([]byte{0x00}, h[:]...), bytes.Repeat([]byte{5}, 28)...)
+	stake := mustAs[custody.Stake](t, hwKey(custody.RoleStake, "w"))
+	pay := hwKey(custody.RolePayment, "w")
+	if _, err := s.SignCip36With(context.Background(), stake, reg, ports.Cip36HardwareOptions{RewardsKey: &pay}); err != nil {
+		t.Fatal(err)
+	}
+	argv := r.lastCall("vote", "registration-metadata")
+	if len(flagValues(argv, "--payment-address-signing-key-hwsfile")) != 1 {
+		t.Errorf("argv %v", argv)
+	}
+	// Without the option the flag is absent.
+	if _, err := s.SignCip36(context.Background(), stake, reg); err != nil {
+		t.Fatal(err)
+	}
+	if argv := r.lastCall("vote", "registration-metadata"); len(flagValues(argv, "--payment-address-signing-key-hwsfile")) != 0 {
+		t.Errorf("argv %v", argv)
+	}
+	// A payment key that is not the address's, and a stake key as rewards key.
+	r.export(s, custody.RolePayment, "x", "1852H/1815H/0H/0/9")
+	x := hwKey(custody.RolePayment, "x")
+	n := r.called("vote")
+	if _, err := s.SignCip36With(context.Background(), stake, reg, ports.Cip36HardwareOptions{RewardsKey: &x}); err == nil {
+		t.Error("a foreign payment key accepted")
+	}
+	st := hwKey(custody.RoleStake, "w")
+	if _, err := s.SignCip36With(context.Background(), stake, reg, ports.Cip36HardwareOptions{RewardsKey: &st}); err == nil {
+		t.Error("a stake key accepted as rewards key")
+	}
+	if r.called("vote") != n {
+		t.Error("the device was asked")
+	}
+}
+
+// spec: SPO-09a-EXT-004
+func TestCip36MisbehavingToolIsRefused(t *testing.T) {
+	const stakePath = "1852H/1815H/0H/2/0"
+	for _, m := range []string{"votewrongkey", "votebadsig", "votewrongaddr", "votetruncated"} {
+		r := newRig(t, "Ledger", "8.0.8")
+		s := r.open()
+		r.export(s, custody.RoleStake, "w", stakePath)
+		r.fake.Misbehave = m
+		r.writeFake()
+		reg := stakeRegistration(stakePath)
+		reg.Address = append([]byte{0x00}, bytes.Repeat([]byte{5}, 56)...)
+		if _, err := s.SignCip36(context.Background(), mustAs[custody.Stake](t, hwKey(custody.RoleStake, "w")), reg); err == nil {
+			t.Errorf("%s: accepted", m)
+		}
+	}
+}
+
+// spec: SPO-05c-EXT-004, SPO-Ptx-EXT-005
+// One call with a signing file and an output file per key; each witness verifies
+// against its own key, and a tool that swaps or damages them is refused.
+func TestWitnessManyIsOneCallWithOneWitnessPerKey(t *testing.T) {
+	r := newRig(t, "Ledger", "8.0.8")
+	s := r.open()
+	r.export(s, custody.RolePoolCold, "p", "1853H/1815H/0H/0H")
+	r.export(s, custody.RolePayment, "p", "1852H/1815H/0H/0/0")
+	body := realBody(t, "combined")
+	keys := []custody.KeyRef{hwKey(custody.RolePoolCold, "p"), hwKey(custody.RolePayment, "p")}
+	ws, err := s.WitnessMany(context.Background(), keys, body, ports.HardwareTxOptions{})
+	if err != nil || len(ws) != 2 {
+		t.Fatalf("%v %v", ws, err)
+	}
+	_, coldPub := fakeKey("1853H/1815H/0H/0H")
+	_, payPub := fakeKey("1852H/1815H/0H/0/0")
+	if !bytes.Equal(ws[0].VKey[:], coldPub) || !bytes.Equal(ws[1].VKey[:], payPub) {
+		t.Error("the witnesses are not in the order of the keys")
+	}
+	argv := r.lastCall("transaction", "witness")
+	if len(flagValues(argv, "--hw-signing-file")) != 2 || len(flagValues(argv, "--out-file")) != 2 || r.called("transaction", "witness") != 1 {
+		t.Errorf("argv %v", argv)
+	}
+	if _, err := s.WitnessMany(context.Background(), []custody.KeyRef{keys[0], keys[0]}, body, ports.HardwareTxOptions{}); err == nil {
+		t.Error("the same key twice")
+	}
+	if _, err := s.WitnessMany(context.Background(), nil, body, ports.HardwareTxOptions{}); err == nil {
+		t.Error("no key")
+	}
+	for _, m := range []string{"wrongkey", "badsig", "truncated"} {
+		r.fake.Misbehave = m
+		r.writeFake()
+		if _, err := s.WitnessMany(context.Background(), keys, body, ports.HardwareTxOptions{}); err == nil {
+			t.Errorf("%s: accepted", m)
+		}
 	}
 }

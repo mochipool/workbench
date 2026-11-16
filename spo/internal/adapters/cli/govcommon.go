@@ -164,7 +164,7 @@ func printDetails(w io.Writer, lines []string) {
 	}
 	fmt.Fprintln(w, "Details")
 	for _, l := range lines {
-		fmt.Fprintf(w, "  %s\n", l)
+		fmt.Fprintf(w, "  %s\n", shown(l))
 	}
 	fmt.Fprintln(w)
 }
@@ -219,7 +219,7 @@ func (a *app) govReport(o govOutcome, f *govFlags, env *Env, wo WireOptions) {
 		printDetails(w, o.details)
 	}
 	for _, d := range o.res.Decisions {
-		fmt.Fprintf(w, "Decision: %s.\n", d)
+		fmt.Fprintf(w, "Decision: %s.\n", shown(d))
 	}
 	switch {
 	case o.res.Submitted:
@@ -228,7 +228,7 @@ func (a *app) govReport(o govOutcome, f *govFlags, env *Env, wo WireOptions) {
 		fmt.Fprintf(w, "Queued transaction %s in %s. Submit it from an online machine.\n", o.res.TxID, wo.TransferFile)
 	}
 	for _, l := range o.extra {
-		fmt.Fprintln(w, l)
+		fmt.Fprintln(w, shown(l))
 	}
 	for _, r := range o.stored {
 		fmt.Fprintf(w, "Stored %s.\n", artefact(r))
@@ -241,7 +241,7 @@ func anchorText(a dgov.Anchor) string {
 	if a.IsZero() {
 		return "none"
 	}
-	return fmt.Sprintf("%s (hash %s)", a.URL, a.HashHex())
+	return fmt.Sprintf("%s (hash %s)", shown(a.URL), a.HashHex())
 }
 
 func credText(c dgov.Credential) string {

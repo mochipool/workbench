@@ -38,6 +38,10 @@ type collState struct {
 	Ref    CollectionRef     `json:"ref"`
 	Slots  map[int]slotState `json:"slots,omitempty"`
 	Closed string            `json:"closed,omitempty"` // outcome announced to the signers
+	// Body is the hex transaction id (the body hash) of the collection when it
+	// was first requested: what a "submitted" notice names, and how a sweep
+	// tells a submission from a discard once the collection is gone.
+	Body string `json:"body,omitempty"`
 }
 
 type coordState struct {
@@ -120,9 +124,17 @@ func (s *coordState) track(id party.CollectionID, ref CollectionRef) *collState 
 // OutItem is a sealed envelope waiting for a transport. It is ciphertext: it
 // reveals nothing a transport would not see anyway.
 type OutItem struct {
-	ID         string `json:"id"`   // hex message id
-	To         string `json:"to"`   // hex fingerprint of the recipient
-	Type       string `json:"type"` // message type
+	ID   string `json:"id"`   // hex message id
+	To   string `json:"to"`   // hex fingerprint of the recipient
+	Type string `json:"type"` // message type
+	// From is the hex fingerprint of the identity that sealed the envelope. An
+	// item whose sealing identity is not this machine's current one is not sent,
+	// except a rotation announcement (Rotation), which the replaced identity
+	// seals by design.
+	From string `json:"from,omitempty"`
+	// Rotation is set by enqueueRotation alone: the item is an announcement of
+	// this machine's own rotation, sealed by the identity it replaced.
+	Rotation   bool   `json:"rotation,omitempty"`
 	Collection string `json:"collection,omitempty"`
 	Slot       int    `json:"slot,omitempty"`
 	Expires    int64  `json:"expires"`
@@ -161,9 +173,65 @@ func readOutbox(r ports.Reader) ([]OutItem, error) {
 	return items, readJSON(r, outboxRef, &items)
 }
 
-// enqueue adds or replaces by message id (a re-sent stored response is the
+// enqueue is the way an item enters the outbox, rotation announcements aside
+// (enqueueRotation). sealer is the identity whose keys sealed the items, as the
+// caller holds them (local.Identity().Fingerprint(), loaded before the
+// transaction): it is recorded as each item's From, and in this transaction it
+// must still be this machine's current identity, otherwise the items are
+// refused with ErrIdentityChanged and nothing is queued. There is no exemption
+// by item type: an item typed Rotation sealed by another identity is refused
+// like any other.
+func (n Node) enqueue(w ports.Writer, now time.Time, sealer party.Fingerprint, add ...OutItem) error {
+	cur, err := n.localFingerprint(w)
+	if err != nil {
+		return err
+	}
+	if cur != sealer {
+		return ErrIdentityChanged
+	}
+	for i := range add {
+		add[i].From = hexFP(sealer)
+		add[i].Rotation = false // only enqueueRotation marks an item as an announcement
+	}
+	return enqueueItems(w, now, add...)
+}
+
+// enqueueRotation queues the announcements of a rotation, which the identity it
+// replaces seals by design (old): the current identity, already the new one in
+// this transaction, is not compared. Only RotateIdentity calls it, and every
+// item must be a Rotation; the items are marked so that the sweep, which drops
+// what an identity other than the current one sealed, keeps them.
+func (n Node) enqueueRotation(w ports.Writer, now time.Time, old party.Fingerprint, add ...OutItem) error {
+	for i := range add {
+		if add[i].Type != string(party.TypeRotation) {
+			return fmt.Errorf("enqueueRotation: an item of type %q is not a rotation announcement", add[i].Type)
+		}
+		add[i].From = hexFP(old)
+		add[i].Rotation = true
+	}
+	return enqueueItems(w, now, add...)
+}
+
+// localFingerprint is the fingerprint of the identity this workspace holds now.
+func (n Node) localFingerprint(r ports.Reader) (party.Fingerprint, error) {
+	return localFingerprintOf(n.Kit, r)
+}
+
+func localFingerprintOf(kit ports.IdentityKit, r ports.Reader) (party.Fingerprint, error) {
+	cur, err := r.Get(localDocRef)
+	if err != nil {
+		return party.Fingerprint{}, err
+	}
+	d, err := kit.ParseDocument(cur)
+	if err != nil {
+		return party.Fingerprint{}, err
+	}
+	return d.Identity.Fingerprint(), nil
+}
+
+// enqueueItems adds or replaces by message id (a re-sent stored response is the
 // same envelope with Delivered cleared), and drops what expired.
-func enqueue(w ports.Writer, now time.Time, add ...OutItem) error {
+func enqueueItems(w ports.Writer, now time.Time, add ...OutItem) error {
 	items, err := readOutbox(w)
 	if err != nil {
 		return err

@@ -85,7 +85,7 @@ approves). Light or online mode only: the offline machine has no chain.`,
 				if err != nil {
 					return err
 				}
-				fmt.Fprintf(a.d.Out, "Created %s: era %s, protocol parameters from %s, %s.\n", o.TransferFile, res.Era, res.Source, res.Date)
+				fmt.Fprintf(a.d.Out, "Created %s: era %s, protocol parameters from %s, %s.\n", o.TransferFile, shown(res.Era), shown(string(res.Source)), shown(res.Date))
 				fmt.Fprintln(a.d.Out, "Add addresses with: spo offline add <name>")
 				return nil
 			})
@@ -120,15 +120,15 @@ func (a *app) confirmReplace(ctx context.Context, env *Env, path string, yes boo
 func printAdd(w io.Writer, res airgap.AddResult, path string) {
 	switch res.Kind {
 	case "payment":
-		fmt.Fprintf(w, "Added payment address %s (%s): %s in %d output(s), %d asset type(s).\n", res.Name, res.Address, lovelaceText(chain.Lovelace(res.Total)), res.Outputs, res.AssetTypes)
+		fmt.Fprintf(w, "Added payment address %s (%s): %s in %d output(s), %d asset type(s).\n", shown(res.Name), shown(res.Address), lovelaceText(chain.Lovelace(res.Total)), res.Outputs, res.AssetTypes)
 	case "stake":
-		fmt.Fprintf(w, "Added stake address %s (%s): rewards %s.\n", res.Name, res.Address, lovelaceText(chain.Lovelace(res.Total)))
+		fmt.Fprintf(w, "Added stake address %s (%s): rewards %s.\n", shown(res.Name), shown(res.Address), lovelaceText(chain.Lovelace(res.Total)))
 	default:
-		fmt.Fprintf(w, "Added DRep %s (%s).\n", res.Name, res.Address)
+		fmt.Fprintf(w, "Added DRep %s (%s).\n", shown(res.Name), shown(res.Address))
 	}
-	fmt.Fprintf(w, "  state from        %s, %s\n", res.Source, res.Date)
-	fmt.Fprintf(w, "  parameters from   %s\n", res.ParamSource)
-	fmt.Fprintf(w, "  written to        %s\n", path)
+	fmt.Fprintf(w, "  state from        %s, %s\n", shown(string(res.Source)), shown(res.Date))
+	fmt.Fprintf(w, "  parameters from   %s\n", shown(string(res.ParamSource)))
+	fmt.Fprintf(w, "  written to        %s\n", shown(path))
 }
 
 func (a *app) offlineAddCommand() *cobra.Command {
@@ -191,7 +191,7 @@ func orUnknown(s string) string {
 	if s == "" {
 		return "unknown"
 	}
-	return s
+	return shown(s)
 }
 
 func (a *app) offlineInfoCommand() *cobra.Command {
@@ -234,7 +234,7 @@ not compared with the transaction.`,
 func printInfo(w io.Writer, path string, res airgap.InfoResult, env *Env) {
 	fmt.Fprintf(w, "Transfer file %s\n", path)
 	if res.Usable != nil {
-		fmt.Fprintf(w, "  state              NOT USABLE: %v\n", res.Usable)
+		fmt.Fprintf(w, "  state              NOT USABLE: %s\n", shown(res.Usable.Error()))
 	} else {
 		fmt.Fprintln(w, "  state              usable")
 	}
@@ -246,10 +246,10 @@ func printInfo(w io.Writer, path string, res airgap.InfoResult, env *Env) {
 	fmt.Fprintf(w, "  era                %s\n", orUnknown(res.Era))
 	fmt.Fprintf(w, "  created with       %s (node %s)\n", orUnknown(res.OnlineCLI), orUnknown(res.OnlineNode))
 	if res.OfflineCLI != "" {
-		fmt.Fprintf(w, "  queued with        %s\n", res.OfflineCLI)
+		fmt.Fprintf(w, "  queued with        %s\n", shown(res.OfflineCLI))
 	}
 	if res.LastAction != "" {
-		fmt.Fprintf(w, "  last action        %s (%s)\n", res.LastAction, res.LastActionDate)
+		fmt.Fprintf(w, "  last action        %s (%s)\n", shown(res.LastAction), shown(res.LastActionDate))
 	}
 	fmt.Fprintf(w, "  history            %d entries\n", res.HistoryEntries)
 	if res.TokenMetaEntries > 0 {
@@ -262,8 +262,8 @@ func printInfo(w io.Writer, path string, res airgap.InfoResult, env *Env) {
 		if ad.Used {
 			used = "used"
 		}
-		fmt.Fprintf(w, "  %-24s %-8s %s\n", ad.Name, ad.Type, ad.Key)
-		fmt.Fprintf(w, "  %-24s %s, %d asset(s), %s, as of %s\n", "", lovelaceText(chain.Lovelace(ad.TotalAmount)), ad.TotalAssets, used, ad.Date)
+		fmt.Fprintf(w, "  %-24s %-8s %s\n", shown(ad.Name), shown(ad.Type), shown(ad.Key))
+		fmt.Fprintf(w, "  %-24s %s, %d asset(s), %s, as of %s\n", "", lovelaceText(chain.Lovelace(ad.TotalAmount)), ad.TotalAssets, used, shown(ad.Date))
 	}
 	if len(res.DReps) > 0 {
 		fmt.Fprintf(w, "\nDReps (%d)\n", len(res.DReps))
@@ -272,16 +272,16 @@ func printInfo(w io.Writer, path string, res airgap.InfoResult, env *Env) {
 			if d.Deposit != nil {
 				dep = "deposit " + lovelaceText(chain.Lovelace(*d.Deposit))
 			}
-			fmt.Fprintf(w, "  %-24s %s, %s, as of %s\n", d.Name, d.Key, dep, d.Date)
+			fmt.Fprintf(w, "  %-24s %s, %s, as of %s\n", shown(d.Name), shown(d.Key), dep, shown(d.Date))
 		}
 	}
 
 	fmt.Fprintf(w, "\nQueued transactions (%d)\n", len(res.Transactions))
 	for _, t := range res.Transactions {
-		fmt.Fprintf(w, "  %d. %s, era %s, %s\n", t.Position, orUnknown(t.Type), orUnknown(t.Era), t.Date)
-		fmt.Fprintf(w, "     from %s (%s)\n", t.FromName, t.FromAddr)
+		fmt.Fprintf(w, "  %d. %s, era %s, %s\n", t.Position, orUnknown(t.Type), orUnknown(t.Era), shown(t.Date))
+		fmt.Fprintf(w, "     from %s (%s)\n", shown(t.FromName), shown(t.FromAddr))
 		if t.ToAddr != "" {
-			fmt.Fprintf(w, "     to   %s (%s)\n", t.ToName, t.ToAddr)
+			fmt.Fprintf(w, "     to   %s (%s)\n", shown(t.ToName), shown(t.ToAddr))
 		}
 		fee, id := txFacts(env, t)
 		fmt.Fprintf(w, "     fee  %s\n     id   %s\n", fee, id)
@@ -295,7 +295,7 @@ func printInfo(w io.Writer, path string, res airgap.InfoResult, env *Env) {
 
 	fmt.Fprintf(w, "\nAttached files (%d)\n", len(res.Files))
 	for _, f := range res.Files {
-		fmt.Fprintf(w, "  %-24s %s, %s\n", f.Key, sizeText(f.Size), f.Date)
+		fmt.Fprintf(w, "  %-24s %s, %s\n", shown(f.Key), sizeText(f.Size), shown(f.Date))
 	}
 }
 
@@ -350,37 +350,37 @@ func (c executeConfirmer) ConfirmExecute(ctx context.Context, s ports.ExecuteSum
 
 func printExecuteSummary(w io.Writer, s ports.ExecuteSummary) {
 	e := s.Entry
-	fmt.Fprintf(w, "\nQueued transaction %d: %s, era %s, queued %s\n", e.Position, orUnknown(e.Type), orUnknown(e.Era), e.Date)
-	fmt.Fprintf(w, "  from         %s (%s)\n", e.FromName, e.FromAddr)
+	fmt.Fprintf(w, "\nQueued transaction %d: %s, era %s, queued %s\n", e.Position, orUnknown(e.Type), orUnknown(e.Era), shown(e.Date))
+	fmt.Fprintf(w, "  from         %s (%s)\n", shown(e.FromName), shown(e.FromAddr))
 	if e.ToAddr != "" {
-		fmt.Fprintf(w, "  to           %s (%s)\n", e.ToName, e.ToAddr)
+		fmt.Fprintf(w, "  to           %s (%s)\n", shown(e.ToName), shown(e.ToAddr))
 	}
 	if e.StakeName != "" {
-		fmt.Fprintf(w, "  stake        %s (%s)\n", e.StakeName, e.StakingAddr)
+		fmt.Fprintf(w, "  stake        %s (%s)\n", shown(e.StakeName), shown(e.StakingAddr))
 	}
 	if e.DelegName != "" {
-		fmt.Fprintf(w, "  delegation   %s\n", e.DelegName)
+		fmt.Fprintf(w, "  delegation   %s\n", shown(e.DelegName))
 	}
 	if e.DRepName != "" {
-		fmt.Fprintf(w, "  DRep         %s\n", e.DRepName)
+		fmt.Fprintf(w, "  DRep         %s\n", shown(e.DRepName))
 	}
 	if e.PoolTicker != "" {
-		fmt.Fprintf(w, "  pool         %s (metadata %s, hash %s)\n", e.PoolTicker, e.PoolMetaURL, e.PoolMetaHash)
+		fmt.Fprintf(w, "  pool         %s (metadata %s, hash %s)\n", shown(e.PoolTicker), shown(e.PoolMetaURL), shown(e.PoolMetaHash))
 	}
 	if s.TxID != "" {
-		fmt.Fprintf(w, "  tx id        %s (computed from the signed transaction)\n", s.TxID)
+		fmt.Fprintf(w, "  tx id        %s (computed from the signed transaction)\n", shown(s.TxID))
 	}
 	if s.Source != "" {
-		fmt.Fprintf(w, "  submit via   %s\n", s.Source)
+		fmt.Fprintf(w, "  submit via   %s\n", shown(string(s.Source)))
 	}
 	for _, x := range s.Warnings {
-		fmt.Fprintf(w, "  WARNING      %s\n", x)
+		fmt.Fprintf(w, "  WARNING      %s\n", shown(x))
 	}
 	for _, x := range s.Checked {
-		fmt.Fprintf(w, "  checked      %s\n", x)
+		fmt.Fprintf(w, "  checked      %s\n", shown(x))
 	}
 	for _, x := range s.Unchecked {
-		fmt.Fprintf(w, "  NOT CHECKED  %s\n", x)
+		fmt.Fprintf(w, "  NOT CHECKED  %s\n", shown(x))
 	}
 	fmt.Fprintln(w)
 }
@@ -450,10 +450,10 @@ func (a *app) reportExecute(res airgap.ExecuteResult, err error, o WireOptions, 
 			Unchecked: append(append([]string(nil), res.Unchecked...), descriptiveFieldsNote)})
 	} else if err != nil && !errors.Is(err, airgap.ErrDeclined) {
 		for _, x := range res.Warnings {
-			fmt.Fprintf(w, "WARNING      %s\n", x)
+			fmt.Fprintf(w, "WARNING      %s\n", shown(x))
 		}
 		for _, x := range res.Checked {
-			fmt.Fprintf(w, "checked      %s\n", x)
+			fmt.Fprintf(w, "checked      %s\n", shown(x))
 		}
 	}
 	if err != nil {
@@ -467,7 +467,7 @@ func (a *app) reportExecute(res airgap.ExecuteResult, err error, o WireOptions, 
 	}
 	fmt.Fprintf(w, "Submitted transaction %s. %d transaction(s) remain in %s.\n", res.TxID, res.Remaining, o.TransferFile)
 	for _, n := range res.Notices {
-		fmt.Fprintf(w, "Notice: %s.\n", n)
+		fmt.Fprintf(w, "Notice: %s.\n", shown(n))
 	}
 	return nil
 }
@@ -578,11 +578,11 @@ unless --overwrite is given.`,
 				for _, e := range res.Entries {
 					switch e.Status {
 					case airgap.Extracted:
-						fmt.Fprintf(a.d.Out, "extracted  %s\n", filepath.Join(target, e.Key))
+						fmt.Fprintf(a.d.Out, "extracted  %s\n", shown(filepath.Join(target, e.Key)))
 					case airgap.Skipped:
-						fmt.Fprintf(a.d.Out, "skipped    %s exists; use --overwrite to replace it\n", e.Key)
+						fmt.Fprintf(a.d.Out, "skipped    %s exists; use --overwrite to replace it\n", shown(e.Key))
 					default:
-						fmt.Fprintf(a.d.Out, "%-10s %s: %v\n", e.Status, e.Key, e.Err)
+						fmt.Fprintf(a.d.Out, "%-10s %s: %s\n", e.Status, shown(e.Key), shown(fmt.Sprint(e.Err)))
 					}
 				}
 				if len(res.Entries) == 0 && err == nil {

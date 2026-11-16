@@ -268,7 +268,8 @@ func TestEnrollRequiresAScope(t *testing.T) {
 }
 
 // A node key names one machine: a second party with the key already enrolled
-// is refused, revoked or not.
+// and active is refused. A revoked record keeps the key but does not hold it,
+// so the key can be enrolled again after the revocation (SPO-Xparty-IF-002).
 // spec: SPO-Xparty-INV-018
 func TestEnrollRefusesASharedNodeKey(t *testing.T) {
 	node := NodeKey{7}
@@ -283,8 +284,8 @@ func TestEnrollRefusesASharedNodeKey(t *testing.T) {
 		t.Fatalf("shared node key: %v", err)
 	}
 	revoked, _ := Revoke(first)
-	if _, err := Enroll(second, []Party{revoked}, t0); !errors.Is(err, ErrNodeKeyInUse) {
-		t.Fatalf("shared with a revoked party: %v", err)
+	if _, err := Enroll(second, []Party{revoked}, t0); err != nil {
+		t.Fatalf("shared with a revoked party only: %v", err)
 	}
 	b.id.Node = nil
 	second.Document = b.doc("b")

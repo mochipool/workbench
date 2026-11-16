@@ -57,7 +57,9 @@ func (d *Driver) text(s string) {
 // Open goes to the menu root and walks down to the command, then opens its
 // form.
 func (d *Driver) Open(path ...string) error {
-	d.m.screen, d.m.group, d.m.filtering, d.m.form, d.m.run = scMenu, nil, false, nil, nil
+	// A finished run left on screen is wiped first, as leaving it by key does.
+	d.m.dropRun()
+	d.m.screen, d.m.group, d.m.filtering, d.m.form = scMenu, nil, false, nil
 	for i, p := range path {
 		found := -1
 		for j, e := range d.m.entries() {
@@ -187,3 +189,51 @@ func (d *Driver) IsSecretField(label string) bool {
 	}
 	return false
 }
+
+// Press presses a key by name ("tab", "ctrl+n", "enter", "esc"...).
+func (d *Driver) Press(name string) { d.key(name) }
+
+// Type types text.
+func (d *Driver) Type(s string) { d.text(s) }
+
+// Focus moves the open form's cursor to the field with the label.
+func (d *Driver) Focus(label string) error {
+	for i, f := range d.m.form.fields {
+		if f.label == label {
+			d.m.form.cursor = i
+			return nil
+		}
+	}
+	return fmt.Errorf("the form has no field %q", label)
+}
+
+// Value is the text of the open form's field.
+func (d *Driver) Value(label string) string {
+	for _, f := range d.m.form.fields {
+		if f.label == label {
+			return f.text.String()
+		}
+	}
+	return ""
+}
+
+// AwaitNames processes what a passphrase-unlocked listing sends until the
+// names are in, or the timeout passes.
+func (d *Driver) AwaitNames(timeout time.Duration) error {
+	deadline := time.After(timeout)
+	for d.m.names.lists == nil {
+		select {
+		case msg := <-d.ch:
+			d.m.Update(msg)
+			if d.m.names.lists == nil && !d.m.names.loading {
+				return fmt.Errorf("the names were not listed: %s", d.m.notice)
+			}
+		case <-deadline:
+			return fmt.Errorf("timed out waiting for the names")
+		}
+	}
+	return nil
+}
+
+// Notice is the form's current notice line.
+func (d *Driver) Notice() string { return d.m.notice }

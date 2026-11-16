@@ -17,6 +17,7 @@ var secretFDFlags = map[string]string{
 	"password-fd":           uihint.SecretIn,
 	"recovery-key-in-fd":    uihint.SecretIn,
 	"mnemonic-in-fd":        uihint.SecretIn,
+	"pin-fd":                uihint.SecretIn,
 	"token-fd":              uihint.SecretIn,
 	"message-passphrase-fd": uihint.SecretIn,
 	"protection-key-fd":     uihint.SecretIn,
@@ -45,6 +46,7 @@ func MarkForUI(root *cobra.Command) {
 		}
 		c.Flags().VisitAll(mark)
 		c.PersistentFlags().VisitAll(mark)
+		applyHints(root, c)
 		for _, sub := range c.Commands() {
 			walk(sub)
 		}

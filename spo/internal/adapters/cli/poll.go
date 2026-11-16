@@ -29,9 +29,9 @@ func (a *app) showPoll(o WireOptions, env *Env) apoll.ShowPoll {
 
 func printPoll(a *app, v apoll.View) {
 	w := a.d.Out
-	fmt.Fprintf(w, "Poll %s [%s]\n  question hash  %x\n\n%s\n\n", v.TxID, v.Source, v.Hash[:], v.Text)
+	fmt.Fprintf(w, "Poll %s [%s]\n  question hash  %x\n\n%s\n\n", v.TxID, shown(string(v.Source)), v.Hash[:], indentLines(shownLines(v.Text)))
 	for i, o := range v.Options {
-		fmt.Fprintf(w, "  %d  %s\n", i, o)
+		fmt.Fprintf(w, "  %d  %s\n", i, shown(o))
 	}
 	fmt.Fprintln(w, "\nThe question is what the chain provider reported; an answer commits to its hash.")
 }
@@ -110,7 +110,7 @@ is not replaced). Send it with: spo poll submit.`,
 				if err != nil {
 					return err
 				}
-				ok, err := a.confirm(ctx, fmt.Sprintf("Answer option %d, %q?", n, v.Options[n]), yes)
+				ok, err := a.confirm(ctx, fmt.Sprintf("Answer option %d, %s?", n, quotedText(v.Options[n])), yes)
 				if err != nil {
 					return err
 				}

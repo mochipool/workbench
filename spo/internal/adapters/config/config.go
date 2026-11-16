@@ -32,6 +32,47 @@ type Koios struct {
 	URL string
 }
 
+// Blockfrost configures a Blockfrost-compatible chain provider (ADR 0006): the
+// service itself or a self-hosted Dingo. The section's presence is the
+// operator's choice. URL is an optional override of the public endpoint of the
+// network. TokenRecord names the Secret record that holds the project id (the
+// project id itself is never in spo.toml); empty means the record named after
+// the provider, "blockfrost".
+type Blockfrost struct {
+	URL         string
+	TokenRecord string
+}
+
+// Node configures the node-to-client provider (ADR 0006): a cardano-node's
+// UNIX socket, or that socket forwarded over TCP. The section's presence is the
+// operator's choice.
+type Node struct {
+	// Address is a socket path, "unix:PATH" or "tcp://host:port". Required.
+	Address string
+	// TimeoutSeconds bounds each operation against the node (1 to
+	// MaxNodeTimeoutSeconds); zero keeps the adapter's default.
+	TimeoutSeconds int
+}
+
+// MaxNodeTimeoutSeconds is the longest per-operation wait spo.toml may ask for.
+const MaxNodeTimeoutSeconds = 600
+
+// Provider kinds. Each has a section of the same name (the node's kind, "node",
+// is the section [node] and the adapter n2c).
+const (
+	KindNode       = "node"
+	KindKoios      = "koios"
+	KindBlockfrost = "blockfrost"
+)
+
+// kinds are the provider kinds in their default order of preference. A node
+// the operator configured is asked first: it is the operator's own.
+var kinds = []string{KindNode, KindKoios, KindBlockfrost}
+
+// IsWebKind reports whether the kind is a third-party HTTP provider, which
+// learns the addresses it is asked about (the node does not).
+func IsWebKind(kind string) bool { return kind == KindKoios || kind == KindBlockfrost }
+
 // Hardware tunes the hardware wallet signer ([hardware]). Every zero value
 // keeps the adapter's default.
 type Hardware struct {
@@ -80,6 +121,22 @@ type Config struct {
 	Mode    string
 	// Koios is nil when no Koios provider is configured.
 	Koios *Koios
+	// Blockfrost is nil when no Blockfrost provider is configured.
+	Blockfrost *Blockfrost
+	// Node is nil when no node provider is configured.
+	Node *Node
+	// Order is the operator's order of preference among the configured
+	// providers ([provider] order). The first answers reads; the next one
+	// that is a different provider is the second source of the reads that
+	// need corroboration. Empty means the default order. Use Providers for
+	// the effective list.
+	Order []string
+	// SameHostOK is [provider] same_host_ok = true: the operator states that
+	// two providers that share a host are independent all the same (for
+	// example two operators behind one reverse proxy). It switches off the
+	// refusal of a cross-check whose two sources share a host, and so weakens
+	// the check; the default is false.
+	SameHostOK bool
 	// Hardware and Handles are nil when the file has no such section.
 	Hardware *Hardware
 	Handles  *Handles
@@ -132,6 +189,97 @@ func (c Config) KoiosURL() string {
 	return p.KoiosURL
 }
 
+// Configured reports whether the provider kind has a section.
+func (c Config) Configured(kind string) bool {
+	switch kind {
+	case KindKoios:
+		return c.Koios != nil
+	case KindBlockfrost:
+		return c.Blockfrost != nil
+	case KindNode:
+		return c.Node != nil
+	}
+	return false
+}
+
+// Providers is the configured provider kinds in the order of preference: the
+// kinds named by [provider] order first, then the others in the default order.
+func (c Config) Providers() []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, k := range append(append([]string(nil), c.Order...), kinds...) {
+		if !seen[k] && c.Configured(k) {
+			seen[k] = true
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// TokenRecord is the name of the Secret record that holds the provider's
+// token: the configured name, else the provider kind.
+func (c Config) TokenRecord(kind string) string {
+	if kind == KindBlockfrost && c.Blockfrost != nil && c.Blockfrost.TokenRecord != "" {
+		return c.Blockfrost.TokenRecord
+	}
+	return kind
+}
+
+// BlockfrostURL is the Blockfrost endpoint in effect: the override, else the
+// public one of the network ("" where there is none or no section).
+func (c Config) BlockfrostURL() string {
+	if c.Blockfrost == nil {
+		return ""
+	}
+	if c.Blockfrost.URL != "" {
+		return c.Blockfrost.URL
+	}
+	switch c.Network {
+	case "mainnet", "preprod", "preview":
+		return "https://cardano-" + c.Network + ".blockfrost.io/api/v0"
+	}
+	return ""
+}
+
+var recordName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+
+func (c Config) validateProviders() error {
+	seen := map[string]bool{}
+	for _, k := range c.Order {
+		switch {
+		case !c.Configured(k) && (k == KindKoios || k == KindBlockfrost || k == KindNode):
+			return fmt.Errorf("[provider] order names %s, which has no [%s] section", k, k)
+		case k != KindKoios && k != KindBlockfrost && k != KindNode:
+			return fmt.Errorf("[provider] order names %q, which is not one of %s", k, strings.Join(kinds, ", "))
+		case seen[k]:
+			return fmt.Errorf("[provider] order names %s twice: a second source must be a different provider", k)
+		}
+		seen[k] = true
+	}
+	for _, u := range []struct{ name, v string }{
+		{"[koios] url", c.koiosOverride()}, {"[blockfrost] url", c.blockfrostOverride()},
+	} {
+		if hasActiveChar(u.v) {
+			return fmt.Errorf("%s has a control or bidirectional character", u.name)
+		}
+	}
+	if b := c.Blockfrost; b != nil && b.TokenRecord != "" && !recordName.MatchString(b.TokenRecord) {
+		return fmt.Errorf("[blockfrost] token_record %q is not a record name (lower-case letters, digits, '-' and '_')", b.TokenRecord)
+	}
+	if n := c.Node; n != nil {
+		if strings.TrimSpace(n.Address) == "" {
+			return errors.New("[node] needs an address: a socket path, unix:PATH or tcp://host:port")
+		}
+		if hasActiveChar(n.Address) {
+			return errors.New("[node] address has a control or bidirectional character")
+		}
+		if n.TimeoutSeconds < 0 || n.TimeoutSeconds > MaxNodeTimeoutSeconds {
+			return fmt.Errorf("[node] timeout_seconds must be 1 to %d", MaxNodeTimeoutSeconds)
+		}
+	}
+	return nil
+}
+
 // Validate checks a configuration.
 func (c Config) Validate() error {
 	if _, ok := PresetFor(c.Network); !ok {
@@ -142,8 +290,11 @@ func (c Config) Validate() error {
 	default:
 		return fmt.Errorf("mode %q is not one of online, light, offline", c.Mode)
 	}
-	if c.Mode == ModeLight && c.Koios == nil {
-		return errors.New("mode light needs a [koios] section: light mode asks a third-party provider, and the workspace must name it (run: spo provider set koios)")
+	if c.Mode == ModeLight && c.Koios == nil && c.Blockfrost == nil && c.Node == nil {
+		return errors.New("mode light needs a [koios] or [blockfrost] section: light mode asks a third-party provider, and the workspace must name it (run: spo provider set koios)")
+	}
+	if err := c.validateProviders(); err != nil {
+		return err
 	}
 	if c.Hardware != nil {
 		if err := c.Hardware.validate(); err != nil {
@@ -193,6 +344,63 @@ func Parse(data []byte) (Config, error) {
 					}
 				default:
 					return Config{}, fmt.Errorf("line %d: unknown key %q in [koios]", e.val.line, e.key)
+				}
+			}
+		case "blockfrost":
+			c.Blockfrost = &Blockfrost{}
+			for _, e := range sec.entries {
+				switch e.key {
+				case "url":
+					if c.Blockfrost.URL, err = e.val.str("blockfrost.url"); err != nil {
+						return Config{}, err
+					}
+				case "token_record":
+					if c.Blockfrost.TokenRecord, err = e.val.str("blockfrost.token_record"); err != nil {
+						return Config{}, err
+					}
+				default:
+					return Config{}, fmt.Errorf("line %d: unknown key %q in [blockfrost]", e.val.line, e.key)
+				}
+			}
+		case "node":
+			c.Node = &Node{}
+			for _, e := range sec.entries {
+				switch e.key {
+				case "address":
+					if c.Node.Address, err = e.val.str("node.address"); err != nil {
+						return Config{}, err
+					}
+				case "timeout_seconds":
+					if e.val.kind != kindInt {
+						return Config{}, fmt.Errorf("line %d: key \"node.timeout_seconds\" must be a whole number", e.val.line)
+					}
+					if e.val.i < 1 || e.val.i > MaxNodeTimeoutSeconds {
+						return Config{}, fmt.Errorf("line %d: [node] timeout_seconds must be 1 to %d", e.val.line, MaxNodeTimeoutSeconds)
+					}
+					c.Node.TimeoutSeconds = int(e.val.i)
+				default:
+					return Config{}, fmt.Errorf("line %d: unknown key %q in [node]", e.val.line, e.key)
+				}
+			}
+		case "provider":
+			for _, e := range sec.entries {
+				switch e.key {
+				case "order":
+					text, err := e.val.str("provider.order")
+					if err != nil {
+						return Config{}, err
+					}
+					c.Order = nil
+					for _, k := range strings.Split(text, ",") {
+						c.Order = append(c.Order, strings.TrimSpace(k))
+					}
+				case "same_host_ok":
+					if e.val.kind != kindBool {
+						return Config{}, fmt.Errorf("line %d: key \"provider.same_host_ok\" must be true or false", e.val.line)
+					}
+					c.SameHostOK = e.val.b
+				default:
+					return Config{}, fmt.Errorf("line %d: unknown key %q in [provider]", e.val.line, e.key)
 				}
 			}
 		case "hardware":
@@ -320,6 +528,31 @@ func Marshal(c Config) ([]byte, error) {
 			fmt.Fprintf(&b, "url = %s\n", quote(c.Koios.URL))
 		}
 	}
+	if c.Blockfrost != nil {
+		b.WriteString("\n[blockfrost]\n")
+		if c.Blockfrost.URL != "" {
+			fmt.Fprintf(&b, "url = %s\n", quote(c.Blockfrost.URL))
+		}
+		if c.Blockfrost.TokenRecord != "" {
+			fmt.Fprintf(&b, "token_record = %s\n", quote(c.Blockfrost.TokenRecord))
+		}
+	}
+	if n := c.Node; n != nil {
+		b.WriteString("\n[node]\n")
+		fmt.Fprintf(&b, "address = %s\n", quote(n.Address))
+		if n.TimeoutSeconds > 0 {
+			fmt.Fprintf(&b, "timeout_seconds = %d\n", n.TimeoutSeconds)
+		}
+	}
+	if len(c.Order) > 0 || c.SameHostOK {
+		b.WriteString("\n[provider]\n")
+		if len(c.Order) > 0 {
+			fmt.Fprintf(&b, "order = %s\n", quote(strings.Join(c.Order, ",")))
+		}
+		if c.SameHostOK {
+			b.WriteString("same_host_ok = true\n")
+		}
+	}
 	if h := c.Hardware; h != nil {
 		b.WriteString("\n[hardware]\n")
 		if h.WaitSeconds > 0 {
@@ -417,4 +650,34 @@ func Save(dir string, c Config) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), Path(dir))
+}
+
+func (c Config) koiosOverride() string {
+	if c.Koios == nil {
+		return ""
+	}
+	return c.Koios.URL
+}
+
+func (c Config) blockfrostOverride() string {
+	if c.Blockfrost == nil {
+		return ""
+	}
+	return c.Blockfrost.URL
+}
+
+// hasActiveChar is true for a string with a character a terminal acts on or
+// that changes what a reader sees: C0 controls, DEL, C1 controls, and the
+// bidirectional controls and isolates (U+061C, U+200E, U+200F, U+202A to
+// U+202E, U+2066 to U+2069), and the line and paragraph separators.
+func hasActiveChar(s string) bool {
+	for _, r := range s {
+		switch {
+		case r < 0x20, r >= 0x7f && r <= 0x9f:
+			return true
+		case r == 0x061c, r == 0x200e, r == 0x200f, r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069, r == 0x2028, r == 0x2029:
+			return true
+		}
+	}
+	return false
 }

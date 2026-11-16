@@ -392,18 +392,18 @@ transfer file that was carried back.`,
 				w := a.d.Out
 				verb := map[bool]string{false: "Applied", true: "Would apply"}[dry]
 				for _, x := range res.Applied {
-					fmt.Fprintf(w, "%s %s to the asset record %s (transaction %s).\n", verb, x.Action, x.Record, x.TxID)
+					fmt.Fprintf(w, "%s %s to the asset record %s (transaction %s).\n", verb, shown(fmt.Sprint(x.Action)), shown(x.Record), shown(fmt.Sprint(x.TxID)))
 				}
 				for _, x := range res.Discarded {
 					fmt.Fprintf(w, "Notice: the transaction %s (%s on %s) is not in the queue and was not submitted: its update is %s, never applied.\n",
-						x.TxID, x.Action, x.Record, map[bool]string{false: "discarded", true: "to be discarded"}[dry])
+						shown(fmt.Sprint(x.TxID)), shown(fmt.Sprint(x.Action)), shown(x.Record), map[bool]string{false: "discarded", true: "to be discarded"}[dry])
 				}
 				for _, x := range res.Unmatched {
 					fmt.Fprintf(w, "Unmatched: %s knows nothing of the transaction %s (%s on %s). Its update is kept. If the transaction was cleared from the queue, run again with --discard-unmatched.\n",
-						o.TransferFile, x.TxID, x.Action, x.Record)
+						o.TransferFile, shown(fmt.Sprint(x.TxID)), shown(fmt.Sprint(x.Action)), shown(x.Record))
 				}
 				for _, x := range res.Waiting {
-					fmt.Fprintf(w, "Waiting: the transaction %s (%s on %s) is still queued.\n", x.TxID, x.Action, x.Record)
+					fmt.Fprintf(w, "Waiting: the transaction %s (%s on %s) is still queued.\n", shown(fmt.Sprint(x.TxID)), shown(fmt.Sprint(x.Action)), shown(x.Record))
 				}
 				if res.NoListing {
 					fmt.Fprintln(w, "Note: this workspace cannot list its pending updates, so updates of removed transactions were not looked for.")

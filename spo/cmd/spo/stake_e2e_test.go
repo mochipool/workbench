@@ -217,12 +217,15 @@ func TestStakeLifecycleOffline(t *testing.T) {
 	if queuedCount(t, f5) != 0 {
 		t.Fatal("a refused deregistration was queued")
 	}
+	wantSingleSource(t, dir) // refused, delegated and registered runs wrote no record
 	out, err = run(f5, "stake", "deregister", stakeWalletName, payer, "--yes", "--single-source")
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
 	mustHave(t, out, "Stake deregistration", "refund       2.000000 ADA", "WARNING", "ONE source", "Stored "+stakeWalletName+".staking.dereg-cert")
 	expectQueued(f5, out, 1, 4)
+	// one record per accepted read: the certificate and the transaction
+	wantSingleSource(t, dir, "spo stake deregister", "spo stake deregister")
 
 	// ---- status prints the snapshot state with its source.
 	out, err = run(snapshot(true, 7_000_000), "stake", "status", stakeWalletName)

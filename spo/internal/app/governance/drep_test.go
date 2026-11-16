@@ -167,7 +167,7 @@ func TestRegisterDRepRefusals(t *testing.T) {
 func TestRetireDRepRefundIsTheOnChainDeposit(t *testing.T) {
 	r := newRig(t)
 	dr := &fakeDReps{src: "koios", l: r.l, r: registeredDRep(123_000_000, "")}
-	res, err := RetireDRep{Base: r.base, Certs: r.certs, DReps: dr, Sources: SingleSourceAcknowledged}.Run(context.Background(), RetireDRepRequest{DRep: "d", Payer: "w.payment"})
+	res, err := RetireDRep{Base: r.base, Certs: r.certs, DReps: dr, Sources: SingleSourceAcknowledged, OnSingle: noopHook}.Run(context.Background(), RetireDRepRequest{DRep: "d", Payer: "w.payment"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,12 +206,12 @@ func TestRetireDRepSourcePolicy(t *testing.T) {
 	}
 	// Not registered: nothing to retire, distinct from Unknown.
 	r2 := newRig(t)
-	none := RetireDRep{Base: r2.base, Certs: r2.certs, DReps: &fakeDReps{src: "koios", l: r2.l, r: chain.None[chain.DRepState]()}, Sources: SingleSourceAcknowledged}
+	none := RetireDRep{Base: r2.base, Certs: r2.certs, DReps: &fakeDReps{src: "koios", l: r2.l, r: chain.None[chain.DRepState]()}, Sources: SingleSourceAcknowledged, OnSingle: noopHook}
 	if _, err := none.Run(context.Background(), RetireDRepRequest{DRep: "d", Payer: "w.payment"}); !errors.Is(err, governance.ErrDRepNotRegistered) {
 		t.Fatalf("not registered: %v", err)
 	}
 	r2.nothingWritten(t)
-	unk := RetireDRep{Base: r2.base, Certs: r2.certs, DReps: &fakeDReps{src: "koios", l: r2.l, r: chain.Unknown[chain.DRepState]("timeout")}, Sources: SingleSourceAcknowledged}
+	unk := RetireDRep{Base: r2.base, Certs: r2.certs, DReps: &fakeDReps{src: "koios", l: r2.l, r: chain.Unknown[chain.DRepState]("timeout")}, Sources: SingleSourceAcknowledged, OnSingle: noopHook}
 	if _, err := unk.Run(context.Background(), RetireDRepRequest{DRep: "d", Payer: "w.payment"}); !errors.Is(err, governance.ErrDRepUnknown) || errors.Is(err, governance.ErrDRepNotRegistered) {
 		t.Fatalf("unknown: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestRetireDRepSourcePolicy(t *testing.T) {
 func TestRetireDRepUnstatedDepositRefused(t *testing.T) {
 	r := newRig(t)
 	dr := &fakeDReps{src: "koios", l: r.l, r: registeredDRep(0, "")}
-	_, err := RetireDRep{Base: r.base, Certs: r.certs, DReps: dr, Sources: SingleSourceAcknowledged}.Run(context.Background(), RetireDRepRequest{DRep: "d", Payer: "w.payment"})
+	_, err := RetireDRep{Base: r.base, Certs: r.certs, DReps: dr, Sources: SingleSourceAcknowledged, OnSingle: noopHook}.Run(context.Background(), RetireDRepRequest{DRep: "d", Payer: "w.payment"})
 	if !errors.Is(err, governance.ErrDRepDeposit) {
 		t.Fatalf("got %v", err)
 	}
@@ -388,7 +388,7 @@ func TestGovernanceTransactionsRefuseSmallFunds(t *testing.T) {
 	}
 	r.nothingWritten(t)
 	r.chain.utxos[0].Lovelace = 1_100_000 // fee leaves less than the minimum output
-	ret := RetireDRep{Base: r.base, Certs: r.certs, DReps: &fakeDReps{src: "k", l: r.l, r: registeredDRep(1, "")}, Sources: SingleSourceAcknowledged}
+	ret := RetireDRep{Base: r.base, Certs: r.certs, DReps: &fakeDReps{src: "k", l: r.l, r: registeredDRep(1, "")}, Sources: SingleSourceAcknowledged, OnSingle: noopHook}
 	if _, err := ret.Run(context.Background(), RetireDRepRequest{DRep: "d", Payer: "w.payment"}); err == nil {
 		t.Fatal("a change below the minimum output must be refused")
 	}
@@ -449,5 +449,46 @@ func TestRegisterDRepAnchorPolicy(t *testing.T) {
 	res, err = RegisterDRep{Base: r.base, Certs: r.certs, DReps: dr, Anchors: AnchorSource{Fetcher: f}, Verifier: v}.Run(context.Background(), RegisterDRepRequest{DRep: "d", Payer: "w.payment", URL: "https://x.org/a.json"})
 	if err != nil || len(res.Decisions) != 0 || len(v.got) != 1 || v.got[0] != ports.AnchorCIP119 {
 		t.Fatalf("%+v %v %v", res.Decisions, err, v.got)
+	}
+}
+
+// A second source that does not state the deposit (Blockfrost) corroborates the
+// registration; a refund is never computed from it, and a second source that
+// does not answer is refused naming both sources unless acknowledged.
+//
+// spec: SPO-21d-INV-001, SPO-21d-EXT-001
+func TestRetireDRepCrossCheckWithASourceThatStatesNoDeposit(t *testing.T) {
+	r := newRig(t)
+	uc := RetireDRep{Base: r.base, Certs: r.certs, DReps: &fakeDReps{src: "koios", l: r.l, r: registeredDRep(500_000_000, "")}}
+	uc.CrossCheck = &fakeDReps{src: "blockfrost", l: r.l, r: chain.Value(chain.DRepState{DepositUnstated: true})}
+	res, err := uc.Run(context.Background(), RetireDRepRequest{DRep: "d", Payer: "w.payment"})
+	if err != nil || res.SingleSource || len(res.Sources) != 2 || res.Refund != 500_000_000 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	// It says "not registered" while the primary says registered.
+	r = newRig(t)
+	uc = RetireDRep{Base: r.base, Certs: r.certs, DReps: &fakeDReps{src: "koios", l: r.l, r: registeredDRep(500_000_000, "")},
+		CrossCheck: &fakeDReps{src: "blockfrost", l: r.l, r: chain.None[chain.DRepState]()}}
+	_, err = uc.Run(context.Background(), RetireDRepRequest{DRep: "d", Payer: "w.payment"})
+	if !errors.Is(err, ErrSourcesDisagree) || !strings.Contains(err.Error(), "koios says registered, deposit 500000000 lovelace") || !strings.Contains(err.Error(), "blockfrost says not registered") {
+		t.Fatalf("%v", err)
+	}
+	// It is down.
+	uc.CrossCheck = &fakeDReps{src: "blockfrost", l: r.l, r: chain.Unknown[chain.DRepState]("HTTP 503")}
+	_, err = uc.Run(context.Background(), RetireDRepRequest{DRep: "d", Payer: "w.payment"})
+	if !errors.Is(err, ErrSingleSource) || !strings.Contains(err.Error(), "blockfrost did not answer: HTTP 503") {
+		t.Fatalf("%v", err)
+	}
+	uc.Sources = SingleSourceAcknowledged
+	uc.OnSingle = noopHook
+	if res, err := uc.Run(context.Background(), RetireDRepRequest{DRep: "d", Payer: "w.payment"}); err != nil || !res.SingleSource {
+		t.Fatalf("%+v %v", res, err)
+	}
+	// A source that states no deposit is never the one a refund rests on.
+	r = newRig(t)
+	only := RetireDRep{Base: r.base, Certs: r.certs, Sources: SingleSourceAcknowledged, OnSingle: noopHook,
+		DReps: &fakeDReps{src: "blockfrost", l: r.l, r: chain.Value(chain.DRepState{DepositUnstated: true})}}
+	if _, err := only.Run(context.Background(), RetireDRepRequest{DRep: "d", Payer: "w.payment"}); !errors.Is(err, governance.ErrDRepDeposit) {
+		t.Fatalf("%v", err)
 	}
 }

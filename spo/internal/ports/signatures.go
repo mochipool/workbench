@@ -117,6 +117,11 @@ func CheckSignatureSigner(s Signer) error {
 			return fmt.Errorf("signer %q claims %s but does not implement Cip88Signer", p.Name(), custody.OpSignCip88)
 		}
 	}
+	if claims[custody.OpSignText] {
+		if _, ok := s.(TextSigner); !ok {
+			return fmt.Errorf("signer %q claims %s but does not implement TextSigner", p.Name(), custody.OpSignText)
+		}
+	}
 	return nil
 }
 

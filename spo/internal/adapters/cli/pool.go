@@ -163,10 +163,10 @@ for the offline entry and is never sent anywhere and never printed.`,
 				fmt.Fprintf(w, "Generated the registration certificate of pool %s.\n", name)
 				fmt.Fprintf(w, "Pool id (hex)    %s\nPool id (bech32) %s\nMetadata hash    %s\n", res.PoolIDHex, res.PoolIDBech, res.MetaHash)
 				for _, c := range res.Corrections {
-					fmt.Fprintf(w, "Corrected        %s\n", c.Field)
+					fmt.Fprintf(w, "Corrected        %s\n", shown(fmt.Sprint(c.Field)))
 				}
 				for _, m := range res.Warnings {
-					fmt.Fprintf(w, "Warning          %s\n", m)
+					fmt.Fprintf(w, "Warning          %s\n", shown(fmt.Sprint(m)))
 				}
 				fmt.Fprintf(w, "Stored %s.pool.cert, %s.metadata.json and the pool id files; the descriptor was updated.\n", name, name)
 				fmt.Fprintf(w, "Publish the metadata at the poolMetaUrl before registering: spo pool metadata show %s\n", name)
@@ -269,12 +269,11 @@ while it is open.`,
 					// Tickers stays nil in every mode: the lookup is not built (hazard H6).
 					NetworkID: env.NetworkID, AllowUnverified: f.allowUnverified, AllowPending: f.allowPending,
 				}
-				if x, ok := any(env.CrossCheck).(ports.PoolStateReader); ok && env.CrossCheck != nil {
-					uc.CrossCheck = x
-				}
+				uc.CrossCheck = env.PoolCross
 				if f.singleSource {
 					uc.Sources = poolops.SingleSourceAcknowledged
 				}
+				uc.OnSingle = a.singleSourceHook(s, "spo pool register")
 				res, err := uc.Run(ctx, poolops.RegisterRequest{Pool: args[0], Payer: args[1], Type: typ, Message: f.messages, Extras: f.extra.ex, Passphrase: f.extra.pass})
 				if err != nil {
 					return f.hint(err)
@@ -506,8 +505,8 @@ and fails the command.`,
 				w := a.d.Out
 				fmt.Fprintf(w, "Pool %s\n  pool id      %x\n  status       %s [%s]\n", res.Bech32, res.PoolID[:], res.Status, res.Source)
 				if res.Status == poolops.StatusUnknown {
-					fmt.Fprintf(w, "  why          %s\n", res.Why)
-					return fmt.Errorf("the registration state is unknown: %s", res.Why)
+					fmt.Fprintf(w, "  why          %s\n", shown(res.Why))
+					return fmt.Errorf("the registration state is unknown: %s", shown(res.Why))
 				}
 				if res.Status == poolops.StatusNotRegistered {
 					return nil
@@ -515,7 +514,7 @@ and fails the command.`,
 				st := res.State
 				line := func(k, v string) {
 					if v != "" {
-						fmt.Fprintf(w, "  %-12s %s [%s]\n", k, v, res.Source)
+						fmt.Fprintf(w, "  %-12s %s [%s]\n", k, shown(v), shown(string(res.Source)))
 					}
 				}
 				line("name", st.Name)
@@ -568,7 +567,7 @@ retire does that.`,
 				name, _ := poolArg(args[0])
 				fmt.Fprintf(w, "Stored %s.pool.dereg-cert: the pool retires at epoch %d (allowed %d to %d).\n", name, res.Epoch, res.Earliest, res.Latest)
 				for _, m := range res.Warnings {
-					fmt.Fprintf(w, "Warning: %s\n", m)
+					fmt.Fprintf(w, "Warning: %s\n", shown(fmt.Sprint(m)))
 				}
 				return nil
 			})

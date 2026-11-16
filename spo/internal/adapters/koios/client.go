@@ -21,10 +21,10 @@ import (
 	"net/url"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
+	"github.com/mochipool/workbench/spo/internal/platform/textsafe"
 )
 
 const (
@@ -221,19 +221,14 @@ func (e *statusError) Error() string {
 }
 
 // prefix returns a short, printable prefix of a response body for an error.
+// The body is the provider's text: control characters (C0 and C1), bidirectional
+// controls and bytes that are not UTF-8 are written as escapes (textsafe), so
+// an error message cannot restyle or rewrite the operator's terminal.
 func prefix(b []byte) string {
 	if len(b) > bodyPrefixLen {
 		b = b[:bodyPrefixLen]
 	}
-	s := strings.ToValidUTF8(string(b), "?")
-	var sb strings.Builder
-	for _, r := range s {
-		if r < 0x20 || r == 0x7f || r == utf8.RuneError {
-			r = ' '
-		}
-		sb.WriteRune(r)
-	}
-	return strings.TrimSpace(sb.String())
+	return strings.TrimSpace(textsafe.Text(string(b)))
 }
 
 // do performs the request and returns the status and the whole body. The

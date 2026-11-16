@@ -90,6 +90,7 @@ var layout = map[ports.Kind]func(r ports.Ref) string{
 	ports.MultisigOutbox:      func(r ports.Ref) string { return r.Name + ".multisig.outbox" },
 	ports.MultisigEvents:      func(r ports.Ref) string { return r.Name + ".multisig.events" },
 	ports.MultisigCollection:  func(r ports.Ref) string { return r.Name + ".multisig.collection" },
+	ports.MultisigSubmitted:   func(r ports.Ref) string { return r.Name + ".multisig.submitted" },
 }
 
 // modes of the kinds that are not locked at 0400: the published metadata is

@@ -33,13 +33,13 @@ type terminalChooser struct{ a *app }
 func (c terminalChooser) Choose(ctx context.Context, v governance.ActionView) (governance.Choice, error) {
 	w := c.a.d.Out
 	id := v.State.ID.Hex()
-	fmt.Fprintf(w, "\nAction %s\n  kind          %s\n  anchor        %s\n", id, v.State.Kind, anchorText(v.State.Anchor))
+	fmt.Fprintf(w, "\nAction %s\n  kind          %s\n  anchor        %s\n", id, shownAny(v.State.Kind), anchorText(v.State.Anchor))
 	if v.Title != "" {
-		fmt.Fprintf(w, "  title         %s\n", v.Title)
+		fmt.Fprintf(w, "  title         %s\n", shown(v.Title))
 	}
 	fmt.Fprintf(w, "  deposit       %s\n  expires after epoch %d\n", lovelaceText(v.State.Deposit), v.State.ExpiresAfter)
 	if v.Earlier != "" {
-		fmt.Fprintf(w, "  your earlier vote on it: %s\n", v.Earlier)
+		fmt.Fprintf(w, "  your earlier vote on it: %s\n", shownAny(v.Earlier))
 	}
 	ans, err := c.a.term.ReadLine(ctx, "Vote [yes/no/abstain/skip/cancel] (default cancel): ")
 	if errors.Is(err, ErrNoTerminal) {

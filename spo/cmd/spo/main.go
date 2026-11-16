@@ -57,12 +57,14 @@ func run() int {
 	}
 
 	root := cli.NewRoot(deps)
+	cli.MarkForUI(root)
+	cli.AttachCompletion(root, deps)
 	root.AddCommand(tuiCommand(buildDeps))
 	if err := root.ExecuteContext(ctx); err != nil {
 		if errors.Is(err, secret.ErrMemoryLimit) {
 			err = errors.New(cli.MemlockAdvice)
 		}
-		fmt.Fprintln(os.Stderr, "spo:", err)
+		fmt.Fprintln(os.Stderr, "spo:", cli.SafeMessage(err))
 		return 1
 	}
 	return 0

@@ -77,6 +77,30 @@ func metaURLOK(u string) bool {
 //
 // spec: SPO-0x-IF-003, SPO-0x-IN-001, SPO-0x-IN-002, SPO-0x-PRE-001, SPO-0x-EXT-001, SPO-0x-EXT-002, SPO-0x-EXT-003, SPO-0x-INV-001, SPO-0x-MODE-001
 func (a PoolInfoAcquirer) Acquire(ctx context.Context, src PoolInfoSource) (chain.PoolInfo, error) {
+	info, mm, err := a.acquire(ctx, src)
+	if err != nil {
+		return chain.PoolInfo{}, err
+	}
+	if mm != nil && !src.AcceptMetadataMismatch {
+		return chain.PoolInfo{}, ErrMetadataHash
+	}
+	return info, nil
+}
+
+// MetadataMismatch records that the published metadata does not hash to the
+// registered hash: both hashes, lower-case hex.
+type MetadataMismatch struct{ Registered, Published string }
+
+// acquire is Acquire that reports a metadata hash mismatch instead of
+// refusing it, so a caller can show both hashes without reading the chain
+// again.
+func (a PoolInfoAcquirer) acquire(ctx context.Context, src PoolInfoSource) (chain.PoolInfo, *MetadataMismatch, error) {
+	var mm *MetadataMismatch
+	info, err := a.acquireInfo(ctx, src, &mm)
+	return info, mm, err
+}
+
+func (a PoolInfoAcquirer) acquireInfo(ctx context.Context, src PoolInfoSource, mm **MetadataMismatch) (chain.PoolInfo, error) {
 	if len(src.InfoFile) > 0 {
 		info, err := chain.ParsePoolInfo(src.InfoFile)
 		if err != nil {
@@ -137,13 +161,13 @@ func (a PoolInfoAcquirer) Acquire(ctx context.Context, src PoolInfoSource) (chai
 	} else {
 		return chain.PoolInfo{}, fmt.Errorf("%w: not JSON", ErrMetadata)
 	}
-	if a.Hasher != nil && info.MetaHash != "" && !src.AcceptMetadataMismatch {
+	if a.Hasher != nil && info.MetaHash != "" {
 		h, err := a.Hasher.MetadataHash(raw)
 		if err != nil {
 			return chain.PoolInfo{}, fmt.Errorf("%w: %v", ErrMetadata, err)
 		}
-		if hex.EncodeToString(h[:]) != strings.ToLower(info.MetaHash) {
-			return chain.PoolInfo{}, ErrMetadataHash
+		if got := hex.EncodeToString(h[:]); got != strings.ToLower(info.MetaHash) {
+			*mm = &MetadataMismatch{Registered: strings.ToLower(info.MetaHash), Published: got}
 		}
 	}
 	return info, nil

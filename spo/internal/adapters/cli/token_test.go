@@ -163,7 +163,7 @@ func TestProviderTokenStoreAndUse(t *testing.T) {
 		}
 		return w.wire(s, o)
 	}
-	if err := run("-C", dir, "pool", "opcert", "issue", "p"); err != nil {
+	if err := run("-C", dir, "pool", "opcert", "issue", "p", "--single-source"); err != nil {
 		t.Fatal(err)
 	}
 	if seen != tok {

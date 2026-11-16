@@ -19,6 +19,10 @@ import (
 type TxBody struct {
 	CBOR []byte
 	ID   chain.TxID
+	// CollateralAtRisk is the most the ledger takes if a script of the body
+	// fails: the total collateral (body key 17) as read back from the encoded
+	// bytes. Nil for a body with no collateral.
+	CollateralAtRisk *chain.Lovelace
 }
 
 // Witness is one verification-key witness: the public key and an Ed25519

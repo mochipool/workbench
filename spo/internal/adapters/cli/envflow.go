@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"os"
 	"path/filepath"
 
@@ -143,6 +144,7 @@ func (a *app) withEnv(cmd *cobra.Command, spec envSpec, fn func(ctx context.Cont
 	if err != nil {
 		return err
 	}
+	defer probe.Close()
 	probe.Absent(CapGenesis, genesisWhy)
 	if err := probe.Require(spec.needs...); err != nil {
 		return err
@@ -156,7 +158,7 @@ func (a *app) withEnv(cmd *cobra.Command, spec envSpec, fn func(ctx context.Cont
 		return err
 	}
 	defer s.Close()
-	if o.Mode == ModeLight && s.Sealed != nil {
+	if (o.Mode == ModeLight || o.Mode == ModeOnline) && s.Sealed != nil {
 		tok, err := a.loadToken(cmd, s, "koios")
 		if err != nil {
 			return err
@@ -165,11 +167,26 @@ func (a *app) withEnv(cmd *cobra.Command, spec envSpec, fn func(ctx context.Cont
 			defer tok.Destroy()
 			o.Token = tok
 		}
+		if o.Config.Blockfrost != nil {
+			rec := o.Config.Blockfrost.TokenRecord
+			if rec == "" {
+				rec = "blockfrost"
+			}
+			btok, err := a.loadToken(cmd, s, rec)
+			if err != nil {
+				return err
+			}
+			if btok != nil {
+				defer btok.Destroy()
+				o.Tokens = map[string]*secret.Buffer{"blockfrost": btok}
+			}
+		}
 	}
 	env, err := a.d.Wire(s.Store, o)
 	if err != nil {
 		return err
 	}
+	defer env.Close()
 	env.Absent(CapGenesis, genesisWhy)
 	if err := env.Require(spec.needs...); err != nil {
 		return err

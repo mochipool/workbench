@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/mochipool/workbench/spo/internal/app/hwkeys"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/cose"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
@@ -81,6 +82,11 @@ type GenerateVotingKey struct {
 	Store     ports.Store
 	Deriver   ports.VotingKeyDeriver
 	Mnemonics ports.MnemonicGenerator // when no phrase is given
+	// Hardware makes the key on a device (upstream 09a `new hw`,
+	// SPO-09a-EXT-002): nil refuses a hardware holder up front. Only the
+	// verification key and the hardware signing file are stored
+	// (SPO-09a-OUT-004, SPO-09a-OUT-009): no .pkey, no mnemonic.
+	Hardware ports.HardwareKeyExporter
 }
 
 // GenerateVotingKeyRequest names the key.
@@ -105,18 +111,22 @@ type VotingKeyGenerated struct {
 
 // Run creates the key.
 func (uc GenerateVotingKey) Run(ctx context.Context, req GenerateVotingKeyRequest) (res VotingKeyGenerated, err error) {
-	if uc.Store == nil || uc.Deriver == nil || (req.Mnemonic == nil && uc.Mnemonics == nil) {
-		return res, ErrNotConfigured
-	}
 	nm, err := plainName(req.Name)
 	if err != nil {
 		return res, err
 	}
+	key := custody.KeyRef{Role: custody.RoleCatalystVote, Holder: req.Holder, Owner: nm}
+	onDevice := hwkeys.Hardware(key)
+	if uc.Store == nil || (!onDevice && (uc.Deriver == nil || (req.Mnemonic == nil && uc.Mnemonics == nil))) {
+		return res, ErrNotConfigured
+	}
 	if req.Account > MaxDerivationIndex || req.Index > MaxDerivationIndex {
 		return res, ErrDerivationRange
 	}
-	// The hardware holder is refused before any tool or file is touched.
-	if _, err := custody.PlanGeneration(custody.KeyRef{Role: custody.RoleCatalystVote, Holder: req.Holder, Owner: nm}); err != nil {
+	// A device that cannot hold the key (a Trezor, a Keystone), a missing
+	// hardware signer and every other holder are refused before any tool or
+	// file is touched (ADR 0008).
+	if _, err := hwkeys.Plan(uc.Hardware, key); err != nil {
 		return res, err
 	}
 	refs := []ports.Ref{
@@ -125,6 +135,9 @@ func (uc GenerateVotingKey) Run(ctx context.Context, req GenerateVotingKeyReques
 	}
 	if err := uc.Store.View(ctx, func(r ports.Reader) error { return refuseExisting(r, refs...) }); err != nil {
 		return res, err
+	}
+	if onDevice {
+		return uc.runOnDevice(ctx, nm, key, req, refs)
 	}
 	var words *ports.Secret
 	defer func() { words.Destroy() }()
@@ -169,6 +182,41 @@ func (uc GenerateVotingKey) Run(ctx context.Context, req GenerateVotingKeyReques
 		return res, err
 	}
 	return VotingKeyGenerated{Name: nm, VKey: pair.VKey, PublicKey: pub, PKey: pkey}, nil
+}
+
+// runOnDevice is `new hw`: the key is made on the device at
+// 1694H/1815H/<account>H/0/<index>, and the verification key and the hardware
+// signing file are stored (SPO-09a-EXT-002, SPO-09a-OUT-004). Nothing of the
+// device's reaches the workspace but those two files.
+func (uc GenerateVotingKey) runOnDevice(ctx context.Context, nm string, key custody.KeyRef, req GenerateVotingKeyRequest, refs []ports.Ref) (res VotingKeyGenerated, err error) {
+	if req.Mnemonic != nil {
+		return res, errors.New("a hardware voting key has no mnemonic: it is made on the device")
+	}
+	hk, err := hwkeys.Export(ctx, uc.Hardware, key, hwkeys.Options{Account: req.Account, Index: req.Index})
+	if err != nil {
+		return res, err
+	}
+	pub, err := cose.VKeyFromEnvelope(hk.VKey)
+	if err != nil {
+		return res, fmt.Errorf("the device's verification key: %w", err)
+	}
+	pkey, err := chain.Bech32Encode("cvote_vk", pub[:])
+	if err != nil {
+		return res, err
+	}
+	err = uc.Store.Update(ctx, func(w ports.Writer) error {
+		if err := refuseExisting(w, refs...); err != nil {
+			return err
+		}
+		if err := w.Put(refs[0], hk.VKey); err != nil {
+			return err
+		}
+		return w.Put(refs[2], hk.SigningFile)
+	})
+	if err != nil {
+		return res, err
+	}
+	return VotingKeyGenerated{Name: nm, VKey: hk.VKey, PublicKey: pub, PKey: pkey}, nil
 }
 
 // ---- genmeta -----------------------------------------------------------------------
@@ -276,7 +324,8 @@ func (uc GenerateRegistration) Run(ctx context.Context, req RegistrationRequest)
 	if err != nil {
 		return res, err
 	}
-	var haveSKey, haveHws bool
+	var haveSKey, haveHws, haveRewardsHws bool
+	var rewardsKeyName string
 	var stakeVKey []byte
 	var rewards chain.Address
 	var keys []ResolvedKey
@@ -299,6 +348,14 @@ func (uc GenerateRegistration) Run(ctx context.Context, req RegistrationRequest)
 		}
 		if rewards, err = uc.rewardsAddress(r, req.Rewards); err != nil {
 			return err
+		}
+		// SPO-09a-INV-004: the rewards account's hardware signing file counts only
+		// when the rewards account is the staking account.
+		rewardsKeyName = rewardsName(req.Rewards)
+		if strings.TrimSuffix(rewardsKeyName, ".payment") == sn && (ports.Ref{Name: rewardsKeyName, Kind: ports.AddrHwsFile}).Validate() == nil {
+			if haveRewardsHws, err = r.Exists(ports.Ref{Name: rewardsKeyName, Kind: ports.AddrHwsFile}); err != nil {
+				return err
+			}
 		}
 		for _, d := range req.Delegation {
 			k, err := resolveVotingKey(r, d)
@@ -370,7 +427,13 @@ func (uc GenerateRegistration) Run(ctx context.Context, req RegistrationRequest)
 		}
 		reg.Nonce = tip.Slot
 	}
-	signed, err := signer.SignCip36(ctx, key, reg)
+	var signed ports.Registration
+	if hs, ok := signer.(ports.HardwareCip36Signer); ok && holder == custody.HolderHardware && haveRewardsHws {
+		pay := custody.KeyRef{Role: custody.RolePayment, Holder: custody.HolderHardware, Owner: rewardsKeyName}
+		signed, err = hs.SignCip36With(ctx, key, reg, ports.Cip36HardwareOptions{RewardsKey: &pay})
+	} else {
+		signed, err = signer.SignCip36(ctx, key, reg)
+	}
 	if err != nil {
 		return res, fmt.Errorf("sign the registration: %w", err)
 	}
@@ -387,6 +450,13 @@ func (uc GenerateRegistration) Run(ctx context.Context, req RegistrationRequest)
 		return res, err
 	}
 	return RegistrationGenerated{Ref: ref, Nonce: reg.Nonce, Keys: keys, Rewards: rewards, JSON: signed.JSON, CBOR: signed.CBOR}, nil
+}
+
+// rewardsName is the name of the rewards argument as a stored payment key,
+// `<wallet>.payment` for a wallet, with a `.addr` suffix removed; its account
+// is that without `.payment` (SPO-09a-INV-004).
+func rewardsName(s string) string {
+	return strings.TrimSuffix(trimDir(strings.TrimSpace(s)), ".addr")
 }
 
 // rewardsAddress resolves the rewards argument (SPO-09a-IN-004): a stored

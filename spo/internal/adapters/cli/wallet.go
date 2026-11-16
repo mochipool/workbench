@@ -60,16 +60,16 @@ func lovelaceText(l chain.Lovelace) string {
 func printTxSummary(w io.Writer, s ports.TxSummary) {
 	fmt.Fprintf(w, "\nPayment\n")
 	if s.SourceAddr != "" {
-		fmt.Fprintf(w, "  from         %s (%s)\n", s.Source, s.SourceAddr)
+		fmt.Fprintf(w, "  from         %s (%s)\n", shownAny(s.Source), shownAny(s.SourceAddr))
 	} else {
-		fmt.Fprintf(w, "  from         %s\n", s.Source)
+		fmt.Fprintf(w, "  from         %s\n", shownAny(s.Source))
 	}
 	if s.DestAddr != "" {
-		fmt.Fprintf(w, "  to           %s (%s)\n", s.Destination, s.DestAddr)
+		fmt.Fprintf(w, "  to           %s (%s)\n", shownAny(s.Destination), shownAny(s.DestAddr))
 	} else {
-		fmt.Fprintf(w, "  to           %s\n", s.Destination)
+		fmt.Fprintf(w, "  to           %s\n", shownAny(s.Destination))
 	}
-	fmt.Fprintf(w, "  amount       %s\n", s.Amount)
+	fmt.Fprintf(w, "  amount       %s\n", shownAny(s.Amount))
 	fmt.Fprintf(w, "  inputs       %d\n", s.Inputs)
 	for i, o := range s.Outputs {
 		var label string
@@ -83,7 +83,7 @@ func printTxSummary(w io.Writer, s ports.TxSummary) {
 		default:
 			label = "change"
 		}
-		fmt.Fprintf(w, "  %-14s %s  %s\n", label, o.Address, lovelaceText(o.Lovelace))
+		fmt.Fprintf(w, "  %-14s %s  %s\n", label, shownAny(o.Address), lovelaceText(o.Lovelace))
 		for _, as := range o.Assets {
 			fmt.Fprintf(w, "  %-14s   + %d %s\n", "", as.Quantity, assetText(as.Asset))
 		}
@@ -91,14 +91,14 @@ func printTxSummary(w io.Writer, s ports.TxSummary) {
 	fmt.Fprintf(w, "  fee          %s\n", lovelaceText(s.Fee))
 	fmt.Fprintf(w, "  valid until  slot %d\n", s.TTL)
 	for _, m := range s.Message {
-		fmt.Fprintf(w, "  message      %s\n", m)
+		fmt.Fprintf(w, "  message      %s\n", shownAny(m))
 	}
 	if s.Size > 0 {
 		fmt.Fprintf(w, "  size         %d bytes\n", s.Size)
 	}
-	fmt.Fprintf(w, "  tx id        %s\n", s.TxID)
+	fmt.Fprintf(w, "  tx id        %s\n", shownAny(s.TxID))
 	if s.Route != "" {
-		fmt.Fprintf(w, "  route        %s\n", s.Route)
+		fmt.Fprintf(w, "  route        %s\n", shownAny(s.Route))
 	}
 	fmt.Fprintln(w)
 }

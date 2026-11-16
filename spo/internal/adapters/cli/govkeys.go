@@ -109,6 +109,8 @@ func (a *app) govKeyCommand(use, short, long string, replace bool, needs func(de
 	o.add(cmd, replace)
 	hw.add(cmd, 0)
 	addChainFlags(cmd, &cf, true)
+	// Declared, so the usage and the TUI form know it; RunE keeps its own checks.
+	cmd.MarkFlagsMutuallyExclusive("mnemonic", "mnemonic-in-fd", "hardware")
 	return cmd
 }
 

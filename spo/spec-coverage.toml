@@ -24,7 +24,7 @@ implemented = ["12a", "12b", "0x", "13b", "Chw", "Ctx", "Xparty", "Ckey", "01pro
 # 04d: the operational certificate is issued natively (VaultSigner). Offline mode
 # is wired; the chain-checked modes wait for their adapters.
 "SPO-04d-PRE-001" = "sync check of the online and light modes; not ported until the node and Koios adapters exist (offline mode skips it, as upstream does)"
-"SPO-04d-MODE-001" = "online mode (cardano-cli kes-period-info) not ported: no node adapter yet; `spo pool opcert issue` without --offline refuses with 'not wired yet'"
+"SPO-04d-MODE-001" = "online mode reads the counter through the n2c adapter (the node's consensus state, the data kes-period-info prints), not through cardano-cli; never run against a real node"
 "SPO-04d-MODE-002" = "light mode Koios request not ported until the Koios adapter is wired; the port requires an OpCertCounterReader that distinguishes None from Unknown instead"
 "SPO-04d-MODE-004" = "light mode decodes the issued counter from the opcert file to compare it with Koios; the port knows the counter it asked the signer to use, so it never decodes it back"
 "SPO-04d-EXT-005" = "display of the KES key and pool id in bech32 is not ported; the pool id is derived internally (chain.PoolIDOf, checked against cardano-cli in the parity test)"
@@ -41,8 +41,6 @@ implemented = ["12a", "12b", "0x", "13b", "Chw", "Ctx", "Xparty", "Ckey", "01pro
 # 03b, 05b, 06, 08a, 08b, 22a, 22b, 03c, 01_claimRewards: the stake use cases. Key-file
 # signing and the offline queue are ported; a hardware holder is decided by the signing plan against the
 # device's profile and the body is canonicalised before it is shown (ADR 0008); a hardware key mixed with a key-file key is refused (SPO-Ptx-PRE-006).
-"SPO-08b-EXT-002" = "the hardware path is the shared pipeline: the body is canonicalised before it is shown (txflow.CanonicalBodies) and the device witnesses it with the change keys declared; tested on a Ledger for a payment, stake registration, DRep registration, vote and poll answer (test/hardware), not for this script's own use case"
-"SPO-22b-EXT-001" = "the hardware path is the shared pipeline: the body is canonicalised before it is shown (txflow.CanonicalBodies) and the device witnesses it with the change keys declared; tested on a Ledger for a payment, stake registration, DRep registration, vote and poll answer (test/hardware), not for this script's own use case"
 "SPO-08b-EXT-003" = "`transaction sign` of cardano-cli with the network flag: signing is native (VaultSigner), witnesses and assembled transaction are byte-equal to `transaction sign` in the oracle test, and there is no network flag to pass"
 "SPO-03c-PRE-001" = "upstream refuses offline mode; the use case answers from whatever RewardAccountReader it is given, including the offline snapshot (the port note of 03c recommends it), so the refusal is the composition's choice, not the use case's"
 "SPO-06-IF-002" = "the extra-parameter grammar is ported (domain/txparam, txflow.ResolveExtras) and wired into SendLovelaces, SendAssets, MintAsset and BurnAsset only; this use case still takes just plain `msg:` lines as the request's Message (validated for the 64-byte limit), and metadata files and enc/pass are refused by not being offered: wiring it is an Extras and a Passphrase field on the request and a call of txflow.ResolveExtras"
@@ -109,7 +107,6 @@ implemented = ["12a", "12b", "0x", "13b", "Chw", "Ctx", "Xparty", "Ckey", "01pro
 "SPO-05c-SEC-001" = "signing keys are opened in guarded memory by the vault signer for one witness and destroyed after it (SPO-Ptx-SEC-001, cited by the signer and parity tests); the use case never sees a key"
 "SPO-05c-SEC-004" = "display only: upstream prints the descriptor with the protection key and the message passphrase; the use case returns neither and `pass:` messages are not ported"
 "SPO-07a-OUT-003" = "display only: the command prints the certificate and the descriptor as it chooses"
-"SPO-07b-EXT-001" = "the hardware path is the shared pipeline: the body is canonicalised before it is shown (txflow.CanonicalBodies) and the device witnesses it with the change keys declared; tested on a Ledger for a payment, stake registration, DRep registration, vote and poll answer (test/hardware), not for this script's own use case; a hardware payer with a key-file cold key, or the reverse, is refused (SPO-Ptx-PRE-006)"
 "SPO-07b-SEC-002" = "no temporary file is written, so no signed transaction or body is left world-readable; `pass:` messages are not ported, so no passphrase is shown"
 
 # 01workOffline, Ptransfer, Coffline (app/airgap, domain/transfer, adapters/transferfile): the
@@ -131,16 +128,12 @@ implemented = ["12a", "12b", "0x", "13b", "Chw", "Ctx", "Xparty", "Ckey", "01pro
 # 04e (app/query.CheckOpCert and QueryOpCertCounter): a verdict as data.
 "SPO-04e-IF-002" = "usage text and exit 1 for a missing or invalid argument are the command's; the use case refuses a check that is not current or next"
 "SPO-04e-IF-003" = "three or more arguments select no subject and exit 0: the command's; each subject is its own use case (CheckOpCert, QueryOpCertCounter)"
-"SPO-04e-MODE-002" = "online mode asks the node for kes-period-info and reads the counters from its answer: not ported, there is no node adapter. The use case computes the same facts from the tip, the genesis and the certificate, and reads the on-chain counter through an OpCertCounterReader, whichever provider backs it"
+"SPO-04e-MODE-002" = "online mode asks the node for kes-period-info and reads the counters from its answer: not ported as a cardano-cli call: the n2c adapter reads the counters from the node's consensus state. The use case computes the same facts from the tip, the genesis and the certificate, and reads the on-chain counter through an OpCertCounterReader, whichever provider backs it"
 "SPO-04e-PR-001" = "the question 'use the pool id from the file?' is the command's; the use case takes the pool name and reads its stored `.pool.id-bech`, and the command asks before calling it"
-
-# Xparty (app/parties, app/multisig, adapters/envelope, partystore, filebag, tailcat).
-"SPO-Xparty-IF-008" = "`party rotate` is not implemented: it needs a rotation statement signed by the old key and a second fingerprint confirmation on the peer (a separate change); an identity that must change is replaced by revoking it and enrolling a new one"
 
 # Governance family (21a to 25b): software and hardware key paths (the plan decides, ADR 0008); a hardware payer for 25b
 # is refused (SPO-25b-PRE-002); enc mode is not ported at generation; offline 23c, 23e, 24a, 24c and 23d are
-# refused as upstream does. The guardrail variant of 25b and the ParameterChange action file are
-# not built.
+# refused as upstream does.
 "SPO-21a-EXT-002" = "enc mode not ported at generation (the decision of 04c and 03a): every signing key goes into the store, whose sealing is the protection; no per-key password and no gpg envelope"
 "SPO-21a-IF-002" = "command-layer argument handling: the use case takes a structured request, so the usage text and the argument count are the CLI's"
 "SPO-21a-INV-001" = "enc mode not ported at generation (the decision of 04c and 03a): every signing key goes into the store, whose sealing is the protection; no per-key password and no gpg envelope"
@@ -220,11 +213,7 @@ implemented = ["12a", "12b", "0x", "13b", "Chw", "Ctx", "Xparty", "Ckey", "01pro
 "SPO-24c-MODE-004" = "which adapter answers (node, Koios or the offline snapshot) and whether the transaction is submitted or queued is the composition's; the use case is tested with a Submitter and with a Queue, and the offline queue is byte-equal to upstream's in TestGovTransactionsMatchUpstream"
 "SPO-24c-OUT-008" = "the deposit-return and withdrawal accounts are returned as credentials in the read model; rendering them as bech32 addresses is the CLI's"
 "SPO-24c-SEC-001" = "the document is fetched through ports.MetadataFetcher, whose adapter (httpfetch) allows https only, a short redirect chain on https, a time limit and a size limit and sends no credentials (httpfetch tests); the use case only hashes what it was given"
-"SPO-25a-EXT-013" = "the ParameterChange action file is not built yet: the adapter returns ErrParameterChangeUnsupported (pinned in TestGovActionFilesMatchCardanoCLI) for the 41-parameter table, the value types and the threshold groups"
 "SPO-25a-IF-008" = "command-layer argument handling: the use case takes a structured request, so the usage text and the argument count are the CLI's"
-"SPO-25a-IF-021" = "the ParameterChange action file is not built yet: the adapter returns ErrParameterChangeUnsupported (pinned in TestGovActionFilesMatchCardanoCLI) for the 41-parameter table, the value types and the threshold groups"
-"SPO-25a-IF-022" = "the ParameterChange action file is not built yet: the adapter returns ErrParameterChangeUnsupported (pinned in TestGovActionFilesMatchCardanoCLI) for the 41-parameter table, the value types and the threshold groups"
-"SPO-25a-IF-023" = "the ParameterChange action file is not built yet: the adapter returns ErrParameterChangeUnsupported (pinned in TestGovActionFilesMatchCardanoCLI) for the 41-parameter table, the value types and the threshold groups"
 "SPO-25a-IN-003" = "settings (era, network option, temp directory, tool paths, ENV_SKIP_PROMPT) are the composition's: the network is NetworkID, the approval policy is ApprovalPolicy, and no tool is run"
 "SPO-25a-OUT-005" = "the port writes no temp files: the downloads are held in memory"
 "SPO-25a-PRE-001" = "upstream tests the configured cardano-cli era; the port gates on protocolVersion.major of the parameters and returns an error (ErrProtocolTooOld), tested under the major-version requirement of the same script, instead of exiting 0"
@@ -232,21 +221,15 @@ implemented = ["12a", "12b", "0x", "13b", "Chw", "Ctx", "Xparty", "Ckey", "01pro
 "SPO-25a-SEC-001" = "the document is fetched through ports.MetadataFetcher, whose adapter (httpfetch) allows https only, a short redirect chain on https, a time limit and a size limit and sends no credentials (httpfetch tests); the use case only hashes what it was given"
 "SPO-25a-SEC-002" = "an observation: the action file is public data and no secret is read, written or printed; nothing to test"
 "SPO-25b-IF-003" = "the extra-parameter grammar is ported (domain/txparam, txflow.ResolveExtras) and wired into SendLovelaces, SendAssets, MintAsset and BurnAsset only; this use case still takes just plain `msg:` lines as the request's Message (validated for the 64-byte limit), and metadata files and enc/pass are refused by not being offered: wiring it is an Extras and a Passphrase field on the request and a call of txflow.ResolveExtras"
-"SPO-25b-IN-004" = "the guardrail variant (collateral UTxO, script cost, script hash check) is not built: a treasury withdrawal or parameter change returns ErrGuardrailsUnsupported (TestRegisterActionGuardrailsUnsupported); the plain variant is byte-equal to upstream's in TestGovTransactionsMatchUpstream"
+"SPO-25b-INV-002" = "upstream decides the guardrail variant of the whole transaction from the tag of the last action file; the port decides it from every proposal (the quirk is noted in SPO-25b-INV-006 and its port note): a treasury withdrawal or parameter change anywhere takes the script path, tested under SPO-25b-INV-006"
 "SPO-25b-IN-006" = "settings (era, network option, temp directory, tool paths, ENV_SKIP_PROMPT) are the composition's: the network is NetworkID, the approval policy is ApprovalPolicy, and no tool is run"
-"SPO-25b-INV-013" = "the guardrail variant (collateral UTxO, script cost, script hash check) is not built: a treasury withdrawal or parameter change returns ErrGuardrailsUnsupported (TestRegisterActionGuardrailsUnsupported); the plain variant is byte-equal to upstream's in TestGovTransactionsMatchUpstream"
-"SPO-25b-INV-015" = "the guardrail variant (collateral UTxO, script cost, script hash check) is not built: a treasury withdrawal or parameter change returns ErrGuardrailsUnsupported (TestRegisterActionGuardrailsUnsupported); the plain variant is byte-equal to upstream's in TestGovTransactionsMatchUpstream"
-"SPO-25b-INV-016" = "the guardrail variant (collateral UTxO, script cost, script hash check) is not built: a treasury withdrawal or parameter change returns ErrGuardrailsUnsupported (TestRegisterActionGuardrailsUnsupported); the plain variant is byte-equal to upstream's in TestGovTransactionsMatchUpstream"
-"SPO-25b-INV-017" = "the guardrail variant (collateral UTxO, script cost, script hash check) is not built: a treasury withdrawal or parameter change returns ErrGuardrailsUnsupported (TestRegisterActionGuardrailsUnsupported); the plain variant is byte-equal to upstream's in TestGovTransactionsMatchUpstream"
 "SPO-25b-MODE-001" = "which adapter answers (node, Koios or the offline snapshot) and whether the transaction is submitted or queued is the composition's; the use case is tested with a Submitter and with a Queue, and the offline queue is byte-equal to upstream's in TestGovTransactionsMatchUpstream"
 "SPO-25b-MODE-002" = "which adapter answers (node, Koios or the offline snapshot) and whether the transaction is submitted or queued is the composition's; the use case is tested with a Submitter and with a Queue, and the offline queue is byte-equal to upstream's in TestGovTransactionsMatchUpstream"
 "SPO-25b-MODE-003" = "which adapter answers (node, Koios or the offline snapshot) and whether the transaction is submitted or queued is the composition's; the use case is tested with a Submitter and with a Queue, and the offline queue is byte-equal to upstream's in TestGovTransactionsMatchUpstream"
 "SPO-25b-OUT-004" = "the port writes no scratch files: the body, witnesses and transaction are held in memory"
 "SPO-25b-OUT-005" = "the transfer file mutation is the queue's (ports.TxQueue), byte-equal to upstream's in TestGovTransactionsMatchUpstream"
 "SPO-25b-PRE-001" = "upstream tests the configured cardano-cli era; the port gates on protocolVersion.major of the parameters and returns an error (ErrProtocolTooOld), tested under the major-version requirement of the same script, instead of exiting 0"
-"SPO-25b-PRE-009" = "display only: the operator's review of each action is the confirmation summary and the CLI's rendering"
 "SPO-25b-PRE-011" = "a failing UTxO query is an error returned by the UtxoReader, never an exit 0; the same behaviour is cited as SPO-Ptx-MODE-002 in the stake and wallet tests"
-"SPO-25b-SEC-001" = "the guardrail variant (collateral UTxO, script cost, script hash check) is not built: a treasury withdrawal or parameter change returns ErrGuardrailsUnsupported (TestRegisterActionGuardrailsUnsupported); the plain variant is byte-equal to upstream's in TestGovTransactionsMatchUpstream"
 "SPO-25b-SEC-002" = "the final confirmation is the Confirmer's; skipping it is the explicit ApprovalSkip policy, recorded in the result (SPO-Ptx-SEC-003 in the txflow tests)"
 "SPO-25b-SEC-003" = "the payment key is opened in guarded memory by the vault signer and destroyed after the call (witness tests); it is passed to no process"
 
@@ -273,7 +256,6 @@ implemented = ["12a", "12b", "0x", "13b", "Chw", "Ctx", "Xparty", "Ckey", "01pro
 
 # Extra parameters, assets and policies: 01_sendAssets, 10, 11a, 11b, Pparam. Software and hardware key paths (the
 # plan decides, ADR 0008); enc is not ported at generation.
-"SPO-01sendAssets-EXT-003" = "the change-key declaration is wallet.hardwareChangeKeys, shared with 01_sendLovelaces and tested there (test/hardware: two --change-output-key-file for a payment and its staking hwsfile); no hardware test drives 01_sendAssets itself"
 "SPO-10-IF-002" = "argument parsing and the usage text are the command's; the use case takes a typed GeneratePolicyRequest (a lifetime is a number, the holder is explicit)"
 "SPO-10-INV-003" = "enc mode not ported at generation: the store's protection replaces it (same decision as 04c); the signing key is never written outside the store"
 "SPO-10-PR-001" = "enc mode not ported at generation: no per-key password prompt (same decision as 04c)"
@@ -299,28 +281,12 @@ implemented = ["12a", "12b", "0x", "13b", "Chw", "Ctx", "Xparty", "Ckey", "01pro
 "SPO-Pparam-IF-030" = "in 01_claimRewards a file word is first tried as the fee payer's address name; the port takes the payer as an explicit field of the request (SPO-01claimRewards-IF-004), so no word is ambiguous"
 "SPO-Pparam-PRE-004" = "enc:basic needs openssl upstream; the port encrypts natively (native.CIP83, byte-compatible with openssl, checked in the parity test), so there is no tool to be missing"
 
-# 15 and 09a: the software-key paths of the Calidus key and the Catalyst voting key
-# (poolkey, catalyst). Hardware holders are still refused up front there (hardware Calidus is suspended,
-# SPO-15-PRE-002; app/catalyst was not changed in this slice); the pieces below are not
-# ported in this slice, each for the reason given.
+# 15 and 09a: the Calidus key and the Catalyst voting key (poolkey, catalyst). A hardware Calidus key is
+# suspended upstream (SPO-15-PRE-002) and refused; the pieces below are not ported, each for the reason given.
 "SPO-15-IF-001" = "sub-command selection and usage are the command tree's (spo/internal/adapters/cli), not a use case's"
 "SPO-15-PRE-003" = "upstream's `cli`/`hw` method word is replaced by the key holder of the request; an unknown method cannot be written"
-"SPO-15-IF-006" = "`sign` (SignWithCalidusKey) is not ported in this slice: it needs a Calidus role in the vault signer and the plain Ed25519 text signature"
-"SPO-15-EXT-006" = "`sign` is not ported in this slice (see SPO-15-IF-006)"
-"SPO-15-OUT-006" = "`sign` is not ported in this slice (see SPO-15-IF-006)"
-"SPO-15-EXT-004" = "hardware Calidus is suspended (SPO-15-PRE-002): the hardware table has no Calidus export and the plan refuses it; a hardware pool cold key could sign the CIP-88 registration through `message sign` (custody.OpSignMessage) but 15 has no hardware path wired"
-"SPO-15-PR-001" = "hardware signing confirmation: the hardware Calidus path is suspended (SPO-15-PRE-002)"
-"SPO-15-EXT-007" = "the Koios request of `query` belongs to the adapter that implements ports.CalidusKeyReader; the use case is tested against a fake reader"
-"SPO-15-INV-007" = "the registered-pools-only filter is part of the Koios request, in the adapter that implements ports.CalidusKeyReader"
 "SPO-15-SEC-002" = "the mnemonic on cardano-signer's command line is a property of the upstream script; the port derives in process and passes no command line"
 "SPO-09a-IF-001" = "sub-command selection and usage are the command tree's (spo/internal/adapters/cli), not a use case's"
-"SPO-09a-IF-004" = "`qrcode` is not ported: the PIN-encrypted QR payload is made by catalyst-toolbox, which the spec does not define byte for byte and the pinned toolchain does not contain, so no oracle can check it; the PNG is Secret (SPO-Pfiles-SEC-001)"
-"SPO-09a-PRE-008" = "`qrcode` is not ported (see SPO-09a-IF-004)"
-"SPO-09a-PRE-009" = "`qrcode` is not ported (see SPO-09a-IF-004)"
-"SPO-09a-PRE-010" = "`qrcode` is not ported (see SPO-09a-IF-004)"
-"SPO-09a-EXT-005" = "`qrcode` is not ported (see SPO-09a-IF-004)"
-"SPO-09a-OUT-007" = "`qrcode` is not ported (see SPO-09a-IF-004)"
-"SPO-09a-SEC-002" = "`qrcode` is not ported (see SPO-09a-IF-004)"
 "SPO-09a-IF-005" = "`query` (QueryCatalystVotingPower) is not ported in this slice: no Catalyst API reader port exists yet"
 "SPO-09a-IN-003" = "`query` is not ported in this slice (see SPO-09a-IF-005)"
 "SPO-09a-PRE-011" = "`query` is not ported in this slice (see SPO-09a-IF-005)"
@@ -329,10 +295,8 @@ implemented = ["12a", "12b", "0x", "13b", "Chw", "Ctx", "Xparty", "Ckey", "01pro
 "SPO-09a-OUT-008" = "`query` is not ported in this slice (see SPO-09a-IF-005)"
 "SPO-09a-INV-006" = "`query` is not ported in this slice (see SPO-09a-IF-005)"
 "SPO-09a-INV-002" = "ADA Handle rewards addresses are refused with ErrAdaHandle, as the send use case refuses handle destinations, until a handle directory port exists"
-"SPO-09a-OUT-004" = "hardware voting key: app/catalyst was not changed in this slice and still refuses a hardware holder up front through custody.PlanGeneration; the hwcli adapter rewrites the descriptions (custody table and exporter) when it is wired"
-"SPO-09a-OUT-009" = "hardware voting key files: app/catalyst still refuses a hardware holder up front (not changed in this slice)"
 "SPO-09a-SEC-004" = "advice on voting-key practice, not behaviour"
-"SPO-09a-IN-001" = "tool paths and minimum versions are the toolchain adapter's (cardano-signer is replaced by in-process signing); catalyst-toolbox is needed only by `qrcode`, which is not ported (see SPO-09a-IF-004)"
+"SPO-09a-IN-001" = "tool paths and minimum versions are the toolchain adapter's (cardano-signer is replaced by in-process signing); `qrcode` is built natively (domain/catalyst, adapters/qrcode) from the toolbox source and needs no tool"
 
 # Hardware signer adapter (internal/adapters/hwcli). Ctx: the body is canonicalised by
 # `transaction transform` (Canonicalize) and a changed auxiliary data hash is refused, not
@@ -391,15 +355,14 @@ implemented = ["12a", "12b", "0x", "13b", "Chw", "Ctx", "Xparty", "Ckey", "01pro
 "SPO-Cconv-PRE-002" = "the hex-string CBOR helpers to_cbor and int_from_cbor are not ported: the port builds and reads CBOR through the Blink Labs library in adapters/native (and a small encoder in domain/poll) from typed values, never from hex text; an unsupported input is an error value there, not empty output"
 "SPO-Cchain-INV-001" = "errors are returned as Go values (ports.TipReader and friends), never as a banner and `exit 1`; a use case that gets a tip error stops with it"
 "SPO-Cchain-INV-002" = "errors are returned as Go values (ports.TipReader and friends), never as a banner and `exit 1`; a use case that gets a tip error stops with it"
-"SPO-Cchain-MODE-001" = "the online mode through a cardano-node socket (`cardano-cli query tip`, with its retries) is not ported: there is no node adapter and the online chain source is Koios (SPO-Cchain-MODE-003 and MODE-007, MODE-010 are cited)"
-"SPO-Cchain-MODE-002" = "the online mode through a cardano-node socket (`cardano-cli query tip`, with its retries) is not ported: there is no node adapter and the online chain source is Koios (SPO-Cchain-MODE-003 and MODE-007, MODE-010 are cited)"
-"SPO-Cchain-MODE-005" = "the online mode through a cardano-node socket (`cardano-cli query tip`, with its retries) is not ported: there is no node adapter and the online chain source is Koios (SPO-Cchain-MODE-003 and MODE-007, MODE-010 are cited)"
-"SPO-Cchain-MODE-006" = "the online mode through a cardano-node socket (`cardano-cli query tip`, with its retries) is not ported: there is no node adapter and the online chain source is Koios (SPO-Cchain-MODE-003 and MODE-007, MODE-010 are cited)"
-"SPO-Cchain-MODE-009" = "the online mode through a cardano-node socket (`cardano-cli query tip`, with its retries) is not ported: there is no node adapter and the online chain source is Koios (SPO-Cchain-MODE-003 and MODE-007, MODE-010 are cited)"
+"SPO-Cchain-MODE-001" = "the online mode through a cardano-node socket (`cardano-cli query tip`, with its retries) is not ported: the node is read in process by the n2c adapter (node-to-client, no cardano-cli, no retry loop; never run against a real node) and Koios is the light-mode source (SPO-Cchain-MODE-003 and MODE-007, MODE-010 are cited)"
+"SPO-Cchain-MODE-002" = "the online mode through a cardano-node socket (`cardano-cli query tip`, with its retries) is not ported: the node is read in process by the n2c adapter (node-to-client, no cardano-cli, no retry loop; never run against a real node) and Koios is the light-mode source (SPO-Cchain-MODE-003 and MODE-007, MODE-010 are cited)"
+"SPO-Cchain-MODE-005" = "the online mode through a cardano-node socket (`cardano-cli query tip`, with its retries) is not ported: the node is read in process by the n2c adapter (node-to-client, no cardano-cli, no retry loop; never run against a real node) and Koios is the light-mode source (SPO-Cchain-MODE-003 and MODE-007, MODE-010 are cited)"
+"SPO-Cchain-MODE-006" = "the online mode through a cardano-node socket (`cardano-cli query tip`, with its retries) is not ported: the node is read in process by the n2c adapter (node-to-client, no cardano-cli, no retry loop; never run against a real node) and Koios is the light-mode source (SPO-Cchain-MODE-003 and MODE-007, MODE-010 are cited)"
 "SPO-Cchain-MODE-011" = "offline mode composes no SyncChecker, so a use case that needs one (airgap new, add and execute) is refused offline with its own error; there is no `offline` answer to compare with `synced`"
 "SPO-Cchain-OUT-004" = "the sync state is ports.SyncChecker's (bool, error), not one of the words synced, unsynced and offline"
 "SPO-Cchain-PRE-001" = "errors are returned as Go values (ports.TipReader and friends), never as a banner and `exit 1`; a use case that gets a tip error stops with it"
-"SPO-Cchain-PRE-002" = "the online mode through a cardano-node socket (`cardano-cli query tip`, with its retries) is not ported: there is no node adapter and the online chain source is Koios (SPO-Cchain-MODE-003 and MODE-007, MODE-010 are cited)"
+"SPO-Cchain-PRE-002" = "the online mode through a cardano-node socket (`cardano-cli query tip`, with its retries) is not ported: the node is read in process by the n2c adapter (node-to-client, no cardano-cli, no retry loop; never run against a real node) and Koios is the light-mode source (SPO-Cchain-MODE-003 and MODE-007, MODE-010 are cited)"
 "SPO-Clight-IN-001" = "no function takes an argument to lowercase and drop"
 "SPO-Clight-IN-002" = "the DRep id is a typed chain.DRepID, converted to the form Koios wants by the adapter's caller (domain/governance.DRepIDsOf); the 56 and 63 character length rule has no counterpart"
 "SPO-Clight-IN-005" = "Submit takes the signed transaction bytes; reading the `cborHex` of a file is the command's or the transfer file's (adapters/transferfile), and an absent cborHex is an error there, not the text `null`"
@@ -429,7 +392,7 @@ implemented = ["12a", "12b", "0x", "13b", "Chw", "Ctx", "Xparty", "Ckey", "01pro
 "SPO-Cconf-INV-001" = "configuration comes from spo.toml with a strict schema (adapters/config); common.inc, ~/.common.inc, ./common.inc and the settings variables are not read, and the values of the network preset are tested (SPO-Cconf-INV-004, INV-006, INV-011)"
 "SPO-Cconf-INV-002" = "configuration comes from spo.toml with a strict schema (adapters/config); common.inc, ~/.common.inc, ./common.inc and the settings variables are not read, and the values of the network preset are tested (SPO-Cconf-INV-004, INV-006, INV-011)"
 "SPO-Cconf-INV-003" = "the terminal is opened by the cli adapter (adapters/cli), not named by a setting"
-"SPO-Cconf-INV-010" = "no child process is given a node socket: signing, building and key generation are native, and no cardano-node adapter exists"
+"SPO-Cconf-INV-010" = "no child process is given a node socket: signing, building and key generation are native, and the node is reached in process by the n2c adapter"
 "SPO-Cconf-INV-012" = "the minimum Ledger Cardano-app version belongs to the hardware adapter, which is not part of this slice"
 "SPO-Cconf-INV-013" = "`bc` is not used: amounts are exact integers in Go"
 "SPO-Cconf-INV-014" = "no scratch files are written to a temp directory: bodies and witnesses stay in memory (SPO-Ptx-OUT-003 is waived for the same reason); a store write uses a temporary file beside its destination"
@@ -441,10 +404,10 @@ implemented = ["12a", "12b", "0x", "13b", "Chw", "Ctx", "Xparty", "Ckey", "01pro
 "SPO-Cconf-INV-022" = "the era is read when a use case asks the EraReader (Koios tip or the transfer file); there is no once-per-run evaluation, no `--<era>-era` flag or cliEra, and no ENV_USEERA override: the native ledger builds for the era of the pinned library"
 "SPO-Cconf-INV-023" = "the era is read when a use case asks the EraReader (Koios tip or the transfer file); there is no once-per-run evaluation, no `--<era>-era` flag or cliEra, and no ENV_USEERA override: the native ledger builds for the era of the pinned library"
 "SPO-Cconf-INV-024" = "errors are returned as Go values with the reason in them; there is no banner, no GitHub footer and no exit inside a function"
-"SPO-Cconf-MODE-002" = "cardano-node is checked by the toolchain gates (cited with SPO-Cconf-PRE-009 to PRE-011) when a composition asks for it; no composition does yet, because there is no node adapter"
+"SPO-Cconf-MODE-002" = "cardano-node is checked by the toolchain gates (cited with SPO-Cconf-PRE-009 to PRE-011) when a composition asks for it; no composition does, because the node is reached in process over its socket and no cardano-node binary is run"
 "SPO-Cconf-MODE-003" = "curl is not used: HTTP is Go's net/http in every mode that needs it"
 "SPO-Cconf-MODE-004" = "the Koios token is a secret record of the sealed store handed to the Koios client when the provider is composed (adapters/cli provider wiring), not read in a prologue by mode"
-"SPO-Cconf-MODE-005" = "the online era through a cardano-node socket (`query tip`) is not ported: no node adapter; Koios' tip (SPO-Cconf-MODE-006) and the transfer file (MODE-007) are"
+"SPO-Cconf-MODE-005" = "the online era through a cardano-node socket (`query tip`) is not ported as `query tip` text: the n2c adapter reads the era with its own query when it submits; Koios' tip (SPO-Cconf-MODE-006) and the transfer file (MODE-007) are"
 "SPO-Cconf-OUT-001" = "errors are returned as Go values with the reason in them; there is no banner, no GitHub footer and no exit inside a function"
 "SPO-Cconf-OUT-002" = "Go's strings.TrimSpace and TrimSpace-like trimming on the values that need it; there is no trimString function"
 "SPO-Cconf-PRE-012" = "the Koios token is an opaque secret: it is not decoded as a JWT, so there is no tier, project id or expiry display and no up-front refusal of an undecodable token (Koios refuses it itself); display only"

@@ -95,7 +95,7 @@ func TestPoolRegistrationWithLedgerColdKeyPayerAndOwner(t *testing.T) {
 	}
 	uc := poolops.RegisterPool{Store: w.Store, Addresses: w.Ledger, Params: w.Chain, Tip: w.Chain, Utxos: w.Chain, Pipeline: w.Pipeline(),
 		PoolCerts: w.Ledger, StakeCerts: w.Ledger, TxIDs: w.Ledger, Hasher: w.Ledger, Clock: fixedClock{},
-		Pools: noPools{}, Sources: poolops.SingleSourceAcknowledged}
+		Pools: noPools{}, Sources: poolops.SingleSourceAcknowledged, OnSingle: noopSingle}
 	res, err := uc.Run(ctx, poolops.RegisterRequest{Pool: "mypool", Payer: "hw.payment"})
 	if err != nil {
 		t.Fatal(err)

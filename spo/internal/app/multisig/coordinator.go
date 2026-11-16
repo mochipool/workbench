@@ -2,6 +2,7 @@ package multisig
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -332,6 +333,7 @@ func (c Coordinator) RequestSignatures(ctx context.Context, in RequestInput, tr 
 		}
 		id := collectionID(in.Ref, l.coll)
 		cs := st.track(id, in.Ref)
+		cs.Body = hexHash([32]byte(l.coll.Body.ID))
 		var items []OutItem
 		for i, s := range l.coll.Slots {
 			r := SlotResult{Slot: i, Name: s.Name, Party: s.Party}
@@ -386,13 +388,13 @@ func (c Coordinator) RequestSignatures(ctx context.Context, in RequestInput, tr 
 		if err := writeJSON(w, coordRef, st); err != nil {
 			return err
 		}
-		return enqueue(w, now, items...)
+		return c.enqueue(w, now, local.Identity().Fingerprint(), items...)
 	})
 	if err != nil {
 		return nil, err
 	}
 	if tr.Sender() != nil {
-		if _, err := (Outbox{Store: c.Store, Clock: c.Clock, Offline: c.Offline}).Flush(ctx, tr); err != nil {
+		if _, err := c.Outbox().Flush(ctx, tr); err != nil {
 			return results, err
 		}
 	}
@@ -415,6 +417,8 @@ func (c Coordinator) authorise(r ports.Reader, st coordState, ps []party.Party, 
 		if err := party.CheckHelloExpiry(o.Created(), o.Expires()); err != nil {
 			return err
 		}
+	case party.RotationAnnouncement:
+		return c.authoriseRotation(c.Clock.Now(), sender, m)
 	default:
 		return fmt.Errorf("%w: a coordinator does not receive a %s", party.ErrNotAuthorised, t)
 	}
@@ -544,6 +548,8 @@ func (c Coordinator) Handle(ctx context.Context, rcv ports.Received) (Handled, e
 			h, err = c.onRefusal(w, o, m, now)
 		case party.Hello:
 			h, err = c.onHello(w, o, now)
+		case party.RotationAnnouncement:
+			h, err = c.onRotation(w, o, m, via, now)
 		}
 		return err
 	})
@@ -785,7 +791,7 @@ func (c Coordinator) Close(ctx context.Context, ref CollectionRef, outcome party
 	defer local.Destroy()
 	now := c.Clock.Now()
 	body := party.CollectionClosed{Outcome: outcome}
-	if outcome == party.OutcomeSubmitted {
+	if outcome == party.OutcomeSubmitted || outcome == party.OutcomeQueued {
 		body.TxID = txid[:]
 	}
 	return c.Store.Update(ctx, func(w ports.Writer) error {
@@ -833,7 +839,7 @@ func (c Coordinator) Close(ctx context.Context, ref CollectionRef, outcome party
 				return err
 			}
 			ev := eventOf(now, "collection-"+string(outcome), cs.ID, 0, [32]byte{})
-			if outcome == party.OutcomeSubmitted {
+			if outcome == party.OutcomeSubmitted || outcome == party.OutcomeQueued {
 				ev.Detail = txid.String()
 			}
 			if err := appendEvent(w, ev); err != nil {
@@ -843,7 +849,7 @@ func (c Coordinator) Close(ctx context.Context, ref CollectionRef, outcome party
 		if err := writeJSON(w, coordRef, st); err != nil {
 			return err
 		}
-		return enqueue(w, now, items...)
+		return c.enqueue(w, now, local.Identity().Fingerprint(), items...)
 	})
 }
 
@@ -852,13 +858,17 @@ func (c Coordinator) Close(ctx context.Context, ref CollectionRef, outcome party
 // clock), one that is gone from its place was discarded (SPO-Xparty-INV-015).
 func (c Coordinator) Sweep(ctx context.Context) ([]CollectionRef, error) {
 	now := c.Clock.Now()
+	// Without a chain time (no tip, no genesis) a collection that was cleared or
+	// submitted is still announced; only an expiry cannot be told.
 	slotNow, err := c.Chain.Slot(ctx, now)
-	if err != nil {
+	haveSlot := err == nil
+	if err != nil && !errors.Is(err, ErrNoChainTime) {
 		return nil, err
 	}
 	type decision struct {
 		ref     CollectionRef
 		outcome party.Outcome
+		txid    chain.TxID
 	}
 	var ds []decision
 	err = c.Store.View(ctx, func(r ports.Reader) error {
@@ -877,11 +887,18 @@ func (c Coordinator) Sweep(ctx context.Context) ([]CollectionRef, error) {
 			l, err := c.loadCollection(r, c.TxIDs, cs.Ref)
 			switch {
 			case errors.Is(err, ErrNoCollection), err == nil && collectionID(cs.Ref, l.coll) != cid:
-				ds = append(ds, decision{cs.Ref, party.OutcomeDiscarded})
+				d := decision{ref: cs.Ref, outcome: party.OutcomeDiscarded}
+				if id, queued, ok := c.submittedAfterRequest(r, cs); ok {
+					d.outcome, d.txid = party.OutcomeSubmitted, id
+					if queued {
+						d.outcome = party.OutcomeQueued
+					}
+				}
+				ds = append(ds, d)
 			case err != nil:
 				return err
-			case l.coll.StateAtTip(slotNow) == pool.CollectionExpired:
-				ds = append(ds, decision{cs.Ref, party.OutcomeExpired})
+			case haveSlot && l.coll.StateAtTip(slotNow) == pool.CollectionExpired:
+				ds = append(ds, decision{ref: cs.Ref, outcome: party.OutcomeExpired})
 			}
 		}
 		return nil
@@ -891,12 +908,65 @@ func (c Coordinator) Sweep(ctx context.Context) ([]CollectionRef, error) {
 	}
 	var out []CollectionRef
 	for _, d := range ds {
-		if err := c.Close(ctx, d.ref, d.outcome, chain.TxID{}); err != nil {
+		if err := c.Close(ctx, d.ref, d.outcome, d.txid); err != nil {
 			return out, err
 		}
 		out = append(out, d.ref)
 	}
 	return out, nil
+}
+
+// submittedAfterRequest tells, for a collection that is gone from its place,
+// whether it went because the registration was submitted (the pool's descriptor
+// records a submission at or after the collection was first requested, which
+// `spo pool register` writes in the transaction that clears the collection)
+// and not because it was discarded. It returns the transaction id the first
+// request carried. A collection whose body was not recorded, a submission whose
+// recorded transaction id is not that body's, and a record that cannot be read,
+// are a discard (SPO-Xparty-INV-035).
+func (c Coordinator) submittedAfterRequest(r ports.Reader, cs collState) (id chain.TxID, queued, ok bool) {
+	if cs.Ref.Kind != KindPool || cs.Body == "" {
+		return id, false, false
+	}
+	b, err := hex.DecodeString(cs.Body)
+	if err != nil || len(b) != len(id) {
+		return id, false, false
+	}
+	first := int64(0)
+	for _, ss := range cs.Slots {
+		if ss.RequestedAt != 0 && (first == 0 || ss.RequestedAt < first) {
+			first = ss.RequestedAt
+		}
+	}
+	sref, err := c.collectionRef(cs.Ref)
+	if err != nil || first == 0 {
+		return id, false, false
+	}
+	raw, err := r.Get(sref)
+	if err != nil {
+		return id, false, false
+	}
+	d, err := pool.ParseDescriptor(raw)
+	if err != nil {
+		return id, false, false
+	}
+	text := d.Text(pool.FieldRegSubmitted)
+	stamp, _, _ := strings.Cut(text, " (")
+	when, err := time.Parse(time.RFC1123Z, stamp)
+	if err != nil || when.Unix() < first {
+		return id, false, false
+	}
+	// The submission must be of THIS collection's transaction: the pool command
+	// records the id of what it submitted, and a collection that was replaced by
+	// another one (a different body) and then discarded is not announced as
+	// submitted because the pool was registered with the other body.
+	rec, err := r.Get(ports.Ref{Name: cs.Ref.Name, Kind: ports.MultisigSubmitted})
+	if err != nil || strings.TrimSpace(string(rec)) != cs.Body {
+		return id, false, false
+	}
+	copy(id[:], b)
+	// A registration only queued offline carries no proof that it was sent.
+	return id, strings.Contains(text, "(only offline, no proof)"), true
 }
 
 // ---- revocation -----------------------------------------------------------------
@@ -986,13 +1056,13 @@ func (c Coordinator) SendInvite(ctx context.Context, partyName string, inv party
 		if err := appendEvent(w, ev); err != nil {
 			return err
 		}
-		return enqueue(w, now, OutItem{ID: hexMsg(mid), To: hexFP(p.Fingerprint), Type: string(party.TypeInvite), Expires: exp.Unix(), Envelope: env})
+		return c.enqueue(w, now, local.Identity().Fingerprint(), OutItem{ID: hexMsg(mid), To: hexFP(p.Fingerprint), Type: string(party.TypeInvite), Expires: exp.Unix(), Envelope: env})
 	})
 	if err != nil {
 		return err
 	}
 	if tr.Sender() != nil {
-		_, err = (Outbox{Store: c.Store, Clock: c.Clock, Offline: c.Offline}).Flush(ctx, tr)
+		_, err = c.Outbox().Flush(ctx, tr)
 	}
 	return err
 }

@@ -225,5 +225,8 @@ the stake key in the workspace. Hardware keys have no mnemonic. ` + hardwareUnte
 	f.Uint32Var(&o.account, "account", 0, "account number of the derivation path (mnemonic and hardware wallets)")
 	f.Uint32Var(&o.index, "index", 0, "address index of the derivation path (mnemonic and hardware wallets)")
 	hw.add(cmd, hwMultisig|hwHybrid)
+	// Declared to cobra as well as checked in RunE, so a driver (the TUI) can
+	// show the exclusion before the command is run.
+	cmd.MarkFlagsMutuallyExclusive("mnemonic", "mnemonic-in-fd", "hardware")
 	return cmd
 }

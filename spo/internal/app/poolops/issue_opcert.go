@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/mochipool/workbench/spo/internal/app/opcounter"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
@@ -27,6 +28,11 @@ var (
 	// ErrChainUnverified: the chain could not be consulted and the caller
 	// did not ask for an unverified issue.
 	ErrChainUnverified = errors.New("the operational certificate counter on the chain could not be determined")
+	// ErrOpCertSingleSource: the counter would rest on one provider and the
+	// caller did not acknowledge that (--single-source). A certificate
+	// issued from a wrong counter gets the pool's blocks rejected, so one
+	// unchecked answer is not enough (ADR 0006, N7).
+	ErrOpCertSingleSource = errors.New("the operational certificate counter rests on a single provider: configure a second independent provider, or acknowledge the single source with --single-source")
 	// ErrNoSigner: the signer for the cold key cannot issue certificates.
 	ErrNoSigner = errors.New("the signer for the cold key cannot issue operational certificates")
 )
@@ -54,6 +60,15 @@ type IssueOperationalCertificate struct {
 	Genesis ports.GenesisReader
 	// Counters reads the counter the chain has seen for the pool.
 	Counters ports.OpCertCounterReader
+	// Cross is an optional second, independent source of the counter (ADR
+	// 0006). When set, the counter is used only if it agrees with Counters
+	// (opcounter.Corroborate); SingleSource acknowledges a second source that
+	// does not answer.
+	Cross        ports.OpCertCounterReader
+	SingleSource bool
+	// OnSingle records an accepted single source before the certificate is
+	// signed or any file written; required when SingleSource is true.
+	OnSingle ports.SingleSourceHook
 	Clock    ports.Clock
 	// AllowUnverified lets the issue proceed when the chain was not
 	// consulted (Unknown). It is the offline mode: the caller states that no
@@ -80,6 +95,12 @@ type OpCertIssued struct {
 	// Verified is false when the chain was not consulted. The operator must
 	// check the certificate against the chain before it is used.
 	Verified bool
+	// Source names the provider(s) the counter on the chain was read from;
+	// empty when the chain was not consulted.
+	Source chain.Source
+	// SingleSource is true when the counter rests on one provider and the
+	// caller acknowledged that.
+	SingleSource bool
 }
 
 // snapshot is what the issue was planned from; the commit re-reads it.
@@ -168,7 +189,7 @@ func (uc IssueOperationalCertificate) Run(ctx context.Context, poolName string, 
 	// Check the counter against the chain before asking for a signature: a
 	// device or a remote party is not bothered for a certificate that would
 	// be refused anyway.
-	verified, err := uc.checkChain(ctx, snap.coldVKey, counter)
+	verified, src, single, err := uc.checkChain(ctx, snap.coldVKey, counter)
 	if err != nil {
 		return OpCertIssued{}, err
 	}
@@ -211,20 +232,27 @@ func (uc IssueOperationalCertificate) Run(ctx context.Context, poolName string, 
 		return OpCertIssued{}, err
 	}
 	return OpCertIssued{Pool: poolName, KesNumber: snap.number, Counter: counter, KesPeriod: period,
-		Expiry: expiry, OpCert: cert, Verified: verified}, nil
+		Expiry: expiry, OpCert: cert, Verified: verified, Source: src, SingleSource: single}, nil
 }
 
 // checkChain compares the counter used with what the chain requires. It
-// returns whether the chain was consulted.
-func (uc IssueOperationalCertificate) checkChain(ctx context.Context, coldVKey []byte, counter uint64) (bool, error) {
+// returns whether the chain was consulted, the source the answer rests on and
+// whether it rests on one provider by acknowledgement. A counter read from one
+// provider, with no second configured, is refused unless acknowledged: this
+// command is the harmful one (a wrong counter gets the pool's blocks
+// rejected).
+func (uc IssueOperationalCertificate) checkChain(ctx context.Context, coldVKey []byte, counter uint64) (bool, chain.Source, bool, error) {
 	id, err := chain.PoolIDOf(coldVKey)
 	if err != nil {
-		return false, err
+		return false, "", false, err
 	}
 	reading, err := uc.Counters.OpCertCounter(ctx, id)
 	if err != nil {
 		reading = chain.Unknown[uint64](err.Error())
 	}
+	res := opcounter.Corroborate(ctx, uc.Counters, uc.Cross, id, reading, uc.SingleSource)
+	reading = res.Reading
+	single := res.Single
 	var required uint64
 	switch onChain, ok := reading.Get(); {
 	case ok:
@@ -233,14 +261,25 @@ func (uc IssueOperationalCertificate) checkChain(ctx context.Context, coldVKey [
 		required = 0
 	default:
 		if uc.AllowUnverified {
-			return false, nil
+			return false, "", false, nil
 		}
-		return false, fmt.Errorf("%w: %s", ErrChainUnverified, reading.Why())
+		return false, "", false, fmt.Errorf("%w: %s", ErrChainUnverified, reading.Why())
+	}
+	if uc.Cross == nil {
+		if !uc.SingleSource {
+			return false, "", false, fmt.Errorf("%w: only %s was asked", ErrOpCertSingleSource, uc.Counters.Source())
+		}
+		single = true
 	}
 	if counter != required {
-		return true, &CounterMismatchError{Issued: counter, Required: required}
+		return true, res.Source, single, &CounterMismatchError{Issued: counter, Required: required}
 	}
-	return true, nil
+	if single {
+		if err := uc.OnSingle.Accept(ctx, "the operational certificate counter", res.Source); err != nil {
+			return false, "", false, err
+		}
+	}
+	return true, res.Source, single, nil
 }
 
 func loadIssueSnapshot(r ports.Reader, poolName string) (issueSnapshot, error) {

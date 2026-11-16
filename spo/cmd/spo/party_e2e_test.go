@@ -267,7 +267,7 @@ func TestFileTransportTwoOwnerRegistrationEndToEnd(t *testing.T) {
 	id := reqIDRE.FindStringSubmatch(reqs)[1]
 	review := mustParty(t, w.bob, nil, nil, "party", "review", id[:12], "--shelley-genesis", w.r.genesis)
 	mustHave(t, review, "arrived by    the file transport", "Whose money moves", "certificate  pool-registration", "pledge       100.000000 ADA",
-		"relay        dns relay.example.org:3001", "pools named      pool1", "inputs not checked", `"register the Quartz pool"`, "NET")
+		"relay        dns \"relay.example.org\":3001", "pools named      pool1", "inputs not checked", `"register the Quartz pool"`, "NET")
 	reviewed := bodyHashRE.FindStringSubmatch(review)[1]
 
 	// No terminal: the approval is refused, and nothing was signed.

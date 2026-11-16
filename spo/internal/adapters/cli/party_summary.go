@@ -6,13 +6,13 @@ import (
 	"io"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 
 	"github.com/mochipool/workbench/spo/internal/app/multisig"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
+	"github.com/mochipool/workbench/spo/internal/platform/textsafe"
 )
 
 // The summary block is what a key witness authorises, laid out in SCREEN ROWS
@@ -105,23 +105,7 @@ func promptRowsFor(q string, cols int) int {
 // quoted is attacker-chosen text in double quotes with nothing that could
 // forge a line, a space, a quote or a control character left raw: a URL or a
 // host name is one word, whole.
-func quoted(s string) string {
-	var b strings.Builder
-	b.WriteByte('"')
-	for _, r := range s {
-		switch {
-		case r == '"' || r == '\\':
-			b.WriteByte('\\')
-			b.WriteRune(r)
-		case r == ' ' || r == utf8.RuneError || !strconv.IsPrint(r):
-			fmt.Fprintf(&b, "\\u{%x}", r)
-		default:
-			b.WriteRune(r)
-		}
-	}
-	b.WriteByte('"')
-	return b.String()
-}
+func quoted(s string) string { return textsafe.Quote(s) }
 
 // width is the columns a rune takes, counted conservatively: anything that is
 // not ASCII may be two wide.
@@ -561,6 +545,31 @@ func (s summary) budgetError(cols, rows int, full bool, label string) error {
 			fix = "Enlarge the terminal and approve again (--full is already on)"
 		}
 		return fmt.Errorf("this request needs a terminal at least %d rows tall; yours has %d (the summary is %d rows, the question and your command line take %d): the top of it would scroll off the screen. %s. Nothing was signed", need, rows, len(s.lines), reserved, fix)
+	}
+	return nil
+}
+
+// size is a terminal's reported size.
+type size struct{ cols, rows int }
+
+// geometryOf is geometry as a value.
+func geometryOf(t Terminal) size {
+	c, r := geometry(t)
+	return size{c, r}
+}
+
+// stillFits re-checks a block that was printed for printedCols columns
+// against the size the terminal has now. A terminal made narrower would wrap
+// lines that were laid out to fit, so its row count no longer holds; one made
+// shorter would already have scrolled the top of the block away. Both are
+// refused with nothing asked.
+func (s summary) stillFits(now size, printedCols int, rv multisig.Review, full bool, label string) error {
+	if now.cols < printedCols {
+		return fmt.Errorf("the terminal was made narrower (%d columns, the summary was laid out for %d) after the summary was printed, so its rows are no longer what was counted. Nothing was signed. Run spo party approve %s again", now.cols, printedCols, label)
+	}
+	s.reserved = 2 + max(promptRowsFor(approvePrompt(rv)+" [y/N] ", now.cols), 2)
+	if err := s.budgetError(now.cols, now.rows, full, label); err != nil {
+		return fmt.Errorf("the terminal changed size after the summary was printed: %w", err)
 	}
 	return nil
 }

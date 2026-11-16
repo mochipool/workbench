@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sync/atomic"
 	"time"
 
@@ -186,7 +187,7 @@ func (r *partyRun) serve(ctx context.Context, invites []string, outboxDir string
 		// outbox to the file transport (multisig.Outbox.Flush takes no filter),
 		// and a request that went into a file is delivered and is not sent over
 		// tailcat. So invitations are written while nothing else waits.
-		if pending, err := (multisig.Outbox{Store: r.s.Store, Clock: r.env.Clock}).Pending(ctx); err != nil {
+		if pending, err := r.node().Outbox().Pending(ctx); err != nil {
 			return err
 		} else if len(pending) > 0 {
 			return fmt.Errorf("the outbox holds %d envelope(s) that writing an invitation by file would carry away too (requests meant for tailcat would be delivered as files and never sent over it): write the invitations first, with nothing queued (spo party serve --invite NAME), then queue requests; or empty the outbox with spo party outbox export DIR", len(pending))
@@ -217,13 +218,14 @@ func (r *partyRun) serve(ctx context.Context, invites []string, outboxDir string
 		bag.Close()
 	}
 
-	known := map[party.NodeKey]bool{}
-	for _, k := range allowed {
-		known[k] = true
+	known, err := co.AllowOwners(ctx)
+	if err != nil {
+		return err
 	}
-	ob := multisig.Outbox{Store: r.s.Store, Clock: r.env.Clock}
+	ob := r.node().Outbox()
 	tr := srv.Transport()
 	synced := time.Now()
+	r.sweepNotices(ctx)
 	for ctx.Err() == nil {
 		if _, err := ob.Flush(ctx, tr); err != nil && ctx.Err() == nil {
 			fmt.Fprintf(a.d.Err, "sending: %v\n", err)
@@ -244,6 +246,7 @@ func (r *partyRun) serve(ctx context.Context, invites []string, outboxDir string
 		if time.Since(synced) > serveSyncEvery {
 			synced = time.Now()
 			r.syncAllowList(ctx, co, srv, known)
+			r.sweepNotices(ctx)
 		}
 	}
 	fmt.Fprintln(w, "Stopped serving.")
@@ -253,28 +256,40 @@ func (r *partyRun) serve(ctx context.Context, invites []string, outboxDir string
 // syncAllowList makes the running server follow the registry: a node key that
 // was enrolled since (or by another process) is allowed, one whose party was
 // revoked is refused and its connections closed (SPO-Xparty-IF-005).
-func (r *partyRun) syncAllowList(ctx context.Context, co multisig.Coordinator, srv TailcatServer, known map[party.NodeKey]bool) {
-	now, err := co.AllowList(ctx)
+func (r *partyRun) syncAllowList(ctx context.Context, co multisig.Coordinator, srv TailcatServer, known map[party.NodeKey]party.Fingerprint) {
+	now, err := co.AllowOwners(ctx)
 	if err != nil {
 		return
 	}
-	cur := map[party.NodeKey]bool{}
-	for _, k := range now {
-		cur[k] = true
-		if !known[k] {
+	followRegistry(srv, known, now, r.a.d.Out)
+}
+
+// followRegistry makes srv admit exactly the node keys of now. A key whose
+// holder changed (a party revoked and another enrolled with the same node key
+// between two syncs) is revoked and then allowed again, so the old holder's
+// open connections are closed.
+func followRegistry(srv TailcatServer, known, now map[party.NodeKey]party.Fingerprint, out io.Writer) {
+	for k, fp := range now {
+		old, had := known[k]
+		switch {
+		case !had:
 			srv.Allow(k)
-			fmt.Fprintf(r.a.d.Out, "now admitting node key %x\n", k[:8])
+			fmt.Fprintf(out, "now admitting node key %x\n", k[:8])
+		case old != fp:
+			srv.Revoke(k)
+			srv.Allow(k)
+			fmt.Fprintf(out, "node key %x now belongs to another party: the old party's connections were closed\n", k[:8])
 		}
 	}
 	for k := range known {
-		if !cur[k] {
+		if _, ok := now[k]; !ok {
 			srv.Revoke(k)
-			fmt.Fprintf(r.a.d.Out, "no longer admitting node key %x: its party was revoked or removed\n", k[:8])
+			fmt.Fprintf(out, "no longer admitting node key %x: its party was revoked or removed\n", k[:8])
 		}
 	}
 	clear(known)
-	for k := range cur {
-		known[k] = true
+	for k, fp := range now {
+		known[k] = fp
 	}
 }
 
@@ -374,7 +389,7 @@ func (r *partyRun) connect(ctx context.Context, coordName string, f *signerFlags
 	if !sg.Resolver.IsSet() {
 		fmt.Fprintln(a.d.Err, "WARNING: this signer has no chain view of its own, so EVERY request that arrives over tailcat will be refused automatically and in silence (SPO-Xparty-PRE-007): a request from a network must have every input resolved by the signer's own resolver, and there is none. The refusals are in spo party events and nothing is sent back. Give it a view (light mode uses its own provider; or --own-snapshot PATH), or exchange requests by file.")
 	}
-	ob := multisig.Outbox{Store: r.s.Store, Clock: r.env.Clock}
+	ob := r.node().Outbox()
 	// The backoff is reset only by a frame received: a connection that is
 	// accepted and then closed before it carries anything (a revoked signer,
 	// clocks too far apart, the wrong coordinator) is not a working one.

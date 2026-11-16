@@ -196,8 +196,11 @@ func TestGenerateCalidusKeyRefusals(t *testing.T) {
 		t.Errorf("files changed: %v", got)
 	}
 	var ue *custody.UnsupportedError
-	if _, err := r.keyUC().Run(context.Background(), GenerateCalidusKeyRequest{Name: "hw", Holder: custody.HolderHardware}); !errors.As(err, &ue) {
+	if _, err := r.keyUC().Run(context.Background(), GenerateCalidusKeyRequest{Name: "hw", Holder: custody.HolderHardware}); !errors.Is(err, ErrHardwareCalidusSuspended) {
 		t.Errorf("hardware holder: %v", err)
+	}
+	if _, err := r.keyUC().Run(context.Background(), GenerateCalidusKeyRequest{Name: "rm", Holder: custody.HolderRemote}); !errors.As(err, &ue) {
+		t.Errorf("remote holder: %v", err)
 	}
 	if _, err := r.keyUC().Run(context.Background(), GenerateCalidusKeyRequest{Name: "../x"}); !errors.Is(err, ErrBadName) {
 		t.Errorf("bad name: %v", err)

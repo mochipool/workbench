@@ -30,6 +30,9 @@ type drepReads struct {
 	Primary    ports.DRepStateReader
 	CrossCheck ports.DRepStateReader
 	Policy     SourcePolicy
+	// OnSingle records an acknowledged single source before the use case goes
+	// on (ADR 0006). Nil with Policy SingleSourceAcknowledged refuses.
+	OnSingle ports.SingleSourceHook
 }
 
 type drepAnswer struct {
@@ -44,7 +47,23 @@ func sameDRep(a, b chain.Reading[chain.DRepState]) bool {
 	}
 	av, _ := a.Get()
 	bv, _ := b.Get()
-	return av.Deposit == bv.Deposit
+	// A source that does not state the deposit (DepositUnstated) cannot
+	// disagree about it: registration is what it corroborates.
+	return av.DepositUnstated || bv.DepositUnstated || av.Deposit == bv.Deposit
+}
+
+func describeDRep(r chain.Reading[chain.DRepState]) string {
+	switch {
+	case r.IsUnknown():
+		return "unknown (" + r.Why() + ")"
+	case r.IsNone():
+		return "not registered"
+	}
+	st, _ := r.Get()
+	if st.DepositUnstated {
+		return "registered, deposit not stated"
+	}
+	return fmt.Sprintf("registered, deposit %d lovelace", st.Deposit)
 }
 
 func (d drepReads) read(ctx context.Context, id chain.DRepID, harmful bool) (drepAnswer, error) {
@@ -70,15 +89,22 @@ func (d drepReads) read(ctx context.Context, id chain.DRepID, harmful bool) (dre
 		}
 		if !r2.IsUnknown() {
 			if !sameDRep(r, r2) {
-				return drepAnswer{}, fmt.Errorf("%w: %s and %s about the DRep", ErrSourcesDisagree, d.Primary.Source(), d.CrossCheck.Source())
+				return drepAnswer{}, fmt.Errorf("%w about the DRep: %s says %s, %s says %s", ErrSourcesDisagree,
+					d.Primary.Source(), describeDRep(r), d.CrossCheck.Source(), describeDRep(r2))
 			}
 			corroborated = true
 			out.Sources = append(out.Sources, d.CrossCheck.Source())
+		} else if d.Policy != SingleSourceAcknowledged {
+			return drepAnswer{}, fmt.Errorf("%w: %s says %s, but %s did not answer: %s", ErrSingleSource,
+				d.Primary.Source(), describeDRep(r), d.CrossCheck.Source(), r2.Why())
 		}
 	}
 	if !corroborated {
 		if d.Policy != SingleSourceAcknowledged {
 			return drepAnswer{}, fmt.Errorf("%w: %s", ErrSingleSource, d.Primary.Source())
+		}
+		if err := d.OnSingle.Accept(ctx, "the DRep deposit", d.Primary.Source()); err != nil {
+			return drepAnswer{}, err
 		}
 		out.Single = true
 	}
@@ -290,6 +316,9 @@ type RetireDRep struct {
 	DReps      ports.DRepStateReader
 	CrossCheck ports.DRepStateReader
 	Sources    SourcePolicy
+	// OnSingle records an acknowledged single source before anything is
+	// signed or queued; required when Sources is SingleSourceAcknowledged.
+	OnSingle ports.SingleSourceHook
 }
 
 // RetireDRepRequest names the DRep and the paying address as typed.
@@ -353,7 +382,7 @@ func (uc RetireDRep) Run(ctx context.Context, req RetireDRepRequest) (Result, er
 	if err != nil {
 		return Result{}, err
 	}
-	ans, err := drepReads{Primary: uc.DReps, CrossCheck: uc.CrossCheck, Policy: uc.Sources}.read(ctx, dr.chainID(), true)
+	ans, err := drepReads{Primary: uc.DReps, CrossCheck: uc.CrossCheck, Policy: uc.Sources, OnSingle: uc.OnSingle}.read(ctx, dr.chainID(), true)
 	if err != nil {
 		return Result{}, err
 	}

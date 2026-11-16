@@ -32,6 +32,11 @@
 //	           (signed by another cold key), badsig, truncated, exitafter
 //	policyid:  wrongpolicy (another id), truncated
 //	key-gen:   wrongvkey (the verification key is not the signing file's)
+//	message:   msgwrongpayload (another payload is embedded), msgbadsig, msgwrongkey
+//	           (another key signs and is named), msgaddr (the address header is not
+//	           the key's hash), msgtruncated
+//	vote:      votewrongkey (another stake key signs), votebadsig, votewrongaddr
+//	           (another rewards address is registered), votetruncated
 package main
 
 import (
@@ -232,6 +237,31 @@ func keyOf(file string) (ed25519.PrivateKey, []byte) {
 	}
 	k := seedFor(strings.Join(j.Path, "/"))
 	return k, k.Public().(ed25519.PublicKey)
+}
+
+// only fails the call when it carries a flag that the argument vector of the
+// spec (or cardano-hw-cli's --help) does not have: the fake checks exactly the
+// vectors the specs give.
+func only(f flags, allowed ...string) {
+	ok := map[string]bool{}
+	for _, a := range allowed {
+		ok[a] = true
+	}
+	for k := range f {
+		if !ok[k] {
+			fmt.Println("ERROR: unknown option", k)
+			os.Exit(2)
+		}
+	}
+}
+
+// network demands the network argument of a vote registration (`--mainnet` or
+// `--testnet-magic N`: SPO-09a-EXT-004 passes the network magic argument).
+func network(f flags) {
+	if len(f["--mainnet"]) == 0 && len(f["--testnet-magic"]) == 0 {
+		fmt.Println("ERROR: no network")
+		os.Exit(1)
+	}
 }
 
 func writeJSON(path string, v any) {
@@ -440,21 +470,63 @@ func witness(f flags) {
 	}
 }
 
+// messageSign writes a CIP-8 COSE_Sign1 and COSE_Key. ASSUMPTION a device must
+// confirm (hardware-device-checklist item 6): the protected header names the
+// blake2b-224 hash of the signing key as its address, which for a pool cold key
+// is the pool id, and the payload is embedded as given (hashed with --hashed).
 func messageSign(f flags) {
+	// SPO-15-EXT-004: message sign --message-hex M --signing-path-hwsfile F --out-file O
+	only(f, "--message-hex", "--signing-path-hwsfile", "--out-file", "--hashed")
 	k, pub := keyOf(f.one("--signing-path-hwsfile"))
 	msg, _ := hex.DecodeString(f.one("--message-hex"))
-	if len(f["--hashed"]) > 0 {
-		h, _ := blake2b.New(28, nil)
-		h.Write(msg)
-		msg = h.Sum(nil)
+	hashed := len(f["--hashed"]) > 0
+	payload := cose.PayloadFor(msg, hashed)
+	signed := payload
+	switch cfg.Misbehave {
+	case "msgwrongpayload":
+		payload = append([]byte(nil), payload...)
+		payload[0] ^= 1
+	case "msgbadsig":
+		other := sha256.Sum256(payload)
+		signed = other[:]
+	case "msgwrongkey":
+		k, pub = otherKey(pub)
 	}
-	sig := ed25519.Sign(k, msg)
-	key := append([]byte{0xa4, 0x01, 0x01, 0x03, 0x27, 0x20, 0x06, 0x21, 0x58, 0x20}, pub...)
-	writeJSON(f.one("--out-file"), map[string]string{"COSE_Sign1_hex": "84" + hex.EncodeToString(sig), "COSE_Key_hex": hex.EncodeToString(key)})
+	addr := cose.Blake2b224(pub)
+	addrBytes := addr[:]
+	switch cfg.Misbehave {
+	case "msgaddr":
+		addrBytes = bytes.Repeat([]byte{1}, 28)
+	case "msgwrongkey":
+		// the tool signs and names its other key; the address follows that key
+	}
+	protected := cose.ProtectedHeader(addrBytes)
+	sig := ed25519.Sign(k, cose.SigStructure(protected, signed))
+	s1 := cose.Sign1{Protected: protected, Hashed: hashed, Payload: payload, Signature: sig}.Encode()
+	key := cose.EncodeKey(pub)
+	sign1Hex := hex.EncodeToString(s1)
+	if cfg.Misbehave == "msgtruncated" {
+		sign1Hex = sign1Hex[:20]
+	}
+	writeJSON(f.one("--out-file"), map[string]string{"COSE_Sign1_hex": sign1Hex, "COSE_Key_hex": hex.EncodeToString(key)})
 }
 
 func voteRegistration(f flags) {
+	// SPO-09a-EXT-004: vote registration-metadata --vote-public-key-string V
+	// --vote-weight W (repeated) --payment-address A --nonce N <network>
+	// [--payment-address-signing-key-hwsfile P] --stake-signing-key-hwsfile S
+	// --metadata-cbor-out-file O
+	only(f, "--vote-public-key-string", "--vote-weight", "--payment-address", "--nonce", "--mainnet", "--testnet-magic",
+		"--payment-address-signing-key-hwsfile", "--stake-signing-key-hwsfile", "--metadata-cbor-out-file", "--voting-purpose")
+	network(f)
+	if len(f["--vote-public-key-string"]) != len(f["--vote-weight"]) || len(f["--vote-public-key-string"]) == 0 {
+		fmt.Println("ERROR: one --vote-weight for each --vote-public-key-string")
+		os.Exit(1)
+	}
 	k, pub := keyOf(f.one("--stake-signing-key-hwsfile"))
+	if cfg.Misbehave == "votewrongkey" {
+		k, pub = otherKey(pub)
+	}
 	var reg cose.Cip36
 	copy(reg.StakePub[:], pub)
 	for i, v := range f["--vote-public-key-string"] {
@@ -478,8 +550,30 @@ func voteRegistration(f flags) {
 	if p := f["--voting-purpose"]; len(p) > 0 {
 		fmt.Sscan(p[0], &reg.Purpose)
 	}
+	if p := f["--payment-address-signing-key-hwsfile"]; len(p) > 0 {
+		// The device takes the payment key to recognise the rewards address as its own.
+		_, ppub := keyOf(p[0])
+		h := cose.Blake2b224(ppub)
+		if len(addr) < 29 || !bytes.Equal(addr[1:29], h[:]) {
+			fmt.Println("ERROR: the payment signing key is not the payment key of the address")
+			os.Exit(1)
+		}
+	}
+	if cfg.Misbehave == "votewrongaddr" {
+		reg.Address = append([]byte(nil), reg.Address...)
+		reg.Address[1] ^= 1
+	}
 	h := reg.SigningHash()
-	os.WriteFile(f.one("--metadata-cbor-out-file"), reg.Metadata(ed25519.Sign(k, h[:])), 0o600)
+	sig := ed25519.Sign(k, h[:])
+	if cfg.Misbehave == "votebadsig" {
+		other := sha256.Sum256(h[:])
+		sig = ed25519.Sign(k, other[:])
+	}
+	out := reg.Metadata(sig)
+	if cfg.Misbehave == "votetruncated" {
+		out = out[:len(out)/2]
+	}
+	os.WriteFile(f.one("--metadata-cbor-out-file"), out, 0o600)
 }
 
 // tagInputs gives key 0 of the body (the inputs) the tag-258 set form when it

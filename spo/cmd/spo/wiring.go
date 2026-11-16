@@ -11,6 +11,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/adapters/cli"
 	"github.com/mochipool/workbench/spo/internal/adapters/config"
 	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
+	"github.com/mochipool/workbench/spo/internal/adapters/native/n2c"
 	"github.com/mochipool/workbench/spo/internal/adapters/sqlitestore"
 	"github.com/mochipool/workbench/spo/internal/adapters/storeaudit"
 	"github.com/mochipool/workbench/spo/internal/platform/seal"
@@ -29,6 +30,12 @@ func newDeps(out, errw io.Writer, term cli.Terminal) cli.Deps {
 			Save:     func(dir string, c cli.WorkspaceConfig) error { return config.Save(dir, toConfig(c)) },
 			Preset:   presetFor,
 			Networks: config.Networks,
+		},
+		NodeAddressWarning: func(addr string) string {
+			if n2c.IsPlainTCP(addr) {
+				return n2c.WarnPlainTCP
+			}
+			return ""
 		},
 		Sealed: cli.SealedOps{
 			Init: func(path string, pass *secret.Buffer) (*secret.Buffer, error) {
@@ -127,6 +134,14 @@ func loadConfig(dir string) (cli.WorkspaceConfig, error) {
 	if c.Koios != nil {
 		out.Koios = &cli.KoiosConfig{URL: c.Koios.URL}
 	}
+	if c.Blockfrost != nil {
+		out.Blockfrost = &cli.BlockfrostConfig{URL: c.Blockfrost.URL, TokenRecord: c.Blockfrost.TokenRecord}
+	}
+	if c.Node != nil {
+		out.Node = &cli.NodeConfig{Address: c.Node.Address, TimeoutSeconds: c.Node.TimeoutSeconds}
+	}
+	out.Order = c.Order
+	out.SameHostOK = c.SameHostOK
 	if h := c.Hardware; h != nil {
 		out.Hardware = &cli.HardwareConfig{WaitSeconds: h.WaitSeconds, MinLedger: h.MinLedger, MinTrezor: h.MinTrezor, MinKeystone: h.MinKeystone}
 	}
@@ -150,6 +165,14 @@ func toConfig(c cli.WorkspaceConfig) config.Config {
 	if c.Koios != nil {
 		out.Koios = &config.Koios{URL: c.Koios.URL}
 	}
+	if c.Blockfrost != nil {
+		out.Blockfrost = &config.Blockfrost{URL: c.Blockfrost.URL, TokenRecord: c.Blockfrost.TokenRecord}
+	}
+	if c.Node != nil {
+		out.Node = &config.Node{Address: c.Node.Address, TimeoutSeconds: c.Node.TimeoutSeconds}
+	}
+	out.Order = c.Order
+	out.SameHostOK = c.SameHostOK
 	if h := c.Hardware; h != nil {
 		out.Hardware = &config.Hardware{WaitSeconds: h.WaitSeconds, MinLedger: h.MinLedger, MinTrezor: h.MinTrezor, MinKeystone: h.MinKeystone}
 	}

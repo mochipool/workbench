@@ -91,6 +91,8 @@ func encodeBody(b party.Body) ([]byte, error) {
 		return marshal(inviteWire{Address: m.Address, Node: m.Node[:]})
 	case party.Hello:
 		return marshal(helloWire{})
+	case party.RotationAnnouncement:
+		return marshal(rotationAnnouncementWire{Statement: m.Statement})
 	case party.Bundle:
 		w := bundleWire{Snapshot: m.Snapshot, Transactions: m.Transactions}
 		for _, a := range m.Attachments {
@@ -166,6 +168,12 @@ func decodeBody(t party.Type, raw []byte) (party.Body, error) {
 			return nil, err
 		}
 		body = party.Hello{}
+	case party.TypeRotation:
+		var w rotationAnnouncementWire
+		if err = unmarshal(raw, &w); err != nil {
+			return nil, err
+		}
+		body = party.RotationAnnouncement{Statement: w.Statement}
 	case party.TypeBundle:
 		var w bundleWire
 		if err = unmarshal(raw, &w); err != nil {

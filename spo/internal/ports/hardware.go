@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/mochipool/workbench/spo/internal/domain/cose"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 )
@@ -72,4 +73,32 @@ type ErrNotHardwareCanonical struct{ Canonical []byte }
 
 func (e *ErrNotHardwareCanonical) Error() string {
 	return "the transaction body is not in the canonical form a hardware wallet accepts (it would change under `cardano-hw-cli transaction transform`); canonicalise the body before it is fixed and shown"
+}
+
+// Cip36HardwareOptions are what a device needs to know about one Catalyst
+// registration.
+type Cip36HardwareOptions struct {
+	// RewardsKey is the payment key whose hardware signing file is passed as
+	// `--payment-address-signing-key-hwsfile` (SPO-09a-INV-004): the rewards
+	// go to the same device, which avoids the device's "unusual request"
+	// warning. Nil passes none. The adapter checks that the key is the
+	// payment credential of the rewards address.
+	RewardsKey *custody.KeyRef
+}
+
+// HardwareCip36Signer is a Cip36Signer that takes the options of a device.
+// SignCip36 is SignCip36With with none.
+type HardwareCip36Signer interface {
+	Cip36Signer
+	SignCip36With(ctx context.Context, key custody.Key[custody.Stake], reg cose.Cip36, opt Cip36HardwareOptions) (Registration, error)
+}
+
+// HardwareMultiWitnesser witnesses one body with several hardware keys in ONE
+// device call (`transaction witness` with several `--hw-signing-file`
+// arguments), as the combined node and payment witness of 05c does
+// (SPO-05c-EXT-004). The witnesses come back in the order of the keys. Whether
+// a real device accepts several files in one call is device checklist item 3.
+type HardwareMultiWitnesser interface {
+	HardwareWitnesser
+	WitnessMany(ctx context.Context, keys []custody.KeyRef, body txbuild.TxBody, opt HardwareTxOptions) ([]txbuild.Witness, error)
 }

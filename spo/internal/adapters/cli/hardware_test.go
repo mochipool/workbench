@@ -106,7 +106,7 @@ func TestHardwareOnlyFlagsNeedHardware(t *testing.T) {
 		}
 	}
 	err := runGen(t, hwDeps(&out, &genFake{}, &fakeHW{}), t.TempDir(), "wallet", "new", "w", "--hardware", "--mnemonic")
-	if err == nil || !strings.Contains(err.Error(), "no mnemonic") {
+	if err == nil || !strings.Contains(err.Error(), "none of the others can be") {
 		t.Errorf("%v", err)
 	}
 }

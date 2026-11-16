@@ -321,9 +321,14 @@ type RegisterPoolDelegation struct {
 	// AllowUnverified.
 	Pools   ports.PoolStateReader
 	Rewards ports.RewardAccountReader
-	// Sources decides what happens when the pool's registration rests on one
-	// source: it is a "harmful if false" read (ADR 0006).
-	Sources SourcePolicy
+	// PoolCross is an optional second, independent source for the pool's
+	// registration; Sources decides what happens when it rests on one source:
+	// it is a "harmful if false" read (ADR 0006).
+	PoolCross ports.PoolStateReader
+	Sources   SourcePolicy
+	// OnSingle records an acknowledged single source before anything is
+	// signed or queued; required when Sources is SingleSourceAcknowledged.
+	OnSingle ports.SingleSourceHook
 	// AllowUnverified goes on when a check cannot be made, as upstream's
 	// offline mode does (SPO-06-MODE-001); the result lists what was skipped.
 	AllowUnverified bool
@@ -416,11 +421,12 @@ func (uc RegisterPoolDelegation) Run(ctx context.Context, req DelegationRegister
 		case rd.IsNone():
 			return Result{}, fmt.Errorf("%w: %s", ErrPoolNotRegistered, cert.Pool.Bech32())
 		default:
-			if uc.Sources != SingleSourceAcknowledged {
-				return Result{}, fmt.Errorf("%w: the pool registration from %s", ErrSingleSource, uc.Pools.Source())
+			srcs, one, err := corroboratePool(ctx, uc.Pools, uc.PoolCross, uc.Sources, uc.OnSingle, cert.Pool, rd)
+			if err != nil {
+				return Result{}, err
 			}
-			single = true
-			sources = append(sources, uc.Pools.Source())
+			single = one
+			sources = append(sources, srcs...)
 		}
 	}
 	// The account (self-correcting).
@@ -602,6 +608,9 @@ type DeregisterStakeAddress struct {
 	Account    ports.RewardAccountReader
 	CrossCheck ports.RewardAccountReader
 	Sources    SourcePolicy
+	// OnSingle records an acknowledged single source before anything is
+	// signed or queued; required when Sources is SingleSourceAcknowledged.
+	OnSingle ports.SingleSourceHook
 }
 
 // Run deregisters the stake address.
@@ -662,7 +671,7 @@ func (uc DeregisterStakeAddress) Run(ctx context.Context, req RegisterRequest) (
 		return Result{}, err
 	}
 
-	ans, err := accountReads{Primary: uc.Account, CrossCheck: uc.CrossCheck, Policy: uc.Sources}.read(ctx, st.addr, true)
+	ans, err := accountReads{Primary: uc.Account, CrossCheck: uc.CrossCheck, Policy: uc.Sources, OnSingle: uc.OnSingle}.read(ctx, st.addr, true)
 	if err != nil {
 		return Result{}, err
 	}
@@ -683,7 +692,7 @@ func (uc DeregisterStakeAddress) Run(ctx context.Context, req RegisterRequest) (
 	}
 	res, err := uc.execute(ctx, txRun{
 		payer: pay, stakeOwner: w, stakeHold: st.holder, certs: []stk.Certificate{cert}, message: req.Message, extras: req.Extras, pass: req.Passphrase, params: params,
-		summary: ports.TxSummary{Kind: "stake deregistration", Account: w, StakeAddr: st.addr, Sources: ans.Sources, SingleSource: ans.Single},
+		summary: ports.TxSummary{Kind: "stake deregistration", Account: w, StakeAddr: st.addr, Sources: ans.Sources, SingleSource: ans.Single, Unchecked: ans.Notes},
 		queued: ports.QueuedTx{Type: "StakeKeyDeRegistration", FromName: pay.name, FromAddr: pay.addr, ToName: pay.name, ToAddr: pay.addr,
 			Description: fmt.Sprintf("signed staking key deregistration transaction for '%s.staking', payment via '%s'", w, pay.name),
 			Extra:       []ports.QueuedField{{Key: "stakeAddr", Value: w + ".staking"}}},
@@ -691,5 +700,5 @@ func (uc DeregisterStakeAddress) Run(ctx context.Context, req RegisterRequest) (
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{Result: res, Certificate: cert, Refund: cert.Deposit, Sources: ans.Sources, SingleSource: ans.Single}, nil
+	return Result{Result: res, Certificate: cert, Refund: cert.Deposit, Sources: ans.Sources, SingleSource: ans.Single, Unchecked: ans.Notes}, nil
 }

@@ -175,7 +175,7 @@ error. Needs the chain: it is refused offline.`,
 					return f.hint(err)
 				}
 				w := a.d.Out
-				fmt.Fprintf(w, "Committee credential %s\n  id (CIP-105)  %s\n  id (CIP-129)  %s\n  source        %s\n", rep.IDs.Hex, rep.IDs.Legacy, rep.IDs.CIP129, rep.Source)
+				fmt.Fprintf(w, "Committee credential %s\n  id (CIP-105)  %s\n  id (CIP-129)  %s\n  source        %s\n", rep.IDs.Hex, rep.IDs.Legacy, rep.IDs.CIP129, shown(string(rep.Source)))
 				if len(rep.Matches) == 0 {
 					fmt.Fprintln(w, "  not a committee member, as a cold key or as an authorised hot key")
 				}
@@ -184,18 +184,18 @@ error. Needs the chain: it is refused offline.`,
 					if m.ByHot {
 						role = "authorised hot key of the member with cold key " + credText(m.Member.Cold)
 					}
-					fmt.Fprintf(w, "  %s\n    authorisation %s\n", role, m.Member.Auth)
+					fmt.Fprintf(w, "  %s\n    authorisation %s\n", role, shown(fmt.Sprint(m.Member.Auth)))
 					if m.Member.Auth == dgov.HotAuthorized {
 						fmt.Fprintf(w, "    hot key       %s\n", credText(m.Member.Hot))
 					}
 					if m.Member.Status != "" {
-						fmt.Fprintf(w, "    status        %s\n", m.Member.Status)
+						fmt.Fprintf(w, "    status        %s\n", shown(fmt.Sprint(m.Member.Status)))
 					}
 					if e, ok := m.Member.Expiry.Get(); ok {
 						fmt.Fprintf(w, "    expires       epoch %d\n", e)
 					}
 					if m.Member.NextChange != "" {
-						fmt.Fprintf(w, "    next epoch    %s\n", m.Member.NextChange)
+						fmt.Fprintf(w, "    next epoch    %s\n", shown(fmt.Sprint(m.Member.NextChange)))
 					}
 				}
 				return nil

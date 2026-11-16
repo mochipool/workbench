@@ -968,3 +968,17 @@ func TestLightURLChecks(t *testing.T) {
 		t.Error("missing magic accepted")
 	}
 }
+
+// A provider's error text is printed in the operator's terminal: C0 and C1
+// controls, bidirectional controls and invalid UTF-8 come out as escapes.
+func TestErrorBodyPrefixHasNothingActive(t *testing.T) {
+	got := prefix([]byte("\x1b[2J\u009b2J‮evil\nline2\xff"))
+	for _, r := range got {
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) || r == 0x202e || r == 0xfffd {
+			t.Errorf("%q holds U+%04X", got, r)
+		}
+	}
+	if !strings.Contains(got, `\u{202e}evil`) || !strings.Contains(got, `\u{9b}`) {
+		t.Errorf("the controls are not shown as escapes: %q", got)
+	}
+}

@@ -54,13 +54,14 @@ func (s SignatureSigners) SignerFor(key custody.KeyRef) (ports.Signer, error) {
 }
 
 // Profile implements ports.Signer: the vault's profile and the message
-// operations. A Calidus or voting key signs nothing in process yet (the
-// Calidus `sign` command is not ported).
+// operations. A Calidus key signs a text (OpSignText); a voting key signs
+// nothing in process.
 func (v VaultSignatures) Profile() custody.Profile {
 	return v.VaultSigner.Profile().
 		Allow(custody.RolePayment, custody.OpSignMessage).
 		Allow(custody.RoleStake, custody.OpSignMessage, custody.OpSignCip36).
-		Allow(custody.RolePoolCold, custody.OpSignCip88)
+		Allow(custody.RolePoolCold, custody.OpSignCip88).
+		Allow(custody.RoleCalidus, custody.OpSignText)
 }
 
 // signWith signs msg with a loaded key (64-byte Ed25519 or 96-byte BIP32-Ed25519).

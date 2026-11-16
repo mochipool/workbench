@@ -2,6 +2,7 @@ package poolops
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -82,6 +83,10 @@ type RegisterPool struct {
 	Pools      ports.PoolStateReader
 	CrossCheck ports.PoolStateReader
 	Sources    SourcePolicy
+	// OnSingle records an acknowledged single source before the registration
+	// is signed, queued or submitted; required when Sources is
+	// SingleSourceAcknowledged.
+	OnSingle ports.SingleSourceHook
 	// Metadata downloads poolMetaUrl for the hash check; nil skips the check
 	// (offline: it runs at execute, SPO-05c-MODE-004).
 	Metadata ports.MetadataFetcher
@@ -514,6 +519,11 @@ func (uc RegisterPool) finish(ctx context.Context, in regInputs, inp txflow.Inpu
 		if err := w.Put(ports.Ref{Name: in.name, Kind: ports.PoolDescriptor}, d.Render()); err != nil {
 			return err
 		}
+		// The id of what was submitted, so that a coordinator that asked others to
+		// sign can tell this submission from a discard (SPO-Xparty-INV-035).
+		if err := w.Put(ports.Ref{Name: in.name, Kind: ports.MultisigSubmitted}, []byte(hex.EncodeToString(out.TxID[:]))); err != nil {
+			return err
+		}
 		return w.Delete(ports.Ref{Name: in.name, Kind: ports.PoolCert})
 	}); err != nil {
 		return res, fmt.Errorf("the transaction was sent (%s), but the registration record could not be stored: %w", out.TxID, err)
@@ -875,27 +885,27 @@ func (uc RegisterPool) readPool(ctx context.Context, id chain.PoolID) (chain.Rea
 			return zero, nil, false, fmt.Errorf("the pool state from %s: %w", uc.CrossCheck.Source(), err)
 		}
 		if !r2.IsUnknown() {
-			if !samePool(r, r2) {
-				return zero, nil, false, fmt.Errorf("%w: %s and %s", ErrSourcesDisagree, uc.Pools.Source(), uc.CrossCheck.Source())
+			if diff := chain.DiffPoolReadings(r, r2); diff != "" {
+				return zero, nil, false, fmt.Errorf("%w: they differ on the pool's %s: %s says %s, %s says %s", ErrSourcesDisagree, diff,
+					uc.Pools.Source(), chain.DescribePoolFor(r, diff), uc.CrossCheck.Source(), chain.DescribePoolFor(r2, diff))
 			}
 			corroborated = true
 			srcs = append(srcs, uc.CrossCheck.Source())
+		} else if uc.Sources != SingleSourceAcknowledged {
+			return zero, nil, false, fmt.Errorf("%w: %s says %s, but %s did not answer: %s", ErrSingleSource,
+				uc.Pools.Source(), describePool(r), uc.CrossCheck.Source(), r2.Why())
 		}
 	}
 	if !corroborated {
 		if uc.Sources != SingleSourceAcknowledged {
 			return zero, nil, false, fmt.Errorf("%w: %s", ErrSingleSource, uc.Pools.Source())
 		}
+		if err := uc.OnSingle.Accept(ctx, "the pool registration state", uc.Pools.Source()); err != nil {
+			return zero, nil, false, err
+		}
 		return r, srcs, true, nil
 	}
 	return r, srcs, false, nil
 }
 
-func samePool(a, b chain.Reading[chain.PoolState]) bool {
-	if a.IsNone() || b.IsNone() {
-		return a.IsNone() && b.IsNone()
-	}
-	av, _ := a.Get()
-	bv, _ := b.Get()
-	return av.Status == bv.Status
-}
+func describePool(r chain.Reading[chain.PoolState]) string { return chain.DescribePool(r) }

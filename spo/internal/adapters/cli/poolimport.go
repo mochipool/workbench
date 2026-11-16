@@ -2,18 +2,20 @@ package cli
 
 import (
 	"context"
-	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
 
 	"github.com/mochipool/workbench/spo/internal/app/workspace"
+	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/stake"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 )
@@ -87,10 +89,10 @@ func parseAccountFlags(vals []string) ([]accountFlag, error) {
 
 func (a *app) poolImportCommand() *cobra.Command {
 	var (
-		coldFile, vrfFile string
-		accountVals       []string
-		dry, cont, accept bool
-		f                 chainFlags
+		coldFile, vrfFile              string
+		accountVals                    []string
+		dry, cont, accept, yes, single bool
+		f                              chainFlags
 	)
 	cmd := &cobra.Command{
 		Use:   "import <name> <pool-id|info.json> [--cold FILE] [--vrf FILE] [--account NAME:PAYMENT_SKEY:STAKE_SKEY]... [--dry-run] [--continue] [--accept-metadata-mismatch] [--transfer-file PATH]",
@@ -149,9 +151,10 @@ other artefacts of the pool exist (the descriptor itself is never replaced).`,
 					uc: workspace.ImportPoolFromChain{
 						PoolInfoAcquirer: workspace.PoolInfoAcquirer{Pools: env.PoolInfos, Updates: env.PoolUpdates, Metadata: env.Metadata, Hasher: env.MetadataHasher},
 						Store:            s.Store, VKeys: env.VKeyEnvelopes, VRF: env.VrfVKeys, Addresses: env.Addresses, Certs: env.Certs,
-						Params: env.Params, NetworkID: env.NetworkID,
+						Params: env.Params, NetworkID: env.NetworkID, Cross: env.PoolInfoCross,
 					},
-					req: workspace.ImportPoolRequest{Name: name, Source: src, ContinueExisting: cont}}
+					yes: yes, s: s,
+					req: workspace.ImportPoolRequest{Name: name, Source: src, ContinueExisting: cont, SingleSource: single}}
 				defer imp.destroy()
 				return imp.run(ctx, coldFile, vrfFile, accs)
 			})
@@ -162,6 +165,8 @@ other artefacts of the pool exist (the descriptor itself is never replaced).`,
 	cmd.Flags().StringArrayVar(&accountVals, "account", nil, "an owner or rewards account's keys: NAME:PAYMENT_SKEY or NAME:PAYMENT_SKEY:STAKE_SKEY, files (repeatable)")
 	cmd.Flags().BoolVar(&dry, "dry-run", false, "check everything and print what would be imported; write nothing")
 	cmd.Flags().BoolVar(&cont, "continue", false, "go on when other artefacts of the pool already exist (adds to them; the descriptor is never replaced)")
+	cmd.Flags().BoolVar(&yes, "yes", false, "confirm the data shown (reward address, owners, margin, cost, pledge, relays) without asking")
+	cmd.Flags().BoolVar(&single, "single-source", false, "go on when the pool's registration data rests on ONE provider (no second provider reads pools, or it does not answer); recorded in the audit log. A disagreement between two providers is never overridden")
 	cmd.Flags().BoolVar(&accept, "accept-metadata-mismatch", false, "take published metadata that does not hash to the registered hash (default: show both hashes and ask, default No)")
 	addChainFlags(cmd, &f, true)
 	return cmd
@@ -197,6 +202,8 @@ type poolImport struct {
 	isFile bool
 	dry    bool
 	accept bool
+	yes    bool
+	s      *session
 	req    workspace.ImportPoolRequest
 	keys   []*secret.Buffer
 	// noTerm is set when a question found no terminal to ask on.
@@ -248,6 +255,14 @@ func (p *poolImport) run(ctx context.Context, coldFile, vrfFile string, accs []a
 		}
 	}
 
+	// The registration data is read once, here, with the second provider's
+	// cross-check; every run below (the dry run, the retries for a rewards
+	// account, the write) uses this one answer, so what is written is what the
+	// operator confirmed.
+	p.uc.OnSingle = p.a.singleSourceHook(p.s, "spo pool import")
+	if p.req.Fetched, err = p.uc.Fetch(ctx, p.req.Source, p.req.SingleSource); err != nil {
+		return err
+	}
 	check := p.req
 	check.DryRun = true
 	res, err := p.once(ctx, &check)
@@ -266,8 +281,12 @@ func (p *poolImport) run(ctx context.Context, coldFile, vrfFile string, accs []a
 		return err
 	}
 	if p.dry {
+		p.printRegistration(res)
 		p.printPlan(res)
 		return nil
+	}
+	if err := p.confirmData(ctx, res); err != nil {
+		return err
 	}
 	final := p.req
 	final.Source.AcceptMetadataMismatch = check.Source.AcceptMetadataMismatch
@@ -287,14 +306,11 @@ func (p *poolImport) once(ctx context.Context, req *workspace.ImportPoolRequest)
 	if !errors.Is(err, workspace.ErrMetadataHash) || req.Source.AcceptMetadataMismatch || p.isFile {
 		return res, err
 	}
-	registered, published, why := p.hashes(ctx)
 	w := p.a.d.Out
 	fmt.Fprintln(w, "The metadata the pool publishes does not match the hash it registered:")
-	if why != "" {
-		fmt.Fprintf(w, "  (the hashes could not be shown: %s)\n", plainText(why, 200))
-		return res, err
+	if mm := req.Fetched.Mismatch; mm != nil {
+		fmt.Fprintf(w, "  registered hash  %s\n  published hash   %s\n", shown(mm.Registered), shown(mm.Published))
 	}
-	fmt.Fprintf(w, "  registered hash  %s\n  published hash   %s\n", registered, published)
 	yes, aerr := p.ask(ctx, "Import the pool with the published metadata anyway?")
 	if aerr != nil {
 		return res, fmt.Errorf("%w (pass --accept-metadata-mismatch to go on)", err)
@@ -304,32 +320,6 @@ func (p *poolImport) once(ctx context.Context, req *workspace.ImportPoolRequest)
 	}
 	req.Source.AcceptMetadataMismatch = true
 	return p.uc.Run(ctx, *req)
-}
-
-// hashes reads again what the acquirer compared: the registered hash and the
-// hash of the published document.
-func (p *poolImport) hashes(ctx context.Context) (registered, published, why string) {
-	word, err := stake.ParsePoolWord(p.arg)
-	if err != nil || !word.IsID {
-		return "", "", "the argument is not a pool id"
-	}
-	rd, err := p.env.PoolInfos.PoolInfo(ctx, word.Pool)
-	if err != nil {
-		return "", "", err.Error()
-	}
-	info, ok := rd.Get()
-	if !ok {
-		return "", "", "the provider did not answer again"
-	}
-	raw, err := p.env.Metadata.Fetch(ctx, info.MetaURL)
-	if err != nil {
-		return "", "", err.Error()
-	}
-	h, err := p.env.MetadataHasher.MetadataHash(raw)
-	if err != nil {
-		return "", "", err.Error()
-	}
-	return strings.ToLower(info.MetaHash), hex.EncodeToString(h[:]), ""
 }
 
 // ask asks a yes/no question, default No. A missing terminal is an error and
@@ -578,4 +568,62 @@ missing.`,
 	cmd.Flags().BoolVar(&attach, "attach", false, "also add the file to the offline transfer file")
 	addChainFlags(cmd, &f, true)
 	return cmd
+}
+
+// printRegistration shows the registration data the import will write, with
+// every string a provider or file chose made safe to print, and the sources it
+// rests on.
+func (p *poolImport) printRegistration(res workspace.PoolImported) {
+	w := p.a.d.Out
+	info := res.Info
+	fmt.Fprintf(w, "Registration data of pool %s", shown(info.IDBech))
+	switch {
+	case len(res.Sources) > 0:
+		names := make([]string, len(res.Sources))
+		for i, s := range res.Sources {
+			names[i] = shown(string(s))
+		}
+		fmt.Fprintf(w, ", read from %s:\n", strings.Join(names, " and "))
+	default:
+		fmt.Fprintln(w, ", from the info file:")
+	}
+	fmt.Fprintf(w, "  reward address  %s\n", shown(info.RewardAddr))
+	for _, o := range info.Owners {
+		fmt.Fprintf(w, "  owner           %s\n", shown(o))
+	}
+	fmt.Fprintf(w, "  margin          %s\n  cost            %s lovelace\n  pledge          %s lovelace\n", shown(info.Margin), shown(info.FixedCost), shown(info.Pledge))
+	var meta struct{ Name, Ticker string }
+	_ = json.Unmarshal(info.Metadata, &meta)
+	fmt.Fprintf(w, "  ticker          %s\n  name            %s\n  metadata url    %s\n  metadata hash   %s\n  vrf key hash    %s\n  opcert counter  %s\n",
+		shown(meta.Ticker), shown(meta.Name), shown(info.MetaURL), shown(info.MetaHash), shown(info.VRFKeyHash), shown(chain.DescribeCounter(info.OpCertCounter)))
+	for _, r := range info.Relays {
+		var parts []string
+		for k, v := range r.Members {
+			parts = append(parts, k+" "+shown(v))
+		}
+		sort.Strings(parts)
+		fmt.Fprintf(w, "  relay           %s port %s\n", strings.Join(parts, " "), shown(r.Port))
+	}
+	if res.SingleSource {
+		printSingleSourceWarning(w, "this registration data", string(res.Sources[0]))
+	}
+}
+
+// confirmData shows the registration data and asks for explicit confirmation
+// (default No) before anything is written; --yes confirms. A single source is
+// recorded in the audit log by the use case just before the write, not here: a
+// declined import records nothing.
+func (p *poolImport) confirmData(ctx context.Context, res workspace.PoolImported) error {
+	p.printRegistration(res)
+	if p.yes {
+		return nil
+	}
+	ok, err := p.ask(ctx, "Import the pool with this registration data?")
+	if err != nil {
+		return fmt.Errorf("%w (pass --yes to confirm the data shown)", err)
+	}
+	if !ok {
+		return errors.New("the registration data was not confirmed: nothing was imported")
+	}
+	return nil
 }

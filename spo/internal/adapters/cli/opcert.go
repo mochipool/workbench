@@ -43,6 +43,7 @@ func (a *app) opcertCommand() *cobra.Command {
 	var (
 		counter uint64
 		flags   chainFlags
+		single  bool
 	)
 	issue := &cobra.Command{
 		Use:   "issue <pool>",
@@ -57,7 +58,8 @@ func (a *app) opcertCommand() *cobra.Command {
 				}
 				res, err := poolops.IssueOperationalCertificate{
 					Store: s.Store, Signers: env.Signers, Tip: env.Tip, Genesis: env.Genesis,
-					Counters: env.OpCertCounters, Clock: env.Clock, AllowUnverified: env.AllowUnverified,
+					Counters: env.OpCertCounters, Cross: env.OpCertCross, SingleSource: single, OnSingle: a.singleSourceHook(s, "spo pool opcert issue"),
+					Clock: env.Clock, AllowUnverified: env.AllowUnverified,
 				}.Run(ctx, args[0], iopts)
 				if err != nil {
 					return err
@@ -67,7 +69,10 @@ func (a *app) opcertCommand() *cobra.Command {
 				fmt.Fprintf(a.d.Out, "KES key %03d expires in period %d, about %s.\n",
 					res.KesNumber, res.Expiry.ExpireKESPeriod, res.Expiry.ExpireKESDate.Local().Format(pool.ExpireDateLayout))
 				if res.Verified {
-					fmt.Fprintf(a.d.Out, "The counter was checked against the chain (%s).\n", env.OpCertCounters.Source())
+					fmt.Fprintf(a.d.Out, "The counter was checked against the chain (%s).\n", shown(string(res.Source)))
+					if res.SingleSource {
+						printSingleSourceWarning(a.d.Out, "the operational certificate counter", string(res.Source))
+					}
 				} else {
 					fmt.Fprintln(a.d.Out, "The counter was not checked against the chain (offline). Check it on an online machine before use.")
 				}
@@ -76,6 +81,7 @@ func (a *app) opcertCommand() *cobra.Command {
 		},
 	}
 	issue.Flags().Uint64Var(&counter, "counter", 0, "issue with this counter instead of the stored one (also creates a missing counter file)")
+	issue.Flags().BoolVar(&single, "single-source", false, opcertSingleSourceHelp)
 	addChainFlags(issue, &flags, false)
 	cmd.AddCommand(issue)
 
@@ -108,6 +114,7 @@ var ErrOpCertCheck = errors.New("the operational certificate check did not pass"
 func (a *app) opcertCheckCommand() *cobra.Command {
 	var (
 		flags   chainFlags
+		single  bool
 		next    bool
 		file    string
 		number  int
@@ -156,11 +163,14 @@ a FALSE or UNKNOWN verdict as success.`,
 					}
 					req.OpCert = b
 				}
-				v, err := query.CheckOpCert{Store: s.Store, Tip: env.Tip, Genesis: env.Genesis, Counters: env.OpCertCounters, Sync: env.Sync}.Run(ctx, req)
+				v, err := query.CheckOpCert{Store: s.Store, Tip: env.Tip, Genesis: env.Genesis, Counters: env.OpCertCounters, Cross: env.OpCertCross, SingleSource: single, OnSingle: a.singleSourceHook(s, "spo pool opcert check"), Sync: env.Sync}.Run(ctx, req)
 				if err != nil {
 					return err
 				}
 				printOpCertVerdict(a.d.Out, v, req.Check)
+				if v.Single {
+					printSingleSourceWarning(a.d.Out, "the operational certificate counter", string(v.Source))
+				}
 				if v.Status != query.StatusOK {
 					return fmt.Errorf("%w: %s", ErrOpCertCheck, verdictWord(v.Status))
 				}
@@ -170,8 +180,10 @@ a FALSE or UNKNOWN verdict as success.`,
 	}
 	cmd.Flags().BoolVar(&next, "next", false, "check that the counter is the chain's plus one (a certificate about to be installed)")
 	cmd.Flags().StringVar(&file, "opcert-file", "", "check this certificate file instead of a stored one")
+	cmd.Flags().BoolVar(&single, "single-source", false, opcertSingleSourceHelp)
 	cmd.Flags().IntVar(&number, "number", 0, "check the stored certificate with this number (default: the newest)")
 	addChainFlags(cmd, &flags, false)
+	cmd.MarkFlagsMutuallyExclusive("number", "opcert-file")
 	return cmd
 }
 
@@ -198,7 +210,7 @@ func printOpCertVerdict(w io.Writer, v query.OpCertVerdict, c query.CounterCheck
 		fmt.Fprintln(w, "  certificate     from the file")
 	}
 	fmt.Fprintf(w, "  counter in file %d\n", v.OnDisk)
-	fmt.Fprintf(w, "  counter on chain %s  [%s]\n", counterOnChain(v.OnChain), v.Source)
+	fmt.Fprintf(w, "  counter on chain %s  [%s]\n", counterOnChain(v.OnChain), shown(string(v.Source)))
 	if v.NextRequired != nil {
 		fmt.Fprintf(w, "  next required   %d\n", *v.NextRequired)
 	}
@@ -206,19 +218,23 @@ func printOpCertVerdict(w io.Writer, v query.OpCertVerdict, c query.CounterCheck
 	fmt.Fprintf(w, "  counter check   %s\n", verdictWord(v.Counter))
 	fmt.Fprintf(w, "VERDICT: %s\n", verdictWord(v.Status))
 	for _, r := range v.Reasons {
-		fmt.Fprintf(w, "  - %s\n", r)
+		fmt.Fprintf(w, "  - %s\n", shown(fmt.Sprint(r)))
 	}
 	if v.Status == query.StatusUnknown {
 		why := "the counter on the chain is not known"
 		if v.OnChain.Why() != "" {
 			why += ": " + v.OnChain.Why()
 		}
-		fmt.Fprintf(w, "  - %s\n", why)
+		fmt.Fprintf(w, "  - %s\n", shown(why))
 	}
 }
 
+// opcertSingleSourceHelp is the help of --single-source on the opcert commands.
+const opcertSingleSourceHelp = "go on when a second provider is not configured (issue requires this) or does not answer; the counter then rests on ONE source and the acknowledgement is recorded in the audit log. A disagreement between two sources, including one that differs by one, is never overridden"
+
 func (a *app) opcertCounterCommand() *cobra.Command {
 	var flags chainFlags
+	var single bool
 	cmd := &cobra.Command{
 		Use:   "counter <pool|pool-id>",
 		Short: "Show the operational certificate counter of a pool on the chain",
@@ -229,18 +245,21 @@ hex). Exit status is non-zero when the chain's answer is not known.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			spec := envSpec{flags: &flags, needs: []Need{CapOpCertCount}}
 			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, _ WireOptions) error {
-				r, err := query.QueryOpCertCounter{Store: s.Store, Counters: env.OpCertCounters, Pools: env.Pools}.Run(ctx, args[0])
+				r, err := query.QueryOpCertCounter{Store: s.Store, Counters: env.OpCertCounters, Pools: env.Pools, Cross: env.OpCertCross, SingleSource: single, OnSingle: a.singleSourceHook(s, "spo pool opcert counter")}.Run(ctx, args[0])
 				if err != nil {
 					return err
 				}
 				w := a.d.Out
 				fmt.Fprintf(w, "Pool %s (%x)\n", r.Bech32, r.PoolID[:])
 				if r.Ticker != "" || r.Name != "" {
-					fmt.Fprintf(w, "  registered as   %s (%s)\n", r.Ticker, r.Name)
+					fmt.Fprintf(w, "  registered as   %s (%s)\n", shown(r.Ticker), shown(r.Name))
 				}
-				fmt.Fprintf(w, "  counter on chain %s  [%s]\n", counterOnChain(r.Counter), r.Source)
+				fmt.Fprintf(w, "  counter on chain %s  [%s]\n", counterOnChain(r.Counter), shown(string(r.Source)))
 				if r.Next != nil {
 					fmt.Fprintf(w, "  next required   %d\n", *r.Next)
+				}
+				if r.Single {
+					printSingleSourceWarning(w, "the operational certificate counter", string(r.Source))
 				}
 				if r.Counter.IsUnknown() {
 					return fmt.Errorf("the counter is not known: %s", r.Counter.Why())
@@ -249,6 +268,7 @@ hex). Exit status is non-zero when the chain's answer is not known.`,
 			})
 		},
 	}
+	cmd.Flags().BoolVar(&single, "single-source", false, opcertSingleSourceHelp)
 	addChainFlags(cmd, &flags, false)
 	return cmd
 }

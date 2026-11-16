@@ -64,9 +64,13 @@ type Pipeline struct {
 	Bodies    ports.TxBodyBuilder
 	Assembler ports.TxAssembler
 	Confirmer ports.Confirmer
-	Submitter ports.TxSubmitter
-	Queue     ports.TxQueue
-	Approval  ApprovalPolicy
+	// SourceNotes are added to the summary of a transaction whose checks rest on
+	// two sources (a cross-check): the sources share a host and the operator
+	// declared them independent.
+	SourceNotes []string
+	Submitter   ports.TxSubmitter
+	Queue       ports.TxQueue
+	Approval    ApprovalPolicy
 	// Canonicalizer brings the body to the form a hardware wallet accepts. It
 	// is needed exactly when a slot of the plan is held by hardware; nil with a
 	// hardware slot is refused by Prepare (ErrNoCanonicalizer). It is never
@@ -461,6 +465,9 @@ func (p Pipeline) Confirm(ctx context.Context, in Input, b Built) (skipped bool,
 		sum := in.Summary
 		sum.Inputs, sum.Outputs, sum.Fee, sum.TTL = len(bal.Spec.Inputs), bal.Spec.Outputs, bal.Spec.Fee, bal.Spec.TTL
 		sum.Message, sum.Size, sum.TxID, sum.Route = bal.Spec.Message, b.EstimatedSize, bal.Body.ID, p.Route()
+		if len(sum.Sources) >= 2 {
+			sum.Notes = append(append([]string(nil), sum.Notes...), p.SourceNotes...)
+		}
 		yes, err := p.Confirmer.Confirm(ctx, sum)
 		if err != nil {
 			return false, fmt.Errorf("confirmation: %w", err)

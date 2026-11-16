@@ -68,7 +68,7 @@ func printWorkspaceReport(w io.Writer, rep *workspace.Report, protection func(po
 	fmt.Fprintf(w, "%-20s %-40s %-8s %s\n", "OWNER", "ARTEFACT", "STATUS", "REASON")
 	for _, o := range rep.Owners {
 		if len(o.Artefacts) == 0 {
-			fmt.Fprintf(w, "%-20s %-40s %-8s %s\n", o.Owner, "-", "failed", o.Reason)
+			fmt.Fprintf(w, "%-20s %-40s %-8s %s\n", shownAny(o.Owner), "-", "failed", shownAny(o.Reason))
 		}
 		for _, ar := range o.Artefacts {
 			why := ar.Reason
@@ -85,14 +85,14 @@ func printWorkspaceReport(w io.Writer, rep *workspace.Report, protection func(po
 					why += p
 				}
 			}
-			fmt.Fprintf(w, "%-20s %-40s %-8s %s\n", o.Owner, artefactName(ar.Ref), statusText(ar.Status), why)
+			fmt.Fprintf(w, "%-20s %-40s %-8s %s\n", shownAny(o.Owner), artefactName(ar.Ref), statusText(ar.Status), shownAny(why))
 		}
 	}
 	for _, u := range rep.Unknown {
-		fmt.Fprintf(w, "%-20s %-40s %-8s %s\n", "-", u.File, "ignored", u.Reason)
+		fmt.Fprintf(w, "%-20s %-40s %-8s %s\n", "-", shownAny(u.File), "ignored", shownAny(u.Reason))
 	}
 	for _, x := range rep.Warnings {
-		fmt.Fprintf(w, "warning: %s\n", x)
+		fmt.Fprintf(w, "warning: %s\n", shownAny(x))
 	}
 }
 
@@ -352,6 +352,8 @@ every secret you export: put it on storage you control and remove it afterwards.
 	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "write into a directory that is not empty, replacing files of the same name")
 	cmd.Flags().BoolVar(&yes, "yes", false, "type \""+plaintextWord+"\" for --plaintext")
 	cmd.Flags().StringVar(&reason, "reason", "", "why the keys are exported; recorded in the audit log (not secret: no key material)")
+	cmd.MarkFlagsMutuallyExclusive("password-fd", "plaintext")
+	cmd.MarkFlagsOneRequired("password-fd", "plaintext")
 	return cmd
 }
 

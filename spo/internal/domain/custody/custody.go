@@ -122,6 +122,7 @@ const (
 	OpSignMessage Operation = "sign-message"               // CIP-8
 	OpSignCip36   Operation = "sign-catalyst-registration" // CIP-36
 	OpSignCip88   Operation = "sign-pool-key-registration" // CIP-88 v2
+	OpSignText    Operation = "sign-text"                  // plain Ed25519 signature over a text (Calidus `sign`, SPO-15-EXT-006)
 	OpExportVKey  Operation = "export-verification-key"
 )
 

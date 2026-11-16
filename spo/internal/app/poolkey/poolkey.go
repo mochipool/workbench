@@ -102,6 +102,9 @@ func (uc GenerateCalidusKey) Run(ctx context.Context, req GenerateCalidusKeyRequ
 	}
 	// A hardware or remote holder is refused before anything else
 	// (SPO-15-PRE-002: upstream suspends the hardware path).
+	if req.Holder == custody.HolderHardware {
+		return res, ErrHardwareCalidusSuspended
+	}
 	if _, err := custody.PlanGeneration(custody.KeyRef{Role: custody.RoleCalidus, Holder: req.Holder, Owner: nm}); err != nil {
 		return res, err
 	}
@@ -191,6 +194,22 @@ type GenerateCalidusRegistration struct {
 	// active work mode (SPO-15-MODE-001). When nil the default is the mainnet
 	// slot of the clock, which is what cardano-signer chooses.
 	Tip ports.TipReader
+	// BeforeDevice, when set, is called before a hardware cold key is asked to
+	// sign (SPO-15-PR-001): it shows what the device will display and asks the
+	// operator to continue. An error stops the registration before the device is
+	// contacted; nothing is written.
+	BeforeDevice func(ctx context.Context, d DeviceSigning) error
+}
+
+// DeviceSigning is what a device is about to be asked to sign, as the operator
+// should see it before the device asks.
+type DeviceSigning struct {
+	PoolBech  string
+	CalidusID string
+	Nonce     uint64
+	// DeviceHash is the blake2b-224 of the message, the hash a Ledger displays
+	// for a `message sign` request (SPO-15-INV-006), in hex.
+	DeviceHash string
 }
 
 // CalidusRegistrationRequest names the key and the pool.
@@ -327,6 +346,21 @@ func (uc GenerateCalidusRegistration) Run(ctx context.Context, req CalidusRegist
 		}
 	}
 	reg := cose.Cip88{PoolID: pid, CalidusPub: calPub, Nonce: nonce}
+	if holder == custody.HolderHardware && uc.BeforeDevice != nil {
+		ph := reg.PayloadHash()
+		dh := cose.Blake2b224(ph[:])
+		pb, err := chain.Bech32Encode("pool", pid[:])
+		if err != nil {
+			return res, err
+		}
+		cid, err := cose.CalidusID(calPub[:])
+		if err != nil {
+			return res, err
+		}
+		if err := uc.BeforeDevice(ctx, DeviceSigning{PoolBech: pb, CalidusID: cid, Nonce: nonce, DeviceHash: hexString(dh[:])}); err != nil {
+			return res, err
+		}
+	}
 	signed, err := signer.SignCip88(ctx, key, reg)
 	if err != nil {
 		return res, fmt.Errorf("sign the registration: %w", err)

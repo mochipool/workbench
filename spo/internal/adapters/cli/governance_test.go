@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/app/governance"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
@@ -19,13 +19,21 @@ import (
 
 // ---- fakes -----------------------------------------------------------------------------
 
+// govParamsDoc is the parameters document of the fake provider: the shape of
+// `query protocol-parameters` with the fields the governance tests read, the
+// PlutusV3 cost model (three values: enough for a script-data hash), the prices
+// and the collateral percentage.
+const govParamsDoc = `{"dRepVotingThresholds":{},"poolVotingThresholds":{},"committeeMaxTermLength":146,"maxTxSize":16384,"txFeePerByte":44,` +
+	`"collateralPercentage":150,"costModels":{"PlutusV3":[100,200,-300]},"executionUnitPrices":{"priceMemory":0.0577,"priceSteps":7.21e-05},` +
+	`"maxTxExecutionUnits":{"memory":14000000,"steps":10000000000}}`
+
 type govParams struct{}
 
 func (govParams) Source() chain.Source { return "fake params" }
 func (govParams) ProtocolParameters(context.Context) (chain.ProtocolParameters, error) {
 	return chain.ProtocolParameters{TxFeePerByte: 44, TxFeeFixed: 155381, CoinsPerUTxOByte: 4310, StakeAddressDeposit: 2_000_000,
 		DRepDeposit: 5_000_000, GovActionDeposit: 10_000_000, MaxTxSize: 16384, MaxValueSize: 5000, ProtocolMajor: 10,
-		Raw: []byte(`{"dRepVotingThresholds":{},"poolVotingThresholds":{},"committeeMaxTermLength":146}`)}, nil
+		Raw: []byte(govParamsDoc)}, nil
 }
 
 type fakeDReps struct {
@@ -101,18 +109,6 @@ func (fakeSummaries) CommitteeThreshold(context.Context) (chain.Reading[chain.Ra
 	return chain.Value(chain.Rational{Num: 2, Den: 3}), nil
 }
 
-// paramChangeMapped is what the composition root does with the native adapter:
-// the sentinel of an unbuilt parameter-change file becomes the port's.
-type paramChangeMapped struct{ ports.ActionFileBuilder }
-
-func (a paramChangeMapped) BuildActionFile(act dgov.Action) (ports.ActionFile, error) {
-	f, err := a.ActionFileBuilder.BuildActionFile(act)
-	if errors.Is(err, native.ErrParameterChangeUnsupported) {
-		return f, fmt.Errorf("%w: %w", ports.ErrParameterChangeUnsupported, err)
-	}
-	return f, err
-}
-
 type recSubmit struct{ got [][]byte }
 
 func (*recSubmit) Source() chain.Source { return "fake submitter" }
@@ -140,6 +136,35 @@ type govFix struct {
 	rewards   ports.RewardAccountReader
 	fetcher   ports.MetadataFetcher
 	absent    map[Cap]string
+	// constitution replaces the constitution reader (default: one with no
+	// guardrails script) and evaluator sets the Plutus evaluator (default none).
+	constitution ports.ConstitutionReader
+	evaluator    ports.TxEvaluator
+	// utxos replaces the payer's UTxOs (default: one of 50 ADA); params the
+	// parameters provider.
+	utxos  ports.UtxoReader
+	params ports.ProtocolParametersReader
+}
+
+func (f *govFix) utxoReader() ports.UtxoReader {
+	if f.utxos != nil {
+		return f.utxos
+	}
+	return fakeUtxos{}
+}
+
+func (f *govFix) paramsReader() ports.ProtocolParametersReader {
+	if f.params != nil {
+		return f.params
+	}
+	return govParams{}
+}
+
+func (f *govFix) constitutionReader() ports.ConstitutionReader {
+	if f.constitution != nil {
+		return f.constitution
+	}
+	return fakeConstitution{}
 }
 
 const govActionTx = 1
@@ -165,10 +190,10 @@ func newGovFix(t *testing.T) *govFix {
 		env := &Env{Mode: o.Mode, NetworkID: ports.NetworkTestnet, Clock: cliClock{},
 			AddressInspector: led, MinOutputCalculator: led, FeeEstimator: led, TxBodyBuilder: led, TxAssembler: led,
 			Addresses: led, Certs: led, CertDecoder: led, PaymentKeys: soft, StakeKeys: soft, Mnemonics: soft, WalletDeriver: soft,
-			DRepKeys: soft, ComColdKeys: soft, ComHotKeys: soft, GovDeriver: soft, VoteFiles: led, ActionFiles: paramChangeMapped{led},
-			Genesis: cliGenesis{}, Tip: cliTip{}, Params: govParams{}, Utxos: fakeUtxos{},
+			DRepKeys: soft, ComColdKeys: soft, ComHotKeys: soft, GovDeriver: soft, VoteFiles: led, ActionFiles: led,
+			Genesis: cliGenesis{}, Tip: cliTip{}, Params: f.paramsReader(), Utxos: f.utxoReader(), MetadataFiles: fsstore.MetadataFiles{},
 			DReps: f.dreps, Committee: f.committee, GovActions: f.actions, StakeDists: f.dist, Summaries: f.summaries, DRepCross: f.drepCross, Rewards: f.rewards,
-			Constitution: fakeConstitution{}, LastEnacted: fakeLastEnacted{}, Epochs: fakeEpoch{}, AnchorFetcher: f.fetcher}
+			Constitution: f.constitutionReader(), LastEnacted: fakeLastEnacted{}, Epochs: fakeEpoch{}, AnchorFetcher: f.fetcher, TxEvaluator: f.evaluator}
 		if f.submit {
 			env.Submitter = f.sub
 			env.Absent(CapQueue, "light mode submits through the provider")
@@ -200,6 +225,8 @@ func newGovFix(t *testing.T) *govFix {
 				env.Epochs = nil
 			case CapConstitution:
 				env.Constitution = nil
+			case CapTxEvaluator:
+				env.TxEvaluator = nil
 			case CapLastEnacted:
 				env.LastEnacted = nil
 			case CapVoteFiles:
@@ -604,14 +631,8 @@ func TestActionCreateAndSubmit(t *testing.T) {
 	if _, err := f.cmd(t, nil, "action", "create", "nonsense", ret); err == nil || !strings.Contains(err.Error(), "info, no-confidence") {
 		t.Errorf("%v", err)
 	}
-	// parameter-change: the typed unsupported error, surfaced clearly; nothing written.
-	_, err := f.cmd(t, nil, "action", "create", "parameter-change", ret, "--anchor-url", govURL, "--anchor-hash", govHash, "--param", "maxTxSize=20000")
-	if !errors.Is(err, governance.ErrParameterChangeUnsupported) || !strings.Contains(err.Error(), "cannot be written yet") || !strings.Contains(err.Error(), "no file was written") {
-		t.Errorf("parameter-change: %v", err)
-	}
-
 	// Submit: the summary shows the kind, the deposit and the return address.
-	out, err = f.cmd(t, []string{"n"}, "action", "submit", "w", file)
+	out, err := f.cmd(t, []string{"n"}, "action", "submit", "w", file)
 	if !errors.Is(err, governance.ErrDeclined) {
 		t.Fatalf("%v", err)
 	}
@@ -621,17 +642,6 @@ func TestActionCreateAndSubmit(t *testing.T) {
 	f.queuedN(t, 1)
 	mustContain(t, out, "Proposal 1 will be action ", "Submitted transaction")
 	govNoKeys(t, f, out)
-
-	// Guardrails kinds: the use case's typed error, printed exactly.
-	f.must(t, "action", "create", "treasury-withdrawal", ret, "--anchor-url", govURL, "--anchor-hash", govHash, "--amount", "1000000")
-	tw := f.glob(t, "treasurywithdrawals_*.action")
-	_, err = f.cmd(t, nil, "action", "submit", "w", tw, "--yes")
-	var ge *governance.GuardrailsError
-	if !errors.As(err, &ge) {
-		t.Fatalf("%v", err)
-	}
-	mustContain(t, err.Error(), "TreasuryWithdrawals", "guardrails script", "What is missing", "a collateral UTxO", "execution units", "Nothing was signed")
-	f.queuedN(t, 1)
 }
 
 // An info action needs no chain reader: it is written with no epoch, constitution
@@ -736,4 +746,21 @@ func TestGovernanceCommandsListEveryMissingCapabilityBeforeAnyPrompt(t *testing.
 		}
 	}
 	f.queuedN(t, 0)
+}
+
+// The key sources of the key generation commands are declared exclusive on the
+// command itself, so cobra refuses the pair before the command runs and the
+// usage says so; the run-time checks stay as a second line.
+func TestGovKeyGenerationSourcesAreDeclaredExclusive(t *testing.T) {
+	f := newGovFix(t)
+	for _, args := range [][]string{
+		{"drep", "keys", "generate", "d", "--mnemonic", "--mnemonic-in-fd", "9"},
+		{"drep", "keys", "generate", "d", "--mnemonic", "--hardware"},
+		{"drep", "keys", "generate", "d", "--mnemonic-in-fd", "9", "--hardware"},
+	} {
+		out, err := f.cmd(t, nil, args...)
+		if err == nil || !strings.Contains(err.Error(), "none of the others can be") {
+			t.Errorf("%v: %v\n%s", args, err, out)
+		}
+	}
 }

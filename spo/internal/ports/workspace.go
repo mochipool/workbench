@@ -172,6 +172,13 @@ type AuditEvent struct {
 	ProtectedKeys int  // signing keys written in upstream's encrypted form
 	Protected     bool // a password was used
 	Acknowledged  bool // the operator acknowledged plaintext export
+
+	// The fields below describe a read that rested on one chain source because
+	// the operator gave --single-source (Operation "single-source-read").
+	Command      string // the command, "spo stake deregister"
+	Read         string // what was read, "reward balance and stake deposit"
+	Source       string // the one provider the read rested on
+	SingleSource bool   // --single-source was given and was needed
 }
 
 // WorkspaceAuditor records AuditEvents. The use case records before it
@@ -187,7 +194,7 @@ type WorkspaceAuditor interface {
 func IsWorkspaceKind(k Kind) bool {
 	switch k {
 	case PartyKeys, PartyIdentity, PartyRecords, PartyReplay, TailcatNodeKey, TailcatPSK, TailcatAddr,
-		MultisigCoordinator, MultisigSigner, MultisigOutbox, MultisigEvents, MultisigCollection, ProviderToken,
+		MultisigCoordinator, MultisigSigner, MultisigOutbox, MultisigEvents, MultisigCollection, MultisigSubmitted, ProviderToken,
 		WorkspaceAuditLog:
 		return false
 	}

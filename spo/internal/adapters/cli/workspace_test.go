@@ -186,10 +186,10 @@ func TestExportNeedsAProtectionChoice(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "out")
 	f.audit.dest = target
 	err := f.run(&scriptTerm{t: t}, "workspace", "export", target)
-	if err == nil || !strings.Contains(err.Error(), "--password-fd") || !strings.Contains(err.Error(), "--plaintext") {
+	if err == nil || !strings.Contains(err.Error(), "password-fd") || !strings.Contains(err.Error(), "plaintext") {
 		t.Fatalf("%v", err)
 	}
-	if err := f.run(&scriptTerm{t: t}, "workspace", "export", target, "--plaintext", "--password-fd", "9"); err == nil || !strings.Contains(err.Error(), "choose one") {
+	if err := f.run(&scriptTerm{t: t}, "workspace", "export", target, "--plaintext", "--password-fd", "9"); err == nil || !strings.Contains(err.Error(), "none of the others can be") {
 		t.Errorf("both choices: %v", err)
 	}
 	if _, serr := os.Stat(target); serr == nil || len(f.audit.events) != 0 {

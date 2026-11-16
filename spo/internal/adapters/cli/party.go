@@ -97,7 +97,7 @@ operators compare fingerprints over another channel. See docs/reference/spo-cli.
 All of it needs a sealed workspace.`,
 	}
 	c.AddCommand(a.partyInitCommand(), a.partyShowCommand(), a.partyExportCommand(), a.partyEnrollCommand(), a.partyListCommand(),
-		a.partyRevokeCommand(), a.partyScopeCommand(), a.partyEventsCommand(),
+		a.partyRevokeCommand(), a.partyScopeCommand(), a.partyEventsCommand(), a.partyRotateCommand(), a.partyRotationCommand(),
 		a.partyRequestCommand(), a.partyInboxCommand(), a.partyOutboxCommand(),
 		a.partyRequestsCommand(), a.partyReviewCommand(), a.partyApproveCommand(), a.partyRefuseCommand(),
 		a.partyServeCommand(), a.partyConnectCommand())

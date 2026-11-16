@@ -116,7 +116,14 @@ func TestPlansAreRefusedOrAcceptedByTheDevicesProfile(t *testing.T) {
 		{"Ledger", "8.0.8", slot(custody.RoleCalidus, custody.OpExportVKey), false}, // SPO-15-PRE-002
 		{"Ledger", "8.0.8", slot(custody.RoleKES, custody.OpExportVKey), false},
 		{"Ledger", "8.0.8", slot(custody.RoleVRF, W), false},
-		{"Ledger", "8.0.8", slot(custody.RolePoolCold, custody.OpSignCip88), false},
+		{"Ledger", "8.0.8", slot(custody.RolePoolCold, custody.OpSignCip88), true}, // SPO-15-EXT-004
+		{"Keystone", "1.7.7", slot(custody.RolePoolCold, custody.OpSignCip88), true},
+		{"Trezor", "2.7.2", slot(custody.RolePoolCold, custody.OpSignCip88), false},
+		{"Ledger", "8.0.8", slot(custody.RoleCalidus, custody.OpSignText), false}, // SPO-15-IF-006
+		{"Keystone", "1.7.7", slot(custody.RoleCalidus, custody.OpExportVKey), false},
+		{"Trezor", "2.7.2", slot(custody.RoleCalidus, custody.OpExportVKey), false},
+		{"Trezor", "2.7.2", slot(custody.RoleCatalystVote, custody.OpExportVKey), false}, // SPO-09a-EXT-002
+		{"Keystone", "1.7.7", slot(custody.RoleCatalystVote, custody.OpExportVKey), false},
 		{"Ledger", "8.0.8", slot(custody.RolePayment, custody.OpSignMessage), false},
 		{"Ledger", "8.0.8", slot(custody.RoleDRep, W, custody.FeatMint), false},
 		// Keystone: Ledger or Keystone keys, no voting, no unrestricted mode.

@@ -134,7 +134,7 @@ func printPoolSummary(ctx context.Context, w io.Writer, store ports.Store, ids p
 		title += ", before the witnesses are collected"
 	}
 	fmt.Fprintf(w, "\n%s\n", title)
-	fmt.Fprintf(w, "  pool         %s\n", s.Account)
+	fmt.Fprintf(w, "  pool         %s\n", shown(s.Account))
 	fmt.Fprintf(w, "  pool id      %s\n", s.Pool)
 	var d *pool.Descriptor
 	var slots []slotInfo
@@ -158,7 +158,7 @@ func printPoolSummary(ctx context.Context, w io.Writer, store ports.Store, ids p
 	}
 	if s.Kind == "pool retirement" {
 		if d != nil {
-			fmt.Fprintf(w, "  ticker       %s\n", d.Text(pool.FieldMetaTicker))
+			fmt.Fprintf(w, "  ticker       %s\n", shown(d.Text(pool.FieldMetaTicker)))
 			fmt.Fprintf(w, "  retires at   epoch %s\n", d.Text(pool.FieldDeregEpoch))
 		}
 	} else {
@@ -167,7 +167,7 @@ func printPoolSummary(ctx context.Context, w io.Writer, store ports.Store, ids p
 			cost, _ := pool.ParseLovelace(d.Text(pool.FieldCost))
 			fmt.Fprintf(w, "  cost         %s per epoch\n", lovelaceText(cost))
 			fmt.Fprintf(w, "  margin       %s\n", d.Text(pool.FieldMargin))
-			fmt.Fprintf(w, "  reward acct  %s\n", d.Text(pool.FieldRewards))
+			fmt.Fprintf(w, "  reward acct  %s\n", shown(d.Text(pool.FieldRewards)))
 			if owners, _, err := d.Owners(); err == nil {
 				for _, o := range owners {
 					wit := o.Witness
@@ -179,16 +179,16 @@ func printPoolSummary(ctx context.Context, w io.Writer, store ports.Store, ids p
 			}
 			if rels, err := d.Relays(); err == nil {
 				for _, r := range rels {
-					fmt.Fprintf(w, "  relay        %s %s", r.Type, r.Entry)
+					fmt.Fprintf(w, "  relay        %s %s", r.Type, shown(r.Entry))
 					if r.Port != "" {
 						fmt.Fprintf(w, ":%s", r.Port)
 					}
 					fmt.Fprintln(w)
 				}
 			}
-			fmt.Fprintf(w, "  ticker       %s\n", d.Text(pool.FieldMetaTicker))
-			fmt.Fprintf(w, "  metadata     %s\n", d.Text(pool.FieldMetaURL))
-			fmt.Fprintf(w, "  meta hash    %s\n", d.Text(pool.FieldMetaHash))
+			fmt.Fprintf(w, "  ticker       %s\n", shown(d.Text(pool.FieldMetaTicker)))
+			fmt.Fprintf(w, "  metadata     %s\n", shown(d.Text(pool.FieldMetaURL)))
+			fmt.Fprintf(w, "  meta hash    %s\n", shown(d.Text(pool.FieldMetaHash)))
 		}
 		if s.Deposit > 0 {
 			fmt.Fprintf(w, "  deposit      %s (paid)\n", lovelaceText(s.Deposit))
@@ -197,11 +197,11 @@ func printPoolSummary(ctx context.Context, w io.Writer, store ports.Store, ids p
 		}
 	}
 	if s.Source != "" {
-		fmt.Fprintf(w, "  paid by      %s\n", s.Source)
+		fmt.Fprintf(w, "  paid by      %s\n", shown(s.Source))
 	}
 	if len(s.Attachments) > 0 {
 		for _, at := range s.Attachments {
-			fmt.Fprintf(w, "  attaches     %s\n", at)
+			fmt.Fprintf(w, "  attaches     %s\n", shown(at))
 		}
 	}
 	if s.Inputs > 0 {
@@ -212,7 +212,7 @@ func printPoolSummary(ctx context.Context, w io.Writer, store ports.Store, ids p
 		if i == len(s.Outputs)-1 {
 			label = "change"
 		}
-		fmt.Fprintf(w, "  %-12s %s  %s\n", label, o.Address, lovelaceText(o.Lovelace))
+		fmt.Fprintf(w, "  %-12s %s  %s\n", label, shown(string(o.Address)), lovelaceText(o.Lovelace))
 	}
 	if s.Fee > 0 {
 		fmt.Fprintf(w, "  fee          %s\n", lovelaceText(s.Fee))
@@ -223,7 +223,7 @@ func printPoolSummary(ctx context.Context, w io.Writer, store ports.Store, ids p
 		fmt.Fprintf(w, "  valid until  slot %d\n", s.TTL)
 	}
 	for _, m := range s.Message {
-		fmt.Fprintf(w, "  message      %s\n", m)
+		fmt.Fprintf(w, "  message      %s\n", shown(m))
 	}
 	if s.TxID != (chain.TxID{}) {
 		fmt.Fprintf(w, "  tx id        %s\n", s.TxID)
@@ -237,7 +237,7 @@ func printPoolSummary(ctx context.Context, w io.Writer, store ports.Store, ids p
 	if len(s.Sources) > 0 {
 		names := make([]string, len(s.Sources))
 		for i, src := range s.Sources {
-			names[i] = string(src)
+			names[i] = shown(string(src))
 		}
 		fmt.Fprintf(w, "  checked via  %s\n", strings.Join(names, ", "))
 	}
@@ -248,7 +248,10 @@ func printPoolSummary(ctx context.Context, w io.Writer, store ports.Store, ids p
 		fmt.Fprintf(w, "  WARNING      the pledge must stay in the owners' delegated stake while the pool is registered, and the deposit comes back only when the pool retires\n")
 	}
 	for _, u := range s.Unchecked {
-		fmt.Fprintf(w, "  NOT CHECKED  %s\n", u)
+		fmt.Fprintf(w, "  NOT CHECKED  %s\n", shown(u))
+	}
+	for _, n := range s.Notes {
+		fmt.Fprintf(w, "  NOTE         %s\n", shown(n))
 	}
 	fmt.Fprintln(w)
 }

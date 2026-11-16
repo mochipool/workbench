@@ -27,6 +27,7 @@ import (
 //	new constitution    [5, previous id / null, [[url, hash], guardrails script / null]]
 //	update committee    [4, previous id / null, {removed credentials}, {added credential: end epoch}, threshold]
 //	treasury withdrawal [2, {reward account: lovelace}, guardrails script / null]
+//	parameter change    [0, previous id / null, {parameter number: value}, guardrails script / null] (govparams.go)
 //
 // where the committee sets and maps are ordered as the ledger orders credentials
 // (script before key, then by hash) and the threshold is a tag-30 rational.
@@ -39,14 +40,8 @@ var actionDescriptions = map[governance.ActionKind]string{
 	governance.NewConstitution:     "Update to the Constitution or policy proposal",
 	governance.UpdateCommittee:     "New constitutional committee and/or threshold and/or terms proposal",
 	governance.TreasuryWithdrawals: "Treasury withdrawal proposal",
-	governance.ParameterChange:     "Protocol parameters update proposal",
+	governance.ParameterChange:     "Update protocol parameters proposal",
 }
-
-// ErrParameterChangeUnsupported: the parameter-update proposal is not built
-// by this adapter yet (the 41-parameter table of SPO-25a-IF-022). It is the
-// port's sentinel, so the layers above, which cannot import this package,
-// match it with errors.Is(err, ports.ErrParameterChangeUnsupported).
-var ErrParameterChangeUnsupported = fmt.Errorf("%w", ports.ErrParameterChangeUnsupported)
 
 const (
 	actTagHardFork     = 1
@@ -98,17 +93,44 @@ func credLess(aScript bool, ah []byte, bScript bool, bh []byte) bool {
 // BuildActionFile implements ports.ActionFileBuilder.
 //
 // spec: SPO-25a-EXT-005, SPO-25a-EXT-006, SPO-25a-EXT-007, SPO-25a-EXT-008, SPO-25a-EXT-009, SPO-25a-EXT-010,
-// spec: SPO-25a-EXT-012, SPO-25a-OUT-002, SPO-Pfiles-OUT-030
+// spec: SPO-25a-EXT-012, SPO-25a-EXT-013, SPO-25a-OUT-002, SPO-Pfiles-OUT-030
 func (Ledger) BuildActionFile(a governance.Action) (ports.ActionFile, error) {
 	if err := a.Validate(); err != nil {
 		return ports.ActionFile{}, err
 	}
 	if a.Kind == governance.ParameterChange {
-		return ports.ActionFile{}, ErrParameterChangeUnsupported
+		// The canonical set, in the ledger's order.
+		params, err := governance.CheckParams(a.Params)
+		if err != nil {
+			return ports.ActionFile{}, err
+		}
+		a.Params = params
 	}
+	b, err := encodeAction(a)
+	if err != nil {
+		return ports.ActionFile{}, err
+	}
+	env, err := textEnvelope(actionEnvelopeType, actionDescriptions[a.Kind], hex.EncodeToString(b), "    ")
+	if err != nil {
+		return ports.ActionFile{}, err
+	}
+	out := ports.ActionFile{Action: a, CBOR: b, Envelope: env}
+	back, err := Ledger{}.DecodeActionFile(env)
+	if err != nil {
+		return ports.ActionFile{}, fmt.Errorf("the encoded action does not read back: %w", err)
+	}
+	if !sameAction(a, back.Action) {
+		return ports.ActionFile{}, errors.New("the encoded action reads back as another action")
+	}
+	return out, nil
+}
+
+// encodeAction writes the proposal procedure of an action in the form
+// cardano-cli writes. DecodeActionFile requires a file to equal it.
+func encodeAction(a governance.Action) ([]byte, error) {
 	ret, err := rewardAccount(a.Return)
 	if err != nil {
-		return ports.ActionFile{}, fmt.Errorf("deposit return: %w", err)
+		return nil, fmt.Errorf("deposit return: %w", err)
 	}
 	var b []byte
 	b = cborArray(b, 4)
@@ -145,14 +167,14 @@ func (Ledger) BuildActionFile(a governance.Action) (ports.ActionFile, error) {
 		for i, w := range a.Withdrawals {
 			acct, err := rewardAccount(w.Account)
 			if err != nil {
-				return ports.ActionFile{}, fmt.Errorf("withdrawal %d: %w", i, err)
+				return nil, fmt.Errorf("withdrawal %d: %w", i, err)
 			}
 			ws[i] = wd{acct, w.Amount}
 		}
-		sort.SliceStable(ws, func(i, j int) bool { return bytes.Compare(ws[i].acct, ws[j].acct) < 0 })
+		sort.SliceStable(ws, func(i, j int) bool { return rewardAccountLess(ws[i].acct, ws[j].acct) })
 		for i := 1; i < len(ws); i++ {
 			if bytes.Equal(ws[i].acct, ws[i-1].acct) {
-				return ports.ActionFile{}, errors.New("a treasury withdrawal names the same account twice")
+				return nil, errors.New("a treasury withdrawal names the same account twice")
 			}
 		}
 		b = cborArray(b, 3)
@@ -161,6 +183,15 @@ func (Ledger) BuildActionFile(a governance.Action) (ports.ActionFile, error) {
 		for _, w := range ws {
 			b = cborBytes(b, w.acct)
 			b = cborUint(b, uint64(w.amt))
+		}
+		b = gScript(b, a.Guardrails)
+	case governance.ParameterChange:
+		b = cborArray(b, 4)
+		b = cborUint(b, actTagParameters)
+		b = gPrev(b, a.Prev)
+		var err error
+		if b, err = encodeParamUpdate(b, a.Params); err != nil {
+			return nil, err
 		}
 		b = gScript(b, a.Guardrails)
 	case governance.UpdateCommittee:
@@ -188,22 +219,9 @@ func (Ledger) BuildActionFile(a governance.Action) (ports.ActionFile, error) {
 		b = cborUint(b, a.Threshold.Num)
 		b = cborUint(b, a.Threshold.Den)
 	default:
-		return ports.ActionFile{}, fmt.Errorf("%w: %q", governance.ErrActionKind, a.Kind)
+		return nil, fmt.Errorf("%w: %q", governance.ErrActionKind, a.Kind)
 	}
-	b = gAnchor(b, a.Anchor.URL, a.Anchor.Hash, true)
-	env, err := textEnvelope(actionEnvelopeType, actionDescriptions[a.Kind], hex.EncodeToString(b), "    ")
-	if err != nil {
-		return ports.ActionFile{}, err
-	}
-	out := ports.ActionFile{Action: a, CBOR: b, Envelope: env}
-	back, err := Ledger{}.DecodeActionFile(env)
-	if err != nil {
-		return ports.ActionFile{}, fmt.Errorf("the encoded action does not read back: %w", err)
-	}
-	if !sameAction(a, back.Action) {
-		return ports.ActionFile{}, errors.New("the encoded action reads back as another action")
-	}
-	return out, nil
+	return gAnchor(b, a.Anchor.URL, a.Anchor.Hash, true), nil
 }
 
 // sameAction compares what an action file carries (the deposit-return address
@@ -221,7 +239,6 @@ func sameAction(a, b governance.Action) bool {
 		sort.SliceStable(x.Remove, func(i, j int) bool {
 			return credLess(x.Remove[i].Script, x.Remove[i].Hash[:], x.Remove[j].Script, x.Remove[j].Hash[:])
 		})
-		x.Params = nil
 		return x
 	}
 	na, nb := norm(a), norm(b)
@@ -262,8 +279,8 @@ func stakeAddressOf(raw []byte) (chain.StakeAddress, governance.Credential, erro
 	return chain.StakeAddress(s), c, err
 }
 
-// DecodeActionFile implements ports.ActionFileBuilder. A parameter change
-// and any other tag it does not read is an error.
+// DecodeActionFile implements ports.ActionFileBuilder. A tag it does not read
+// is an error.
 //
 // spec: SPO-25b-IN-002, SPO-25b-PRE-004, SPO-25b-PRE-005, SPO-25b-PRE-006
 func (Ledger) DecodeActionFile(envelope []byte) (ports.ActionFile, error) {
@@ -281,7 +298,10 @@ func (Ledger) DecodeActionFile(envelope []byte) (ports.ActionFile, error) {
 	if err != nil {
 		return ports.ActionFile{}, errors.New("the action cborHex is not hex")
 	}
-	it, err := gparseAll(raw)
+	// The indefinite-length arrays of cardano-cli's cost models are the one
+	// leniency; the comparison with the builder's bytes at the end makes it
+	// exact: an indefinite array anywhere else cannot equal what is built.
+	it, err := gparseAllIndefinite(raw)
 	if err != nil {
 		return ports.ActionFile{}, fmt.Errorf("the action: %w", err)
 	}
@@ -335,6 +355,9 @@ func (Ledger) DecodeActionFile(envelope []byte) (ports.ActionFile, error) {
 		copy(c.Hash[:], x.arr[1].b)
 		return c, true
 	}
+	if g[0].major != 0 {
+		return bad("the governance action tag is not an unsigned integer")
+	}
 	ok := true
 	switch g[0].u {
 	case actTagInfo:
@@ -348,7 +371,7 @@ func (Ledger) DecodeActionFile(envelope []byte) (ports.ActionFile, error) {
 		}
 	case actTagHardFork:
 		a.Kind = governance.HardForkInitiation
-		ok = len(g) == 3 && g[2].major == 4 && len(g[2].arr) == 2
+		ok = len(g) == 3 && g[2].major == 4 && len(g[2].arr) == 2 && g[2].arr[0].major == 0 && g[2].arr[1].major == 0
 		if ok {
 			a.Prev, ok = prev(g[1])
 			a.Version = governance.Version{Major: g[2].arr[0].u, Minor: g[2].arr[1].u}
@@ -372,12 +395,17 @@ func (Ledger) DecodeActionFile(envelope []byte) (ports.ActionFile, error) {
 		a.Kind = governance.TreasuryWithdrawals
 		ok = len(g) == 3 && g[1].major == 5
 		if ok {
+			seenAcct := map[string]bool{}
 			for i, k := range g[1].keys {
 				addr, key, err := stakeAddressOf(k.b)
-				if err != nil || g[1].vals[i].major != 0 {
+				if k.major != 2 || err != nil || g[1].vals[i].major != 0 {
 					ok = false
 					break
 				}
+				if seenAcct[string(addr)] {
+					return bad(fmt.Sprintf("the treasury withdrawal names the account %s twice", addr))
+				}
+				seenAcct[string(addr)] = true
 				a.Withdrawals = append(a.Withdrawals, governance.Withdrawal{Account: addr, Key: key, Amount: chain.Lovelace(g[1].vals[i].u)})
 			}
 			if ok {
@@ -387,7 +415,8 @@ func (Ledger) DecodeActionFile(envelope []byte) (ports.ActionFile, error) {
 	case actTagCommittee:
 		a.Kind = governance.UpdateCommittee
 		ok = len(g) == 5 && g[2].major == 6 && g[2].inner != nil && g[2].inner.major == 4 && g[3].major == 5 &&
-			g[4].major == 6 && g[4].u == 30 && g[4].inner != nil && len(g[4].inner.arr) == 2
+			g[4].major == 6 && g[4].u == 30 && g[4].inner != nil && len(g[4].inner.arr) == 2 &&
+			g[4].inner.arr[0].major == 0 && g[4].inner.arr[1].major == 0
 		if ok {
 			a.Prev, ok = prev(g[1])
 		}
@@ -410,13 +439,32 @@ func (Ledger) DecodeActionFile(envelope []byte) (ports.ActionFile, error) {
 			}
 			a.Threshold = chain.Rational{Num: g[4].inner.arr[0].u, Den: g[4].inner.arr[1].u}
 		}
-	case 0:
-		return ports.ActionFile{}, ErrParameterChangeUnsupported
+	case actTagParameters:
+		a.Kind = governance.ParameterChange
+		ok = len(g) == 4 && g[2].major == 5
+		if ok {
+			a.Prev, ok = prev(g[1])
+		}
+		if ok {
+			var perr error
+			if a.Params, perr = decodeParamUpdate(g[2]); perr != nil {
+				return bad(perr.Error())
+			}
+			a.Guardrails, ok = script(g[3])
+		}
 	default:
 		return bad(fmt.Sprintf("the governance action tag %d is not one this adapter reads", g[0].u))
 	}
 	if !ok {
 		return bad(fmt.Sprintf("the governance action of tag %d is malformed", g[0].u))
+	}
+	// What is shown is what is carried: the file must be what the builder writes
+	// for the action it was read as. A non-minimal integer, a duplicate map key,
+	// an unsorted set or an indefinite array outside the cost models cannot be.
+	if want, err := encodeAction(a); err != nil {
+		return bad(err.Error())
+	} else if !bytes.Equal(want, raw) {
+		return ports.ActionFile{}, errors.New("the action file is not in the canonical encoding (a non-minimal integer, an unsorted or repeated set or map entry, or an indefinite-length item other than a cost model): refusing to display what may not be what it carries")
 	}
 	return ports.ActionFile{Action: a, CBOR: raw, Envelope: append([]byte(nil), envelope...)}, nil
 }
@@ -434,3 +482,23 @@ func encodeProposals(b []byte, props [][]byte) []byte {
 }
 
 var _ ports.ActionFileBuilder = Ledger{}
+
+// rewardAccountLess is the ledger's order of reward accounts, the order of the
+// treasury-withdrawal map that cardano-cli writes whatever the order of its
+// flags: the network id first (testnet before mainnet), then the credential
+// with a script before a key (the ledger's Credential has ScriptHashObj first),
+// then the hash. The raw bytes do not sort this way: the header byte of a key
+// account (0xe0 or 0xe1) is below that of a script account (0xf0 or 0xf1).
+// Observed with cardano-cli: a script account precedes a key account.
+func rewardAccountLess(a, b []byte) bool {
+	if len(a) == 0 || len(b) == 0 {
+		return bytes.Compare(a, b) < 0
+	}
+	if na, nb := a[0]&0x0f, b[0]&0x0f; na != nb {
+		return na < nb
+	}
+	if sa, sb := a[0]&0x10 != 0, b[0]&0x10 != 0; sa != sb {
+		return sa
+	}
+	return bytes.Compare(a[1:], b[1:]) < 0
+}

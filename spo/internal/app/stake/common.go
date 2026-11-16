@@ -271,6 +271,9 @@ type accountReads struct {
 	Primary    ports.RewardAccountReader
 	CrossCheck ports.RewardAccountReader
 	Policy     SourcePolicy
+	// OnSingle records an acknowledged single source before the use case goes
+	// on (ADR 0006). Nil with Policy SingleSourceAcknowledged refuses.
+	OnSingle ports.SingleSourceHook
 }
 
 type accountAnswer struct {
@@ -278,42 +281,10 @@ type accountAnswer struct {
 	Known   stk.Known
 	Sources []chain.Source
 	Single  bool
-}
-
-func sameAccount(a, b chain.RewardAccount) bool {
-	eq := func(x, y bool) bool { return x == y }
-	pool := func(x, y chain.Reading[chain.PoolID]) bool {
-		xv, xo := x.Get()
-		yv, yo := y.Get()
-		return eq(xo, yo) && xv == yv && x.IsNone() == y.IsNone()
-	}
-	str := func(x, y chain.Reading[string]) bool {
-		xv, xo := x.Get()
-		yv, yo := y.Get()
-		return eq(xo, yo) && xv == yv && x.IsNone() == y.IsNone()
-	}
-	dep := func(x, y chain.Reading[chain.Lovelace]) bool {
-		xv, xo := x.Get()
-		yv, yo := y.Get()
-		return eq(xo, yo) && xv == yv && x.IsNone() == y.IsNone()
-	}
-	xg, xo := a.GovActionDeposits.Get()
-	yg, yo := b.GovActionDeposits.Get()
-	gov := xo == yo && len(xg) == len(yg)
-	for i := 0; gov && i < len(xg); i++ {
-		gov = xg[i] == yg[i]
-	}
-	return a.Withdrawable == b.Withdrawable && pool(a.DelegatedPool, b.DelegatedPool) && str(a.VoteDelegation, b.VoteDelegation) &&
-		dep(a.Deposit, b.Deposit) && gov
-}
-
-func sameReading(a, b chain.Reading[chain.RewardAccount]) bool {
-	if a.IsNone() || b.IsNone() {
-		return a.IsNone() && b.IsNone()
-	}
-	av, _ := a.Get()
-	bv, _ := b.Get()
-	return sameAccount(av, bv)
+	// Notes say what the answer rests on one source for although two agreed:
+	// a figure the second source does not state (the deposit of a Blockfrost
+	// account), which the summary must show.
+	Notes []string
 }
 
 // read answers what the chain says about a stake address. Unknown is an
@@ -344,18 +315,45 @@ func (a accountReads) read(ctx context.Context, addr chain.StakeAddress, harmful
 			return accountAnswer{}, fmt.Errorf("the stake address state from %s: %w", a.CrossCheck.Source(), err)
 		}
 		if !r2.IsUnknown() {
-			if !sameReading(r, r2) {
-				return accountAnswer{}, fmt.Errorf("%w: %s and %s", ErrSourcesDisagree, a.Primary.Source(), a.CrossCheck.Source())
+			if diff := compareAccounts(r, r2); diff != "" {
+				return accountAnswer{}, fmt.Errorf("%w: %s says %s, %s says %s (%s)", ErrSourcesDisagree,
+					a.Primary.Source(), describeAccount(r), a.CrossCheck.Source(), describeAccount(r2), diff)
 			}
 			corroborated = true
 			out.Sources = append(out.Sources, a.CrossCheck.Source())
+			out.Notes = append(out.Notes, depositNote(r, r2, a.Primary.Source(), a.CrossCheck.Source())...)
+		} else if a.Policy != SingleSourceAcknowledged {
+			return accountAnswer{}, fmt.Errorf("%w: %s says %s, but %s did not answer: %s", ErrSingleSource,
+				a.Primary.Source(), describeAccount(r), a.CrossCheck.Source(), r2.Why())
 		}
 	}
 	if !corroborated {
 		if a.Policy != SingleSourceAcknowledged {
 			return accountAnswer{}, fmt.Errorf("%w: %s", ErrSingleSource, a.Primary.Source())
 		}
+		if err := a.OnSingle.Accept(ctx, "the reward balance and stake deposit", a.Primary.Source()); err != nil {
+			return accountAnswer{}, err
+		}
 		out.Single = true
 	}
 	return out, nil
+}
+
+// depositNote is the statement that a deposit amount rests on the first
+// provider although both agreed on the rest: the second does not state
+// deposits, so nothing corroborated the figure the refund is computed from. A
+// wrong amount is refused by the ledger, which the note says.
+func depositNote(first, second chain.Reading[chain.RewardAccount], firstSrc, secondSrc chain.Source) []string {
+	a, ok := first.Get()
+	if !ok {
+		return nil
+	}
+	d, stated := a.Deposit.Get()
+	if !stated {
+		return nil
+	}
+	if b, ok := second.Get(); ok && !b.Deposit.IsUnknown() {
+		return nil
+	}
+	return []string{fmt.Sprintf("deposit %d lovelace from %s only; %s does not state deposits; the ledger refuses a wrong amount", d, firstSrc, secondSrc)}
 }

@@ -51,6 +51,10 @@ type BodySpec struct {
 	// cardano-cli does. Each one needs its own witness, so the caller counts it
 	// in the witness count of the fee estimate (SPO-13b-INV-001).
 	RequiredSigners []KeyHash
+	// Plutus is the script, redeemers and collateral the body and its witness
+	// set carry: the collateral inputs (body key 13), the script-data hash
+	// (key 11), the script and the redeemers (witness set keys 7 and 5).
+	Plutus *PlutusAttachment
 }
 
 // Ledger bundles the functions Balance needs.
@@ -252,11 +256,21 @@ func hintSuffix(h string) string {
 	return "; " + h
 }
 
-func (d Draft) spec(outs []Output, fee chain.Lovelace, ttl uint64) BodySpec {
+func (d Draft) spec(outs []Output, fee chain.Lovelace, ttl uint64, min MinOutputFunc, check bool) (BodySpec, error) {
+	plutus := d.Plutus
+	if plutus != nil {
+		// The collateral that is at risk follows the fee, and its fields are
+		// part of the body, so they are set before the fee is estimated.
+		a, err := plutus.WithCollateralFor(fee, d.Payer, min, check)
+		if err != nil {
+			return BodySpec{}, err
+		}
+		plutus = &a
+	}
 	return BodySpec{Inputs: d.Inputs, Outputs: outs, Fee: fee, TTL: ttl, Message: d.Message,
 		Certificates: d.Certificates, Withdrawals: d.Withdrawals, Votes: d.Votes, Proposals: d.Proposals,
 		Mint: d.Mint, MintScripts: d.MintScripts, MetadataFiles: d.MetadataFiles, MessageEncryption: d.MessageEncryption,
-		RequiredSigners: d.RequiredSigners}
+		RequiredSigners: d.RequiredSigners, Plutus: plutus}, nil
 }
 
 // Balance runs stages 6 to 8 of the pipeline: it finds the fee by
@@ -278,7 +292,11 @@ func (d Draft) Balance(ttl uint64, l Ledger) (Balanced, error) {
 		if err != nil {
 			return Balanced{}, err
 		}
-		body, err := l.Build(d.spec(outs, fee, ttl))
+		sp, err := d.spec(outs, fee, ttl, l.MinOutput, false)
+		if err != nil {
+			return Balanced{}, err
+		}
+		body, err := l.Build(sp)
 		if err != nil {
 			return Balanced{}, err
 		}
@@ -305,7 +323,10 @@ func (d Draft) Balance(ttl uint64, l Ledger) (Balanced, error) {
 	if err != nil {
 		return Balanced{}, err
 	}
-	spec := d.spec(outs, fee, ttl)
+	spec, err := d.spec(outs, fee, ttl, l.MinOutput, true)
+	if err != nil {
+		return Balanced{}, err
+	}
 	body, err := l.Build(spec)
 	if err != nil {
 		return Balanced{}, err

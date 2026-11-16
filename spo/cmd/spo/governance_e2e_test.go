@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/blake2b"
 
@@ -197,6 +199,7 @@ func TestGovernanceOffline(t *testing.T) {
 		t.Fatalf("%v\n%s", err, out)
 	}
 	mustHave(t, out, "DRep retirement", "refund       500.000000 ADA", "WARNING      a read this transaction rests on came from ONE source")
+	wantSingleSource(t, dir, "spo drep retire")
 	expectQueued(f2, out, 2, 4)
 
 	// ---- votes: `vote create` reads the chain and offline refuses it, naming each missing capability.
@@ -375,7 +378,12 @@ func (k *govKoios) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	switch req.Method + " " + req.URL.Path {
 	case "GET /api/v1/tip": // the recorded tip, epoch 1483
-		return k.respond(200, recorded(k.t, "tip.json"), req), nil
+		// The recorded tip, with the time of the block moved to now: a web
+		// provider whose tip is hours old is stale (ADR 0006), and the recording
+		// is.
+		tip := recorded(k.t, "tip.json")
+		tip = regexp.MustCompile(`"block_time":\d+`).ReplaceAll(tip, []byte(fmt.Sprintf(`"block_time":%d`, time.Now().Unix())))
+		return k.respond(200, tip, req), nil
 	case "GET /api/v1/proposal_list":
 		return k.respond(200, k.openProposals(), req), nil
 	case "GET /api/v1/proposal_votes":

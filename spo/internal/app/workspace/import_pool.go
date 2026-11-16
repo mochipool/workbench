@@ -72,7 +72,16 @@ type ImportPoolFromChain struct {
 	Certs     ports.CertificateBuilder
 	// Params gives the stake address deposit; needed only when an account has
 	// both its keys. Offline mode wires the transfer file's parameters.
-	Params    ports.ProtocolParametersReader
+	Params ports.ProtocolParametersReader
+	// Cross is an optional second, independent reader of the pool's
+	// registration. When the info comes from the chain, the fields both
+	// providers state must agree; without it (or when it does not answer) the
+	// request must acknowledge a single source (ADR 0006, F3).
+	Cross ports.PoolInfoReader
+	// OnSingle records an acknowledged single source before anything is
+	// written; required when the data rests on one provider (ADR 0006). A dry
+	// run writes nothing and records nothing.
+	OnSingle  ports.SingleSourceHook
 	NetworkID uint8
 	// Zone is the zone of regSubmitted; nil is UTC (upstream's `date -R` uses the
 	// machine's zone).
@@ -103,6 +112,49 @@ type ImportPoolRequest struct {
 	Accounts  []AccountKeys
 	// DryRun plans and checks everything and writes nothing.
 	DryRun bool
+	// SingleSource acknowledges registration data that rests on one provider.
+	SingleSource bool
+	// Fetched, when set, is the registration data an earlier Fetch read (and
+	// cross-checked); Run uses it and reads nothing from the chain, so what is
+	// written is what the operator was shown. Source and SingleSource are then
+	// not consulted.
+	Fetched *FetchedPool
+}
+
+// FetchedPool is the registration data of one read of the chain (or an info
+// file) together with the result of its cross-check. A caller that shows the
+// data before it is written passes the same value to every Run.
+type FetchedPool struct {
+	Info chain.PoolInfo
+	// Sources are the providers the data rests on (empty for an info file) and
+	// Single is true when it rests on one by acknowledgement.
+	Sources []chain.Source
+	Single  bool
+	// Mismatch is set when the published metadata does not hash to the
+	// registered hash; Run refuses unless the request accepts it.
+	Mismatch *MetadataMismatch
+}
+
+// Fetch reads the registration data once: the info file or the chain, the
+// metadata check (a mismatch is recorded, not refused), and the cross-check
+// with the second provider. It writes nothing.
+func (u ImportPoolFromChain) Fetch(ctx context.Context, src PoolInfoSource, single bool) (*FetchedPool, error) {
+	info, mm, err := u.acquire(ctx, src)
+	if err != nil {
+		return nil, err
+	}
+	f := &FetchedPool{Info: info, Mismatch: mm}
+	if len(src.InfoFile) == 0 {
+		word, err := stake.ParsePoolWord(src.PoolID)
+		if err != nil || !word.IsID {
+			return nil, ErrBadPoolID
+		}
+		f.Sources, f.Single, err = corroborate(ctx, u.Pools, u.Cross, word.Pool, info, single)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return f, nil
 }
 
 // AccountImported says what became of an account.
@@ -129,6 +181,11 @@ type PoolImported struct {
 	// CounterNext is the number in the counter file (chain counter + 1); valid
 	// when the cold key was imported.
 	CounterNext uint64
+	// Sources are the providers the registration data was read from (empty
+	// for an info file); SingleSource is true when it rests on one of them by
+	// the operator's acknowledgement.
+	Sources      []chain.Source
+	SingleSource bool
 	// RewardsMissing: no account is the pool's rewards account; the script asks
 	// whether to go back and add one (SPO-0x-PR-007, default yes).
 	RewardsMissing bool
@@ -198,11 +255,22 @@ func (u ImportPoolFromChain) Run(ctx context.Context, req ImportPoolRequest) (Po
 	if err != nil {
 		return PoolImported{}, err
 	}
-	// The info first: nothing of the workspace is looked at before it is in hand.
-	info, err := u.Acquire(ctx, req.Source)
-	if err != nil {
-		return PoolImported{}, err
+	// The info first: nothing of the workspace is looked at before it is in
+	// hand. It is read once; a caller that confirms the data passes it back in
+	// req.Fetched. The second provider corroborates it (F3): the reward
+	// address, owners and counter would otherwise rest on one answer.
+	fetched := req.Fetched
+	if fetched == nil {
+		f, err := u.Fetch(ctx, req.Source, req.SingleSource)
+		if err != nil {
+			return PoolImported{}, err
+		}
+		fetched = f
 	}
+	if fetched.Mismatch != nil && !req.Source.AcceptMetadataMismatch {
+		return PoolImported{}, ErrMetadataHash
+	}
+	info, sources, singleUsed := fetched.Info, fetched.Sources, fetched.Single
 
 	// Existing artefacts of the pool (SPO-0x-PR-002, SPO-0x-PRE-004).
 	poolKinds := []ports.Kind{ports.PoolDescriptor, ports.NodeSKey, ports.NodeVKey, ports.NodeCounter, ports.VrfSKey, ports.VrfVKey}
@@ -284,7 +352,7 @@ func (u ImportPoolFromChain) Run(ctx context.Context, req ImportPoolRequest) (Po
 	})
 
 	var plan []put
-	res := PoolImported{Pool: name, Info: info, DryRun: req.DryRun}
+	res := PoolImported{Pool: name, Info: info, DryRun: req.DryRun, Sources: sources, SingleSource: singleUsed}
 	taken := map[ports.Ref]bool{}
 	// refuse catches a name used twice in this request; what the store already
 	// holds is checked against the whole plan below (SPO-0x-PRE-006, SPO-0x-PRE-008).
@@ -506,6 +574,13 @@ func (u ImportPoolFromChain) Run(ctx context.Context, req ImportPoolRequest) (Po
 			return nil
 		})
 		return res, err
+	}
+	// The audit record of an acknowledged single source comes before the first
+	// write (ADR 0006); a failure leaves the workspace as it was.
+	if singleUsed {
+		if err := u.OnSingle.Accept(ctx, "the pool's reward address, owners and operational certificate counter", sources[0]); err != nil {
+			return PoolImported{}, err
+		}
 	}
 	err = u.Store.Update(ctx, func(w ports.Writer) error {
 		// The same checks inside the transaction: the workspace may have moved.

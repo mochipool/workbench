@@ -2,7 +2,6 @@ package ports
 
 import (
 	"context"
-	"errors"
 
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/governance"
@@ -128,24 +127,11 @@ type ActionFile struct {
 	Envelope []byte
 }
 
-// ErrParameterChangeUnsupported: the parameter-update proposal is not built
-// by the action-file adapter yet. An ActionFileBuilder that cannot build a
-// ParameterChange must return an error that wraps this one, so that the use
-// cases and the CLI can tell it from any other failure with errors.Is and
-// without matching text.
-//
-// TODO(native): adapters/native/govaction.go returns its own
-// native.ErrParameterChangeUnsupported, which the layers above cannot import.
-// Until native returns (or wraps) this sentinel, the composition root maps the
-// native error to this one (cmd/spo/env.go). Once native wraps it the mapping
-// can go.
-var ErrParameterChangeUnsupported = errors.New("a ParameterChange action file is not built by this adapter yet")
-
 // ActionFileBuilder makes and reads `.action` files as `cardano-cli governance
 // action create-*` writes them. An action that needs the guardrails script
 // (treasury withdrawal and parameter change under a constitution that has one)
-// still gets its file: the script is evaluated at transaction time. A
-// parameter change is not built by this adapter yet (ErrParameterChangeUnsupported).
+// still gets its file, with the script hash: the script is a witness of the
+// transaction that proposes it.
 type ActionFileBuilder interface {
 	BuildActionFile(a governance.Action) (ActionFile, error)
 	DecodeActionFile(envelope []byte) (ActionFile, error)

@@ -84,7 +84,7 @@ func txViewLines(v party.TxView, authorityFirst bool) (lines []string, authority
 			fmt.Fprintf(b, "    retires at   epoch %d\n", *c.Epoch)
 		}
 		if c.Anchor != nil {
-			fmt.Fprintf(b, "    anchor       %s (hash %x)\n", c.Anchor.URL, c.Anchor.Hash[:])
+			fmt.Fprintf(b, "    anchor       %s (hash %x)\n", shown(c.Anchor.URL), c.Anchor.Hash[:])
 		}
 		if r := c.PoolReg; r != nil {
 			fmt.Fprintf(b, "    operator     %x\n    vrf key      %x\n    pledge       %s\n    cost         %s\n    margin       %d/%d\n    rewards to   %s\n",
@@ -97,10 +97,10 @@ func txViewLines(v party.TxView, authorityFirst bool) (lines []string, authority
 				if rl.HasPort {
 					port = fmt.Sprintf(":%d", rl.Port)
 				}
-				fmt.Fprintf(b, "    relay        %s %s%s\n", rl.Kind, rl.Host, port)
+				fmt.Fprintf(b, "    relay        %s %s%s\n", rl.Kind, shown(rl.Host), port)
 			}
 			if r.HasMeta {
-				fmt.Fprintf(b, "    metadata     %s (hash %x)\n", r.MetaURL, r.MetaHash[:])
+				fmt.Fprintf(b, "    metadata     %s (hash %x)\n", shown(r.MetaURL), r.MetaHash[:])
 			}
 		}
 	}
@@ -116,7 +116,7 @@ func txViewLines(v party.TxView, authorityFirst bool) (lines []string, authority
 	for _, vt := range v.Votes {
 		fmt.Fprintf(b, "  vote         %s on %x#%d: %s\n", vt.Voter, vt.ActionTx[:], vt.ActionIx, vt.Vote)
 		if vt.Anchor != nil && authorityFirst { // a vote anchor is shown in the party review only
-			fmt.Fprintf(b, "    anchor       %s (hash %x)\n", vt.Anchor.URL, vt.Anchor.Hash[:])
+			fmt.Fprintf(b, "    anchor       %s (hash %x)\n", shown(vt.Anchor.URL), vt.Anchor.Hash[:])
 		}
 	}
 	b = w("signers")

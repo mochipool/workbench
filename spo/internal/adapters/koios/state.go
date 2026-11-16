@@ -69,12 +69,14 @@ func (c *Client) PoolState(ctx context.Context, pool chain.PoolID) (chain.Readin
 	if !row.Status.present || row.Status.null {
 		return unknown("pool_info has no pool_status")
 	}
+	status, retEpoch := chain.PoolRegistered, uint64(0)
 	switch row.Status.val {
 	case "registered":
 	case "retiring":
 		if !row.Retiring.present || row.Retiring.null {
 			return unknown("pool_status is retiring but retiring_epoch is absent")
 		}
+		status, retEpoch = chain.PoolRetiring, uint64(row.Retiring.val)
 	case "retired":
 		if !row.Retiring.present || row.Retiring.null {
 			return unknown("pool_status is retired but retiring_epoch is absent")
@@ -83,7 +85,7 @@ func (c *Client) PoolState(ctx context.Context, pool chain.PoolID) (chain.Readin
 	default:
 		return unknown(fmt.Sprintf("unrecognised pool_status %q", prefix([]byte(row.Status.val))))
 	}
-	ps := chain.PoolState{ID: pool}
+	ps := chain.PoolState{ID: pool, Status: status, RetiringEpoch: retEpoch}
 	if row.Meta.present && !row.Meta.null {
 		ps.Name, ps.Ticker = row.Meta.val.Name, row.Meta.val.Ticker
 	}

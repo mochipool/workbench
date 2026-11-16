@@ -187,6 +187,11 @@ type DRepID struct {
 type DRepState struct {
 	ID      DRepID
 	Deposit Lovelace
+	// DepositUnstated is true when the provider does not state the deposit
+	// (Deposit is then zero and means nothing). A cross-check compares the
+	// deposits only when both sources state them, and a refund is not
+	// computed from a source that does not.
+	DepositUnstated bool
 	// The fields below are filled by providers that state them; the zero
 	// values are "not stated" (Unknown readings, empty strings), never "none".
 	AnchorURL      string
@@ -197,7 +202,7 @@ type DRepState struct {
 
 // PoolStatus is where a registered pool is in its life, as a provider says
 // it (Koios `pool_status`; the node's `query stake-pools` lists a retiring
-// pool as registered). The zero value is PoolRegistered.
+// pool as registered). The zero value is PoolRegistered (stated: no retirement pending); a source that does not say is PoolStatusUnstated.
 type PoolStatus string
 
 // Pool statuses.
@@ -205,6 +210,11 @@ const (
 	PoolRegistered PoolStatus = ""         // registered, no retirement pending
 	PoolRetiring   PoolStatus = "retiring" // registered, retirement scheduled at RetiringEpoch
 	PoolRetired    PoolStatus = "retired"  // was registered, retirement took effect
+	// PoolStatusUnstated is a source that says the pool is registered but not
+	// whether a retirement is pending. It is a different answer from
+	// PoolRegistered ("no retirement pending"): a cross-check compares the
+	// status only when both sources state it.
+	PoolStatusUnstated PoolStatus = "unstated"
 )
 
 // PoolState is a registered stake pool as the chain reports it. Name and
