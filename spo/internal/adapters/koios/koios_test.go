@@ -462,6 +462,10 @@ func TestUtxosMultiAsset(t *testing.T) {
 		!u.HasDatumHash || !u.HasInlineDatum || !u.HasReferenceScript {
 		t.Fatalf("%+v", u)
 	}
+	// The hash itself is kept for the air-gap snapshot (SPO-Cutxo-OUT-001).
+	if u.DatumHash != strings.Repeat("22", 32) {
+		t.Fatalf("datum hash %q", u.DatumHash)
+	}
 }
 
 func TestUtxosRefusals(t *testing.T) {

@@ -86,26 +86,25 @@ func AcceptResponse(s SlotState, sender Fingerprint, r SigningResponse, vkey [32
 
 // RequestFacts is what a signer knows about its own side of a request.
 type RequestFacts struct {
-	HoldsKey       bool   // it holds a key with the requested hash and role
 	WorkspaceMagic uint32 // its workspace's network magic
 	CurrentSlot    uint64 // the chain tip's slot, or the clock's, as SPO-Xparty-INV-015
-	OverNetwork    bool   // the request arrived over a network transport
+	// OverNetwork is true for every transport that is not known to be the
+	// file transport: an unknown kind is a network (SPO-Xparty-PRE-006).
+	OverNetwork bool
 }
 
 // RefuseRequestEarly is the first part of SPO-Xparty-PRE-006, in its order:
-// no key with that hash and role; the network magic is not the workspace's;
-// the body hash is not the BLAKE2b-256 of the body received. It returns the
-// reason and true to refuse.
+// the network magic is not the workspace's; the body hash is not the
+// BLAKE2b-256 of the body received. It returns the reason and true to refuse.
+// Nothing here depends on what the signer holds: these reasons are sent.
 //
-// The remaining checks need a decoded transaction and the signer's plan, so
-// the caller runs them: "does not decode as a transaction of the current era"
-// (RefuseBodyDecode) after this function, then RefuseRequestLate, then the
-// plan (RefuseCannotSign).
+// The remaining checks need a decoded transaction, so the caller runs them:
+// "does not decode as a transaction of the current era" (RefuseBodyDecode),
+// then the checks on the view (network, undisplayable parts, auxiliary data),
+// then RefuseRequestLate, and last the checks that depend on the signer's
+// private state (scope, key held, inputs, plan), which are never sent.
 func RefuseRequestEarly(req SigningRequest, f RequestFacts) (RefusalReason, bool) {
-	switch {
-	case !f.HoldsKey:
-		return RefuseNoKey, true
-	case req.NetworkMagic != f.WorkspaceMagic:
+	if req.NetworkMagic != f.WorkspaceMagic {
 		return RefuseWrongNetwork, true
 	}
 	if sum := blake2b.Sum256(req.TxBody); !bytes.Equal(sum[:], req.BodyHash[:]) {

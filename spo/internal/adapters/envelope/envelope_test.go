@@ -39,7 +39,7 @@ func newID(t *testing.T, seed byte, label string) *Private {
 func enrolled(p *Private, name string, roles ...party.Role) party.Party {
 	id := p.Identity()
 	return party.Party{Identity: id, Fingerprint: id.Fingerprint(), Name: name, Roles: roles,
-		Pools: []string{"pool1"}, State: party.StateActive, EnrolledAt: t0}
+		Scope: party.Scope{Pools: []string{"pool1"}}, State: party.StateActive, EnrolledAt: t0}
 }
 
 func lookupOf(ps ...party.Party) LookupFunc {
@@ -64,7 +64,7 @@ func sampleRequest() party.SigningRequest {
 func never(party.MessageID) (bool, error) { return false, nil }
 
 func authorise(p party.Party, t party.Type, _ party.Body) error {
-	return party.Authorise(p, t, party.Concern{Pool: "pool1"})
+	return party.Authorise(p, t, party.Concern{})
 }
 
 // craft encrypts an arbitrary plaintext to recipient, for building envelopes

@@ -9,7 +9,11 @@ import (
 	"time"
 
 	"golang.org/x/crypto/blake2b"
+
+	"github.com/mochipool/workbench/spo/internal/domain/custody"
 )
+
+var testScope = Scope{KeyRoles: []custody.Role{custody.RoleStake}, Pools: []string{"pool1"}}
 
 var t0 = time.Unix(1_800_000_000, 0).UTC()
 
@@ -94,7 +98,7 @@ func TestConfirmPrefix(t *testing.T) {
 // spec: SPO-Xparty-PRE-001, SPO-Xparty-PR-001, SPO-Xparty-IF-002, SPO-Xparty-OUT-001
 func TestEnroll(t *testing.T) {
 	k := mk(1, "alice")
-	good := Enrollment{Document: k.doc("c"), Name: "alice", Roles: []Role{RoleSigner, RoleCoordinator}, Pools: []string{"pool1"}, Confirmation: typed(k.id.Fingerprint())}
+	good := Enrollment{Document: k.doc("c"), Name: "alice", Roles: []Role{RoleSigner, RoleCoordinator}, Scope: Scope{KeyRoles: []custody.Role{custody.RoleStake}, Pools: []string{"pool1"}}, Confirmation: typed(k.id.Fingerprint())}
 	p, err := Enroll(good, nil, t0)
 	if err != nil {
 		t.Fatal(err)
@@ -134,7 +138,7 @@ func TestEnroll(t *testing.T) {
 		"dup role":     func(e *Enrollment) { e.Roles = []Role{RoleSigner, RoleSigner} },
 		"bad name":     func(e *Enrollment) { e.Name = "../x" },
 		"empty name":   func(e *Enrollment) { e.Name = "" },
-		"bad pool":     func(e *Enrollment) { e.Pools = []string{"a b"} },
+		"bad pool":     func(e *Enrollment) { e.Scope.Pools = []string{"a b"} },
 	} {
 		e := good
 		mut(&e)
@@ -146,13 +150,13 @@ func TestEnroll(t *testing.T) {
 		t.Fatalf("duplicate identity: %v", err)
 	}
 	k2 := mk(3, "bob")
-	e2 := Enrollment{Document: k2.doc("c"), Name: "alice", Roles: []Role{RoleSigner}, Confirmation: typed(k2.id.Fingerprint())}
+	e2 := Enrollment{Document: k2.doc("c"), Name: "alice", Roles: []Role{RoleSigner}, Scope: testScope, Confirmation: typed(k2.id.Fingerprint())}
 	if _, err := Enroll(e2, []Party{p}, t0); !errors.Is(err, ErrNameTaken) {
 		t.Fatalf("duplicate name: %v", err)
 	}
 	// An identity with a hostile label is refused.
 	k3 := mk(4, "x\x1b]0;pwn\a")
-	e3 := Enrollment{Document: k3.doc("c"), Name: "eve", Roles: []Role{RoleSigner}, Confirmation: typed(k3.id.Fingerprint())}
+	e3 := Enrollment{Document: k3.doc("c"), Name: "eve", Roles: []Role{RoleSigner}, Scope: testScope, Confirmation: typed(k3.id.Fingerprint())}
 	if _, err := Enroll(e3, nil, t0); !errors.Is(err, ErrIdentity) {
 		t.Fatalf("label: %v", err)
 	}
@@ -161,7 +165,7 @@ func TestEnroll(t *testing.T) {
 // spec: SPO-Xparty-INV-005, SPO-Xparty-IF-003
 func TestRevoke(t *testing.T) {
 	k := mk(1, "a")
-	p, _ := Enroll(Enrollment{Document: k.doc("c"), Name: "a", Roles: []Role{RoleCoordinator}, Confirmation: typed(k.id.Fingerprint())}, nil, t0)
+	p, _ := Enroll(Enrollment{Document: k.doc("c"), Name: "a", Roles: []Role{RoleCoordinator}, Scope: testScope, Confirmation: typed(k.id.Fingerprint())}, nil, t0)
 	r, err := Revoke(p)
 	if err != nil || r.Active() || p.State != StateActive {
 		t.Fatal(r, err)
@@ -176,14 +180,16 @@ func TestRevoke(t *testing.T) {
 
 // spec: SPO-Xparty-INV-010
 func TestAuthorise(t *testing.T) {
-	mkp := func(seed byte, roles []Role, pools ...string) Party {
+	mkp := func(seed byte, roles ...Role) Party {
 		id := mk(seed, "p").id
-		return Party{Identity: id, Fingerprint: id.Fingerprint(), Roles: roles, Pools: pools, State: StateActive}
+		return Party{Identity: id, Fingerprint: id.Fingerprint(), Roles: roles, State: StateActive}
 	}
-	coord := mkp(1, []Role{RoleCoordinator}, "poolA")
-	signer := mkp(2, []Role{RoleSigner})
-	machine := mkp(3, []Role{RoleMachine})
-	other := mkp(4, []Role{RoleSigner})
+	coord := mkp(1, RoleCoordinator)
+	signer := mkp(2, RoleSigner)
+	machine := mkp(3, RoleMachine)
+	other := mkp(4, RoleSigner)
+	revoked := mkp(5, RoleCoordinator)
+	revoked.State = StateRevoked
 	slot := Concern{SlotSigner: signer.Fingerprint, HasSlotSigner: true}
 	tests := []struct {
 		name   string
@@ -192,19 +198,19 @@ func TestAuthorise(t *testing.T) {
 		c      Concern
 		permit bool
 	}{
-		{"coordinator request for own pool", coord, TypeSigningRequest, Concern{Pool: "poolA"}, true},
-		{"coordinator request for other pool", coord, TypeSigningRequest, Concern{Pool: "poolB"}, false},
-		{"coordinator request with no pool", coord, TypeSigningRequest, Concern{}, true},
-		{"coordinator closed", coord, TypeCollectionClosed, Concern{Pool: "poolA"}, true},
-		{"coordinator closed other pool", coord, TypeCollectionClosed, Concern{Pool: "poolB"}, false},
+		{"coordinator request", coord, TypeSigningRequest, Concern{}, true},
+		{"coordinator closed", coord, TypeCollectionClosed, Concern{}, true},
 		{"coordinator invite", coord, TypeInvite, Concern{}, true},
-		{"signer request", signer, TypeSigningRequest, Concern{Pool: "poolA"}, false},
+		{"revoked coordinator", revoked, TypeSigningRequest, Concern{}, false},
+		{"signer request", signer, TypeSigningRequest, Concern{}, false},
 		{"machine invite", machine, TypeInvite, Concern{}, false},
 		{"signer response for its slot", signer, TypeSigningResponse, slot, true},
 		{"signer refusal for its slot", signer, TypeSigningRefusal, slot, true},
 		{"signer response for another's slot", other, TypeSigningResponse, slot, false},
 		{"signer response, slot unknown", signer, TypeSigningResponse, Concern{}, false},
 		{"coordinator response", coord, TypeSigningResponse, Concern{SlotSigner: coord.Fingerprint, HasSlotSigner: true}, false},
+		{"signer hello", signer, TypeHello, Concern{}, true},
+		{"coordinator hello", coord, TypeHello, Concern{}, false},
 		{"machine bundle", machine, TypeBundle, Concern{}, true},
 		{"signer bundle", signer, TypeBundle, Concern{}, false},
 		{"coordinator bundle", coord, TypeBundle, Concern{}, false},
@@ -215,6 +221,99 @@ func TestAuthorise(t *testing.T) {
 		if (err == nil) != tc.permit || (err != nil && !errors.Is(err, ErrNotAuthorised)) {
 			t.Errorf("%s: err = %v, want permit=%v", tc.name, err, tc.permit)
 		}
+	}
+}
+
+// The scope rule: the key role is one of the sender's, every pool the body
+// concerns is one of its pools, and a body with no pool needs Unscoped. The
+// zero scope allows nothing.
+// spec: SPO-Xparty-INV-010
+func TestCheckScope(t *testing.T) {
+	scoped := Scope{KeyRoles: []custody.Role{custody.RoleStake}, Pools: []string{"poolA"}}
+	unscoped := Scope{KeyRoles: []custody.Role{custody.RolePayment}, Unscoped: true}
+	tests := []struct {
+		name  string
+		s     Scope
+		role  custody.Role
+		pools []string
+		ok    bool
+	}{
+		{"role and pool in scope", scoped, custody.RoleStake, []string{"poolA"}, true},
+		{"other pool", scoped, custody.RoleStake, []string{"poolB"}, false},
+		{"one of two pools out", scoped, custody.RoleStake, []string{"poolA", "poolB"}, false},
+		{"role not named", scoped, custody.RolePoolCold, []string{"poolA"}, false},
+		{"no pool, not unscoped", scoped, custody.RoleStake, nil, false},
+		{"no pool, unscoped", unscoped, custody.RolePayment, nil, true},
+		{"unscoped does not grant a pool", unscoped, custody.RolePayment, []string{"poolA"}, false},
+		{"unscoped does not grant a role", unscoped, custody.RoleStake, nil, false},
+		{"the zero scope", Scope{}, custody.RoleStake, nil, false},
+		{"the zero scope with a pool", Scope{}, custody.RoleStake, []string{"poolA"}, false},
+	}
+	for _, tc := range tests {
+		err := CheckScope(tc.s, tc.role, tc.pools)
+		if (err == nil) != tc.ok || (err != nil && !errors.Is(err, ErrOutOfScope)) {
+			t.Errorf("%s: %v, want ok=%v", tc.name, err, tc.ok)
+		}
+	}
+}
+
+// An enrollment of a coordinator or signer names its scope: no default.
+// spec: SPO-Xparty-INV-010, SPO-Xparty-IF-002
+func TestEnrollRequiresAScope(t *testing.T) {
+	k := mk(1, "alice")
+	base := Enrollment{Document: k.doc("c"), Name: "alice", Roles: []Role{RoleCoordinator}, Confirmation: typed(k.id.Fingerprint())}
+	for name, sc := range map[string]Scope{"none": {}, "roles only": {KeyRoles: []custody.Role{custody.RoleStake}},
+		"pools only": {Pools: []string{"pool1"}}, "unscoped only": {Unscoped: true}} {
+		e := base
+		e.Scope = sc
+		if _, err := Enroll(e, nil, t0); !errors.Is(err, ErrInvalidEnrollment) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	e := base
+	e.Scope = Scope{KeyRoles: []custody.Role{custody.RoleStake, custody.RoleStake}, Pools: []string{"pool1"}}
+	if _, err := Enroll(e, nil, t0); !errors.Is(err, ErrInvalidEnrollment) {
+		t.Errorf("a key role twice: %v", err)
+	}
+	// A machine party needs none.
+	e = base
+	e.Roles = []Role{RoleMachine}
+	if _, err := Enroll(e, nil, t0); err != nil {
+		t.Errorf("machine: %v", err)
+	}
+}
+
+// The tailcat allow-list is built only from active signer or machine parties
+// that have a node key.
+// spec: SPO-Xparty-IF-005
+func TestAllowedNodeKeys(t *testing.T) {
+	mkp := func(seed byte, node *NodeKey, state State, roles ...Role) Party {
+		id := mk(seed, "p").id
+		id.Node = node
+		return Party{Identity: id, Fingerprint: id.Fingerprint(), Roles: roles, State: state}
+	}
+	k := func(b byte) *NodeKey { n := NodeKey{b}; return &n }
+	ps := []Party{
+		mkp(1, k(1), StateActive, RoleSigner),
+		mkp(2, k(2), StateActive, RoleMachine),
+		mkp(3, k(3), StateRevoked, RoleSigner),                 // revoked
+		mkp(4, k(4), StateActive, RoleCoordinator),             // coordinator only
+		mkp(5, nil, StateActive, RoleSigner),                   // no node key
+		mkp(6, k(6), StateActive, RoleCoordinator, RoleSigner), // both: a signer
+		mkp(7, k(1), StateActive, RoleMachine),                 // the same key twice
+	}
+	got := AllowedNodeKeys(ps)
+	want := []NodeKey{{1}, {2}, {6}}
+	if len(got) != len(want) {
+		t.Fatalf("allow-list = %v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("allow-list = %v, want %v", got, want)
+		}
+	}
+	if len(AllowedNodeKeys(nil)) != 0 {
+		t.Fatal("an allow-list from nobody")
 	}
 }
 
@@ -305,7 +404,7 @@ func TestAcceptResponse(t *testing.T) {
 func TestRefuseRequest(t *testing.T) {
 	txb := []byte{0xa0, 1, 2}
 	req := SigningRequest{KeyRole: "payment", TxBody: txb, BodyHash: blake2b.Sum256(txb), TTLSlot: 1000, NetworkMagic: 42}
-	facts := RequestFacts{HoldsKey: true, WorkspaceMagic: 42, CurrentSlot: 10}
+	facts := RequestFacts{WorkspaceMagic: 42, CurrentSlot: 10}
 	if r, refuse := RefuseRequestEarly(req, facts); refuse {
 		t.Fatalf("refused: %d", r)
 	}
@@ -317,10 +416,8 @@ func TestRefuseRequest(t *testing.T) {
 		mut  func(*SigningRequest, *RequestFacts)
 		want RefusalReason
 	}{
-		{"no key", func(_ *SigningRequest, f *RequestFacts) { f.HoldsKey = false }, RefuseNoKey},
 		{"wrong network", func(r *SigningRequest, _ *RequestFacts) { r.NetworkMagic = 1 }, RefuseWrongNetwork},
 		{"body hash", func(r *SigningRequest, _ *RequestFacts) { r.TxBody = []byte{0xa0, 1, 3} }, RefuseBodyHash},
-		{"no key before network", func(r *SigningRequest, f *RequestFacts) { f.HoldsKey = false; r.NetworkMagic = 1 }, RefuseNoKey},
 	}
 	for _, tc := range early {
 		r, f := req, facts

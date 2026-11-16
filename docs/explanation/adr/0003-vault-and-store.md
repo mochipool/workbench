@@ -1,6 +1,6 @@
 # ADR 0003: Sealed single-file store
 
-Status: accepted, 2026-11-16; revised the same day after three security reviews of the implementation. Closes E1, E2, E3 and S1; sets the audit design for S3. The code is `spo/internal/platform/seal` (primitives), `spo/internal/platform/secret` (guarded memory) and `spo/internal/adapters/sqlitestore`. Byte layouts are pinned by committed test vectors in both packages.
+Status: accepted, 2026-11-16; revised the same day after seven security reviews of the implementation; the seventh found nothing further that is required before real keys. Closes E1, E2, E3 and S1; sets the audit design for S3. The code is `spo/internal/platform/seal` (primitives), `spo/internal/platform/secret` (guarded memory) and `spo/internal/adapters/sqlitestore`. Byte layouts are pinned by committed test vectors in both packages.
 
 ## Context
 
@@ -12,7 +12,7 @@ One file per operator workspace holds everything. Decision D7 seals every record
 
 | File | Contents |
 | --- | --- |
-| `workspace.spo` | SQLite database (pure-Go driver, WAL mode, `secure_delete`, `synchronous=FULL`, `trusted_schema` off) |
+| `workspace.spo` | SQLite database (pure-Go driver, WAL mode, `secure_delete`, `synchronous=FULL`, `trusted_schema` off, `cell_size_check` on, SQLite's defensive mode) |
 | `workspace.spo-wal`, `-shm` | SQLite's own, while a handle is open |
 | `workspace.spo.head` | The newest audit sequence number and MAC, as text |
 | `workspace.spo.head.lock` | Lock file for updating the head file |
@@ -23,7 +23,9 @@ The database itself is not encrypted. Every payload is sealed before it is writt
 
 ### Schema
 
-Five strict tables and nothing else: `meta`, `keyslots`, `records`, `audit`, `schema_version`. On every open, verify and rekey, the schema is compared with an exact allow-list: the expected tables with their exact definitions and SQLite's automatic indexes. A trigger, view, extra table, extra index or altered column is refused. This matters because a planted trigger could otherwise rewrite rows behind a write that reports success.
+Five strict tables and nothing else: `meta`, `keyslots`, `records`, `audit`, `schema_version`. The schema is compared with an exact allow-list (the expected tables with their exact definitions and SQLite's automatic indexes) at every open, after a migration, at the start of every write transaction on the connection that writes, before a backup, and in every verification. A trigger, view, extra table, extra index or altered column is refused. This matters because a planted trigger could otherwise rewrite rows behind a write that reports success.
+
+Running `ANALYZE`, `PRAGMA optimize` or a database tool that does so creates a statistics table, and the store then refuses to open. `VACUUM`, backup and restore pass.
 
 ### Keys
 
@@ -55,7 +57,8 @@ The associated data of both operations is the canonical CBOR encoding of `[forma
 
 ### Writes and the audit log
 
-* An update is one SQL transaction (`BEGIN IMMEDIATE`) with a version check per record. A lost race returns a conflict error. Before commit, the rows just written are read back and compared.
+* An update is one SQL transaction with a version check per record. A lost race returns a conflict error. Each write runs on its own new connection: `BEGIN IMMEDIATE`, a schema reload, the epoch and schema checks, then the statements. Before commit, the rows just written are read back and compared.
+* A write can be cancelled only before `COMMIT`. If `COMMIT` reports an error, the store reads the file back on a new connection to learn what happened. If even that fails it reports the outcome as unknown, and the operator must run `spo store verify` before retrying, because repeating an operation that did take effect (issuing an operational certificate, for example) would apply it twice.
 * Each update appends one audit row inside the same transaction. The row lists every record touched with its version and a hash over its stored bytes (kind, lookup tag, nonce, wrapped key, sealed owner, ciphertext), and carries an HMAC under the audit key over the row and the previous row's MAC. The event description is itself a sealed, padded record.
 * Slot changes append audit rows that record a hash of the whole slot table.
 
@@ -63,7 +66,8 @@ The associated data of both operations is the canonical CBOR encoding of `[forma
 
 `Verify` checks, in this order: the schema allow-list; SQLite's own integrity check; the epoch MAC; every audit row's MAC and link; that each record's current version and hash are the last ones the chain recorded for it, that no record exists that the chain never recorded, and that no version ever goes backwards; the slot-table hash against the newest recorded one; and the head file.
 
-* **Every open runs the full verification** on a read-only connection before anything is written. A wrong credential or a failed verification leaves every file unchanged. Verifying 3,000 records takes about 20 ms.
+* **Every open runs the full verification** on a read-only connection before anything is written. Open reads the meta row and the slots under the file lock, releases it while it derives the key from the passphrase, takes it again, and requires the key to match the file's current epoch. A wrong credential or a failed verification leaves the database, its write-ahead log and the head file unchanged; SQLite may create or rebuild its `-shm` file. Verification time grows with the audit chain: about 20 ms for 3,000 records, about 200 ms for 5,000 records and 50,000 audit rows.
+* The store never removes or truncates SQLite's `-wal` and `-shm` files on its own, except in `restore`, which replaces the database they belong to.
 * While a handle is open it keeps the verified version and hash of every record and checks each row it reads against them, so a record rolled back behind its back is refused, not laundered by the next write.
 * `spo store verify --deep` additionally decrypts every record.
 
@@ -75,6 +79,7 @@ Changing the passphrase, replacing the recovery key or recovering with the recov
 2. It runs the full verification under the old keys and refuses on any problem.
 3. In one transaction it draws a new master key and epoch, re-wraps every data key and owner blob, recomputes every lookup tag, replaces all slots by one passphrase slot and one new recovery slot, and appends a rollover row. That row records the old chain's head and a hash over every earlier audit row, so earlier history stays tamper-evident.
 4. The new recovery key is returned as soon as the transaction has committed. Scrubbing the old key material from the file (vacuum and WAL truncation) follows, and is retried at the next open or close if it fails.
+5. If the commit reports an error other than "busy", the outcome is treated as unknown: the new recovery key is still shown, marked valid only if the change took effect, with instructions for finding out by reopening.
 
 **What a rekey does not do.** It does not rotate data keys or re-encrypt payloads. Anyone who holds an old copy of the file together with an old credential can still open everything that copy held. After a suspected compromise, the keys themselves must be rotated (new KES key and opcert; an exposed cold key means retiring the pool). Old pages can also survive on SSDs, copy-on-write file systems, snapshots and backups, whatever the store does.
 
@@ -86,7 +91,7 @@ Changing the passphrase, replacing the recovery key or recovering with the recov
 ### Backup and recovery
 
 * `spo store backup` writes a consistent copy with `VACUUM INTO` and verifies it. Records in it are already sealed and it carries the same key slots.
-* `spo store restore` verifies the backup, refuses a backup of another workspace, refuses an older backup over a newer workspace unless told to, and refuses while the workspace is open.
+* `spo store restore` verifies the backup, refuses a backup of another workspace, refuses an older backup over a newer workspace unless told to, and refuses while the workspace is open. Under its exclusive lock it first checkpoints any write-ahead log of the workspace being replaced, and refuses if it cannot, so that an old log is never replayed into the restored file. After a restore that reports an error or is interrupted, investigate before opening with `--accept-rollback`.
 * `spo store recover` unlocks with the recovery key, requires a new passphrase, and rekeys.
 
 ### Memory
@@ -96,7 +101,7 @@ Changing the passphrase, replacing the recovery key or recovering with the recov
 
 ### Concurrency
 
-One SQL connection and one gate per handle. A call made from inside a callback of the same handle blocks until its context ends. Each handle holds a shared advisory file lock; rekey and restore take it exclusively. Advisory locks do not bind a process that ignores them, and are unreliable on network file systems: keep the workspace on a local disk. The epoch check is what stops a stale handle from writing.
+One long-lived read connection and one gate per handle; every write uses its own short-lived connection. A call made from inside a callback of the same handle blocks until its context ends. Each handle holds a shared advisory file lock for its whole life. An open takes the lock exclusively for a moment while it reads, and others wait up to 5 seconds for it. A rekey or a restore needs the file exclusively and fails at once while any handle has it open, a read-only verify included. File locking is implemented for Unix systems only. Advisory locks do not bind a process that ignores them, and are unreliable on network file systems: keep the workspace on a local disk. The epoch check is what stops a stale handle from writing.
 
 ### What the file reveals without the passphrase
 
@@ -112,7 +117,9 @@ Names of pools, wallets and parties are never stored in clear and never appear i
 
 The store's guarantees assume that:
 
-* the workspace directory is writable only by the operator;
+* the system is Unix (Linux or macOS) and the workspace is on a local disk;
+* the workspace and backup directories are writable only by the operator;
+* nothing but `spo` opens or writes the file: no `sqlite3`, database browsers or sync clients;
 * the head printed by `store verify` and `store backup` is recorded off the machine;
 * the lockable-memory limit is at least 8 MiB;
 * after a suspected compromise, the keys are rotated, not only the passphrase.

@@ -11,6 +11,7 @@
 package partystore
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -19,6 +20,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
@@ -46,21 +48,35 @@ type partyJSON struct {
 	Created     int64    `json:"created"`
 	Fingerprint string   `json:"fingerprint"`
 	Roles       []string `json:"roles"`
-	Pools       []string `json:"pools"`
-	State       string   `json:"state"`
-	EnrolledAt  int64    `json:"enrolled_at"`
+	// Scope is what a signing request between us and the party may be about.
+	// A record without one (an older record) reads as the zero Scope, which
+	// allows nothing; the older "pools" list is not carried over.
+	Scope      *scopeJSON `json:"scope,omitempty"`
+	State      string     `json:"state"`
+	EnrolledAt int64      `json:"enrolled_at"`
+}
+
+type scopeJSON struct {
+	KeyRoles []string `json:"key_roles"`
+	Pools    []string `json:"pools"`
+	Unscoped bool     `json:"unscoped"`
 }
 
 func toJSON(p party.Party) partyJSON {
 	j := partyJSON{Name: p.Name, Label: p.Identity.Label, Ed25519: hex.EncodeToString(p.Identity.Ed25519[:]),
 		X25519: hex.EncodeToString(p.Identity.X25519[:]), Created: p.Identity.Created.Unix(),
-		Fingerprint: hex.EncodeToString(p.Fingerprint[:]), Pools: p.Pools, State: string(p.State), EnrolledAt: p.EnrolledAt.Unix()}
+		Fingerprint: hex.EncodeToString(p.Fingerprint[:]), State: string(p.State), EnrolledAt: p.EnrolledAt.Unix()}
 	if p.Identity.Node != nil {
 		j.Node = hex.EncodeToString(p.Identity.Node[:])
 	}
 	for _, r := range p.Roles {
 		j.Roles = append(j.Roles, string(r))
 	}
+	sc := &scopeJSON{Pools: p.Scope.Pools, Unscoped: p.Scope.Unscoped}
+	for _, r := range p.Scope.KeyRoles {
+		sc.KeyRoles = append(sc.KeyRoles, string(r))
+	}
+	j.Scope = sc
 	return j
 }
 
@@ -89,10 +105,16 @@ func fromJSON(j partyJSON) (party.Party, error) {
 	if id.Fingerprint() != fp {
 		return party.Party{}, fmt.Errorf("%w: fingerprint does not match keys", ErrCorrupt)
 	}
-	p := party.Party{Identity: id, Fingerprint: fp, Name: j.Name, Pools: j.Pools, State: party.State(j.State),
+	p := party.Party{Identity: id, Fingerprint: fp, Name: j.Name, State: party.State(j.State),
 		EnrolledAt: time.Unix(j.EnrolledAt, 0).UTC()}
 	for _, r := range j.Roles {
 		p.Roles = append(p.Roles, party.Role(r))
+	}
+	if j.Scope != nil {
+		p.Scope = party.Scope{Pools: j.Scope.Pools, Unscoped: j.Scope.Unscoped}
+		for _, r := range j.Scope.KeyRoles {
+			p.Scope.KeyRoles = append(p.Scope.KeyRoles, custody.Role(r))
+		}
 	}
 	if p.State != party.StateActive && p.State != party.StateRevoked {
 		return party.Party{}, fmt.Errorf("%w: state %q", ErrCorrupt, j.State)
@@ -210,11 +232,20 @@ func (Registry) Revoke(w ports.Writer, name string) (party.Party, error) {
 	return party.Party{}, ports.ErrNotFound
 }
 
-// MaxReplayEntries caps the replay log (24 bytes each, about 800 KB). A full
-// log refuses new messages, never forgets an unexpired id.
+// MaxReplayEntries caps the whole replay log (44 bytes each, about 1.4 MB). A
+// full log refuses new messages, never forgets an unexpired id. One sender
+// holds at most party.MaxReplayPerSender live entries: over that, that
+// sender's messages are refused and no other sender's (SPO-Xparty-INV-022).
 const MaxReplayEntries = 32768
 
-const entryLen = 16 + 8
+// The log is the magic and then entries of sender, id and expiry. A log
+// without the magic is the older form, entries of id and expiry only, read
+// with no sender (such an entry counts against no sender's quota).
+const (
+	replayMagic = "RPL2"
+	entryLen    = 20 + 16 + 8
+	legacyLen   = 16 + 8
+)
 
 // Replay is the replay log over Store records.
 type Replay struct{}
@@ -222,6 +253,7 @@ type Replay struct{}
 var _ ports.ReplayLog = Replay{}
 
 type entry struct {
+	sender  party.Fingerprint
 	id      party.MessageID
 	expires int64
 }
@@ -234,16 +266,31 @@ func loadReplay(r ports.Reader, now time.Time) ([]entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(b)%entryLen != 0 {
-		return nil, fmt.Errorf("%w: replay log length", ErrCorrupt)
-	}
 	var out []entry
-	for ; len(b) > 0; b = b[entryLen:] {
-		e := entry{expires: int64(binary.BigEndian.Uint64(b[16:entryLen]))}
-		copy(e.id[:], b[:16])
+	keep := func(e entry) {
 		if e.expires >= now.Unix() { // an id is kept until its expiry has passed
 			out = append(out, e)
 		}
+	}
+	if rest, ok := bytes.CutPrefix(b, []byte(replayMagic)); ok {
+		if len(rest)%entryLen != 0 {
+			return nil, fmt.Errorf("%w: replay log length", ErrCorrupt)
+		}
+		for ; len(rest) > 0; rest = rest[entryLen:] {
+			e := entry{expires: int64(binary.BigEndian.Uint64(rest[36:entryLen]))}
+			copy(e.sender[:], rest[:20])
+			copy(e.id[:], rest[20:36])
+			keep(e)
+		}
+		return out, nil
+	}
+	if len(b)%legacyLen != 0 {
+		return nil, fmt.Errorf("%w: replay log length", ErrCorrupt)
+	}
+	for ; len(b) > 0; b = b[legacyLen:] {
+		e := entry{expires: int64(binary.BigEndian.Uint64(b[16:legacyLen]))}
+		copy(e.id[:], b[:16])
+		keep(e)
 	}
 	return out, nil
 }
@@ -262,22 +309,28 @@ func (Replay) Seen(r ports.Reader, id party.MessageID, now time.Time) (bool, err
 }
 
 // Record adds id until expires and drops expired entries in the same write.
-func (Replay) Record(w ports.Writer, id party.MessageID, expires, now time.Time) error {
+func (Replay) Record(w ports.Writer, sender party.Fingerprint, id party.MessageID, expires, now time.Time) error {
 	es, err := loadReplay(w, now)
 	if err != nil {
 		return err
 	}
+	own := 0
 	for _, e := range es {
 		if e.id == id {
 			return ports.ErrReplay
 		}
+		if e.sender == sender {
+			own++
+		}
 	}
-	if len(es) >= MaxReplayEntries {
+	if own >= party.MaxReplayPerSender || len(es) >= MaxReplayEntries {
 		return ports.ErrReplayFull
 	}
-	es = append(es, entry{id: id, expires: expires.Unix()})
-	b := make([]byte, 0, len(es)*entryLen)
+	es = append(es, entry{sender: sender, id: id, expires: expires.Unix()})
+	b := make([]byte, 0, len(replayMagic)+len(es)*entryLen)
+	b = append(b, replayMagic...)
 	for _, e := range es {
+		b = append(b, e.sender[:]...)
 		b = append(b, e.id[:]...)
 		b = binary.BigEndian.AppendUint64(b, uint64(e.expires))
 	}

@@ -15,6 +15,14 @@
 // not a regular file, is not owned by the current user, or that group or
 // others can access.
 //
+// OTHER TOOLS. The schema check (SCHEMA ALLOW-LIST) accepts exactly the objects
+// the migrations create. Running ANALYZE or PRAGMA optimize on the file (or any
+// tool that does) creates sqlite_stat1, which the check does not know: the
+// store is then refused with ErrSchema, and nothing is repaired automatically
+// (drop the table with the sqlite3 shell only if you know it is the cause).
+// That is a safe refusal, not a defect to work around. VACUUM and backup or
+// restore of the file keep the schema as it is and pass.
+//
 // KEYS AND THE KEY EPOCH. A random master key is wrapped once per key slot
 // (passphrase or recovery); HKDF splits it into a record-wrapping key, an
 // index key and an audit key (internal/platform/seal). meta holds a key epoch
@@ -29,54 +37,110 @@
 // rekey (or a modification of the meta row) gets ErrStaleHandle and does
 // nothing.
 //
-// CONCURRENCY. One handle has one database connection, and operations on it
-// run one at a time, on the handle's gate. The gate is waited for until the
-// caller's context ends, with no other timeout. A call into the same handle
-// from inside a View or Update callback therefore waits for itself until its
-// context ends and then returns an error wrapping ErrReentrant and the
-// context's error; with context.Background it would wait forever. Inside an
-// Update, read a secret with the Writer's OpenSecret (tx.go). Close waits for
-// the gate without limit and is safe to call twice; do not call it from
-// inside a callback. Several handles, in one process or several, may open the
-// same file: Update starts with BEGIN IMMEDIATE, so a second writer waits up
-// to the busy timeout and then fails with ports.ErrConflict. A handle holds a
-// shared flock on the file for its lifetime (an open that finds the file idle
-// holds it exclusively while it runs its read-only checks, so that they can
-// read it as immutable, and then goes back to shared). A restore and a rekey take it exclusively and
-// fail with ErrLocked while any other handle has the file open. (flock is
-// advisory: a process that does not use it can still write; the key epoch
-// check is what stops its stale handles, and the record map what stops it from
-// getting a record rolled back under a handle.) A handle whose lock upgrade
-// or downgrade failed (Rekey) is marked broken and returns ErrLockLost from
-// every operation but Close.
+// CONCURRENCY. One handle has one long-lived connection for reads, and
+// operations on it run one at a time, on the handle's gate. The gate is waited
+// for until the caller's context ends, with no other timeout. A call into the
+// same handle from inside a View or Update callback therefore waits for itself
+// until its context ends and then returns an error wrapping ErrReentrant and
+// the context's error; with context.Background it would wait forever. A
+// context that has ended before the call starts gets the context's error, not
+// ErrReentrant. Inside an Update, read a secret with the Writer's OpenSecret
+// (tx.go). Close waits for the gate without limit and is safe to call twice; do
+// not call it from inside a callback. Several handles, in one process or
+// several, may open the same file: Update starts with BEGIN IMMEDIATE, so a
+// second writer waits up to the busy timeout and then fails with
+// ports.ErrConflict. A handle holds a shared flock on the file for its
+// lifetime. An open takes the file exclusively only while it reads it (below)
+// and waits up to five seconds for another open's exclusive stretch to end
+// before it gives up with ErrLocked. A restore and a rekey take the lock
+// exclusively and fail with ErrLocked at once while any other handle has the
+// file open. (flock is advisory: a process that does not use it can still
+// write; the key epoch check is what stops its stale handles, and the record
+// map what stops it from getting a record rolled back or deleted under a
+// handle.) A handle whose lock upgrade or downgrade failed (Rekey) is marked
+// broken and returns ErrLockLost from every operation but Close.
 //
-// OPEN ORDER. A failed open writes nothing: not the store file, nor -wal and
-// -shm, nor the head file or its lock. Open
+// A write is one transaction on a CONNECTION OF ITS OWN: every Update, slot
+// change, rekey and cleanup opens a new connection to the file, runs the
+// epoch and schema checks on it right after BEGIN IMMEDIATE and the statements
+// on it, and closes it. The schema that is checked and the schema the
+// statements run against are then read from the same snapshot, under the write
+// lock. (A long-lived connection keeps the schema it parsed: another process
+// could plant a trigger, let the handle load it, and remove it from
+// sqlite_master again without changing the schema cookie; the text check would
+// then pass while the trigger still fired.) The new connection parses the
+// schema when it connects, which is before the write lock is held, so the
+// transaction also runs PRAGMA writable_schema=RESET first, which makes SQLite
+// parse the schema again from the file. Cost, measured with 3000 records:
+// opening such a connection, BEGIN IMMEDIATE, the reset, the epoch and schema
+// checks and closing it take about 0.15 ms, inside a whole Update of about
+// 1 ms; an Open costs hundreds of milliseconds (key derivation and
+// verification). Reads (View, Open, Verify) use the long-lived connection: they
+// run SELECTs on the base tables, which no trigger fires on.
 //
-//  1. checks the file (regular, owned by the user, mode 0600) and takes the
-//     file lock;
-//  2. on a READ-ONLY connection: reads the declared schema version, checks the
-//     schema against the allow-list (SCHEMA ALLOW-LIST, schemacheck.go) before
-//     anything the file says is trusted, loads the meta row and key slots,
-//     unlocks, checks the key epoch, compares the head file (without changing
-//     it) and runs the full verification (verify.go: WHAT VERIFY COVERS AND
-//     DOES NOT COVER, which includes the schema again). A wrong credential, a
-//     forged audit row, a rolled-back record, a planted trigger: the open fails
-//     here and nothing has been written;
-//  3. only then reopens READ-WRITE, re-checks the schema and the epoch,
-//     migrates if the file's schema is older (and then checks the schema of
-//     the new version and verifies again), writes or advances the head file,
-//     and retries a rekey's pending cleanup.
+// ENDING A WRITE. A write is cancelled only before COMMIT starts: the context
+// is checked right before it and the transaction rolled back. COMMIT itself,
+// and the head-file write after it, run without the caller's cancellation (a
+// driver that watches the context can report a context error for a COMMIT that
+// SQLite completed, which would report a committed rekey as failed and destroy
+// its new recovery key, or invite a retry that applies a change twice). If
+// COMMIT returns any error, the store reads the file back to find out whether
+// it committed (the chain holds the row the transaction appended; for a rekey,
+// meta.key_epoch is the new epoch) and reports that: success when it did, the
+// error when it did not, ErrOutcomeUnknown when even that read fails. The
+// read-back runs on a new connection (the failed one is closed first). A head
+// file that cannot be advanced after a commit is a notice; the next open accepts
+// a file that is ahead of its head file. A rekey whose outcome is unknown returns
+// its new recovery key with ErrOutcomeUnknown (valid only if the rekey took
+// effect).
 //
-// AcceptRollback changes only what step 2 does with a head file that is ahead
+// OPEN ORDER. A failed open leaves the database, its -wal and the head file
+// byte for byte as they were, and creates no head file or head lock. A
+// read-only open (VerifyFile included) and a failed open may leave -wal and -shm
+// files that SQLite created; the store never removes, truncates or otherwise
+// touches either on any path (another process may have committed into that WAL;
+// only SQLite decides when it is checkpointed and removed).
+// Open
+//
+//  1. checks the file (regular, owned by the user, mode 0600);
+//  2. reads the meta row and the key slots (schema first), holding the file
+//     lock for that read only, and releases the lock;
+//  3. unlocks (the Argon2 work), holding no lock;
+//  4. takes the lock again and, on a READ-ONLY connection, reads the declared
+//     schema version, checks the schema against the allow-list (SCHEMA
+//     ALLOW-LIST, schemacheck.go) before anything the file says is trusted,
+//     reloads the meta row and requires the unlocked master key to belong to
+//     its key epoch (else ErrStaleHandle: the file changed meanwhile), compares
+//     the head file (without changing it) and runs the full verification
+//     (verify.go: WHAT VERIFY COVERS AND DOES NOT COVER, which includes the
+//     schema again). A wrong credential, a forged audit row, a rolled-back
+//     record, a planted trigger: the open fails here and nothing has been
+//     written;
+//  5. goes back to a shared lock and reopens the file, read-write (or, for a
+//     read-only handle, read-only without the immutable promise). The reopened
+//     file must be the file the lock is held on (the descriptor's identity) and
+//     its chain must end at the head just verified, else ErrVerify. (When
+//     other handles share the file a well-behaved writer may have appended
+//     since; then the verified head must still be in the chain, and the
+//     handle's record map checks the new rows at its first use.) The schema
+//     and the epoch are checked again;
+//  6. migrates if the file's schema is older (and then checks the schema of the
+//     new version and verifies again), writes or advances the head file, and
+//     retries a rekey's pending cleanup.
+//
+// Steps 2 and 4 take the lock exclusively when nobody holds the file and, with
+// that lock held, no -wal is waiting to be replayed, and read the file as
+// immutable (it cannot change between the checks and the reopening); otherwise
+// they share, and wait up to five seconds for an exclusive holder. A read-only
+// handle (VerifyFile) holds the shared lock like any other after step 4.
+//
+// AcceptRollback changes only what step 4 does with a head file that is ahead
 // of or foreign to the chain; SkipVerify skips only the full verification in
-// step 2 (the schema check and the unlock stay), and the handle then does it at
+// step 4 (the schema check and the unlock stay), and the handle then does it at
 // its first use (below). Neither writes before the checks that remain passed.
-// (A read-only connection to a database in WAL mode may create empty -wal and
-// -shm files; when the open fails and nobody else has the file, they are removed
-// again.) Passphrases are used as the bytes typed, with no Unicode
-// normalisation. Unlocking depends on the slots and the key epoch only; damage
-// to audit rows or records never makes a credential "wrong".
+// Passphrases are used as the bytes typed, with no Unicode normalisation.
+// Unlocking depends on the slots and the key epoch only; damage to audit rows
+// or records never makes a credential "wrong".
 //
 // SCHEMA ALLOW-LIST. Every connection is opened with trusted_schema OFF,
 // cell_size_check ON and the driver's defensive mode (dsn). The database
@@ -84,7 +148,8 @@
 // file's version (schemacheck.go): a trigger, view, extra table or index, or a
 // changed column is an ErrVerify wrapping ErrSchema. The comparison runs at
 // every open, after a migration, at the start of every write transaction and of
-// every verification (so before every Update, slot change and Rekey).
+// every verification (so before every Update, slot change and Rekey), on the
+// connection the write then uses (see CONCURRENCY).
 //
 // WRITE VERIFICATION. Before COMMIT, every statement-level write is read back
 // and compared byte for byte with what the store wrote: Update reads back the
@@ -96,10 +161,11 @@
 // apply.
 //
 // THE HANDLE'S RECORD MAP. Each handle keeps what the audit chain says every
-// record is, and every record it reads is compared with it, so a record rolled
-// back to an older authentic version while the handle is open is refused
-// instead of being written back as a new version (tx.go: THE HANDLE'S RECORD
-// MAP).
+// record is and which lookup tag it has, and every record it reads is compared
+// with it, so a record rolled back to an older authentic version while the
+// handle is open is refused instead of being written back as a new version, and
+// a record deleted behind the handle's back is an ErrVerify, not "not found"
+// (tx.go: THE HANDLE'S RECORD MAP).
 //
 // Backups use VACUUM INTO, which is safe under WAL; never copy the file byte
 // for byte while it is open.
@@ -174,8 +240,11 @@ var (
 // ends. A caller that is itself inside a View or Update callback of this
 // handle waits for itself, so it gets the error only when ctx ends. A handle
 // that lost its file lock gets ErrLockLost here, so every operation but Close
-// refuses.
+// refuses. A context that has ended before the call gets its own error.
 func (s *Store) enter(ctx context.Context) (release func(), err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("sqlitestore: %w", err)
+	}
 	select {
 	case s.gate <- struct{}{}:
 		s.mu.Lock()
@@ -237,9 +306,8 @@ func checkFile(path string) error {
 }
 
 // dsn builds the connection string. immutable promises SQLite that nobody
-// changes the file while it is open (and that no WAL has to be replayed): it
-// then neither locks the file nor creates -wal and -shm files, so inspecting
-// a closed workspace leaves nothing behind.
+// changes the file while it is open (and that no WAL has to be replayed); the
+// open's stages promise it only while they hold the file lock exclusively.
 //
 // Every connection, whatever its mode, is opened with trusted_schema OFF
 // (SQL functions and virtual tables that a view, trigger or CHECK in the file
@@ -247,8 +315,11 @@ func checkFile(path string) error {
 // corrupt cell size is an error, not an out-of-bounds read) and the driver's
 // defensive mode (_defensive=1: SQLITE_DBCONFIG_DEFENSIVE, so a statement
 // cannot switch on writable_schema or write to shadow tables). The driver
-// applies _defensive before the _pragma list, so all of it holds from the
-// first statement. This build of SQLite is not compiled with
+// sorts the _pragma values by name before it runs them, so their order here
+// means nothing; only _defensive is applied before the first statement. The
+// pragmas then run one after another during connecting, and some of them
+// (journal_mode) already make SQLite parse the schema, which is why a write
+// transaction resets it (CONCURRENCY). This build of SQLite is not compiled with
 // SQLITE_TRUSTED_SCHEMA=0, which is why the pragma is set here. None of
 // these stops a trigger made of plain UPDATE statements; the schema
 // allow-list (schemacheck.go) does.
@@ -601,11 +672,142 @@ func OpenWithRecoveryOptions(path string, recovery *secret.Buffer, o OpenOptions
 	return open(path, credential{seal.SlotRecovery, raw}, false, o)
 }
 
-// open follows the order in the package comment (OPEN ORDER): file checks and
-// lock; then, on a read-only connection, schema, unlock, epoch, the head-file
-// comparison and the full verification, none of which writes anything; and
-// only when all of that passed, a read-write connection for the migration, the
-// head file and the cleanup retry.
+// lockWaitMax is how long an open waits for the file lock held by another
+// open. (A variable so a test can lower it.)
+var lockWaitMax = 5 * time.Second
+
+// lockShared takes a shared lock, retrying while an exclusive holder (another
+// open reading the file, which takes well under a second) has it, for at most
+// lockWaitMax or until ctx ends.
+func lockShared(ctx context.Context, path string) (*os.File, error) {
+	deadline := time.Now().Add(lockWaitMax)
+	for {
+		f, err := lockFile(path, false)
+		if !errors.Is(err, ErrLocked) || time.Now().After(deadline) {
+			return f, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("%w: %w", ErrLocked, ctx.Err())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+// A stage is one read-only look at the file: the file lock and a read-only
+// connection. When nobody holds the file and, with the exclusive lock held, no
+// -wal waits to be replayed, the lock stays exclusive and the connection is
+// immutable, so the file cannot change between the checks and the reopening;
+// otherwise the lock is shared (waited for). The store never removes -wal or
+// -shm itself.
+type stage struct {
+	lock      *os.File
+	db        *sql.DB
+	exclusive bool
+}
+
+func openStage(ctx context.Context, abs string) (*stage, error) {
+	g := &stage{}
+	if l, err := lockFile(abs, true); err == nil {
+		if hasWAL(abs) {
+			if err := downgradeLock(l); err != nil {
+				l.Close()
+				return nil, fmt.Errorf("%w: the shared lock could not be taken: %v", ErrLocked, err)
+			}
+			g.lock = l
+		} else {
+			g.lock, g.exclusive = l, true
+		}
+	}
+	if g.lock == nil {
+		l, err := lockShared(ctx, abs)
+		if err != nil {
+			return nil, err
+		}
+		g.lock = l
+	}
+	db, err := openDB(abs, true, g.exclusive)
+	if err != nil {
+		g.lock.Close()
+		return nil, err
+	}
+	g.db = db
+	return g, nil
+}
+
+// close ends the stage.
+func (g *stage) close() {
+	g.db.Close()
+	g.lock.Close()
+}
+
+// checkDeclared reads the file's schema version, refuses one this binary cannot
+// use and checks the schema against the allow-list, before anything else the
+// file says is trusted.
+func checkDeclared(ctx context.Context, db dbq, readOnly bool) (int, error) {
+	v, err := declaredVersion(ctx, db)
+	if err != nil {
+		return 0, err
+	}
+	switch {
+	case v < len(migrations) && readOnly:
+		return 0, fmt.Errorf("sqlitestore: file needs migration from schema %d to %d; open it read-write first", v, len(migrations))
+	case v > len(migrations):
+		return 0, fmt.Errorf("sqlitestore: file has schema version %d, this binary knows %d; upgrade the binary (or the schema_version table was modified)", v, len(migrations))
+	}
+	if err := checkSchema(ctx, db, v); err != nil {
+		return 0, err
+	}
+	return v, nil
+}
+
+// test hooks: beforeUnlock is called before the key derivation, beforeReopen
+// between the verification and the reopening of the file.
+var beforeUnlock, beforeReopen func()
+
+// confirmReopen checks that the connection just opened reads the file this
+// handle verified: the same file as the locked descriptor, and a chain that
+// ends at the head verified (when the lock was exclusive; under a shared lock a
+// well-behaved writer may have appended, and the verified head must still be in
+// the chain).
+func confirmReopen(ctx context.Context, abs string, lock *os.File, db dbq, want Head, exclusive bool) error {
+	bad := func(why string) error {
+		return &VerifyError{Problems: []string{"the workspace file changed between its verification and its reopening: " + why}}
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	a, err := f.Stat()
+	b, err2 := lock.Stat()
+	if err != nil || err2 != nil || !os.SameFile(a, b) {
+		return bad("the path no longer names the file that was verified")
+	}
+	got, err := chainHead(ctx, db)
+	if err != nil {
+		return err
+	}
+	if got.equal(want) {
+		return nil
+	}
+	if !exclusive {
+		if ok, err := chainContains(ctx, db, want); err != nil {
+			return err
+		} else if ok {
+			return nil
+		}
+	}
+	return bad("the audit chain does not end where the verification saw it end")
+}
+
+// open follows the order in the package comment (OPEN ORDER): the meta row and
+// the key slots are read and the lock released; the key derivation runs with no
+// lock held; then, on a read-only connection and under the lock again, schema,
+// epoch, the head-file comparison and the full verification, none of which
+// writes anything; and only when all of that passed, a connection that may
+// write (unless the handle is read-only) for the migration, the head file and
+// the cleanup retry.
 func open(path string, cred credential, readOnly bool, o OpenOptions) (st *Store, err error) {
 	ctx := context.Background()
 	abs, err := filepath.Abs(path)
@@ -615,75 +817,24 @@ func open(path string, cred credential, readOnly bool, o OpenOptions) (st *Store
 	if err := checkFile(abs); err != nil {
 		return nil, err
 	}
-	// The checks before the first write read the file on a read-only
-	// connection. One that can have the file to itself (nobody holds it open,
-	// no WAL to replay) reads it as immutable, which leaves no -wal or -shm
-	// behind; otherwise it shares, and a read-only connection to a database in
-	// WAL mode may create empty -wal and -shm files, which the failure path
-	// below removes again when it can prove nobody else uses them. A
-	// read-write open takes the exclusive lock only for this stretch and goes
-	// back to shared before it writes; two opens at the same instant may
-	// therefore see ErrLocked from each other, which is what the lock is for.
-	var lock *os.File
-	immutable := false
-	_, errW := os.Lstat(abs + "-wal")
-	_, errS := os.Lstat(abs + "-shm")
-	hadSideFiles := errW == nil || errS == nil
-	if !hasWAL(abs) {
-		if lock, err = lockFile(abs, true); err == nil {
-			immutable = true
-		}
-	}
-	if lock == nil {
-		if lock, err = lockFile(abs, false); err != nil {
-			return nil, err
-		}
-	}
-	db, err := openDB(abs, true, immutable)
+	// Steps 2 and 3: what the key derivation needs, then the key derivation.
+	m1, slots, err := readUnlockInputs(ctx, abs, readOnly)
 	if err != nil {
-		lock.Close()
 		return nil, err
 	}
 	var master *secret.Buffer
 	var keys *seal.Keys
 	defer func() {
 		if err != nil {
-			db.Close()
-			if !hadSideFiles && !immutable && upgradeLock(lock) == nil {
-				// Nobody else has the file: take back what our read-only
-				// connection created, so a failed open leaves no trace.
-				os.Remove(abs + "-wal")
-				os.Remove(abs + "-shm")
-			}
-			lock.Close()
 			master.Destroy()
 			keys.Destroy()
 		}
 	}()
-	v, err := declaredVersion(ctx, db)
-	if err != nil {
-		return nil, err
+	if beforeUnlock != nil {
+		beforeUnlock()
 	}
-	switch {
-	case v < len(migrations) && readOnly:
-		return nil, fmt.Errorf("sqlitestore: file needs migration from schema %d to %d; open it read-write first", v, len(migrations))
-	case v > len(migrations):
-		return nil, fmt.Errorf("sqlitestore: file has schema version %d, this binary knows %d; upgrade the binary (or the schema_version table was modified)", v, len(migrations))
-	}
-	// Nothing the file says is trusted before its schema is the expected one.
-	if err = checkSchema(ctx, db, v); err != nil {
-		return nil, err
-	}
-	m, err := loadMeta(ctx, db)
-	if err != nil {
-		return nil, err
-	}
-	slots, err := loadSlots(ctx, db)
-	if err != nil {
-		return nil, err
-	}
-	master, used, notices, err := unlock(m.ws, slots, cred, func(mk *secret.Buffer) (bool, error) {
-		return epochMatches(m, mk)
+	master, used, notices, err := unlock(m1.ws, slots, cred, func(mk *secret.Buffer) (bool, error) {
+		return epochMatches(m1, mk)
 	})
 	if err != nil {
 		return nil, err
@@ -691,12 +842,37 @@ func open(path string, cred credential, readOnly bool, o OpenOptions) (st *Store
 	if keys, err = seal.DeriveKeys(master); err != nil {
 		return nil, err
 	}
+
+	// Step 4: the checks, under the lock, on a read-only connection.
+	g, err := openStage(ctx, abs)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			g.close()
+		}
+	}()
+	db := g.db
+	v, err := checkDeclared(ctx, db, readOnly)
+	if err != nil {
+		return nil, err
+	}
+	m, err := loadMeta(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	if ok, err := epochMatches(m, master); err != nil {
+		return nil, err
+	} else if !ok {
+		return nil, fmt.Errorf("%w: the file changed while the credential was being checked; open it again", ErrStaleHandle)
+	}
 	head, notices, rewrite, err := checkHead(ctx, db, abs, m.ws, readOnly, o, notices)
 	if err != nil {
 		return nil, err
 	}
 	st = &Store{db: db, path: abs, ws: m.ws, epoch: m.epoch, master: master, keys: keys, slotID: used, ro: readOnly, now: time.Now,
-		lock: lock, gate: make(chan struct{}, 1), head: head, notices: notices, schemaV: v}
+		lock: g.lock, gate: make(chan struct{}, 1), head: head, notices: notices, schemaV: v}
 	// The full verification, still on the read-only connection. (With
 	// SkipVerify the handle builds the same knowledge at its first use.)
 	if !o.SkipVerify {
@@ -706,28 +882,39 @@ func open(path string, cred credential, readOnly bool, o OpenOptions) (st *Store
 		}
 		st.notices = append(st.notices, res.Notices...)
 	}
-	if readOnly {
-		return st, nil
-	}
-	// The credential is good and the file verified: now it may be written.
+
+	// Step 5: the credential is good and the file verified. From here the
+	// handle holds the file shared and uses a connection that does not promise
+	// SQLite the file is immutable.
+	exclusive := g.exclusive
 	db.Close()
-	if immutable {
-		if err = downgradeLock(lock); err != nil {
+	if exclusive {
+		if err = downgradeLock(g.lock); err != nil {
 			return nil, fmt.Errorf("%w: the shared lock could not be taken after the checks: %v", ErrLocked, err)
 		}
-		immutable = false // the handle holds the file shared from here on
+		g.exclusive = false
 	}
-	rw, err := openDB(abs, false, false)
+	if beforeReopen != nil {
+		beforeReopen()
+	}
+	db, err = openDB(abs, readOnly, false)
 	if err != nil {
 		return nil, err
 	}
-	db, st.db = rw, rw
+	g.db, st.db = db, db
+	if err = confirmReopen(ctx, abs, g.lock, db, head, exclusive); err != nil {
+		return nil, err
+	}
 	if err = checkSchema(ctx, db, v); err != nil { // the file may have changed between the two connections
 		return nil, err
 	}
 	if err = st.checkEpochNow(ctx); err != nil {
 		return nil, err
 	}
+	if readOnly {
+		return st, nil
+	}
+	// Step 6.
 	if v < len(migrations) {
 		if err = migrate(ctx, db); err != nil {
 			return nil, err
@@ -753,6 +940,25 @@ func open(path string, cred credential, readOnly bool, o OpenOptions) (st *Store
 	}
 	st.retryCleanup(ctx)
 	return st, nil
+}
+
+// readUnlockInputs is step 2 of the open: under the file lock, the schema
+// check, the meta row and the key slots. The lock is released before it
+// returns.
+func readUnlockInputs(ctx context.Context, abs string, readOnly bool) (m metaRow, slots []seal.Slot, err error) {
+	g, err := openStage(ctx, abs)
+	if err != nil {
+		return m, nil, err
+	}
+	defer g.close()
+	if _, err = checkDeclared(ctx, g.db, readOnly); err != nil {
+		return m, nil, err
+	}
+	if m, err = loadMeta(ctx, g.db); err != nil {
+		return m, nil, err
+	}
+	slots, err = loadSlots(ctx, g.db)
+	return m, slots, err
 }
 
 // epochMatches reports whether master belongs to the key epoch recorded in m:

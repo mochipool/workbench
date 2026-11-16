@@ -205,6 +205,10 @@ No prompts.
 | cardano-cli generation failure | 1 | SPO-25a-PRE-019 |
 | Action file not writable | 1 | SPO-25a-OUT-002 |
 
+## Real-tool notes
+
+* Observed 2026-11-16 (cardano-cli 11.2.3.0): the proposal procedure is `[deposit, reward account, governance action, anchor]` in type `Governance proposal`; the action is `[6]` (info), `[3, prev]` (no confidence), `[1, prev, [major, minor]]` (hard fork), `[5, prev, [[url, hash], script | null]]` (constitution), `[2, {account => lovelace}, script | null]` (treasury withdrawal) and `[4, prev, {removed}, {added => epoch}, tag-30 threshold]` (update committee), with `prev` `[tx id, index]` or `null`. The credentials of the committee sets are ordered as the ledger orders them, **script before key**, then by hash; the threshold is reduced (`0.66` is `33/50`). The descriptions are `Info proposal`, `Motion of no confidence proposal`, `Hardfork initiation proposal`, `Update to the Constitution or policy proposal`, `New constitutional committee and/or threshold and/or terms proposal` and `Treasury withdrawal proposal`. The six kinds are byte-equal to the port's (`TestGovActionFilesMatchCardanoCLI`); the parameter-change file is not built by the port yet.
+
 ## Security
 
 - **SPO-25a-SEC-001** The anchor hash commits the action to whatever bytes the URL served at the moment of the run. A hash the operator supplied is overridden by the computed one in online and light mode (SPO-25a-INV-001), and trusted unchecked offline (SPO-25a-MODE-004) and for non-JSON documents (SPO-25a-INV-002). IPFS content is fetched through the third-party gateway `ipfs.io`. (src: L153, L173-L185, L220-L221)

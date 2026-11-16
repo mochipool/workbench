@@ -8,8 +8,15 @@
 // os.Root opened on its directory: no path with a separator or ".." is ever
 // accepted, the OS refuses any lookup that would leave the directory, and a
 // symbolic link is never followed (it is refused, and renamed aside with
-// ".rejected" so it is not seen again). A file is read only if it is a
-// regular file of at most party.MaxEnvelopeBytes.
+// ".rejected" so it is not seen again). A candidate is opened with O_NOFOLLOW
+// and O_NONBLOCK (a FIFO swapped in for the file cannot block the bag), and
+// read only if the opened descriptor is a regular file of at most
+// party.MaxEnvelopeBytes.
+//
+// A file is marked read (renamed with ".read") only after its caller has
+// handled it: Receive delivers, Ack marks (ports.EnvelopeAcker). A file that
+// was delivered and not acknowledged stays where it is and is delivered again
+// after a restart; the replay log makes that harmless.
 //
 // The bag does not look inside an envelope. What it returns is unchecked
 // bytes; the caller opens them with adapters/envelope.
@@ -64,14 +71,20 @@ type Bag struct {
 	root *os.Root
 	poll time.Duration
 
-	mu       sync.Mutex // one Receive at a time; guards rejected
-	rejected []Rejection
+	mu        sync.Mutex // one Receive at a time; guards the fields below
+	rejected  []Rejection
+	delivered map[string]bool // delivered by this process and not yet acknowledged
+	last      string          // the file the last Receive returned
 }
 
 var (
-	_ ports.EnvelopeSender   = (*Bag)(nil)
-	_ ports.EnvelopeReceiver = (*Bag)(nil)
+	_ ports.EnvelopeSender = (*Bag)(nil)
+	_ ports.EnvelopeAcker  = (*Bag)(nil)
 )
+
+// Transport is the bag as the sending side of multisig: its kind is the file
+// transport, so a cold-key request may go through it (SPO-Xparty-PRE-004).
+func (b *Bag) Transport() ports.Transport { return ports.NewTransport(b, ports.ViaFile) }
 
 // Open opens the bag on an existing directory.
 func Open(dir string) (*Bag, error) {
@@ -79,7 +92,7 @@ func Open(dir string) (*Bag, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Bag{root: root, poll: DefaultPoll}, nil
+	return &Bag{root: root, poll: DefaultPoll, delivered: map[string]bool{}}, nil
 }
 
 // SetPoll changes the polling interval.
@@ -152,10 +165,11 @@ func (b *Bag) Write(name string, envelope []byte) (err error) {
 	return b.root.Rename(tmp, name)
 }
 
-// Receive returns the next unread envelope file, in name order, marking it
-// read (renamed with ".read"). It waits, polling, until one exists or ctx
-// ends. A file that is not a regular file, is too large or cannot be read is
-// renamed with ".rejected", noted in Rejected, and skipped.
+// Receive returns the next unread envelope file, in name order, and does not
+// mark it: Ack does, once the caller has handled the envelope. It waits,
+// polling, until one exists or ctx ends. A file that is not a regular file,
+// is too large or cannot be read is renamed with ".rejected", noted in
+// Rejected, and skipped.
 func (b *Bag) Receive(ctx context.Context) ([]byte, ports.TransportKind, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -183,7 +197,8 @@ func (b *Bag) reject(name, reason string) {
 	b.root.Rename(name, name+rejectedSuffix) // renames the link itself, never its target
 }
 
-// next takes the first acceptable file, or reports found false.
+// next takes the first acceptable file not already delivered, or reports
+// found false.
 func (b *Bag) next() (data []byte, found bool, err error) {
 	entries, err := fs.ReadDir(b.root.FS(), ".")
 	if err != nil {
@@ -191,7 +206,7 @@ func (b *Bag) next() (data []byte, found bool, err error) {
 	}
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), Ext) {
+		if strings.HasSuffix(e.Name(), Ext) && !b.delivered[e.Name()] {
 			names = append(names, e.Name())
 		}
 	}
@@ -201,12 +216,8 @@ func (b *Bag) next() (data []byte, found bool, err error) {
 		if err != nil {
 			continue
 		}
-		switch {
-		case !st.Mode().IsRegular():
+		if !st.Mode().IsRegular() {
 			b.reject(name, "not a regular file")
-			continue
-		case st.Size() > party.MaxEnvelopeBytes || st.Size() == 0:
-			b.reject(name, "empty or larger than the envelope limit")
 			continue
 		}
 		data, err := b.read(name)
@@ -214,18 +225,31 @@ func (b *Bag) next() (data []byte, found bool, err error) {
 			b.reject(name, err.Error())
 			continue
 		}
-		if err := b.root.Rename(name, name+readSuffix); err != nil {
-			return nil, false, err // would be delivered again: stop
-		}
+		b.delivered[name], b.last = true, name
 		return data, true, nil
 	}
 	return nil, false, nil
 }
 
-// read opens the file without following a link, checks it is still a
-// regular file within the limit, and reads at most one byte past the limit.
+// Ack marks the file the last Receive returned as read. Call it after the
+// envelope was handled; before that the file is not marked.
+func (b *Bag) Ack() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.last == "" {
+		return nil
+	}
+	name := b.last
+	b.last = ""
+	delete(b.delivered, name)
+	return b.root.Rename(name, name+readSuffix)
+}
+
+// read opens the file without following a link and without blocking, checks
+// the opened descriptor is a regular file within the limit, and reads at most
+// one byte past the limit.
 func (b *Bag) read(name string) ([]byte, error) {
-	f, err := b.root.OpenFile(name, os.O_RDONLY|noFollow, 0)
+	f, err := b.root.OpenFile(name, os.O_RDONLY|noFollow|nonBlock, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -234,8 +258,11 @@ func (b *Bag) read(name string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !st.Mode().IsRegular() {
+	switch {
+	case !st.Mode().IsRegular():
 		return nil, errors.New("not a regular file")
+	case st.Size() > party.MaxEnvelopeBytes || st.Size() == 0:
+		return nil, errors.New("empty or larger than the envelope limit")
 	}
 	data, err := io.ReadAll(io.LimitReader(f, party.MaxEnvelopeBytes+1))
 	if err != nil {

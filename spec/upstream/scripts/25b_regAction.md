@@ -247,6 +247,10 @@ This script follows the shared pipeline [`Ptx`](../patterns/Ptx.md). One require
 | Light submit fails | **0** | SPO-25b-MODE-002 |
 | Offline read-back mismatch | 0 | SPO-25b-MODE-003 |
 
+## Real-tool notes
+
+* Observed 2026-11-16 (cardano-cli 11.2.3.0): a body carries the proposal procedures as body key 20, a tag-258 set **in the order of the action files** (so the action index of each proposal is its position), and the votes as key 19 (see 24a). The plain variant is byte-equal to the port's offline, with the TTL `tip + 25000` and one witness (`TestGovTransactionsMatchUpstream`). The guardrail variant (treasury withdrawal, parameter change) needs a collateral UTxO, the evaluated execution units and the script hash check; the port returns `ErrGuardrailsUnsupported` naming what is missing and builds nothing.
+
 ## Security
 
 - **SPO-25b-SEC-001** In the guardrail variant the payer's collateral UTxO (5 to 10 ADA) is at stake: if the guardrails script fails validation on chain the collateral is forfeited. The only protection is the local cost run and the hash comparison of SPO-25b-PRE-014; the proposal deposit is not at risk in that case. (src: L672-L685, L731-L733)

@@ -31,6 +31,20 @@ type BodySpec struct {
 	// keyed by reward address in the body.
 	Certificates []stake.Certificate
 	Withdrawals  []Withdrawal
+	// Votes and Proposals are the governance attachments (24b, 25b): the
+	// body carries the voting procedures (key 19) and the proposal
+	// procedures (key 20), in the order given.
+	Votes     []VoteAttachment
+	Proposals []ProposalAttachment
+	// Mint is the mint field (key 9) and MintScripts the native script files
+	// (JSON) the body carries in its witness set.
+	Mint        []MintEntry
+	MintScripts [][]byte
+	// MetadataFiles and MessageEncryption are the metadata beside Message;
+	// the auxiliary data is the user files in order, then the message
+	// metadata (SPO-Pparam-OUT-002).
+	MetadataFiles     []MetadataFile
+	MessageEncryption string
 }
 
 // Ledger bundles the functions Balance needs.
@@ -122,6 +136,35 @@ func (d Draft) layout(fee chain.Lovelace, min MinOutputFunc, check bool) ([]Outp
 		v, short, err = rest(0)
 		outs = []Output{{Address: d.Payer, Lovelace: v, Assets: total.Assets}}
 		names = []string{"change"}
+	case d.mode == modeMint:
+		// One output: the change, with every asset above zero after the
+		// mint and the burn (SPO-11a-INV-002, SPO-11b-INV-001).
+		var after []chain.AssetAmount
+		if after, err = d.mintedHoldings(total.Assets); err != nil {
+			return nil, err
+		}
+		var v chain.Lovelace
+		v, short, err = rest(0)
+		outs = []Output{{Address: d.Payer, Lovelace: v, Assets: after}}
+		names = []string{"change"}
+	case d.mode == modeSendAssets:
+		// The destination gets max(requested, minimum) and the assets sent;
+		// the payer the rest and every other asset. The minimum of each
+		// output is computed with its own address (SPO-01sendAssets-EXT-001).
+		var left []chain.AssetAmount
+		if left, err = subtractAssets(total.Assets, d.Send); err != nil {
+			return nil, err
+		}
+		var m, v chain.Lovelace
+		if m, err = probe(d.Destination, d.Send); err != nil {
+			return nil, err
+		}
+		if d.Amount.n > m {
+			m = d.Amount.n
+		}
+		v, short, err = rest(m)
+		outs = []Output{{Address: d.Destination, Lovelace: m, Assets: d.Send}, {Address: d.Payer, Lovelace: v, Assets: left}}
+		restIdx = 1
 	case d.mode == modeClaim && d.Destination == d.Payer:
 		var v chain.Lovelace
 		v, short, err = rest(0)
@@ -205,7 +248,8 @@ func hintSuffix(h string) string {
 
 func (d Draft) spec(outs []Output, fee chain.Lovelace, ttl uint64) BodySpec {
 	return BodySpec{Inputs: d.Inputs, Outputs: outs, Fee: fee, TTL: ttl, Message: d.Message,
-		Certificates: d.Certificates, Withdrawals: d.Withdrawals}
+		Certificates: d.Certificates, Withdrawals: d.Withdrawals, Votes: d.Votes, Proposals: d.Proposals,
+		Mint: d.Mint, MintScripts: d.MintScripts, MetadataFiles: d.MetadataFiles, MessageEncryption: d.MessageEncryption}
 }
 
 // Balance runs stages 6 to 8 of the pipeline: it finds the fee by

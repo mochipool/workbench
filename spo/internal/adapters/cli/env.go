@@ -36,6 +36,14 @@ const (
 	CapCerts       Cap = "certificate-building"
 	CapCertDecode  Cap = "certificate-decoding"
 
+	CapPoolCerts      Cap = "pool-certificate-building"
+	CapPoolCertDecode Cap = "pool-certificate-decoding"
+	CapMetaHash       Cap = "metadata-hash"
+	CapTxID           Cap = "tx-id"
+	CapAttach         Cap = "transfer-attach"
+	CapMetaFetch      Cap = "metadata-fetch"
+	CapTickers        Cap = "ticker-protection"
+
 	CapTip         Cap = "tip"
 	CapSync        Cap = "sync-check"
 	CapOpCertCount Cap = "opcert-counter"
@@ -47,7 +55,44 @@ const (
 	CapCrossCheck  Cap = "reward-account-crosscheck"
 	CapSubmit      Cap = "tx-submit"
 	CapQueue       Cap = "tx-queue"
+
+	CapBundle   Cap = "transfer-file"
+	CapEras     Cap = "era"
+	CapFileSink Cap = "extract-sink"
+	CapTxView   Cap = "tx-view"
+
+	// Governance (spec/upstream 21a to 25b).
+	CapDRepKeys     Cap = "drep-keygen"
+	CapComColdKeys  Cap = "committee-cold-keygen"
+	CapComHotKeys   Cap = "committee-hot-keygen"
+	CapGovDeriver   Cap = "governance-derivation"
+	CapVoteFiles    Cap = "vote-file"
+	CapActionFiles  Cap = "action-file"
+	CapAnchorFetch  Cap = "anchor-fetch"
+	CapAnchorVerify Cap = "anchor-verification"
+	CapCommittee    Cap = "committee-state"
+	CapGovActions   Cap = "governance-actions"
+	CapConstitution Cap = "constitution"
+	CapLastEnacted  Cap = "last-enacted-action"
+	CapStakeDist    Cap = "stake-distribution"
+	CapEpoch        Cap = "epoch"
+	// CapVotingSummary is the provider's own tally of a proposal (light mode,
+	// SPO-24c-MODE-005); CapDRepCross a second, independent DRep-state source
+	// for the reads that need corroboration (the deposit a DRep refund rests on).
+	CapVotingSummary Cap = "voting-summary"
+	CapDRepCross     Cap = "drep-state-crosscheck"
 )
+
+// GovernanceChainCaps are the governance capabilities that read the chain.
+var GovernanceChainCaps = []Cap{CapCommittee, CapGovActions, CapConstitution, CapLastEnacted, CapStakeDist, CapEpoch, CapVotingSummary, CapDRepCross}
+
+// GovernanceLocalCaps are the governance capabilities that need no chain.
+var GovernanceLocalCaps = []Cap{CapDRepKeys, CapComColdKeys, CapComHotKeys, CapGovDeriver, CapVoteFiles, CapActionFiles, CapAnchorFetch, CapAnchorVerify}
+
+// FileSinkFactory opens a sink that writes files into one directory and
+// nowhere else (ports.FileSink). The composition root supplies it, so this
+// package imports no file adapter.
+type FileSinkFactory func(dir string) (ports.FileSink, error)
 
 // Env is everything a command may use, resolved once when the command
 // starts (ADR 0008). Every field is typed by the narrow port the command
@@ -82,6 +127,19 @@ type Env struct {
 	// Certs builds certificates; CertDecoder reads certificate files back.
 	Certs       ports.CertificateBuilder
 	CertDecoder ports.CertificateDecoder
+	// PoolCerts builds and PoolCertDecoder reads the pool certificates;
+	// MetadataHasher hashes the pool metadata; TxIDs gives the id of a body.
+	PoolCerts       ports.PoolCertificateBuilder
+	PoolCertDecoder ports.PoolCertificateDecoder
+	MetadataHasher  ports.PoolMetadataHasher
+	TxIDs           ports.TxIDCalculator
+	// Attach stores files in the offline transfer file (offline only).
+	Attach ports.TransferAttacher
+	// Metadata downloads the published pool metadata (light and online
+	// only). Tickers is the opt-in ticker-protection lookup: it is built in
+	// no mode (hazard H6).
+	Metadata ports.MetadataFetcher
+	Tickers  ports.TickerProtectionChecker
 
 	Tip            ports.TipReader
 	Sync           ports.SyncChecker
@@ -98,6 +156,46 @@ type Env struct {
 	CrossCheck ports.RewardAccountReader
 	Submitter  ports.TxSubmitter
 	Queue      ports.TxQueue
+
+	// Bundle is the air-gap transfer file at WireOptions.TransferFile, read
+	// and changed through the narrow bundle ports. It is present in every
+	// mode (`offline new` creates the file); whether the file exists is for
+	// the use case to find out.
+	Bundle ports.BundleStore
+	// Eras reads the era of the transfer file (offline); nil in light mode,
+	// where the era comes from the light-mode parameters document.
+	Eras ports.EraReader
+	// Sinks opens the directory `offline extract` writes into.
+	Sinks FileSinkFactory
+	// TxViewer decodes a queued transaction for display.
+	TxViewer ports.TxViewer
+
+	// The governance ports (21a to 25b). Key generators, the deriver and the
+	// vote and action file builders are local. AnchorFetcher downloads anchor
+	// documents (not in offline mode); AnchorVerifier checks them as
+	// CIP-100/108/119 and is absent in every mode until an adapter exists:
+	// a command that would verify refuses without its policy flag.
+	DRepKeys       ports.DRepKeyGenerator
+	ComColdKeys    ports.CommitteeColdKeyGenerator
+	ComHotKeys     ports.CommitteeHotKeyGenerator
+	GovDeriver     ports.GovernanceDeriver
+	VoteFiles      ports.VoteFileBuilder
+	ActionFiles    ports.ActionFileBuilder
+	AnchorFetcher  ports.MetadataFetcher
+	AnchorVerifier ports.AnchorVerifier
+	// The governance chain readers; each is nil until an adapter of the
+	// mode implements the port.
+	Committee    ports.CommitteeStateReader
+	GovActions   ports.GovActionReader
+	Constitution ports.ConstitutionReader
+	LastEnacted  ports.LastEnactedReader
+	StakeDists   ports.StakeDistributionReader
+	Epochs       ports.EpochReader
+	// Summaries is the provider's voting summary and committee threshold, the
+	// light-mode source of a tally; DRepCross is a second DRep-state source,
+	// independent of DReps. Neither exists in every mode.
+	Summaries ports.VotingSummaryReader
+	DRepCross ports.DRepStateReader
 
 	// AllowUnverified is true only when the chain is not consulted.
 	AllowUnverified bool
@@ -190,6 +288,20 @@ func (e *Env) has(c Cap) bool {
 		v = e.Certs
 	case CapCertDecode:
 		v = e.CertDecoder
+	case CapPoolCerts:
+		v = e.PoolCerts
+	case CapPoolCertDecode:
+		v = e.PoolCertDecoder
+	case CapMetaHash:
+		v = e.MetadataHasher
+	case CapTxID:
+		v = e.TxIDs
+	case CapAttach:
+		v = e.Attach
+	case CapMetaFetch:
+		v = e.Metadata
+	case CapTickers:
+		v = e.Tickers
 	case CapTip:
 		v = e.Tip
 	case CapSync:
@@ -212,6 +324,46 @@ func (e *Env) has(c Cap) bool {
 		v = e.Submitter
 	case CapQueue:
 		v = e.Queue
+	case CapBundle:
+		v = e.Bundle
+	case CapEras:
+		v = e.Eras
+	case CapFileSink:
+		v = e.Sinks
+	case CapTxView:
+		v = e.TxViewer
+	case CapDRepKeys:
+		v = e.DRepKeys
+	case CapComColdKeys:
+		v = e.ComColdKeys
+	case CapComHotKeys:
+		v = e.ComHotKeys
+	case CapGovDeriver:
+		v = e.GovDeriver
+	case CapVoteFiles:
+		v = e.VoteFiles
+	case CapActionFiles:
+		v = e.ActionFiles
+	case CapAnchorFetch:
+		v = e.AnchorFetcher
+	case CapAnchorVerify:
+		v = e.AnchorVerifier
+	case CapCommittee:
+		v = e.Committee
+	case CapGovActions:
+		v = e.GovActions
+	case CapConstitution:
+		v = e.Constitution
+	case CapLastEnacted:
+		v = e.LastEnacted
+	case CapStakeDist:
+		v = e.StakeDists
+	case CapEpoch:
+		v = e.Epochs
+	case CapVotingSummary:
+		v = e.Summaries
+	case CapDRepCross:
+		v = e.DRepCross
 	}
 	return !isNil(v)
 }
@@ -246,6 +398,22 @@ func (e *Env) Source(c Cap) string {
 		v = e.Submitter
 	case CapQueue:
 		v = e.Queue
+	case CapCommittee:
+		v = e.Committee
+	case CapGovActions:
+		v = e.GovActions
+	case CapConstitution:
+		v = e.Constitution
+	case CapLastEnacted:
+		v = e.LastEnacted
+	case CapStakeDist:
+		v = e.StakeDists
+	case CapEpoch:
+		v = e.Epochs
+	case CapVotingSummary:
+		v = e.Summaries
+	case CapDRepCross:
+		v = e.DRepCross
 	}
 	if isNil(v) {
 		return ""

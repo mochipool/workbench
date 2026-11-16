@@ -113,11 +113,14 @@ type AssetAmount struct {
 
 // Utxo is an unspent output at an address.
 type Utxo struct {
-	TxID               TxID
-	Index              uint32
-	Lovelace           Lovelace
-	Assets             []AssetAmount
-	HasDatumHash       bool
+	TxID         TxID
+	Index        uint32
+	Lovelace     Lovelace
+	Assets       []AssetAmount
+	HasDatumHash bool
+	// DatumHash is the hash in hex when the provider states it; HasDatumHash
+	// may be true with this empty.
+	DatumHash          string
 	HasInlineDatum     bool
 	HasReferenceScript bool
 }
@@ -184,6 +187,12 @@ type DRepID struct {
 type DRepState struct {
 	ID      DRepID
 	Deposit Lovelace
+	// The fields below are filled by providers that state them; the zero
+	// values are "not stated" (Unknown readings, empty strings), never "none".
+	AnchorURL      string
+	AnchorHash     string // hex
+	Expiry         Reading[uint64]
+	DelegatedStake Reading[Lovelace]
 }
 
 // PoolStatus is where a registered pool is in its life, as a provider says

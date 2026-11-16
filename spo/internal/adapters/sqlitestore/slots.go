@@ -106,7 +106,7 @@ func (s *Store) addSlot(ctx context.Context, slot seal.Slot) error {
 			return nil, err
 		}
 		return head, nil
-	})
+	}, nil)
 	return err
 }
 
@@ -203,7 +203,8 @@ func (s *Store) AddPassphraseSlot(ctx context.Context, passphrase *secret.Buffer
 
 // AddRecoverySlot adds a new recovery key and returns it as printable text.
 // It does not change the master key, so it needs no rekey. The older recovery
-// keys keep working until a Rekey.
+// keys keep working until a Rekey. On ErrOutcomeUnknown it returns the key and
+// the error: the key is valid only if the slot was stored.
 func (s *Store) AddRecoverySlot(ctx context.Context) (text *secret.Buffer, slotID []byte, err error) {
 	if err := s.writable(); err != nil {
 		return nil, nil, err
@@ -227,6 +228,9 @@ func (s *Store) AddRecoverySlot(ctx context.Context) (text *secret.Buffer, slotI
 		return nil, nil, err
 	}
 	if err := s.addSlot(ctx, slot); err != nil {
+		if errors.Is(err, ErrOutcomeUnknown) {
+			return text, id, err // valid only if the slot was stored
+		}
 		text.Destroy()
 		return nil, nil, err
 	}
@@ -248,6 +252,7 @@ func (s *Store) ChangePassphrase(ctx context.Context, slotID []byte, newPassphra
 
 // ChangePassphraseRekey changes the passphrase by a Rekey with the new
 // passphrase as the only credential. It returns the new recovery key as text.
+// On ErrOutcomeUnknown it returns the key AND the error (see Rekey).
 func (s *Store) ChangePassphraseRekey(ctx context.Context, newPassphrase *secret.Buffer) (*secret.Buffer, error) {
 	return s.Rekey(ctx, []Credential{PassphraseCredential(newPassphrase)})
 }
@@ -294,6 +299,15 @@ func (s *Store) ChangePassphraseRekey(ctx context.Context, newPassphrase *secret
 // wrapped keys are still in free pages and in the WAL; every Open and Close
 // retries the cleanup while the flag is set. A failure to advance the head
 // file after the commit is a notice.
+//
+// If COMMIT reports an error and the store cannot read the file back to learn
+// whether the rekey took effect, Rekey returns the new recovery key text AND an
+// error wrapping ErrOutcomeUnknown: the key is valid only if the rekey took
+// effect, and the caller must show it and say so. (Whether it did is told by
+// opening with the new passphrase.) The same holds for any COMMIT error other
+// than a plain busy or locked one, whatever the read-back shows: a commit that
+// failed on fsync may still take effect after a crash. Only when COMMIT was
+// never issued is the key destroyed.
 func (s *Store) Rekey(ctx context.Context, keep []Credential) (newRecovery *secret.Buffer, err error) {
 	if err := s.writable(); err != nil {
 		return nil, err
@@ -332,7 +346,7 @@ func (s *Store) Rekey(ctx context.Context, keep []Credential) (newRecovery *secr
 		return nil, err
 	}
 	defer func() {
-		if err != nil {
+		if err != nil && !errors.Is(err, ErrOutcomeUnknown) {
 			text.Destroy()
 		}
 	}()
@@ -358,10 +372,22 @@ func (s *Store) Rekey(ctx context.Context, keep []Credential) (newRecovery *secr
 		}
 	}()
 
-	committed, err := s.withWriteTx(ctx, func(q dbq) (*Head, error) {
+	// If COMMIT reports an error, the rekey took effect exactly when the file's
+	// key epoch is the new one (R4-2). The new recovery key is shown or lost
+	// by this answer, so it comes from the file, not from the error.
+	committed, err := s.withWriteTxMode(ctx, true, func(q dbq) (*Head, error) {
 		return s.rekeyBody(ctx, q, keys, epoch, epochMAC, pslot, rslot)
+	}, func(nc context.Context, q dbq) (bool, error) {
+		var got []byte
+		if err := q.QueryRowContext(nc, `SELECT key_epoch FROM meta WHERE id = 1`).Scan(&got); err != nil {
+			return false, err
+		}
+		return bytes.Equal(got, epoch), nil
 	})
 	if !committed {
+		if errors.Is(err, ErrOutcomeUnknown) {
+			return text, err // the rekey may be on disk: the key is valid only if it is
+		}
 		return nil, err
 	}
 	// From here on the rekey is done and the old keys match nothing in the
@@ -370,9 +396,6 @@ func (s *Store) Rekey(ctx context.Context, keep []Credential) (newRecovery *secr
 	s.master.Destroy()
 	s.master, s.keys, s.slotID, s.epoch, swapped = master, keys, pslot.ID, epoch, true
 	s.known = nil // the chain has a new segment under new keys: rebuilt at the next use
-	if err != nil {
-		s.notice("the rekey is committed but the head file could not be written: " + err.Error())
-	}
 	return text, nil
 }
 
@@ -416,18 +439,57 @@ func (s *Store) Cleanup(ctx context.Context) error {
 // (freed pages are zeroed by secure_delete); the checkpoint folds the WAL into
 // it and truncates the WAL file, which fails (busy) while another connection
 // holds a read snapshot. The flag is cleared only when both succeeded.
+//
+// It runs on a connection of its own. Immediately before VACUUM (which copies
+// the whole schema into the new file) that connection checks the key epoch and
+// the schema as a write transaction does, and the flag is cleared by a
+// checked write transaction that reads the meta row back.
 func (s *Store) cleanup(ctx context.Context) error {
-	if _, err := s.db.ExecContext(ctx, `VACUUM`); err != nil {
+	conn, closeConn, err := s.writeConn(ctx)
+	if err != nil {
+		return err
+	}
+	defer closeConn()
+	nc := context.WithoutCancel(ctx)
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return mapErr(err)
+	}
+	err = s.checkWriteSnapshot(ctx, conn)
+	conn.ExecContext(nc, "ROLLBACK") // VACUUM cannot run inside a transaction
+	if err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `VACUUM`); err != nil {
 		return fmt.Errorf("vacuum: %w", err)
 	}
 	var busy, logFrames, ckpt int
-	if err := s.db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &ckpt); err != nil {
+	if err := conn.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &ckpt); err != nil {
 		return fmt.Errorf("WAL checkpoint: %w", err)
 	}
 	if busy != 0 {
 		return errors.New("WAL checkpoint: another connection holds the database busy")
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE meta SET cleanup_pending = 0`)
+	_, err = s.withWriteTx(ctx, func(q dbq) (*Head, error) {
+		if _, err := q.ExecContext(ctx, `UPDATE meta SET cleanup_pending = 0`); err != nil {
+			return nil, err
+		}
+		var rows, pending int
+		var ws, epoch, mac []byte
+		if err := q.QueryRowContext(ctx, `SELECT count(*) FROM meta`).Scan(&rows); err != nil {
+			return nil, err
+		}
+		if err := q.QueryRowContext(ctx, `SELECT workspace_id, key_epoch, epoch_mac, cleanup_pending FROM meta WHERE id = 1`).Scan(&ws, &epoch, &mac, &pending); err != nil {
+			return nil, err
+		}
+		ok, err := s.keys.Audit.CheckEpoch(ws, epoch, mac)
+		if err != nil {
+			return nil, err
+		}
+		if rows != 1 || pending != 0 || !ok || !bytes.Equal(ws, s.ws) || !bytes.Equal(epoch, s.epoch) {
+			return nil, errWriteChanged("the meta row")
+		}
+		return nil, nil
+	}, nil)
 	return err
 }
 

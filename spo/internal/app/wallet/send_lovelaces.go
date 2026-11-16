@@ -10,9 +10,11 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/mochipool/workbench/spo/internal/app/txflow"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
+	"github.com/mochipool/workbench/spo/internal/domain/txparam"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -92,6 +94,10 @@ type SendLovelaces struct {
 	DefTTL uint64
 	// Selection chooses the inputs; empty means SelectAll.
 	Selection txbuild.SelectionStrategy
+	// Files and Encrypter are needed only by a request with Extras that name
+	// metadata files or ask for message encryption.
+	Files     ports.MetadataFileReader
+	Encrypter ports.MessageEncrypter
 }
 
 // SendRequest is one payment. Source and Destination are as the operator
@@ -102,6 +108,13 @@ type SendRequest struct {
 	Amount      string // ALL, ALLFUNDS, MIN or lovelace
 	// Message holds CIP-20 lines (the pieces of `msg:`), at most 64 bytes each.
 	Message []string
+	// Extras are the parsed extra parameters (txparam.Parse with
+	// txparam.ForSendLovelaces): further messages, encryption, metadata
+	// files and the UTxO filters. Optional.
+	Extras *txparam.Extras
+	// Passphrase is the `pass:` passphrase of Extras, for `enc:basic`; nil
+	// means the default. The caller owns it and destroys it.
+	Passphrase *ports.Secret
 }
 
 // SendResult is what happened. Nothing in it is secret.
@@ -118,6 +131,10 @@ type SendResult struct {
 	// ApprovalSkipped is true when the confirmation was skipped by policy.
 	ApprovalSkipped bool
 	Destination     string // the name or address the money was sent to
+	// MetadataFiles names the user metadata files attached.
+	MetadataFiles []string
+	// Encrypted is true when the message lines are CIP-83 encrypted.
+	Encrypted bool
 }
 
 var (
@@ -179,6 +196,14 @@ func (uc SendLovelaces) Run(ctx context.Context, req SendRequest) (SendResult, e
 		return SendResult{}, err
 	}
 	if err := txbuild.ValidateMessage(req.Message); err != nil {
+		return SendResult{}, err
+	}
+	// The extra parameters are resolved before any file or network access:
+	// the metadata files are read, the message is encrypted.
+	//
+	// spec: SPO-01sendLovelaces-IF-003, SPO-Pparam-IF-010, SPO-Pparam-IF-016
+	meta, err := txflow.ResolveExtras(txflow.ExtrasPorts{Files: uc.Files, Encrypter: uc.Encrypter}, req.Extras, req.Message, req.Passphrase)
+	if err != nil {
 		return SendResult{}, err
 	}
 
@@ -273,12 +298,19 @@ func (uc SendLovelaces) Run(ctx context.Context, req SendRequest) (SendResult, e
 	if strategy == "" {
 		strategy = txbuild.SelectAll
 	}
-	inputs, err := strategy.Select(utxos)
+	// The filters of the extra parameters narrow the candidates in every
+	// work mode; the strategy then chooses among them (hazard H4).
+	//
+	// spec: SPO-01sendLovelaces-MODE-002, SPO-Pparam-IF-019, SPO-Pparam-IF-020, SPO-Pparam-IF-022
+	inputs, err := strategy.Select(txflow.FilterCandidates(req.Extras, utxos))
 	if err != nil {
 		return SendResult{}, fmt.Errorf("%s: %w", src.name, err)
 	}
-	draft, err := txbuild.NewDraft(src.addr, dst.addr, amount, inputs, req.Message)
+	draft, err := txbuild.NewDraft(src.addr, dst.addr, amount, inputs, nil)
 	if err != nil {
+		return SendResult{}, err
+	}
+	if draft, err = meta.Attach(draft); err != nil {
 		return SendResult{}, err
 	}
 
@@ -388,7 +420,10 @@ func (uc SendLovelaces) Run(ctx context.Context, req SendRequest) (SendResult, e
 	// Stage 12: submit or queue exactly what was confirmed.
 	res := SendResult{TxID: signed.ID, Fee: bal.Spec.Fee, TTL: bal.Spec.TTL, Outputs: bal.Spec.Outputs,
 		Inputs: len(bal.Spec.Inputs), Size: len(signed.CBOR), SignedTx: signed.CBOR, ApprovalSkipped: skipped,
-		Destination: dst.name}
+		Destination: dst.name, Encrypted: meta.Encryption != ""}
+	for _, f := range meta.Files {
+		res.MetadataFiles = append(res.MetadataFiles, f.Name)
+	}
 	if uc.Queue != nil {
 		toName := dst.name
 		if err := uc.Queue.Enqueue(ctx, ports.QueuedTx{Type: "Transaction", FromName: src.name, FromAddr: src.addr,

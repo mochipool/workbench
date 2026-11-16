@@ -63,7 +63,7 @@ func copyBuf(t *testing.T, b *secret.Buffer) *secret.Buffer {
 	return c
 }
 
-func startServer(t *testing.T, reg *tailcfg.DERPRegion, allowed []party.NodeKey, admit func([]byte) (party.Fingerprint, error)) *Server {
+func startServer(t *testing.T, reg *tailcfg.DERPRegion, allowed []party.NodeKey, admit func([]byte, party.NodeKey) (party.Fingerprint, error)) *Server {
 	t.Helper()
 	s, err := NewServer(ServerConfig{Allowed: allowed, Admit: admit, Region: reg, Logf: quietLogf})
 	if err != nil {
@@ -84,7 +84,8 @@ func clientFor(t *testing.T, s *Server, node *secret.Buffer, coord party.Fingerp
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := NewClient(ClientConfig{Address: addr, NodeKey: node, Coordinator: coord, Logf: quietLogf, DialTimeout: 15 * time.Second})
+	sk := party.NodeKey(s.ts.Key.Public().Raw32())
+	c, err := NewClient(ClientConfig{Address: addr, NodeKey: node, Coordinator: coord, ExpectServerKey: &sk, Logf: quietLogf, DialTimeout: 15 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +141,7 @@ func TestEnvelopesOverTailcat(t *testing.T) {
 	}
 	signerParty := mkParty(signerID, "signer", party.RoleSigner)
 	lookup := func(fp party.Fingerprint) (party.Party, bool) { return signerParty, fp == signerParty.Fingerprint }
-	admit := func(env []byte) (party.Fingerprint, error) {
+	admit := func(env []byte, _ party.NodeKey) (party.Fingerprint, error) {
 		o, err := envelope.Open(coordID, env, lookup, time.Now())
 		if err != nil {
 			return party.Fingerprint{}, err
@@ -247,7 +248,7 @@ func TestEnrolledKeyBadFirstFrameAndOtherPorts(t *testing.T) {
 	reg := relay(t)
 	node, pub := nodeKey(t)
 	bad := errors.New("no")
-	s := startServer(t, reg, []party.NodeKey{pub}, func([]byte) (party.Fingerprint, error) { return party.Fingerprint{}, bad })
+	s := startServer(t, reg, []party.NodeKey{pub}, func([]byte, party.NodeKey) (party.Fingerprint, error) { return party.Fingerprint{}, bad })
 	addr, _ := s.Address()
 	var text string
 	addr.Use(func(b []byte) error { text = string(b); return nil })
@@ -327,7 +328,8 @@ func TestPersistentKeys(t *testing.T) {
 	}
 }
 
-// A signer can pin the server key from the Invite.
+// A signer pins the server key from the Invite, and cannot be built without it.
+// spec: SPO-Xparty-IF-006
 func TestClientChecksServerKey(t *testing.T) {
 	t.Parallel()
 	reg := relay(t)
@@ -346,8 +348,16 @@ func TestClientChecksServerKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.Close()
-	if _, err := NewClient(ClientConfig{Address: secretOf(t, "not an address"), NodeKey: copyBuf(t, node)}); err == nil {
+	if _, err := NewClient(ClientConfig{Address: secretOf(t, "not an address"), NodeKey: copyBuf(t, node), ExpectServerKey: &right}); err == nil {
 		t.Fatal("accepted junk as an address")
+	}
+	// The server key from the invitation is mandatory (SPO-Xparty-IF-006).
+	if _, err := NewClient(ClientConfig{Address: addr(), NodeKey: copyBuf(t, node)}); err == nil {
+		t.Fatal("built a client with no expected server key")
+	}
+	zero := party.NodeKey{}
+	if _, err := NewClient(ClientConfig{Address: addr(), NodeKey: copyBuf(t, node), ExpectServerKey: &zero}); err == nil {
+		t.Fatal("built a client with a zero expected server key")
 	}
 }
 

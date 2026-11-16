@@ -5,17 +5,23 @@ import (
 	"errors"
 	"time"
 
+	"github.com/mochipool/workbench/spo/internal/domain/chain"
+	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 )
 
-// TransportKind says how an envelope arrived. The cold-key rule
-// (SPO-Xparty-PRE-004, PRE-006) depends on it, so a receiver must report it
-// truthfully and a caller must not guess.
+// TransportKind says how an envelope arrived or leaves. The cold-key rule
+// (SPO-Xparty-PRE-004, PRE-006) depends on it. The zero value is unknown, and
+// unknown is treated as a network in every cold-key check: a kind that was not
+// stated is never taken for the file transport.
 type TransportKind uint8
 
 const (
-	// ViaFile: the envelope was read from a file.
-	ViaFile TransportKind = iota + 1
+	// ViaUnknown: the kind was not stated. It is a network for the cold-key
+	// rule, and is refused where a kind must be stated.
+	ViaUnknown TransportKind = iota
+	// ViaFile: the envelope was read from or written to a file.
+	ViaFile
 	// ViaNetwork: the envelope came over a network transport (tailcat).
 	ViaNetwork
 )
@@ -29,6 +35,32 @@ func (k TransportKind) String() string {
 	}
 	return "unknown"
 }
+
+// IsFile reports that the kind is the file transport. Everything else, the
+// unknown kind included, is a network for the cold-key rule.
+func (k TransportKind) IsFile() bool { return k == ViaFile }
+
+// Known reports that the kind was stated.
+func (k TransportKind) Known() bool { return k == ViaFile || k == ViaNetwork }
+
+// Transport is a sender together with what kind of transport it is. Only the
+// transport adapters make one for themselves (filebag.Bag.Transport,
+// tailcat.Server.Transport, tailcat.Client.Transport), so a call site cannot
+// say that a network is a file. The zero Transport has no sender and an
+// unknown kind. NewTransport is for tests and for a transport adapter.
+type Transport struct {
+	send EnvelopeSender
+	kind TransportKind
+}
+
+// NewTransport pairs a sender with its kind.
+func NewTransport(s EnvelopeSender, k TransportKind) Transport { return Transport{send: s, kind: k} }
+
+// Sender is the envelope sender; nil for the zero Transport.
+func (t Transport) Sender() EnvelopeSender { return t.send }
+
+// Kind is the transport's kind.
+func (t Transport) Kind() TransportKind { return t.kind }
 
 // Transport errors.
 var (
@@ -56,6 +88,15 @@ type EnvelopeReceiver interface {
 	Receive(ctx context.Context) (envelope []byte, via TransportKind, err error)
 }
 
+// EnvelopeAcker is an EnvelopeReceiver that keeps what it delivered until the
+// caller has handled it: the file bag marks a file read only after Ack, so a
+// crash between delivery and handling delivers it again (the replay log makes
+// that harmless). Ack marks the envelope returned by the last Receive.
+type EnvelopeAcker interface {
+	EnvelopeReceiver
+	Ack() error
+}
+
 // PartyReader reads the party registry inside a Store View or Update.
 // Lookups return ErrNotFound for an unknown party.
 type PartyReader interface {
@@ -81,9 +122,10 @@ type PartyRegistry interface {
 // ErrReplay: the message id was already accepted (SPO-Xparty-INV-007).
 var ErrReplay = errors.New("message id already accepted")
 
-// ErrReplayFull: the replay log is full; the message is refused rather than
-// accepted unrecorded.
-var ErrReplayFull = errors.New("replay log is full")
+// ErrReplayFull: the sender already has as many live replay entries as it may
+// (party.MaxReplayPerSender), or the log is full; the message is refused
+// rather than accepted unrecorded. Only that sender is refused.
+var ErrReplayFull = errors.New("replay log is full for that sender")
 
 // ReplayLog is the replay log of SPO-Xparty-INV-007. Record takes the Writer
 // of the store transaction that applies the message's effect, so the id and
@@ -93,6 +135,130 @@ var ErrReplayFull = errors.New("replay log is full")
 type ReplayLog interface {
 	// Seen reports whether id is recorded and not yet expired at now.
 	Seen(r Reader, id party.MessageID, now time.Time) (bool, error)
-	// Record stores id until expires; ErrReplay if it is already there.
-	Record(w Writer, id party.MessageID, expires, now time.Time) error
+	// Record stores id, sent by sender, until expires; ErrReplay if it is
+	// already there, ErrReplayFull when the sender is over its quota.
+	Record(w Writer, sender party.Fingerprint, id party.MessageID, expires, now time.Time) error
+}
+
+// ---- sealing and opening (SPO-Xparty-OUT-002, PRE-002) ----------------------
+
+// OpenedEnvelope is an envelope that decrypted and passed the first six
+// steps of SPO-Xparty-PRE-002. Its body is reachable only through Admit,
+// which runs the replay check and the authorisation, so a body cannot be read
+// from an envelope that was not admitted.
+type OpenedEnvelope interface {
+	Sender() party.Party
+	Type() party.Type
+	ID() party.MessageID
+	Created() time.Time
+	Expires() time.Time
+	// Admit runs step 7 (the message id is not in the replay log: seen) and
+	// step 8 (the body decodes and the sender's roles and pools permit it:
+	// authorise) and returns the body. It does not record the id: the caller
+	// does, in the store transaction of the message's effect (INV-007).
+	Admit(seen func(party.MessageID) (bool, error), authorise func(sender party.Party, t party.Type, body party.Body) error) (party.Body, error)
+}
+
+// EnvelopeSealer builds envelopes from the local identity. The private
+// signing key stays behind it.
+type EnvelopeSealer interface {
+	// Identity is the local public identity.
+	Identity() party.Identity
+	// Seal signs and encrypts body from the local identity to the recipient,
+	// valid from now to expires, and returns the envelope and its message id.
+	Seal(to party.Identity, body party.Body, now, expires time.Time) (envelope []byte, id party.MessageID, err error)
+}
+
+// EnvelopeOpener opens envelopes addressed to the local identity.
+type EnvelopeOpener interface {
+	// Open runs SPO-Xparty-PRE-002 steps 1 to 6 against the lookup of
+	// enrolled parties and returns the first refusal.
+	Open(envelope []byte, lookup func(party.Fingerprint) (party.Party, bool), now time.Time) (OpenedEnvelope, error)
+	// Audit says what a refusal returned by Open or Admit records: the
+	// reason and, when the signature verified, the sender
+	// (SPO-Xparty-INV-006). known false means the refusal came before the
+	// signature step: nothing in it is authenticated.
+	Audit(err error) (reason string, sender party.Fingerprint, known bool)
+	// IsRefusal tells a refusal of an envelope from a failure of the
+	// machinery (a store that could not be read): only a refusal is
+	// recorded as an audit event and answered with nothing (INV-006).
+	IsRefusal(err error) bool
+}
+
+// LocalIdentity is the party's own identity with its private keys in guarded
+// memory. Destroy wipes them.
+type LocalIdentity interface {
+	EnvelopeSealer
+	EnvelopeOpener
+	Destroy()
+}
+
+// GeneratedIdentity is a new identity: the private keys for PutSecret under
+// Ref{"local", PartyKeys}, the signed public document for PartyIdentity.
+type GeneratedIdentity struct {
+	Keys     *Secret
+	Document []byte
+	Identity party.Identity
+}
+
+// IdentityKit generates, parses and loads party identities.
+type IdentityKit interface {
+	Generate(label string, node *party.NodeKey, now time.Time) (GeneratedIdentity, error)
+	// ParseDocument decodes a public identity document strictly. It does not
+	// verify the signature: party.Enroll does (SPO-Xparty-PRE-001).
+	ParseDocument(b []byte) (party.Document, error)
+	// Local loads the workspace's own identity from the store and vault. The
+	// caller destroys it.
+	Local(ctx context.Context) (LocalIdentity, error)
+}
+
+// Multi-party records. All are one JSON blob each, so a change commits
+// atomically with the replay entry of the message that caused it.
+const (
+	// MultisigCoordinator is the coordinator's view of the collections it
+	// asked others to sign: per collection and slot, the request last sent.
+	MultisigCoordinator Kind = "multisig.coordinator"
+	// MultisigSigner is the signer's inbox: every admitted request, its
+	// decision and the response it gave (SPO-Xparty-INV-017).
+	MultisigSigner Kind = "multisig.signer"
+	// MultisigOutbox holds the sealed envelopes not yet handed to a
+	// transport (SPO-Xparty-SEC-003).
+	MultisigOutbox Kind = "multisig.outbox"
+	// MultisigEvents is the log of audit events of OUT-004 and INV-006.
+	MultisigEvents Kind = "multisig.events"
+	// MultisigCollection holds a witness collection of a transaction that is
+	// not a pool registration (the pool's own is in its descriptor).
+	MultisigCollection Kind = "multisig.collection"
+)
+
+func init() {
+	for _, k := range []Kind{MultisigCoordinator, MultisigSigner, MultisigOutbox, MultisigEvents, MultisigCollection} {
+		kinds[k] = kindInfo{}
+	}
+}
+
+// ---- the signer's own view of its funds (SPO-Xparty-PR-002) -------------------
+
+// OwnedAddresses is what the signer owns, from its own store and never from a
+// coordinator. The review marks every output of a body Own or not by it, and
+// the signer resolves the inputs of a body in the UTxO sets of these
+// addresses. party.OwnedList is the simple implementation over a list the
+// wiring supplies.
+type OwnedAddresses interface {
+	// PaymentAddresses are the addresses of the signer's own payment keys.
+	PaymentAddresses(ctx context.Context) ([]chain.Address, error)
+	// IsOwn reports whether addr is one of them.
+	IsOwn(addr chain.Address) bool
+	// IsOwnReward reports whether a reward account is the signer's.
+	IsOwnReward(account chain.StakeAddress) bool
+}
+
+// ApprovalGate asks the operator to authenticate again before a key signs
+// (SPO-Xparty-INV-016): the wiring prompts for the store passphrase for the
+// pool cold, payment and owner stake roles. Signer.Approve calls it with the
+// key about to sign and the hash of the body that was reviewed, and signs only
+// when it returns nil. There is no default: a Signer with no gate refuses
+// to approve.
+type ApprovalGate interface {
+	Reauthenticate(ctx context.Context, key custody.KeyRef, bodyHash [32]byte) error
 }

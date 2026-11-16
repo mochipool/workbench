@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
+	"github.com/mochipool/workbench/spo/internal/domain/transfer"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -44,6 +45,8 @@ type File struct {
 	Now func() time.Time
 
 	mu sync.Mutex
+	// afterWrite is a test hook between the write and the read-back.
+	afterWrite func()
 }
 
 // Errors of the transfer file.
@@ -53,7 +56,7 @@ var (
 	ErrInvalidFile = errors.New("the offline transfer file is not usable; create it with `01_workOffline.sh new` on the online machine")
 	// ErrAddressNotInFile: the address has no snapshot in the file
 	// (SPO-Ptx-MODE-004).
-	ErrAddressNotInFile = errors.New("the address is not in the offline transfer file; include it on the online machine first (`01_workOffline.sh add`)")
+	ErrAddressNotInFile = fmt.Errorf("%w (`01_workOffline.sh add`)", transfer.ErrAddressNotInBundle)
 	// ErrReadBack: the entry read back from the file is not the one written
 	// (SPO-Ptransfer-OUT-012). Upstream prints an error and exits 0.
 	ErrReadBack = errors.New("the queued transaction read back from the transfer file differs from the one written")

@@ -24,10 +24,19 @@ import (
 // refused with its own message.
 var witnessKeyTypes = map[custody.Role]struct{ normal, extended string }{
 	custody.RolePayment: {"PaymentSigningKeyShelley_ed25519", "PaymentExtendedSigningKeyShelley_ed25519_bip32"},
-	custody.RoleStake:   {"StakeSigningKeyShelley_ed25519", "StakeExtendedSigningKeyShelley_ed25519_bip32"},
+	// A policy key is a payment-type key (SPO-10-EXT-001) kept as <policy>.policy.skey.
+	custody.RolePolicy: {"PaymentSigningKeyShelley_ed25519", "PaymentExtendedSigningKeyShelley_ed25519_bip32"},
+	custody.RoleStake:  {"StakeSigningKeyShelley_ed25519", "StakeExtendedSigningKeyShelley_ed25519_bip32"},
 	// The pool cold key witnesses a pool registration or retirement
 	// (SPO-05c-EXT-004, SPO-07b-EXT-002); the owner is the pool's name.
 	custody.RolePoolCold: {"StakePoolSigningKey_ed25519", "StakePoolExtendedSigningKey_ed25519_bip32"},
+	// The governance keys: a DRep key witnesses its registration, update and
+	// retirement and its votes, the committee cold key its hot-key authorisation
+	// and resignation, the committee hot key its votes (SPO-21b-INV-004,
+	// SPO-23c-INV-004, SPO-24b-EXT-003).
+	custody.RoleDRep:          {"DRepSigningKey_ed25519", "DRepExtendedSigningKey_ed25519_bip32"},
+	custody.RoleCommitteeCold: {"ConstitutionalCommitteeColdSigningKey_ed25519", "ConstitutionalCommitteeColdExtendedSigningKey_ed25519_bip32"},
+	custody.RoleCommitteeHot:  {"ConstitutionalCommitteeHotSigningKey_ed25519", "ConstitutionalCommitteeHotExtendedSigningKey_ed25519_bip32"},
 }
 
 // witnessRef maps a key reference to the secret artefact. For a payment key
@@ -39,8 +48,16 @@ func witnessRef(key custody.KeyRef) (ports.Ref, error) {
 		return ports.Ref{Name: key.Owner, Kind: ports.AddrSKey}, nil
 	case custody.RoleStake:
 		return ports.Ref{Name: key.Owner, Kind: ports.StakingSKey}, nil
+	case custody.RolePolicy:
+		return ports.Ref{Name: key.Owner, Kind: ports.PolicySKey}, nil
 	case custody.RolePoolCold:
 		return ports.Ref{Name: key.Owner, Kind: ports.NodeSKey}, nil
+	case custody.RoleDRep:
+		return ports.Ref{Name: key.Owner, Kind: ports.DRepSKey}, nil
+	case custody.RoleCommitteeCold:
+		return ports.Ref{Name: key.Owner, Kind: ports.CCColdSKey}, nil
+	case custody.RoleCommitteeHot:
+		return ports.Ref{Name: key.Owner, Kind: ports.CCHotSKey}, nil
 	}
 	return ports.Ref{}, fmt.Errorf("the vault signer cannot witness a transaction with a %s key", key.Role)
 }

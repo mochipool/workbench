@@ -49,6 +49,8 @@ The terminal-facing primitives every script uses: a yes/no question (`ask`), a h
 - **SPO-Cui-SEC-001** The password is returned in clear on stdout and lives in the caller's shell variable. It is not echoed to the terminal (stars only). (src: L799-L803)
 
 > **Upstream quirk:** `IFS= read -s` is used without `-r`. Backslashes in the typed password are **consumed as escapes**: `ab\cd` is read as `abcd`, and a trailing backslash joins the next input line. Passwords are only ever typed through this function, both for encryption and decryption, so a password with a backslash still works consistently. A reimplementation that must open files encrypted by the upstream scripts has to apply the same unescaping to a password containing a backslash. A raw reader would derive a different key. (src: L799)
+>
+> *Observed 2026-11-16* (`spo/test/parity/workspace_test.go`, real `01_protectKey enc` on a pseudo terminal): typing `Abc\def-12345` encrypts with `Abcdef-12345`; the typed text does not open the file. Leading and trailing spaces are kept. The rule as ported (`keyfile.UpstreamRead`): a backslash is dropped and the next byte kept, backslash-newline joins lines, a final backslash is dropped.
 
 > **Upstream quirk:** The password is read from stdin while the prompt uses `termTTY`. If stdin is redirected, the password is taken from the redirected input, and with stdin at end of input it is empty (an abort for the callers). (src: L798-L799)
 

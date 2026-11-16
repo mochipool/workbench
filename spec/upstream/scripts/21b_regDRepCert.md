@@ -211,5 +211,6 @@ Use case `RegisterOrUpdateDRep(drep, payer, anchor?, metadata?)` on aggregate `D
 
 ## Open questions
 
-* What an update certificate without anchor does on chain for the pinned ledger (clears versus keeps the anchor). The Conway ledger specification settles it.
+* What an update certificate without anchor does on chain for the pinned ledger (clears versus keeps the anchor). The Conway ledger specification settles it. Observed 2026-11-16 (cardano-cli 11.2.3.0): the update certificate is `83 12 8200 581c<hash> f6` (type 18, anchor `null`) and the registration `84 10 8200 581c<hash> <deposit> <anchor | f6>`, type `Certificate`, descriptions `DRep Key Update Certificate` and `DRep Key Registration Certificate`; the retirement is `83 11 8200 581c<hash> <deposit>` (`DRep Key Retirement Certificate`). The port refuses an update without an anchor for a DRep that has one on chain unless the operator allows the clearing (`AllowAnchorClear`), because the certificate gives the ledger a null anchor to apply.
+* Observed 2026-11-16 (offline, the recorded preview parameters): `dRepDeposit` is 500 ADA, so a registration from a wallet with 50 ADA is refused by SPO-21b-PRE-008 with exit 0 and no transaction; an update or a retirement is not.
 * Whether `--include-stake` changes the shape of element 1 in a way the later `jq` expressions depend on; a real `query drep-state` on a registered DRep settles it.

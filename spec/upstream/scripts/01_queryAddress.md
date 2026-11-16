@@ -80,6 +80,8 @@ The tables are display only and are not specified. This spec records what is que
    - **SPO-01queryAddress-PRE-002** Online, when a query is needed, the node must be `synced` (SPO-Cchain-OUT-004), else exit 1. Light mode has no sync check here. (src: L64-L66)
    - **SPO-01queryAddress-PRE-003** A failing query prints the error text and ends the script with exit status 0 (the status passed to `exit` is read after an `echo`). (src: L69, L78)
    - **SPO-01queryAddress-MODE-001** Offline: `readOfflineFile` (exit 1 when the file is unusable, SPO-Coffline-PRE-001 to SPO-Coffline-PRE-004), then the stored `utxoJSON` of the address. An address that is not in the file is refused with exit 1 ("include it first online"). (src: L85-L87)
+
+> **Observed 2026-11-16:** offline, an address that is not in the file exits 1 for a payment address and 0 for a stake address (SPO-01queryAddress-PRE-006), and a Handle exits 1. The port answers all three with typed errors (`ErrNotInSnapshot` for both address kinds, `ErrAdaHandleUnsupported`) and, offline, reports the snapshot's `date` and `used` flag. The facts of the report equal the facts of the file (`TestQueryAddressOfflineMatchesTheSnapshot`).
    - **SPO-01queryAddress-PRE-004** Exits 1 ("no funds on the address") when the UTxO set is empty. (src: L91-L92)
 4. **Report.**
    - **SPO-01queryAddress-OUT-001** Reports each UTxO (`<hash>#<index>`, lovelace, datum hash when present), the total lovelace (sum over all UTxOs), and, per distinct asset id, the total amount, the CIP-14 fingerprint (SPO-Cconv-OUT-013) and the asset name in readable form where possible (SPO-Cconv-OUT-016). ADA Handle assets are labelled as handles. Display only; nothing is written. (src: L91-L207)

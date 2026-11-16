@@ -28,6 +28,22 @@ fake `http.RoundTripper`; no test touches the network.
 | `proposal_list_closed.json` | the same without the three `is.null` filters and with `&limit=2`: one proposal, expired in epoch 1483 |
 | `address_utxos.json` | `POST /address_utxos?select=tx_hash,tx_index,value,asset_list,datum_hash,inline_datum,reference_script` with `_extended:true` |
 | `light_parameters.json` | `GET ...preview-parameters.json?rnd=<unix>` |
+| `committee_info.json` | `GET /committee_info` (SPO-Clight-EXT-008): one element with `quorum_numerator` 2, `quorum_denominator` 3 and three members, each with `status` `authorized` and script cold and hot credentials (`cc_cold_has_script`, `cc_hot_has_script` true) |
+| `proposal_list_kinds.json` | `GET /proposal_list?proposal_id=in.(<seven ids>)&select=proposal_tx_hash,proposal_index,proposal_type,proposal_description,deposit,return_address,proposed_epoch,expiration,meta_url,meta_hash,dropped_epoch,enacted_epoch,expired_epoch`: one expired proposal of each of the seven kinds (found with `GET /proposal_list?proposal_type=eq.<kind>&limit=3`). The `proposal_description.tag` of a committee update is `UpdateCommittee` while `proposal_type` says `NewCommittee`; a ParameterChange description is `[prev id or null, {camelCase parameter: value}, guardrails script]` |
+| `proposal_votes_hardfork.json` | `GET /proposal_votes?_proposal_id=gov_action1lg4j2tyav3dnwmhx372w4pmkfkkk2y8zq9exjg0qedenzcw2dmuqql0r99d` (SPO-Clight-EXT-010): an enacted hard fork with three SPO, three ConstitutionalCommittee (script) and two DRep votes, newest first |
+| `proposal_votes_constitution.json` | the same for `gov_action1x2j56d9k...`: one DRep abstain |
+| `proposal_votes_info.json` | the same for `gov_action18uh2e6d...` (the InfoAction): `[]`, no votes |
+| `proposal_voting_summary_info.json` | `GET /proposal_voting_summary?_proposal_id=gov_action18uh2e6d...` (SPO-Clight-EXT-011) |
+| `proposal_voting_summary_constitution.json` | the same for `gov_action1x2j56d9k...` |
+| `proposal_voting_summary_hardfork.json` | the same for the enacted hard fork `gov_action1lg4j2ty...`: non-zero percentages (`drep_yes_pct` 79.86, `pool_yes_pct` 52.23, `committee_yes_pct` 37.50) |
+
+Governance reads, recorded 2026-11-16 (epoch 1483) with `curl` from the same API. `GET /tip` answers `era` `Conway`
+(`Era`). `/proposal_votes` and `/proposal_voting_summary` take `_proposal_id` as a query parameter (a path of the
+spec's form fails with `Query not Found`). `proposal_voting_summary` answered an empty body, not `[]`, for a proposal
+Koios had no summary of; percentages are JSON numbers (`79.86`, `0.00`, `0`), powers are strings. The constitution and
+the last enacted action ids are not read from Koios: upstream takes them from the light-mode parameters document
+(`constitution`, `prevActionIDs`, SPO-25a-MODE-002), which is `light_parameters.json`. No endpoint was invented for the
+DRep and pool stake distribution: upstream's light mode does not read them (SPO-24c-MODE-005).
 
 No proposal was open on preview when these were recorded (the same query
 with no `return_address` also answered `[]`), so the open-proposal tests
@@ -35,6 +51,12 @@ derive their row from `proposal_list_closed.json` by setting `expired_epoch`
 to null in the test (hand-derived, not recorded). `account_info` also carries
 `proposal_refund`; the adapter ignores it and follows Clight (the proposal
 list).
+
+Hand-derived, not recorded: the open-proposal rows of the governance tests are `proposal_list_kinds.json` with
+`expired_epoch` and `dropped_epoch` set to null (and, in the end-to-end test, `expiration` moved to 1485 so the epoch-1483
+tip still sees them open); the end-to-end test also points the info action's `meta_url` and `meta_hash` at a loopback
+document and nulls the registered DRep's anchor, so no request leaves the machine. The vote-row cases with a voter in
+several rows, every error case and every malformed-row case are hand-written in `governance_test.go`.
 
 Not recorded (hand-written in the tests from the spec text): a UTxO carrying
 native assets and datum flags, a pool with `op_cert_counter` null, and every

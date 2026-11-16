@@ -27,10 +27,12 @@ type Limits struct {
 	Idle             time.Duration
 	MaxConns         int
 	ConnsPerKeyPerMn int
+	LivePerKey       int
+	Lifetime         time.Duration
 }
 
-// DefaultLimits are the constants of SPO-Xparty-INV-019.
-var DefaultLimits = Limits{MaxFramesPerConn, IdleTimeout, MaxConns, MaxConnsPerKeyPerMinute}
+// DefaultLimits are the constants of SPO-Xparty-INV-019 and INV-022.
+var DefaultLimits = Limits{MaxFramesPerConn, IdleTimeout, MaxConns, MaxConnsPerKeyPerMinute, MaxLivePerKey, MaxConnLifetime}
 
 // ErrEmptyAllowList: concern T2. tailcat admits every client until a key is
 // allowed, so a server with no enrolled node key is never started.
@@ -47,11 +49,13 @@ type ServerConfig struct {
 	// It must not be empty (T2) and is set on the tailcat server before it
 	// starts.
 	Allowed []party.NodeKey
-	// Admit is called with the first frame of every connection and must
-	// return the sender's fingerprint only if the frame is a valid envelope
-	// from an enrolled party (envelope.Open). Otherwise the connection is
-	// closed without a byte written (SPO-Xparty-INV-018).
-	Admit func(envelope []byte) (party.Fingerprint, error)
+	// Admit is called with the first frame of every connection and the node
+	// key tailcat authenticated for it, and must return the sender's
+	// fingerprint only if the frame is a valid envelope from an active
+	// enrolled party whose enrolled node key is that peer, of a type a first
+	// frame may be, and not a replay (multisig.Node.Admit). Otherwise the
+	// connection is closed without a byte written (SPO-Xparty-INV-018).
+	Admit func(envelope []byte, peer party.NodeKey) (party.Fingerprint, error)
 	// Port is the one TCP port served; zero means DefaultPort.
 	Port uint16
 	// Region is the DERP region of a self-hosted relay (concern T5). When
@@ -102,6 +106,7 @@ type Server struct {
 	allowed map[party.NodeKey]bool
 	peers   map[party.Fingerprint]*peerConn
 	conns   map[net.Conn]struct{} // every open connection, for Close
+	byKey   map[party.NodeKey][]net.Conn
 	active  int
 	recent  map[party.NodeKey][]time.Time
 
@@ -113,6 +118,11 @@ var (
 	_ ports.EnvelopeReceiver = (*Server)(nil)
 )
 
+// Transport is the server as the sending side of multisig: its kind is a
+// network, so a pool cold key request never goes through it
+// (SPO-Xparty-PRE-004).
+func (s *Server) Transport() ports.Transport { return ports.NewTransport(s, ports.ViaNetwork) }
+
 // NewServer checks the configuration. It does not touch the network: the
 // refusal for an empty allow-list is here, before anything exists to start.
 func NewServer(cfg ServerConfig) (*Server, error) {
@@ -123,7 +133,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, errors.New("tailcat: Admit is required")
 	}
 	s := &Server{cfg: cfg, lim: DefaultLimits, port: cfg.Port, now: time.Now, inbox: make(chan []byte, MaxFramesPerConn),
-		done: make(chan struct{}), allowed: map[party.NodeKey]bool{}, peers: map[party.Fingerprint]*peerConn{}, conns: map[net.Conn]struct{}{},
+		done: make(chan struct{}), allowed: map[party.NodeKey]bool{}, peers: map[party.Fingerprint]*peerConn{}, conns: map[net.Conn]struct{}{}, byKey: map[party.NodeKey][]net.Conn{},
 		recent: map[party.NodeKey][]time.Time{}}
 	if s.port == 0 {
 		s.port = DefaultPort
@@ -139,6 +149,12 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 	if l := cfg.Limits; l.ConnsPerKeyPerMn > 0 {
 		s.lim.ConnsPerKeyPerMn = min(l.ConnsPerKeyPerMn, s.lim.ConnsPerKeyPerMn)
+	}
+	if l := cfg.Limits; l.LivePerKey > 0 {
+		s.lim.LivePerKey = min(l.LivePerKey, s.lim.LivePerKey)
+	}
+	if l := cfg.Limits; l.Lifetime > 0 {
+		s.lim.Lifetime = min(l.Lifetime, s.lim.Lifetime)
 	}
 	for _, k := range cfg.Allowed {
 		if k == (party.NodeKey{}) {
@@ -238,11 +254,18 @@ func (s *Server) Allow(k party.NodeKey) {
 	}
 }
 
-// Revoke stops serving a node key at our listener.
+// Revoke stops serving a node key at our listener and closes its live
+// connections. tailcat itself keeps the key in its allow-list until the
+// server restarts without it: the key can still open a tunnel, and every
+// connection it opens is closed here before a byte is read.
 func (s *Server) Revoke(k party.NodeKey) {
 	s.mu.Lock()
 	delete(s.allowed, k)
+	live := s.byKey[k]
 	s.mu.Unlock()
+	for _, c := range live {
+		c.Close()
+	}
 }
 
 // Stats returns the counters.
@@ -272,9 +295,9 @@ func (s *Server) isAllowed(k party.NodeKey) bool {
 	return s.allowed[k]
 }
 
-// admitConn applies the per-key rate and the connection cap, in that order,
-// and reserves a slot.
-func (s *Server) admitConn(peer party.NodeKey) bool {
+// admitConn applies the per-key rate, the live connections of the key and the
+// connection cap, and reserves a slot for c.
+func (s *Server) admitConn(peer party.NodeKey, c net.Conn) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
@@ -284,18 +307,30 @@ func (s *Server) admitConn(peer party.NodeKey) bool {
 			recent = append(recent, t)
 		}
 	}
-	if len(recent) >= s.lim.ConnsPerKeyPerMn || s.active >= s.lim.MaxConns {
+	if len(recent) >= s.lim.ConnsPerKeyPerMn || len(s.byKey[peer]) >= s.lim.LivePerKey || s.active >= s.lim.MaxConns {
 		s.recent[peer] = recent
 		return false
 	}
 	s.recent[peer] = append(recent, now)
+	s.byKey[peer] = append(s.byKey[peer], c)
 	s.active++
 	return true
 }
 
-func (s *Server) release() {
+func (s *Server) release(peer party.NodeKey, c net.Conn) {
 	s.mu.Lock()
 	s.active--
+	live := s.byKey[peer][:0:0]
+	for _, o := range s.byKey[peer] {
+		if o != c {
+			live = append(live, o)
+		}
+	}
+	if len(live) == 0 {
+		delete(s.byKey, peer)
+	} else {
+		s.byKey[peer] = live
+	}
 	s.mu.Unlock()
 }
 
@@ -325,8 +360,9 @@ func (s *Server) unregister(fp party.Fingerprint, pc *peerConn) {
 //	peer, known: the node key behind the connection, when tailcat names one.
 //
 // A connection from an unknown or no-longer-allowed key, over the rate, over
-// the cap, with a bad length, a bad first frame, an idle gap, or more than
-// MaxFrames frames, is closed.
+// the cap or the key's live connections, with a bad length, a bad first
+// frame, an idle gap, more than MaxFrames frames, or older than Lifetime, is
+// closed.
 func (s *Server) serve(c net.Conn, peer party.NodeKey, known bool) {
 	s.mu.Lock()
 	s.conns[c] = struct{}{}
@@ -338,11 +374,14 @@ func (s *Server) serve(c net.Conn, peer party.NodeKey, known bool) {
 		s.mu.Unlock()
 	}()
 	s.accepted.Add(1)
-	if !known || !s.isAllowed(peer) || !s.admitConn(peer) {
+	if !known || !s.isAllowed(peer) || !s.admitConn(peer, c) {
 		s.refused.Add(1)
 		return
 	}
-	defer s.release()
+	defer s.release(peer, c)
+	// A connection lives at most Lifetime, however busy: a peer cannot hold a
+	// slot for ever by sending a frame now and then.
+	defer time.AfterFunc(s.lim.Lifetime, func() { c.Close() }).Stop()
 	var (
 		fp party.Fingerprint
 		pc *peerConn
@@ -363,7 +402,7 @@ func (s *Server) serve(c net.Conn, peer party.NodeKey, known bool) {
 		}
 		if n == 0 {
 			var aerr error
-			if fp, aerr = s.cfg.Admit(env); aerr != nil {
+			if fp, aerr = s.cfg.Admit(env, peer); aerr != nil {
 				s.refused.Add(1)
 				return
 			}

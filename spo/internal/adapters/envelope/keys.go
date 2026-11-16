@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"filippo.io/age"
@@ -25,6 +26,10 @@ const KeysLen = 64
 type Private struct {
 	keys *secret.Buffer // KeysLen bytes: Ed25519 seed || X25519 scalar
 	id   party.Identity
+
+	ageOnce sync.Once
+	age     *age.X25519Identity
+	ageErr  error
 }
 
 // Generate makes a new identity, reading 64 random bytes from rand straight
@@ -124,22 +129,26 @@ func (p *Private) sign(msg []byte) (sig [64]byte, err error) {
 	return sig, err
 }
 
-// ageIdentity builds the age identity from the X25519 scalar. age offers no
-// constructor from raw bytes, only from its bech32 text, so the scalar goes
-// through a Go string and into age's own struct. Both are ordinary heap
-// memory that cannot be wiped, and live until the garbage collector reclaims
-// them. The Private is built, used and dropped per Open to keep that short.
+// ageIdentity returns the age identity of the X25519 scalar, built once per
+// Private and kept until the Private is dropped. age offers no constructor
+// from raw bytes, only from its bech32 text, so the scalar goes through a Go
+// string and into age's own struct: the X25519 private scalar therefore exists
+// in ordinary heap memory, inside age, that this program cannot wipe, for as
+// long as the Private (an unlocked identity) is alive. Destroy wipes the
+// guarded copy only; the cached identity goes when the garbage collector
+// reclaims the Private. One identity per Private keeps that to a single copy.
 func (p *Private) ageIdentity() (*age.X25519Identity, error) {
-	var id *age.X25519Identity
-	err := p.keys.Use(func(b []byte) error {
-		s, err := bech32.EncodeFromBase256("age-secret-key-", b[32:KeysLen])
-		if err != nil {
+	p.ageOnce.Do(func() {
+		p.ageErr = p.keys.Use(func(b []byte) error {
+			s, err := bech32.EncodeFromBase256("age-secret-key-", b[32:KeysLen])
+			if err != nil {
+				return err
+			}
+			p.age, err = age.ParseX25519Identity(strings.ToUpper(s))
 			return err
-		}
-		id, err = age.ParseX25519Identity(strings.ToUpper(s))
-		return err
+		})
 	})
-	return id, err
+	return p.age, p.ageErr
 }
 
 // ageRecipient builds the age recipient for a public X25519 key.

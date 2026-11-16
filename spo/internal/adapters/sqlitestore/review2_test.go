@@ -67,6 +67,7 @@ func TestStaleHandleAfterRekeyDoesNothing(t *testing.T) {
 	// platform): simulate by dropping b's lock. Now the rekey goes through and
 	// b is stale.
 	b.lock.Close()
+	b.lock, _ = os.Open(path) // a descriptor without a flock
 	rekeyTo(t, a, "np")
 	records, rows := recordCount(t, path)
 	stale := map[string]func() error{

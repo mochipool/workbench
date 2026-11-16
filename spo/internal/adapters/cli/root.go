@@ -57,9 +57,12 @@ func NewRoot(d Deps) *cobra.Command {
 	root.AddCommand(a.initCommand(), a.storeCommand(), a.providerCommand(), a.modeCommand(), a.capabilitiesCommand())
 
 	poolCmd := &cobra.Command{Use: "pool", Short: "Pool keys, certificates and registration"}
-	poolCmd.AddCommand(a.poolKeysCommand(), a.vrfCommand(), a.kesCommand(), a.opcertCommand())
+	poolCmd.AddCommand(a.poolKeysCommand(), a.vrfCommand(), a.kesCommand(), a.opcertCommand(),
+		a.poolDescriptorCommand(), a.poolCertCommand(), a.poolMetadataCommand(), a.poolRegisterCommand(), a.poolWitnessCommand(),
+		a.poolStatusCommand(), a.poolRetireCertCommand(), a.poolRetireCommand())
 	root.AddCommand(poolCmd)
-	root.AddCommand(a.walletCommand(), a.stakeCommand())
+	root.AddCommand(a.walletCommand(), a.stakeCommand(), a.offlineCommand(), a.addressCommand())
+	root.AddCommand(a.drepCommand(), a.committeeCommand(), a.voteCommand(), a.actionCommand())
 	explainAll(root)
 	return root
 }

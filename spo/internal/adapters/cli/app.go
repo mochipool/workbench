@@ -261,6 +261,12 @@ const rekeyNote = "The workspace key was replaced. The previous recovery key no 
 // key is written there and never shown. Otherwise it is shown once and the
 // operator must type back its last group to show it was written down.
 func (a *app) deliverRecoveryKey(ctx context.Context, key *secret.Buffer, fd int) error {
+	return a.deliverRecoveryKeyMode(ctx, key, fd, false)
+}
+
+// deliverRecoveryKeyMode is deliverRecoveryKey; unknown says the key is valid
+// only if the change that made it took effect.
+func (a *app) deliverRecoveryKeyMode(ctx context.Context, key *secret.Buffer, fd int, unknown bool) error {
 	if fd >= 0 {
 		if err := key.Use(func(b []byte) error { return writeFD(fd, b) }); err != nil {
 			return err
@@ -289,6 +295,9 @@ func (a *app) deliverRecoveryKey(ctx context.Context, key *secret.Buffer, fd int
 			return nil
 		}
 		fmt.Fprintln(a.d.Err, "That is not the last group. Try again.")
+	}
+	if unknown {
+		return errors.New("the recovery key was not confirmed; it is valid only if the change took effect, and you did not show it was written down")
 	}
 	return errors.New("the recovery key was not confirmed; it is the valid key of the workspace but you did not show it was written down. If you did not write it down, make a new one with: spo store recovery-key new")
 }

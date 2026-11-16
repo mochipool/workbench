@@ -64,7 +64,7 @@ func TestSpecLimits(t *testing.T) {
 	if MaxFramesPerConn != 64 || IdleTimeout != 30*time.Second || MaxConns != 16 || MaxConnsPerKeyPerMinute != 6 {
 		t.Fatal("limits differ from SPO-Xparty-INV-019")
 	}
-	if MaxFrame != 1<<20 || DefaultLimits != (Limits{64, 30 * time.Second, 16, 6}) {
+	if MaxFrame != 1<<20 || DefaultLimits != (Limits{64, 30 * time.Second, 16, 6, 2, 10 * time.Minute}) {
 		t.Fatal("defaults")
 	}
 	// A caller can tighten, never loosen.
@@ -78,7 +78,7 @@ func TestSpecLimits(t *testing.T) {
 	}
 }
 
-func admitAll([]byte) (party.Fingerprint, error) { return party.Fingerprint{1}, nil }
+func admitAll([]byte, party.NodeKey) (party.Fingerprint, error) { return party.Fingerprint{1}, nil }
 
 // spec: SPO-Xparty-IF-005, SPO-Xparty-INV-018 (concern T2)
 func TestEmptyAllowListRefused(t *testing.T) {
@@ -187,7 +187,7 @@ func recvOne(t *testing.T, s *Server) []byte {
 // spec: SPO-Xparty-INV-018 (concern T2)
 func TestUnenrolledKeyGetsNothing(t *testing.T) {
 	called := false
-	s := testServer(t, ServerConfig{Admit: func([]byte) (party.Fingerprint, error) { called = true; return party.Fingerprint{}, nil }})
+	s := testServer(t, ServerConfig{Admit: func([]byte, party.NodeKey) (party.Fingerprint, error) { called = true; return party.Fingerprint{}, nil }})
 	for name, tc := range map[string]struct {
 		peer  party.NodeKey
 		known bool
@@ -208,7 +208,7 @@ func TestUnenrolledKeyGetsNothing(t *testing.T) {
 // spec: SPO-Xparty-INV-018
 func TestFirstFrame(t *testing.T) {
 	bad := errors.New("not an envelope from an enrolled party")
-	s := testServer(t, ServerConfig{Admit: func(e []byte) (party.Fingerprint, error) {
+	s := testServer(t, ServerConfig{Admit: func(e []byte, _ party.NodeKey) (party.Fingerprint, error) {
 		if string(e) != "good" {
 			return party.Fingerprint{}, bad
 		}
@@ -425,5 +425,122 @@ func TestServerCloseUnblocksReceiveAndConnections(t *testing.T) {
 	case <-h.done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("Close left a connection open")
+	}
+}
+
+// Admit is told which node key tailcat authenticated for the connection, so
+// that it can bind the first frame's sender to it.
+// spec: SPO-Xparty-INV-018
+func TestAdmitReceivesThePeerKey(t *testing.T) {
+	got := make(chan party.NodeKey, 1)
+	s := testServer(t, ServerConfig{Allowed: []party.NodeKey{key1, key2}, Admit: func(_ []byte, peer party.NodeKey) (party.Fingerprint, error) {
+		got <- peer
+		return party.Fingerprint{9}, nil
+	}})
+	h := dial(s, key2, true)
+	go WriteFrame(h.remote, []byte("x"))
+	recvOne(t, s)
+	if peer := <-got; peer != key2 {
+		t.Fatalf("Admit saw peer %v", peer)
+	}
+	h.remote.Close()
+}
+
+// At most two live connections per node key; a connection that closes frees
+// its place; another key is not affected.
+// spec: SPO-Xparty-INV-022
+func TestLiveConnectionsPerKey(t *testing.T) {
+	s := testServer(t, ServerConfig{Allowed: []party.NodeKey{key1, key2}})
+	waitLive := func(k party.NodeKey, n int) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			s.mu.Lock()
+			live := len(s.byKey[k])
+			s.mu.Unlock()
+			if live == n {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatalf("key %v never had %d live connections", k, n)
+	}
+	h1, h2 := dial(s, key1, true), dial(s, key1, true)
+	waitLive(key1, 2)
+	h3 := dial(s, key1, true)
+	h3.closed(t) // the key's third
+	h4 := dial(s, key2, true)
+	go WriteFrame(h4.remote, []byte("ok"))
+	recvOne(t, s)
+	h1.remote.Close()
+	<-h1.done
+	waitLive(key1, 1)
+	h5 := dial(s, key1, true)
+	waitLive(key1, 2)
+	h2.remote.Close()
+	h4.remote.Close()
+	h5.remote.Close()
+}
+
+// A connection is closed at its hard lifetime although it keeps talking.
+// spec: SPO-Xparty-INV-022
+func TestConnectionLifetime(t *testing.T) {
+	s := testServer(t, ServerConfig{Limits: Limits{Lifetime: 300 * time.Millisecond}})
+	h := dial(s, key1, true)
+	stop := make(chan struct{})
+	go func() {
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			case <-time.After(50 * time.Millisecond):
+				WriteFrame(h.remote, []byte("x"))
+			}
+		}
+	}()
+	defer close(stop)
+	go func() { // drain
+		for {
+			if _, _, err := s.Receive(context.Background()); err != nil {
+				return
+			}
+		}
+	}()
+	select {
+	case <-h.done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("a busy connection outlived its lifetime")
+	}
+}
+
+// Revoke closes the live connections of the key, at once.
+// spec: SPO-Xparty-INV-022, SPO-Xparty-INV-005
+func TestRevokeClosesLiveConnections(t *testing.T) {
+	s := testServer(t, ServerConfig{Allowed: []party.NodeKey{key1, key2}})
+	h := dial(s, key1, true)
+	other := dial(s, key2, true)
+	go WriteFrame(h.remote, []byte("x"))
+	recvOne(t, s)
+	s.Revoke(key1)
+	select {
+	case <-h.done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("a revoked key's connection stayed open")
+	}
+	go WriteFrame(other.remote, []byte("y"))
+	recvOne(t, s) // another key is untouched
+	other.remote.Close()
+}
+
+// The transports carry their own kind.
+// spec: SPO-Xparty-PRE-004, SPO-Xparty-INV-024
+func TestTransportsStateTheirKind(t *testing.T) {
+	s := testServer(t, ServerConfig{})
+	if s.Transport().Kind() != ports.ViaNetwork || s.Transport().Sender() == nil {
+		t.Fatal("the server is not a network transport")
+	}
+	c := &Client{}
+	if c.Transport().Kind() != ports.ViaNetwork {
+		t.Fatal("the client is not a network transport")
 	}
 }

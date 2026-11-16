@@ -75,6 +75,21 @@ var layout = map[ports.Kind]func(r ports.Ref) string{
 	ports.PoolItnSKey:            func(r ports.Ref) string { return r.Name + ".itn.skey" },
 	ports.PoolItnVKey:            func(r ports.Ref) string { return r.Name + ".itn.vkey" },
 	ports.PoolWitnessFile:        func(r ports.Ref) string { return r.Name + ".witness" },
+
+	// spec: SPO-Xparty-INV-001, SPO-Xparty-INV-003, SPO-Xparty-OUT-001, SPO-Xparty-INV-007, SPO-Xparty-SEC-001
+	ports.PartyKeys:      func(r ports.Ref) string { return r.Name + ".party.keys" },
+	ports.PartyIdentity:  func(r ports.Ref) string { return r.Name + ".party.identity" },
+	ports.PartyRecords:   func(r ports.Ref) string { return r.Name + ".party.records" },
+	ports.PartyReplay:    func(r ports.Ref) string { return r.Name + ".party.replay" },
+	ports.TailcatNodeKey: func(r ports.Ref) string { return r.Name + ".tailcat.nodekey" },
+	ports.TailcatPSK:     func(r ports.Ref) string { return r.Name + ".tailcat.psk" },
+	ports.TailcatAddr:    func(r ports.Ref) string { return r.Name + ".tailcat.addr" },
+	// spec: SPO-Xparty-SEC-003, SPO-Xparty-OUT-004
+	ports.MultisigCoordinator: func(r ports.Ref) string { return r.Name + ".multisig.coordinator" },
+	ports.MultisigSigner:      func(r ports.Ref) string { return r.Name + ".multisig.signer" },
+	ports.MultisigOutbox:      func(r ports.Ref) string { return r.Name + ".multisig.outbox" },
+	ports.MultisigEvents:      func(r ports.Ref) string { return r.Name + ".multisig.events" },
+	ports.MultisigCollection:  func(r ports.Ref) string { return r.Name + ".multisig.collection" },
 }
 
 // modes of the kinds that are not locked at 0400: the published metadata is

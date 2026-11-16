@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"sort"
+	"strings"
 
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 )
@@ -131,9 +132,10 @@ func drepBech32(id chain.DRepID) string {
 //     drep_status: Unknown.
 //
 // The predefined DReps (always abstain, always no confidence) have no
-// DRepID, so they never reach this reader (stake.DRep.ChainID). The expiry,
-// activity and anchor Koios returns are not part of chain.DRepState and are
-// not read.
+// DRepID, so they never reach this reader (stake.DRep.ChainID). A registered
+// DRep also carries the anchor (meta_url, meta_hash: both null is no anchor),
+// the expiry (expires_epoch_no) and the delegated stake (amount, SPO-Clight-OUT-015);
+// the last two are Unknown readings when Koios does not state them.
 func (c *Client) DRepState(ctx context.Context, id chain.DRepID) (chain.Reading[chain.DRepState], error) {
 	unknown := func(why string) (chain.Reading[chain.DRepState], error) {
 		return chain.Unknown[chain.DRepState](why), nil
@@ -150,6 +152,10 @@ func (c *Client) DRepState(ctx context.Context, id chain.DRepID) (chain.Reading[
 		HasScript *bool             `json:"has_script"`
 		Status    optional[string]  `json:"drep_status"`
 		Deposit   optional[uintVal] `json:"deposit"`
+		Expires   optional[uintVal] `json:"expires_epoch_no"`
+		Amount    optional[uintVal] `json:"amount"`
+		MetaURL   optional[string]  `json:"meta_url"`
+		MetaHash  optional[string]  `json:"meta_hash"`
 	}
 	if err := strictUnmarshal(body, &rows); err != nil {
 		return unknown("drep_info answer is not a JSON array of DReps: " + prefix([]byte(err.Error())))
@@ -180,7 +186,30 @@ func (c *Client) DRepState(ctx context.Context, id chain.DRepID) (chain.Reading[
 	if !row.Deposit.present || row.Deposit.null {
 		return unknown("drep_info has no deposit for a registered DRep")
 	}
-	return chain.Value(chain.DRepState{ID: id, Deposit: chain.Lovelace(row.Deposit.val)}), nil
+	st := chain.DRepState{ID: id, Deposit: chain.Lovelace(row.Deposit.val)}
+	// The anchor: meta_url and meta_hash both null is "no anchor"; both
+	// strings (the hash 32 bytes of hex) is the anchor; anything else is not
+	// interpretable, and a made-up "no anchor" could hide one.
+	switch {
+	case row.MetaURL.present && row.MetaURL.null && row.MetaHash.present && row.MetaHash.null:
+	case row.MetaURL.present && !row.MetaURL.null && row.MetaURL.val != "" && row.MetaHash.present && !row.MetaHash.null:
+		if _, err := decodeHex(row.MetaHash.val, 32); err != nil {
+			return unknown("drep_info meta_hash: " + err.Error())
+		}
+		st.AnchorURL, st.AnchorHash = row.MetaURL.val, strings.ToLower(row.MetaHash.val)
+	default:
+		return unknown("drep_info states meta_url and meta_hash neither both nor as null")
+	}
+	// Expiry and stake are Unknown, never zero, when Koios does not state them.
+	st.Expiry = chain.Unknown[uint64]("drep_info states no expires_epoch_no")
+	if row.Expires.present && !row.Expires.null {
+		st.Expiry = chain.Value(uint64(row.Expires.val))
+	}
+	st.DelegatedStake = chain.Unknown[chain.Lovelace]("drep_info states no amount")
+	if row.Amount.present && !row.Amount.null {
+		st.DelegatedStake = chain.Value(chain.Lovelace(row.Amount.val))
+	}
+	return chain.Value(st), nil
 }
 
 // govActionDeposits asks for the still-open governance actions whose

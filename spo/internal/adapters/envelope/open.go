@@ -55,8 +55,9 @@ func (o *Opened) Recipient() party.Fingerprint { return o.recipient }
 //
 // Steps 7 (replay) and 8 (authorisation) need the caller's store and
 // registry: they are Admit, which the caller must call before acting on the
-// message. The sender is recorded in a refusal only from step 4 on; before
-// that the fingerprint in the payload is an attacker's claim.
+// message. The sender is recorded in a refusal only once the signature has
+// verified (from step 5 on); before that, a failed signature and a revoked
+// sender included, the fingerprint in the payload is an attacker's claim.
 //
 // Open reads no clock and no store; now and lookup are inputs.
 func Open(recipient *Private, envelope []byte, lookup LookupFunc, now time.Time) (*Opened, error) {
@@ -98,10 +99,10 @@ func Open(recipient *Private, envelope []byte, lookup LookupFunc, now time.Time)
 		return nil, refuse(ErrSenderUnknown)
 	}
 	if !p.Active() {
-		return nil, refuseFrom(ErrSenderRevoked, sfp)
+		return nil, refuse(ErrSenderRevoked) // the signature is not checked yet: nothing is authenticated
 	}
 	if len(outer.Signature) != ed25519SigLen || !verifySig(p.Identity.Ed25519, outer.Payload, outer.Signature) {
-		return nil, refuseFrom(ErrSignature, sfp)
+		return nil, refuse(ErrSignature) // the fingerprint is a claim of whoever sent the bytes
 	}
 	if !equalFP(rfp, recipient.Fingerprint()) {
 		return nil, refuseFrom(ErrNotRecipient, sfp)

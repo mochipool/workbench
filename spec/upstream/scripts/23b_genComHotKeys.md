@@ -150,6 +150,8 @@ Use case `GenerateCommitteeHotKey(name, protection, derivation?, replace?)` on a
 
 ## Port notes
 
+* Observed 2026-11-16 (cardano-cli 11.2.3.0, cardano-signer 1.35.0): the hot key is `ConstitutionalCommitteeHotVerificationKey_ed25519` / `ConstitutionalCommitteeHotSigningKey_ed25519`; the `mnemonics` form (path role 5) writes `ConstitutionalCommitteeHotExtendedSigningKey_ed25519_bip32`. The upstream replace prompt (SPO-23b-PR-001) is answered in the port by the explicit `Replace` option, and the replacement deletes the signing key too (the upstream branch leaves it). Without input upstream exits 1 on the prompt (the default is No), the port refuses with an error and writes nothing (`TestGovKeyRefusalsMatchUpstream`).
+
 * Rotation: a port should model "replace the hot key" as a versioned credential, keep the old one until the new authorisation is confirmed on chain, and delete it afterwards, instead of deleting first.
 * Fix the replace branch so it removes the signing key; keep the hardware type rewrites as a Ledger-adapter concern (they only make cardano-cli accept the device key).
 * Atomicity and sealing remarks of 21a apply.

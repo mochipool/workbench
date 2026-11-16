@@ -36,9 +36,11 @@ type Party struct {
 	Fingerprint Fingerprint
 	Name        string // the operator's local name for it
 	Roles       []Role
-	Pools       []string // pools it may act for; empty means none
-	State       State
-	EnrolledAt  time.Time
+	// Scope is what a signing request between us and this party may be about
+	// (SPO-Xparty-INV-010). The zero Scope allows nothing.
+	Scope      Scope
+	State      State
+	EnrolledAt time.Time
 }
 
 // Active reports whether the party's envelopes may be accepted
@@ -47,9 +49,6 @@ func (p Party) Active() bool { return p.State == StateActive }
 
 // HasRole reports whether p was enrolled with r.
 func (p Party) HasRole(r Role) bool { return slices.Contains(p.Roles, r) }
-
-// HasPool reports whether p was enrolled for pool.
-func (p Party) HasPool(pool string) bool { return slices.Contains(p.Pools, pool) }
 
 // Enrollment errors.
 var (
@@ -67,11 +66,13 @@ var (
 
 // Enrollment is the operator's request to enrol a party.
 type Enrollment struct {
-	Document     Document
-	Name         string // local name, chosen by the operator
-	Roles        []Role
-	Pools        []string
-	Confirmation string // the first two fingerprint groups, as typed (PR-001)
+	Document Document
+	Name     string // local name, chosen by the operator
+	Roles    []Role
+	// Scope is required for a coordinator or a signer: the operator names
+	// the key roles and the pools (or Unscoped); there is no default.
+	Scope        Scope
+	Confirmation string // the first four fingerprint groups, as typed (PR-001)
 }
 
 // Enroll builds the party record for an enrollment, or refuses. The checks
@@ -100,12 +101,12 @@ func Enroll(e Enrollment, existing []Party, now time.Time) (Party, error) {
 			return Party{}, fmt.Errorf("%w: role %q", ErrInvalidEnrollment, r)
 		}
 	}
-	pools := slices.Clone(e.Pools)
-	slices.Sort(pools)
-	for i, p := range pools {
-		if !poolRE.MatchString(p) || (i > 0 && pools[i-1] == p) {
-			return Party{}, fmt.Errorf("%w: pool %q", ErrInvalidEnrollment, p)
-		}
+	scope, err := e.Scope.normalised()
+	if err != nil {
+		return Party{}, err
+	}
+	if (slices.Contains(roles, RoleCoordinator) || slices.Contains(roles, RoleSigner)) && scope.Empty() {
+		return Party{}, fmt.Errorf("%w: a coordinator or signer needs a scope: key roles, and pools or unscoped", ErrInvalidEnrollment)
 	}
 	fp := id.Fingerprint()
 	if !ConfirmPrefix(fp, e.Confirmation) {
@@ -119,7 +120,7 @@ func Enroll(e Enrollment, existing []Party, now time.Time) (Party, error) {
 			return Party{}, ErrNameTaken
 		}
 	}
-	return Party{Identity: id, Fingerprint: fp, Name: e.Name, Roles: roles, Pools: pools,
+	return Party{Identity: id, Fingerprint: fp, Name: e.Name, Roles: roles, Scope: scope,
 		State: StateActive, EnrolledAt: now.UTC().Truncate(time.Second)}, nil
 }
 
@@ -134,15 +135,13 @@ func Revoke(p Party) (Party, error) {
 	return p, nil
 }
 
-// ErrNotAuthorised is SPO-Xparty-INV-010: the sender's roles and pools do not
-// permit the message.
+// ErrNotAuthorised is SPO-Xparty-INV-010: the sender's role does not permit
+// the message.
 var ErrNotAuthorised = errors.New("party: sender is not authorised for this message")
 
 // Concern is what a message is about, as the receiver knows it from its own
 // state, never from the sender's claim.
 type Concern struct {
-	// Pool is the pool the body concerns, "" when it concerns none.
-	Pool string
 	// SlotSigner is the signer assigned to the slot a SigningResponse or
 	// SigningRefusal answers; HasSlotSigner is false when no such slot is
 	// known.
@@ -151,12 +150,14 @@ type Concern struct {
 }
 
 // Authorise decides whether sender may send a message of type t
-// (SPO-Xparty-INV-010):
+// (SPO-Xparty-INV-010), by role:
 //
-//   - SigningRequest, CollectionClosed and Invite need the coordinator role,
-//     and, when the body concerns a pool, that pool among the sender's.
+//   - SigningRequest, CollectionClosed and Invite need the coordinator role.
+//     What a SigningRequest may ask is the sender's Scope, decided by
+//     CheckScope once the body is decoded.
 //   - SigningResponse and SigningRefusal need the signer role and that the
 //     sender is the signer assigned to the slot.
+//   - Hello needs the signer role (SPO-Xparty-INV-021).
 //   - Bundle needs the machine role.
 //
 // An inactive sender is never authorised.
@@ -169,15 +170,16 @@ func Authorise(sender Party, t Type, c Concern) error {
 		if !sender.HasRole(RoleCoordinator) {
 			return fmt.Errorf("%w: not a coordinator", ErrNotAuthorised)
 		}
-		if c.Pool != "" && !sender.HasPool(c.Pool) {
-			return fmt.Errorf("%w: not a coordinator for that pool", ErrNotAuthorised)
-		}
 	case TypeSigningResponse, TypeSigningRefusal:
 		if !sender.HasRole(RoleSigner) {
 			return fmt.Errorf("%w: not a signer", ErrNotAuthorised)
 		}
 		if !c.HasSlotSigner || c.SlotSigner != sender.Fingerprint {
 			return fmt.Errorf("%w: not the signer of that slot", ErrNotAuthorised)
+		}
+	case TypeHello:
+		if !sender.HasRole(RoleSigner) {
+			return fmt.Errorf("%w: not a signer", ErrNotAuthorised)
 		}
 	case TypeBundle:
 		if !sender.HasRole(RoleMachine) {
@@ -187,4 +189,18 @@ func Authorise(sender Party, t Type, c Concern) error {
 		return fmt.Errorf("%w: unknown message type", ErrNotAuthorised)
 	}
 	return nil
+}
+
+// AllowedNodeKeys is the allow-list of the tailcat server (SPO-Xparty-IF-005):
+// the node keys of the active parties that are a signer or a machine and have
+// one, and no other. A revoked party, a coordinator-only party and a party
+// without a node key are not in it.
+func AllowedNodeKeys(ps []Party) []NodeKey {
+	var out []NodeKey
+	for _, p := range ps {
+		if p.Active() && p.Identity.Node != nil && (p.HasRole(RoleSigner) || p.HasRole(RoleMachine)) && !slices.Contains(out, *p.Identity.Node) {
+			out = append(out, *p.Identity.Node)
+		}
+	}
+	return out
 }
