@@ -25,6 +25,9 @@ type Preset struct {
 	// LightParametersURL is the light-mode protocol parameters file
 	// (SPO-Cconf-INV-006).
 	LightParametersURL string
+	// HandleURL is the ADA Handle API root (SPO-Cconf-INV-006, the
+	// adahandleAPI column of the endpoint table).
+	HandleURL string
 }
 
 // spec: SPO-Cconf-INV-004, SPO-Cconf-INV-006, SPO-Cconf-INV-011
@@ -32,16 +35,19 @@ var presets = map[string]Preset{
 	"mainnet": {
 		Name: "mainnet", Magic: "mainnet", AddressPrefix: "addr", ByronToShelleyEpochs: 208,
 		KoiosURL:           "https://api.koios.rest/api/v1",
+		HandleURL:          "https://api.handle.me",
 		LightParametersURL: "https://uptime.live/data/cardano/parms/mainnet-parameters.json",
 	},
 	"preprod": {
 		Name: "preprod", Magic: "1", AddressPrefix: "addr_test", ByronToShelleyEpochs: 4,
 		KoiosURL:           "https://preprod.koios.rest/api/v1",
+		HandleURL:          "https://preprod.api.handle.me",
 		LightParametersURL: "https://uptime.live/data/cardano/parms/preprod-parameters.json",
 	},
 	"preview": {
 		Name: "preview", Magic: "2", AddressPrefix: "addr_test", ByronToShelleyEpochs: 0,
 		KoiosURL:           "https://preview.koios.rest/api/v1",
+		HandleURL:          "https://preview.api.handle.me",
 		LightParametersURL: "https://uptime.live/data/cardano/parms/preview-parameters.json",
 	},
 }

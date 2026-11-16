@@ -315,7 +315,41 @@ func TestOldRecordReadsAsEmptyScope(t *testing.T) {
 	if len(got.Scope.KeyRoles) != 0 || len(got.Scope.Pools) != 0 || got.Scope.Unscoped {
 		t.Fatalf("scope = %+v", got.Scope)
 	}
-	if party.CheckScope(got.Scope, custody.RoleStake, []string{"pool1x"}) == nil {
+	if party.CheckScope(got.Scope, custody.RoleStake, party.TxView{Certificates: []party.ViewCert{{Kind: party.CertStakeDelegation, HasPool: true}}}) == nil {
 		t.Fatal("an old record's coordinator may ask for something")
+	}
+}
+
+// The registry refuses a second party with a node key already enrolled, and
+// can change a party's scope.
+// spec: SPO-Xparty-INV-018, SPO-Xparty-INV-010
+func TestRegistryNodeKeyAndScope(t *testing.T) {
+	ctx := context.Background()
+	s, reg := newMem(), Registry{}
+	a, dup := mkParty(2, "alice"), mkParty(4, "dup")
+	n := *a.Identity.Node
+	dup.Identity.Node = &n
+	dup.Fingerprint = dup.Identity.Fingerprint()
+	if err := s.Update(ctx, func(w ports.Writer) error { return reg.Put(w, a) }); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Update(ctx, func(w ports.Writer) error { return reg.Put(w, dup) }); !errors.Is(err, party.ErrNodeKeyInUse) {
+		t.Fatalf("a shared node key: %v", err)
+	}
+	narrow := party.Scope{KeyRoles: []custody.Role{custody.RoleStake}, Pools: []string{"p2"}}
+	if err := s.Update(ctx, func(w ports.Writer) error { _, err := reg.SetScope(w, "alice", narrow); return err }); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.View(ctx, func(r ports.Reader) error {
+		got, err := reg.ByName(r, "alice")
+		if err != nil || got.Scope.Unscoped || len(got.Scope.Pools) != 1 || got.Scope.Pools[0] != "p2" {
+			t.Fatalf("%+v %v", got, err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Update(ctx, func(w ports.Writer) error { _, err := reg.SetScope(w, "nobody", narrow); return err }); !errors.Is(err, ports.ErrNotFound) {
+		t.Fatalf("unknown party: %v", err)
 	}
 }

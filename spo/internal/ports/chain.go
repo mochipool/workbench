@@ -67,3 +67,15 @@ type TxSubmitter interface {
 	ChainSource
 	Submit(ctx context.Context, signedTx []byte) (chain.TxID, error)
 }
+
+// UtxoResolver resolves unspent outputs by reference, whatever address they
+// are at. Value means the provider says the output exists and is unspent;
+// None means it says the output does not exist or is spent; Unknown means it
+// did not say (a reference missing from an answer, a failure, a refused
+// answer). Every reference asked for has an entry in the map on a nil error.
+// A signer that decides from the answer treats None and Unknown alike
+// (SPO-Xparty-PR-002).
+type UtxoResolver interface {
+	ChainSource
+	ResolveUtxos(ctx context.Context, refs []chain.OutRef) (map[chain.OutRef]chain.Reading[chain.ResolvedUtxo], error)
+}

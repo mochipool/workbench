@@ -129,6 +129,8 @@ func RefOf(file string) (ports.Ref, bool) {
 // catalogue knows of but a workspace does not hold.
 func reasonFor(file string) string {
 	switch {
+	case file == ".spo-workspace-audit.json" || file == "spo-workspace-audit.json":
+		return "this program's own audit log of the directory (spo key unprotect), not an artefact"
 	case file == "offlineTransfer.json":
 		return "the offline transfer bag (Ptransfer), not part of a workspace"
 	case strings.HasSuffix(file, ".witness"), strings.HasSuffix(file, ".txbody"), strings.HasSuffix(file, ".tx"), strings.HasSuffix(file, ".txwitness"):

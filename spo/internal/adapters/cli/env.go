@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"strings"
 
+	"github.com/mochipool/workbench/spo/internal/app/handles"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
@@ -61,6 +63,17 @@ const (
 	CapFileSink Cap = "extract-sink"
 	CapTxView   Cap = "tx-view"
 
+	// Extra parameters and native assets (spec/upstream Pparam, 10 to 11b).
+	CapMetaFiles  Cap = "metadata-file"
+	CapMsgEncrypt Cap = "message-encryption"
+	CapPolicyID   Cap = "policy-id"
+	// CapKeyCrypto is upstream's gpg envelope for signing keys. It is needed
+	// only to read or write upstream's encrypted keys.
+	CapKeyCrypto Cap = "key-encryption"
+	// CapVKeyDerive derives the verification key of a signing key, so an
+	// import can check the stored pair belongs together.
+	CapVKeyDerive Cap = "verification-key-derivation"
+
 	// Governance (spec/upstream 21a to 25b).
 	CapDRepKeys     Cap = "drep-keygen"
 	CapComColdKeys  Cap = "committee-cold-keygen"
@@ -81,6 +94,25 @@ const (
 	// for the reads that need corroboration (the deposit a DRep refund rests on).
 	CapVotingSummary Cap = "voting-summary"
 	CapDRepCross     Cap = "drep-state-crosscheck"
+
+	// The Calidus pool key (CIP-151, upstream 15) and Catalyst (CIP-36, 09a).
+	// CapSignatures is a signer that can sign CIP-8 messages, CIP-36 and
+	// CIP-88 registrations (ADR 0008); CapCalidusRead is a provider that reads
+	// the Calidus keys registered on chain.
+	CapCalidusKeys Cap = "calidus-keygen"
+	CapVotingKeys  Cap = "voting-keygen"
+	CapSignatures  Cap = "registration-signing"
+	CapCalidusRead Cap = "calidus-registrations"
+
+	// CapHardware is a hardware wallet: the release set has cardano-hw-cli.
+	// Whether a device is connected, and which one, is found only when a
+	// command's plan needs it. CapAdaHandle resolves ADA Handles (a chain
+	// provider and the Handle API); CapPollQuestion reads an SPO poll's
+	// question; CapBLSKeys generates the pool BLS key pair.
+	CapHardware     Cap = "hardware-wallet"
+	CapAdaHandle    Cap = "ada-handle"
+	CapPollQuestion Cap = "poll-question"
+	CapBLSKeys      Cap = "bls-keygen"
 )
 
 // GovernanceChainCaps are the governance capabilities that read the chain.
@@ -88,6 +120,11 @@ var GovernanceChainCaps = []Cap{CapCommittee, CapGovActions, CapConstitution, Ca
 
 // GovernanceLocalCaps are the governance capabilities that need no chain.
 var GovernanceLocalCaps = []Cap{CapDRepKeys, CapComColdKeys, CapComHotKeys, CapGovDeriver, CapVoteFiles, CapActionFiles, CapAnchorFetch, CapAnchorVerify}
+
+// HandleResolver resolves an ADA Handle (app/handles.Resolver satisfies it).
+type HandleResolver interface {
+	Resolve(ctx context.Context, text string) (handles.Resolved, error)
+}
 
 // FileSinkFactory opens a sink that writes files into one directory and
 // nowhere else (ports.FileSink). The composition root supplies it, so this
@@ -170,6 +207,19 @@ type Env struct {
 	// TxViewer decodes a queued transaction for display.
 	TxViewer ports.TxViewer
 
+	// MetadataFiles reads the user metadata files (.json, .cbor) of the extra
+	// parameters; MsgEncrypter does the CIP-83 `basic` encryption of the
+	// message lines; PolicyIDs gives the id of a native script. All are local.
+	MetadataFiles ports.MetadataFileReader
+	MsgEncrypter  ports.MessageEncrypter
+	PolicyIDs     ports.PolicyIDCalculator
+	// KeyEncryptor and KeyDecryptor make and open upstream's gpg-encrypted
+	// signing key envelopes. They are nil where gpg is not available.
+	KeyEncryptor ports.KeyEncryptor
+	KeyDecryptor ports.KeyDecryptor
+	// VKeyDeriver derives a verification key from a signing key (local).
+	VKeyDeriver ports.VerificationKeyDeriver
+
 	// The governance ports (21a to 25b). Key generators, the deriver and the
 	// vote and action file builders are local. AnchorFetcher downloads anchor
 	// documents (not in offline mode); AnchorVerifier checks them as
@@ -196,6 +246,33 @@ type Env struct {
 	// independent of DReps. Neither exists in every mode.
 	Summaries ports.VotingSummaryReader
 	DRepCross ports.DRepStateReader
+
+	// CalidusKeys and VotingKeys derive the Calidus and the Catalyst voting
+	// key from a mnemonic (local). SignatureSigner is a signer of the vault
+	// that also signs messages, CIP-36 and CIP-88 registrations (ports.CheckSigner
+	// and ports.CheckSignatureSigner passed); Signers hands it out for a
+	// vault-held key. CalidusReader reads the registered Calidus keys.
+	CalidusKeys     ports.CalidusKeyDeriver
+	VotingKeys      ports.VotingKeyDeriver
+	SignatureSigner ports.Signer
+	CalidusReader   ports.CalidusKeyReader
+
+	// Hardware exports the keys of a hardware wallet, Canonicalizer brings a
+	// transaction body to the form a device accepts and PolicyIDer asks the
+	// device for a policy id. They are one lazily opened session: nothing
+	// touches a device until a command's plan needs it. All three are nil when
+	// the release set has no cardano-hw-cli.
+	Hardware      ports.HardwareKeyExporter
+	Canonicalizer ports.HardwareCanonicalizer
+	PolicyIDer    ports.HardwarePolicyIDer
+	// Handles resolves an ADA Handle to the address that holds it, verified
+	// against the chain; nil where no provider can (the offline mode keeps a
+	// resolver that refuses, so the refusal says why).
+	Handles HandleResolver
+	// Polls reads the question of an SPO poll (light mode).
+	Polls ports.PollQuestionReader
+	// BLSKeys generates the pool BLS key pair (local).
+	BLSKeys ports.BLSKeyGenerator
 
 	// AllowUnverified is true only when the chain is not consulted.
 	AllowUnverified bool
@@ -332,6 +409,18 @@ func (e *Env) has(c Cap) bool {
 		v = e.Sinks
 	case CapTxView:
 		v = e.TxViewer
+	case CapMetaFiles:
+		v = e.MetadataFiles
+	case CapMsgEncrypt:
+		v = e.MsgEncrypter
+	case CapPolicyID:
+		v = e.PolicyIDs
+	case CapVKeyDerive:
+		v = e.VKeyDeriver
+	case CapKeyCrypto:
+		if e.KeyEncryptor != nil && e.KeyDecryptor != nil {
+			v = e.KeyEncryptor
+		}
 	case CapDRepKeys:
 		v = e.DRepKeys
 	case CapComColdKeys:
@@ -364,6 +453,25 @@ func (e *Env) has(c Cap) bool {
 		v = e.Summaries
 	case CapDRepCross:
 		v = e.DRepCross
+	case CapCalidusKeys:
+		v = e.CalidusKeys
+	case CapVotingKeys:
+		v = e.VotingKeys
+	case CapSignatures:
+		v = e.SignatureSigner
+	case CapCalidusRead:
+		v = e.CalidusReader
+	case CapHardware:
+		v = e.Hardware
+	case CapAdaHandle:
+		// Offline the resolver exists only to refuse with its reason.
+		if e.Mode != ModeOffline {
+			v = e.Handles
+		}
+	case CapPollQuestion:
+		v = e.Polls
+	case CapBLSKeys:
+		v = e.BLSKeys
 	}
 	return !isNil(v)
 }
@@ -414,6 +522,10 @@ func (e *Env) Source(c Cap) string {
 		v = e.Summaries
 	case CapDRepCross:
 		v = e.DRepCross
+	case CapCalidusRead:
+		v = e.CalidusReader
+	case CapPollQuestion:
+		v = e.Polls
 	}
 	if isNil(v) {
 		return ""
@@ -482,6 +594,9 @@ type WireOptions struct {
 	Mode string
 	// Offline is true when --offline overrode the workspace's mode.
 	Offline bool
+	// Ctx is the context of the command: what a lazily opened adapter (the
+	// hardware wallet) uses where a call has none of its own.
+	Ctx     context.Context
 	Preset  NetworkPreset
 	Genesis GenesisOverrides
 	// Token is the provider API token from the store, or nil. The wiring
@@ -490,6 +605,11 @@ type WireOptions struct {
 	// TransferFile is the offline transfer file to read and queue to.
 	// Whether it exists is for the wiring to find out.
 	TransferFile string
+	// Toolchain and Tools are the external tools of the release set, for the
+	// few capabilities that run one (gpg for upstream's encrypted keys). Tools
+	// is empty when the binary runs without a toolchain manifest.
+	Toolchain ports.Toolchain
+	Tools     []ports.ToolName
 }
 
 // GenesisOverrides are the genesis files and the Byron epoch count in

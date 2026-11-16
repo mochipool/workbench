@@ -38,19 +38,19 @@ func recvNow(t *testing.T, b *Bag) []byte {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	e, via, err := b.Receive(ctx)
-	if err != nil || via != ports.ViaFile {
-		t.Fatalf("Receive = %v, %v", via, err)
+	got, err := b.Receive(ctx)
+	if err != nil || got.Via() != ports.ViaFile {
+		t.Fatalf("Receive = %v, %v", got.Via(), err)
 	}
-	return e
+	return got.Envelope
 }
 
 func expectNothing(t *testing.T, b *Bag) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
-	if e, _, err := b.Receive(ctx); err == nil {
-		t.Fatalf("received %d bytes", len(e))
+	if got, err := b.Receive(ctx); err == nil {
+		t.Fatalf("received %d bytes", len(got.Envelope))
 	}
 }
 

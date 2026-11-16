@@ -39,12 +39,17 @@ func (o Outbox) Pending(ctx context.Context) ([]OutItem, error) {
 // cold key request is never sent, whatever sealed it (SPO-Xparty-PRE-004).
 // It returns how many were handed over now.
 //
-// What happens to a handed-over envelope depends on the transport. A file
-// written is delivered: the item is done. A network transport has no
-// application acknowledgement, so the item stays Sent and goes out again after
-// Rearm (the next connection) until the answer it asks for arrives, the
-// collection closes, or it expires; the receiver's replay log makes a repeat
-// harmless (SPO-Xparty-INV-017).
+// What happens to a handed-over envelope depends on its type and the
+// transport. A file written is delivered: the item is done. Over a network,
+// a message that is not a SigningRequest (a response, a refusal, a
+// CollectionClosed, an Invite) is sent ONCE: it is delivered when the write
+// succeeds and is never sent again spontaneously; a response whose write was
+// lost is recovered by the coordinator re-sending its request, which the
+// signer answers from its stored response. A SigningRequest stays Sent and
+// goes out again, with the same message id, when its signer connects again
+// (Rearm, or the coordinator's handling of that signer's Hello), until the
+// answer it asks for arrives, the collection closes, or it expires
+// (SPO-Xparty-INV-017).
 func (o Outbox) Flush(ctx context.Context, tr ports.Transport) (int, error) {
 	if !tr.Kind().Known() {
 		return 0, ErrTransportKind
@@ -56,7 +61,7 @@ func (o Outbox) Flush(ctx context.Context, tr ports.Transport) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	var done []string
+	done := map[string]bool{} // message id -> delivered, not only sent
 	var first error
 	for _, it := range items {
 		if it.Sent || (it.ColdKey && tr.Kind() != ports.ViaFile) {
@@ -68,7 +73,7 @@ func (o Outbox) Flush(ctx context.Context, tr ports.Transport) (int, error) {
 		}
 		switch err := tr.Sender().Send(ctx, to, it.Envelope); {
 		case err == nil:
-			done = append(done, it.ID)
+			done[it.ID] = tr.Kind() == ports.ViaFile || it.Type != string(party.TypeSigningRequest)
 		case errors.Is(err, ports.ErrNoRoute):
 		default:
 			if first == nil {
@@ -83,11 +88,9 @@ func (o Outbox) Flush(ctx context.Context, tr ports.Transport) (int, error) {
 				return err
 			}
 			for i := range all {
-				for _, id := range done {
-					if all[i].ID == id {
-						all[i].Sent = true
-						all[i].Delivered = tr.Kind() == ports.ViaFile
-					}
+				if delivered, ok := done[all[i].ID]; ok {
+					all[i].Sent = true
+					all[i].Delivered = delivered
 				}
 			}
 			return writeJSON(w, outboxRef, all)
@@ -99,21 +102,29 @@ func (o Outbox) Flush(ctx context.Context, tr ports.Transport) (int, error) {
 	return len(done), first
 }
 
-// Rearm makes the envelopes that were sent over a network and not settled go
-// out again at the next Flush: call it when a new connection is made.
+// Rearm makes the SigningRequests that were sent over a network and not
+// answered go out again at the next Flush: call it when a new connection is
+// made. Nothing else is re-sent: a response, a refusal or a CollectionClosed
+// was delivered when it was written.
 func (o Outbox) Rearm(ctx context.Context) error {
 	return o.Store.Update(ctx, func(w ports.Writer) error {
-		all, err := readOutbox(w)
-		if err != nil {
-			return err
-		}
-		for i := range all {
-			if !all[i].Delivered {
-				all[i].Sent = false
-			}
-		}
-		return writeJSON(w, outboxRef, all)
+		return rearm(w, nil)
 	})
+}
+
+// rearm clears Sent on the undelivered SigningRequests, of one recipient when
+// to is not nil, inside the caller's transaction.
+func rearm(w ports.Writer, to *party.Fingerprint) error {
+	all, err := readOutbox(w)
+	if err != nil {
+		return err
+	}
+	for i := range all {
+		if !all[i].Delivered && all[i].Type == string(party.TypeSigningRequest) && (to == nil || all[i].To == hexFP(*to)) {
+			all[i].Sent = false
+		}
+	}
+	return writeJSON(w, outboxRef, all)
 }
 
 // settleRequest marks the envelope with that message id done: the answer it
@@ -147,7 +158,7 @@ func settleCollection(w ports.Writer, collection string) error {
 
 // Handler takes one incoming envelope. Coordinator.Handle and Signer.Handle
 // are Handlers.
-type Handler func(ctx context.Context, envelope []byte, via ports.TransportKind) (Handled, error)
+type Handler func(ctx context.Context, rcv ports.Received) (Handled, error)
 
 // Pump moves envelopes between the store-backed outbox and a transport until
 // idle: it flushes the outbox, waits up to Idle for an incoming envelope,
@@ -193,7 +204,7 @@ func (p Pump) Run(ctx context.Context) error {
 func (p Pump) receiveOne(ctx context.Context) (bool, error) {
 	rctx, cancel := context.WithTimeout(ctx, p.Idle)
 	defer cancel()
-	raw, via, err := p.Receive.Receive(rctx)
+	rcv, err := p.Receive.Receive(rctx)
 	if err != nil {
 		if ctx.Err() != nil {
 			return false, ctx.Err()
@@ -203,7 +214,7 @@ func (p Pump) receiveOne(ctx context.Context) (bool, error) {
 		}
 		return false, err
 	}
-	h, err := p.Handle(ctx, raw, via)
+	h, err := p.Handle(ctx, rcv)
 	if err != nil {
 		return true, err
 	}

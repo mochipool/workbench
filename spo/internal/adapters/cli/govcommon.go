@@ -36,6 +36,7 @@ type govOpts struct {
 	single       bool // --single-source
 	allow        bool // --allow-unverified
 	anchorClear  bool // --allow-anchor-clear
+	unrestricted bool // --allow-unrestricted (hardware wallets)
 	chainOnly    bool // chain flags without a transfer file
 	anchorOfWhat string
 }
@@ -47,6 +48,7 @@ type govFlags struct {
 	chain chainFlags
 
 	messages         []string
+	extra            extraFlags
 	yes              bool
 	anchorURL        string
 	anchorHash       string
@@ -54,6 +56,7 @@ type govFlags struct {
 	singleSource     bool
 	allowUnverified  bool
 	allowAnchorClear bool
+	unrestricted     bool
 }
 
 func (f *govFlags) add(cmd *cobra.Command, o govOpts) {
@@ -62,6 +65,7 @@ func (f *govFlags) add(cmd *cobra.Command, o govOpts) {
 	if o.tx {
 		fl.StringArrayVar(&f.messages, "message", nil, "CIP-20 message line, at most 64 bytes (repeatable)")
 		fl.BoolVar(&f.yes, "yes", false, "approve without asking (the summary is still printed)")
+		f.extra.add(cmd, &f.messages, extraCert)
 	}
 	if o.anchor {
 		what := o.anchorOfWhat
@@ -73,6 +77,9 @@ func (f *govFlags) add(cmd *cobra.Command, o govOpts) {
 	}
 	if o.anchorClear {
 		fl.BoolVar(&f.allowAnchorClear, "allow-anchor-clear", false, "let an update without an anchor replace the anchor the DRep has on chain with none")
+	}
+	if o.unrestricted {
+		fl.BoolVar(&f.unrestricted, "allow-unrestricted", false, unrestrictedHelp)
 	}
 	if o.unverified {
 		fl.BoolVar(&f.anchorUnverified, "anchor-unverified", false, anchorUnverifiedHelp)
@@ -169,6 +176,7 @@ func (a *app) govBase(s *session, env *Env, f *govFlags, conf govConfirmer) gove
 	return governance.Base{
 		Store: s.Store, Addresses: env.AddressInspector, Params: env.Params, Tip: env.Tip, Utxos: env.Utxos,
 		Pipeline: p, NetworkID: env.NetworkID,
+		Files: env.MetadataFiles, Encrypter: env.MsgEncrypter,
 	}
 }
 

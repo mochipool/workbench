@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/mochipool/workbench/spo/internal/app/hwkeys"
 	"github.com/mochipool/workbench/spo/internal/domain/assets"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
@@ -29,9 +30,12 @@ var (
 
 // GeneratePolicy creates a minting policy: a payment-type key pair, the
 // native script that requires its signature (and optionally a time lock) and
-// the policy id (upstream 10_genPolicy, software keys). The signing key goes
-// into the store; a hardware holder is refused up front by the generation
-// plan. The four artefacts are written together or not at all (SPO-10-INV-005
+// the policy id (upstream 10_genPolicy). The signing key goes into the store.
+// A hardware holder (`hw`) is planned against the device profile and exported
+// at 1855H/1815H/0H through Hardware; with no Hardware wired it is refused up
+// front by the generation plan. When PolicyIDer is wired the policy id of a
+// hardware policy is the device's answer (SPO-10-EXT-005), checked against the
+// id computed from the script. The four artefacts are written together or not at all (SPO-10-INV-005
 // upstream leaves a half-written policy that blocks the name).
 type GeneratePolicy struct {
 	Store    ports.Store
@@ -39,6 +43,11 @@ type GeneratePolicy struct {
 	Policies ports.PolicyIDCalculator
 	// Tip is read only for a policy with a lifetime.
 	Tip ports.TipReader
+	// Hardware exports the key of a hardware holder; nil keeps the upfront refusal.
+	Hardware ports.HardwareKeyExporter
+	// PolicyIDer asks the device for the policy id of a hardware policy; nil
+	// uses the id computed from the script.
+	PolicyIDer ports.HardwarePolicyIDer
 }
 
 // GeneratePolicyRequest names the policy. Lifetime is in slots; zero means
@@ -81,7 +90,9 @@ func (uc GeneratePolicy) Run(ctx context.Context, req GeneratePolicyRequest) (Po
 	}
 	// Hardware (and any other non-vault holder) is refused before anything
 	// is read or written (ADR 0008).
-	if _, err := custody.PlanGeneration(custody.KeyRef{Role: custody.RolePolicy, Holder: req.Holder, Owner: name}); err != nil {
+	key := custody.KeyRef{Role: custody.RolePolicy, Holder: req.Holder, Owner: name}
+	onDevice := hwkeys.Hardware(key)
+	if _, err := hwkeys.Plan(uc.Hardware, key); err != nil {
 		return PolicyGenerated{}, err
 	}
 	// The expiry is computed before any side effect, and a failed tip read
@@ -118,11 +129,22 @@ func (uc GeneratePolicy) Run(ctx context.Context, req GeneratePolicyRequest) (Po
 	if err := uc.Store.View(ctx, check); err != nil {
 		return PolicyGenerated{}, err
 	}
-	pair, err := uc.KeyGen.GeneratePayment(ctx)
-	if err != nil {
-		return PolicyGenerated{}, fmt.Errorf("generate the policy key: %w", err)
+	var pair ports.KeyPair
+	var hwsfile []byte
+	if onDevice {
+		// spec: SPO-10-EXT-002, SPO-10-OUT-004
+		hk, err := hwkeys.Export(ctx, uc.Hardware, key, hwkeys.Options{})
+		if err != nil {
+			return PolicyGenerated{}, err
+		}
+		pair.VKey, hwsfile = hk.VKey, hk.SigningFile
+	} else {
+		var err error
+		if pair, err = uc.KeyGen.GeneratePayment(ctx); err != nil {
+			return PolicyGenerated{}, fmt.Errorf("generate the policy key: %w", err)
+		}
+		defer pair.SKey.Destroy()
 	}
-	defer pair.SKey.Destroy()
 	env, err := pool.ParseEnvelope(pair.VKey)
 	if err != nil {
 		return PolicyGenerated{}, err
@@ -139,6 +161,7 @@ func (uc GeneratePolicy) Run(ctx context.Context, req GeneratePolicyRequest) (Po
 		return PolicyGenerated{}, fmt.Errorf("the policy id: %w", err)
 	}
 	idHex := hex.EncodeToString(id[:])
+	askDevice := onDevice && uc.PolicyIDer != nil
 	err = uc.Store.Update(ctx, func(w ports.Writer) error {
 		if err := check(w); err != nil {
 			return err
@@ -146,16 +169,56 @@ func (uc GeneratePolicy) Run(ctx context.Context, req GeneratePolicyRequest) (Po
 		if err := w.Put(ports.Ref{Name: name, Kind: ports.PolicyVKey}, pair.VKey); err != nil {
 			return err
 		}
-		if err := w.PutSecret(ports.Ref{Name: name, Kind: ports.PolicySKey}, pair.SKey); err != nil {
+		if onDevice {
+			if err := w.Put(ports.Ref{Name: name, Kind: ports.PolicyHwsFile}, hwsfile); err != nil {
+				return err
+			}
+		} else if err := w.PutSecret(ports.Ref{Name: name, Kind: ports.PolicySKey}, pair.SKey); err != nil {
 			return err
 		}
 		if err := w.Put(ports.Ref{Name: name, Kind: ports.PolicyScript}, script); err != nil {
 			return err
 		}
+		if askDevice {
+			return nil // the id file follows the device's answer
+		}
 		return w.Put(ports.Ref{Name: name, Kind: ports.PolicyID}, []byte(idHex+"\n"))
 	})
 	if err != nil {
 		return PolicyGenerated{}, err
+	}
+	if askDevice {
+		// spec: SPO-10-EXT-005. The device reads the signing file and the script
+		// from the store, so it can only be asked once they are stored; a
+		// disagreement or a failure takes the artefacts away again, so no
+		// half-written policy blocks the name.
+		undo := func() {
+			_ = uc.Store.Update(ctx, func(w ports.Writer) error {
+				for _, k := range []ports.Kind{ports.PolicyVKey, ports.PolicyHwsFile, ports.PolicyScript} {
+					_ = w.Delete(ports.Ref{Name: name, Kind: k})
+				}
+				return nil
+			})
+		}
+		pk, perr := custody.As[custody.Policy](key)
+		if perr != nil {
+			undo()
+			return PolicyGenerated{}, perr
+		}
+		devID, derr := uc.PolicyIDer.PolicyID(ctx, pk, script)
+		if derr != nil {
+			undo()
+			return PolicyGenerated{}, fmt.Errorf("the device's policy id: %w", derr)
+		}
+		if devID != idHex {
+			undo()
+			return PolicyGenerated{}, fmt.Errorf("the device answered policy id %s, the script's is %s: nothing was stored", devID, idHex)
+		}
+		if err := uc.Store.Update(ctx, func(w ports.Writer) error {
+			return w.Put(ports.Ref{Name: name, Kind: ports.PolicyID}, []byte(devID+"\n"))
+		}); err != nil {
+			return PolicyGenerated{}, err
+		}
 	}
 	return PolicyGenerated{Name: name, PolicyID: idHex, KeyHash: hashHex, Script: script, Expiry: expiry, Limited: limited}, nil
 }

@@ -224,3 +224,23 @@ type PoolState struct {
 	MetaURL       string
 	MetaHash      string
 }
+
+// OutRef names one transaction output: the transaction id and the output
+// index. It is what an input of a transaction body refers to.
+type OutRef struct {
+	TxID  TxID
+	Index uint32
+}
+
+// String is "<txid hex>#<index>".
+func (r OutRef) String() string { return fmt.Sprintf("%s#%d", r.TxID, r.Index) }
+
+// ResolvedUtxo is what a provider says one unspent output holds and where: its
+// address, lovelace and native assets. A signer that must know whose an input
+// is looks it up by reference (SPO-Xparty-PR-002), not by the address a
+// coordinator names.
+type ResolvedUtxo struct {
+	Address  Address
+	Lovelace Lovelace
+	Assets   []AssetAmount
+}

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/mochipool/workbench/spo/internal/app/handles"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/transfer"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -26,7 +27,7 @@ var (
 	// ErrUnresolved: the argument is no stored name, address or Handle
 	// (SPO-01queryAddress-PRE-001).
 	ErrUnresolved = errors.New("the argument is not the name of a stored address, an address or an ADA Handle: the address can't be resolved")
-	// ErrAdaHandleUnsupported: ADA Handle resolution is not ported.
+	// ErrAdaHandleUnsupported: no handle resolver is wired (QueryAddress.Handles).
 	ErrAdaHandleUnsupported = errors.New("ADA Handle addresses are not supported yet; give the address or the name of a stored address")
 	// ErrAddressType: the address is neither a payment nor a stake address
 	// (SPO-01queryAddress-INV-001).
@@ -71,6 +72,27 @@ type QueryAddress struct {
 	// Sync is set in the full online mode: a payment query needs a synced
 	// node (SPO-01queryAddress-PRE-002). The light mode has no sync check.
 	Sync ports.SyncChecker
+	// Handles resolves an ADA Handle argument to the address that holds it,
+	// verified against the chain (satisfied by handles.Resolver). Nil keeps the
+	// refusal with ErrAdaHandleUnsupported.
+	Handles HandleResolver
+}
+
+// HandleResolver resolves an ADA Handle (handles.Resolver).
+type HandleResolver interface {
+	Resolve(ctx context.Context, text string) (handles.Resolved, error)
+}
+
+// ErrHandleUnverified: the resolver answered an address it did not verify; a
+// wrong address is harmful (ADR 0006), so it is refused.
+var ErrHandleUnverified = errors.New("the ADA Handle resolution was not verified against the chain; refusing it")
+
+// ResolvedHandle is shown beside the address of a report for a handle: the
+// handle and the address it resolved to are both visible (ADR 0006).
+type ResolvedHandle struct {
+	Handle     string
+	Kind       string
+	VerifiedBy string
 }
 
 // AssetLine is one asset of an output.
@@ -106,6 +128,9 @@ type AddressReport struct {
 	Name    string
 	Address string
 	Source  chain.Source
+	// Handle is set when the argument was an ADA Handle; Name is then the
+	// handle and Address the address it resolved to.
+	Handle *ResolvedHandle
 
 	// Payment: the outputs in the order of the reader, the lovelace total and
 	// the asset totals ordered by policy and name.
@@ -130,7 +155,8 @@ type AddressReport struct {
 
 // Run resolves the word and reads the address. A word is a stored name when
 // `<name>.addr` is stored, else a literal address of the payment or stake
-// kind, else an ADA Handle, which is refused with ErrAdaHandleUnsupported.
+// kind, else an ADA Handle, which is resolved by Handles (refused with
+// ErrAdaHandleUnsupported when none is wired).
 //
 // spec: SPO-01queryAddress-IF-002, SPO-01queryAddress-IN-001, SPO-01queryAddress-IN-002, SPO-01queryAddress-IN-004,
 // spec: SPO-01queryAddress-PRE-001, SPO-01queryAddress-INV-001, SPO-01queryAddress-EXT-001, SPO-01queryAddress-EXT-003,
@@ -143,7 +169,7 @@ func (uc QueryAddress) Run(ctx context.Context, word string) (AddressReport, err
 	if word == "" || uc.Addresses == nil {
 		return AddressReport{}, errors.New("an address query needs a stored name, an address or an ADA Handle")
 	}
-	name, addr, err := uc.resolve(ctx, word)
+	name, addr, rh, err := uc.resolve(ctx, word)
 	if err != nil {
 		return AddressReport{}, err
 	}
@@ -151,7 +177,7 @@ func (uc QueryAddress) Run(ctx context.Context, word string) (AddressReport, err
 	if err != nil {
 		return AddressReport{}, fmt.Errorf("%w: %v", ErrAddressType, err)
 	}
-	rep := AddressReport{Name: name, Address: addr}
+	rep := AddressReport{Name: name, Address: addr, Handle: rh}
 	switch {
 	case info.Kind.IsPayment():
 		err = uc.payment(ctx, &rep)
@@ -170,7 +196,7 @@ func (uc QueryAddress) Run(ctx context.Context, word string) (AddressReport, err
 }
 
 // resolve follows SPO-01queryAddress-IN-004 and IN-005.
-func (uc QueryAddress) resolve(ctx context.Context, word string) (name, addr string, err error) {
+func (uc QueryAddress) resolve(ctx context.Context, word string) (name, addr string, rh *ResolvedHandle, err error) {
 	n := strings.TrimSuffix(strings.TrimPrefix(word, "./"), ".addr")
 	if uc.Store != nil && n != "" && !strings.ContainsAny(n, "/\\") {
 		kind, base := ports.AddrFile, n
@@ -191,19 +217,37 @@ func (uc QueryAddress) resolve(ctx context.Context, word string) (name, addr str
 			return nil
 		})
 		if verr != nil {
-			return "", "", verr
+			return "", "", nil, verr
 		}
 		if found {
-			return n, strings.TrimSpace(addr), nil
+			return n, strings.TrimSpace(addr), nil, nil
 		}
 	}
 	if info, ierr := uc.Addresses.InspectAddress(chain.Address(word)); ierr == nil && (info.Kind.IsPayment() || info.Kind == ports.AddrReward) {
-		return "", word, nil
+		return "", word, nil, nil
 	}
 	if handleRoot.MatchString(strings.ToLower(word)) || handleSub.MatchString(strings.ToLower(word)) {
-		return "", "", ErrAdaHandleUnsupported
+		return uc.resolveHandle(ctx, strings.ToLower(word))
 	}
-	return "", "", fmt.Errorf("%w: %q", ErrUnresolved, word)
+	return "", "", nil, fmt.Errorf("%w: %q", ErrUnresolved, word)
+}
+
+// resolveHandle resolves an ADA Handle and shows it with the address it
+// resolved to. An unverified answer is refused.
+//
+// spec: SPO-01queryAddress-IN-005, SPO-Caddr-IF-001, SPO-Caddr-IF-002
+func (uc QueryAddress) resolveHandle(ctx context.Context, h string) (string, string, *ResolvedHandle, error) {
+	if uc.Handles == nil {
+		return "", "", nil, ErrAdaHandleUnsupported
+	}
+	res, err := uc.Handles.Resolve(ctx, h)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("the ADA Handle %s: %w", h, err)
+	}
+	if res.Address == "" || res.VerifiedBy == "" {
+		return "", "", nil, fmt.Errorf("%w: %s", ErrHandleUnverified, h)
+	}
+	return h, string(res.Address), &ResolvedHandle{Handle: h, Kind: string(res.Kind), VerifiedBy: res.VerifiedBy}, nil
 }
 
 func (uc QueryAddress) payment(ctx context.Context, rep *AddressReport) error {

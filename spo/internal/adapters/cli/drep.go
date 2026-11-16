@@ -39,7 +39,7 @@ sealed in the workspace and not shown; --mnemonic-in-fd N derives it from a phra
 read from file descriptor N. --account and --index select the path.`,
 		false, keyNeeds(CapDRepKeys),
 		func(ctx context.Context, s *session, env *Env, req governance.GenerateKeysRequest, fresh bool) error {
-			res, err := governance.GenerateDRepKeys{Store: s.Store, Keys: env.DRepKeys, Deriver: env.GovDeriver, Mnemonics: env.Mnemonics, Params: env.Params}.Run(ctx, req)
+			res, err := governance.GenerateDRepKeys{Store: s.Store, Keys: env.DRepKeys, Deriver: env.GovDeriver, Mnemonics: env.Mnemonics, Params: env.Params, Hardware: env.Hardware}.Run(ctx, req)
 			if err != nil {
 				return err
 			}
@@ -104,14 +104,18 @@ was sent or queued. Offline, the DRep must be in the transfer file
 (01_workOffline add-drep).`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			spec := envSpec{flags: &f.chain, config: true, needs: govTxNeeds(CapCerts, CapDReps)}
+			spec := envSpec{flags: &f.chain, config: true, needs: govTxNeeds(CapCerts, CapDReps), extras: &f.extra}
 			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, wo WireOptions) error {
+				unrestricted, err := a.unrestrictedConsent(ctx, f.unrestricted)
+				if err != nil {
+					return err
+				}
 				details, notes := a.drepDetails(ctx, s, env, &f, args[0])
 				uc := governance.RegisterDRep{Base: a.govBase(s, env, &f, govConfirmer{a: a, details: details, notes: notes}),
 					Certs: env.Certs, DReps: env.DReps, Anchors: governance.AnchorSource{Fetcher: env.AnchorFetcher},
 					Verifier: env.AnchorVerifier, AnchorUnverifiedAcknowledged: f.anchorUnverified}
 				res, err := uc.Run(ctx, governance.RegisterDRepRequest{DRep: args[0], Payer: args[1], URL: f.anchorURL, Hash: f.anchorHash,
-					Message: f.messages, AllowAnchorClear: f.allowAnchorClear})
+					Message: f.messages, Extras: f.extra.ex, Passphrase: f.extra.pass, AllowAnchorClear: f.allowAnchorClear, Unrestricted: unrestricted})
 				if err != nil {
 					return f.hint(err)
 				}
@@ -125,7 +129,7 @@ was sent or queued. Offline, the DRep must be in the transfer file
 			})
 		},
 	}
-	f.add(cmd, govOpts{tx: true, anchor: true, unverified: true, anchorClear: true, anchorOfWhat: "the DRep (CIP-119)"})
+	f.add(cmd, govOpts{tx: true, anchor: true, unverified: true, anchorClear: true, unrestricted: true, anchorOfWhat: "the DRep (CIP-119)"})
 	return cmd
 }
 
@@ -149,15 +153,19 @@ The certificate is stored as <name>.drep-ret.cert only after the transaction
 was sent or queued.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			spec := envSpec{flags: &f.chain, config: true, needs: govTxNeeds(CapCerts, CapDReps)}
+			spec := envSpec{flags: &f.chain, config: true, needs: govTxNeeds(CapCerts, CapDReps), extras: &f.extra}
 			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, wo WireOptions) error {
+				unrestricted, err := a.unrestrictedConsent(ctx, f.unrestricted)
+				if err != nil {
+					return err
+				}
 				var details []string
 				if id := readPublic(ctx, s.Store, ports.Ref{Name: drepStem(args[0]), Kind: ports.DRepID}); id != nil {
 					details = append(details, "DRep id       "+firstLineText(id))
 				}
 				uc := governance.RetireDRep{Base: a.govBase(s, env, &f, govConfirmer{a: a, details: details}),
 					Certs: env.Certs, DReps: env.DReps, CrossCheck: env.DRepCross, Sources: f.policy()}
-				res, err := uc.Run(ctx, governance.RetireDRepRequest{DRep: args[0], Payer: args[1], Message: f.messages})
+				res, err := uc.Run(ctx, governance.RetireDRepRequest{DRep: args[0], Payer: args[1], Message: f.messages, Extras: f.extra.ex, Passphrase: f.extra.pass, Unrestricted: unrestricted})
 				if err != nil {
 					return f.hint(err)
 				}
@@ -167,7 +175,7 @@ was sent or queued.`,
 			})
 		},
 	}
-	f.add(cmd, govOpts{tx: true, single: true})
+	f.add(cmd, govOpts{tx: true, single: true, unrestricted: true})
 	return cmd
 }
 

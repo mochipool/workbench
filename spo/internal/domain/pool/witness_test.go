@@ -151,8 +151,8 @@ func TestFillIsACompareAndSet(t *testing.T) {
 // spec: SPO-05d-INV-003, SPO-Xparty-INV-015, SPO-05c-INV-008
 func TestStatesAndExpiry(t *testing.T) {
 	r := newRig(t)
-	if r.c.State(1000) != CollectionOpenIncomplete || r.c.State(1001) != CollectionExpired {
-		t.Error("the window is open while ttl >= tip: equal is accepted")
+	if r.c.State(999) != CollectionOpenIncomplete || r.c.State(1000) != CollectionExpired || r.c.State(1<<64-1) != CollectionExpired {
+		t.Error("the collection is expired when the tip has reached the ttl slot, at any tip")
 	}
 	c, _ := r.fill(t, r.c, "mypool.node", r.cold, 10)
 	c, _ = r.fill(t, c, "pay", r.pay, 10)

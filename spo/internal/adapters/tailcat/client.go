@@ -25,6 +25,14 @@ type ClientConfig struct {
 	// Coordinator is who the address leads to. Send accepts only this
 	// recipient.
 	Coordinator party.Fingerprint
+	// Hello builds a fresh Hello for the coordinator: a new message id and a
+	// five-minute expiry on every call. The client sends one as the first
+	// frame of EVERY connection, so no connection starts with an envelope
+	// that is in the coordinator's replay log, and the coordinator learns
+	// that this signer is connected (SPO-Xparty-INV-018, INV-021). The wiring
+	// supplies it (multisig.Signer.NewHello): this adapter holds no identity
+	// key. It is required.
+	Hello func(ctx context.Context) ([]byte, error)
 	// ExpectServerKey is the coordinator's node key from the same Invite. It
 	// is required: NewClient refuses an address whose server key differs, so
 	// a mismatched address and invite are caught before any dial, and refuses
@@ -40,8 +48,9 @@ type ClientConfig struct {
 
 // Client is the signer side. It implements ports.EnvelopeSender and
 // ports.EnvelopeReceiver over one connection to the coordinator, dialled on
-// first use. The caller sends first: the coordinator closes a connection
-// whose first frame is not a valid envelope.
+// first use and again after it drops. Every connection begins with a fresh
+// Hello that the client itself sends (ClientConfig.Hello): the coordinator
+// closes a connection whose first frame is anything else.
 type Client struct {
 	cfg  ClientConfig
 	idle time.Duration
@@ -65,6 +74,9 @@ var (
 // NewClient checks the configuration and builds the tailcat client. It does
 // not dial.
 func NewClient(cfg ClientConfig) (*Client, error) {
+	if cfg.Hello == nil {
+		return nil, errors.New("tailcat: a Hello builder is required: every connection starts with a fresh Hello")
+	}
 	if cfg.ExpectServerKey == nil || *cfg.ExpectServerKey == (party.NodeKey{}) {
 		return nil, errors.New("tailcat: the coordinator's node key from the invitation is required")
 	}
@@ -104,7 +116,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 
 // Transport is the client as the sending side of multisig: its kind is a
 // network.
-func (c *Client) Transport() ports.Transport { return ports.NewTransport(c, ports.ViaNetwork) }
+func (c *Client) Transport() ports.Transport { return ports.NetworkTransport(c) }
 
 // PublicKey is the node public key the coordinator must have enrolled.
 func (c *Client) PublicKey() party.NodeKey { return party.NodeKey(c.tc.PublicKey().Raw32()) }
@@ -135,6 +147,20 @@ func (c *Client) connection(ctx context.Context) (*peerConn, error) {
 		return nil, fmt.Errorf("tailcat: dial: %w", err)
 	}
 	pc := &peerConn{c: nc}
+	// The first frame of every connection is a fresh Hello. A caller cannot
+	// skip it and cannot send anything before it: the connection is not handed
+	// out until it is written.
+	hello, err := c.cfg.Hello(dctx)
+	if err == nil && (len(hello) == 0 || len(hello) > MaxFrame) {
+		err = ports.ErrEnvelopeSize
+	}
+	if err == nil {
+		err = writeWithContext(dctx, pc, c.idle, hello)
+	}
+	if err != nil {
+		nc.Close()
+		return nil, fmt.Errorf("tailcat: hello: %w", err)
+	}
 	c.conn = pc
 	go c.read(pc)
 	return pc, nil
@@ -189,15 +215,29 @@ func (c *Client) Send(ctx context.Context, to party.Fingerprint, envelope []byte
 	return nil
 }
 
-// Receive returns the next frame from the coordinator, as ports.ViaNetwork.
-func (c *Client) Receive(ctx context.Context) ([]byte, ports.TransportKind, error) {
+// Receive returns the next frame from the coordinator, as a network delivery.
+func (c *Client) Receive(ctx context.Context) (ports.Received, error) {
 	select {
 	case env := <-c.inbox:
-		return env, ports.ViaNetwork, nil
+		return ports.NetworkReceived(env), nil
 	case <-ctx.Done():
-		return nil, 0, ctx.Err()
+		return ports.Received{}, ctx.Err()
 	case <-c.done:
-		return nil, 0, ports.ErrClosed
+		return ports.Received{}, ports.ErrClosed
+	}
+}
+
+// Disconnect drops the connection to the coordinator. The next Send or Connect
+// dials again, and the new connection opens with a fresh Hello. A caller does
+// this when it knows the connection is no good; read does it itself when the
+// coordinator closes it.
+func (c *Client) Disconnect() {
+	c.mu.Lock()
+	pc := c.conn
+	c.conn = nil
+	c.mu.Unlock()
+	if pc != nil {
+		pc.c.Close()
 	}
 }
 

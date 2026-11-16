@@ -5,7 +5,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 )
@@ -44,17 +43,42 @@ func (k TransportKind) IsFile() bool { return k == ViaFile }
 func (k TransportKind) Known() bool { return k == ViaFile || k == ViaNetwork }
 
 // Transport is a sender together with what kind of transport it is. Only the
-// transport adapters make one for themselves (filebag.Bag.Transport,
-// tailcat.Server.Transport, tailcat.Client.Transport), so a call site cannot
-// say that a network is a file. The zero Transport has no sender and an
-// unknown kind. NewTransport is for tests and for a transport adapter.
+// transport adapters make one (filebag.Bag.Transport, tailcat.Server.Transport,
+// tailcat.Client.Transport), through the two constructors below: there is no
+// constructor that takes a kind, so a call site cannot pick one at run time,
+// and a test (ports/transport_callers_test.go) fails when code outside the
+// adapters and tests calls them. The zero Transport has no sender and an
+// unknown kind.
 type Transport struct {
 	send EnvelopeSender
 	kind TransportKind
 }
 
-// NewTransport pairs a sender with its kind.
-func NewTransport(s EnvelopeSender, k TransportKind) Transport { return Transport{send: s, kind: k} }
+// FileTransport is a sender that writes files (SPO-Xparty-INV-024).
+func FileTransport(s EnvelopeSender) Transport { return Transport{send: s, kind: ViaFile} }
+
+// NetworkTransport is a sender over a network (SPO-Xparty-INV-024).
+func NetworkTransport(s EnvelopeSender) Transport { return Transport{send: s, kind: ViaNetwork} }
+
+// Received is one envelope as a transport delivered it, with how it arrived.
+// The kind is not a field a caller can set: only FileReceived and
+// NetworkReceived, which the adapters call, make one, and Signer.Handle and
+// Coordinator.Handle take a Received, so wiring cannot relabel what came over
+// a network as a file (SPO-Xparty-INV-024). The bytes are unchecked.
+type Received struct {
+	Envelope []byte
+	via      TransportKind
+}
+
+// FileReceived is an envelope read from a file.
+func FileReceived(envelope []byte) Received { return Received{Envelope: envelope, via: ViaFile} }
+
+// NetworkReceived is an envelope that came over a network.
+func NetworkReceived(envelope []byte) Received { return Received{Envelope: envelope, via: ViaNetwork} }
+
+// Via is how the envelope arrived; ViaUnknown for the zero Received, which is
+// a network for the cold-key rule.
+func (r Received) Via() TransportKind { return r.via }
 
 // Sender is the envelope sender; nil for the zero Transport.
 func (t Transport) Sender() EnvelopeSender { return t.send }
@@ -85,7 +109,7 @@ type EnvelopeSender interface {
 // specified. The bytes are unchecked: the caller opens them with
 // adapters/envelope, whatever the transport said (SPO-Xparty-SEC-002).
 type EnvelopeReceiver interface {
-	Receive(ctx context.Context) (envelope []byte, via TransportKind, err error)
+	Receive(ctx context.Context) (Received, error)
 }
 
 // EnvelopeAcker is an EnvelopeReceiver that keeps what it delivered until the
@@ -235,22 +259,6 @@ func init() {
 	for _, k := range []Kind{MultisigCoordinator, MultisigSigner, MultisigOutbox, MultisigEvents, MultisigCollection} {
 		kinds[k] = kindInfo{}
 	}
-}
-
-// ---- the signer's own view of its funds (SPO-Xparty-PR-002) -------------------
-
-// OwnedAddresses is what the signer owns, from its own store and never from a
-// coordinator. The review marks every output of a body Own or not by it, and
-// the signer resolves the inputs of a body in the UTxO sets of these
-// addresses. party.OwnedList is the simple implementation over a list the
-// wiring supplies.
-type OwnedAddresses interface {
-	// PaymentAddresses are the addresses of the signer's own payment keys.
-	PaymentAddresses(ctx context.Context) ([]chain.Address, error)
-	// IsOwn reports whether addr is one of them.
-	IsOwn(addr chain.Address) bool
-	// IsOwnReward reports whether a reward account is the signer's.
-	IsOwnReward(account chain.StakeAddress) bool
 }
 
 // ApprovalGate asks the operator to authenticate again before a key signs

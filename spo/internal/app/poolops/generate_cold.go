@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/mochipool/workbench/spo/internal/app/hwkeys"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
@@ -25,16 +26,24 @@ var ErrVrfKeyExists = errors.New("VRF key artefacts already exist for this pool"
 // The key type argument of the script becomes explicit: the signing key is
 // always held in the store (upstream `cli`; the store's own protection
 // replaces `enc`, which is not ported at generation, as for 04c). A
-// hardware holder is refused up front by the generation plan.
+// hardware holder is planned against the device profile (Ledger or Keystone
+// only, SPO-04a-EXT-003) and exported through Hardware; with no Hardware wired
+// it is refused up front by the generation plan.
 type GenerateColdKeys struct {
 	Store  ports.Store
 	KeyGen ports.ColdKeyGenerator
+	// Hardware exports the cold key of a hardware holder; nil keeps the
+	// upfront refusal.
+	Hardware ports.HardwareKeyExporter
 }
 
 // GenerateColdKeysRequest names the pool and who holds the signing key.
 type GenerateColdKeysRequest struct {
 	Pool   string
 	Holder custody.Holder // empty means the vault
+	// Index is the cold key index of the hardware path 1853H/1815H/0H/<Index>H
+	// (SPO-04a-IF-003, SPO-04a-INV-002); a hardware holder only.
+	Index uint32
 }
 
 // ColdKeysGenerated is the result. It carries no signing key.
@@ -46,19 +55,39 @@ type ColdKeysGenerated struct {
 
 // Run generates the cold keys. The `.vkey`, `.skey` and the counter are
 // written together or not at all.
+//
+// spec: SPO-04a-IF-001, SPO-04a-IF-003, SPO-04a-PRE-001, SPO-04a-INV-002, SPO-04a-EXT-003, SPO-04a-EXT-004
 func (uc GenerateColdKeys) Run(ctx context.Context, req GenerateColdKeysRequest) (ColdKeysGenerated, error) {
-	if _, err := custody.PlanGeneration(custody.KeyRef{Role: custody.RolePoolCold, Holder: req.Holder, Owner: req.Pool}); err != nil {
+	key := custody.KeyRef{Role: custody.RolePoolCold, Holder: req.Holder, Owner: req.Pool}
+	onDevice := hwkeys.Hardware(key)
+	if !onDevice && req.Index != 0 {
+		return ColdKeysGenerated{}, errors.New("the cold key index is for a hardware key")
+	}
+	if req.Index > 2147483647 {
+		return ColdKeysGenerated{}, errors.New("the cold key index is at most 2147483647")
+	}
+	if _, err := hwkeys.Plan(uc.Hardware, key); err != nil {
 		return ColdKeysGenerated{}, err
 	}
 	// Check before generating, so a refusal creates nothing.
 	if err := uc.Store.View(ctx, func(r ports.Reader) error { return coldPlan(r, req.Pool) }); err != nil {
 		return ColdKeysGenerated{}, err
 	}
-	pair, err := uc.KeyGen.GenerateCold(ctx)
-	if err != nil {
-		return ColdKeysGenerated{}, fmt.Errorf("generate cold key: %w", err)
+	var pair ports.KeyPair
+	var hwsfile []byte
+	if onDevice {
+		hk, err := hwkeys.Export(ctx, uc.Hardware, key, hwkeys.Options{Index: req.Index})
+		if err != nil {
+			return ColdKeysGenerated{}, err
+		}
+		pair.VKey, hwsfile = hk.VKey, hk.SigningFile
+	} else {
+		var err error
+		if pair, err = uc.KeyGen.GenerateCold(ctx); err != nil {
+			return ColdKeysGenerated{}, fmt.Errorf("generate cold key: %w", err)
+		}
+		defer pair.SKey.Destroy()
 	}
-	defer pair.SKey.Destroy()
 
 	env, err := pool.ParseEnvelope(pair.VKey)
 	if err != nil {
@@ -83,7 +112,11 @@ func (uc GenerateColdKeys) Run(ctx context.Context, req GenerateColdKeysRequest)
 		if err := w.Put(ports.Ref{Name: req.Pool, Kind: ports.NodeVKey}, pair.VKey); err != nil {
 			return err
 		}
-		if err := w.PutSecret(ports.Ref{Name: req.Pool, Kind: ports.NodeSKey}, pair.SKey); err != nil {
+		if onDevice {
+			if err := w.Put(ports.Ref{Name: req.Pool, Kind: ports.NodeHwsFile}, hwsfile); err != nil {
+				return err
+			}
+		} else if err := w.PutSecret(ports.Ref{Name: req.Pool, Kind: ports.NodeSKey}, pair.SKey); err != nil {
 			return err
 		}
 		return w.Put(ports.Ref{Name: req.Pool, Kind: ports.NodeCounter}, counter.Envelope())

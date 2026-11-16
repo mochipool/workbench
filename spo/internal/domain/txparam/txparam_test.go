@@ -261,3 +261,34 @@ func TestCheckMetadataJSON(t *testing.T) {
 		t.Errorf("only the first key is checked: %v", err)
 	}
 }
+
+// A front end that holds the message lines outside the words gives them as
+// options: the encryption mode then survives without a msg: word, and the
+// lines are checked, kept verbatim and not added to the extras.
+func TestParseWithOptions(t *testing.T) {
+	ex, err := ParseWith([]string{"x.json"}, ForCertificate, Options{Messages: []string{"a|b"}, Encryption: "basic"})
+	if err != nil || ex.Encryption != "basic" || len(ex.Messages) != 0 || len(ex.MetadataFiles) != 1 {
+		t.Fatalf("%v %+v", err, ex)
+	}
+	// Without a message anywhere the mode has no effect (IF-013).
+	if ex, err = ParseWith(nil, ForCertificate, Options{Encryption: "basic"}); err != nil || ex.Encryption != "" {
+		t.Errorf("no message: %v %+v", err, ex)
+	}
+	// A message word counts as a message too, and an enc: word wins.
+	if ex, err = ParseWith([]string{"msg:hi", "enc:basic"}, ForCertificate, Options{}); err != nil || ex.Encryption != "basic" || len(ex.Messages) != 1 {
+		t.Errorf("word input: %v %+v", err, ex)
+	}
+	// An unsupported mode and a bad line are refused.
+	if _, err = ParseWith(nil, ForCertificate, Options{Messages: []string{"x"}, Encryption: "aes"}); !errors.Is(err, ErrBadEncryption) {
+		t.Errorf("mode: %v", err)
+	}
+	if _, err = ParseWith(nil, ForCertificate, Options{Messages: []string{strings.Repeat("x", 65)}}); !errors.Is(err, ErrBadMessage) {
+		t.Errorf("line: %v", err)
+	}
+	// Parse is ParseWith with no options.
+	a, _ := Parse([]string{"msg:hi", "enc:basic"}, ForCertificate)
+	b, _ := ParseWith([]string{"msg:hi", "enc:basic"}, ForCertificate, Options{})
+	if a.String() != b.String() {
+		t.Error("Parse differs from ParseWith")
+	}
+}

@@ -24,6 +24,15 @@ mode = "light"          # required: online, light or offline
 
 [koios]                 # optional; present = Koios is the chosen chain provider
 url = "https://preview.koios.rest/api/v1"   # optional endpoint override
+
+[hardware]              # optional; every key optional
+wait_seconds = 60       # wait for a hardware wallet to answer, 1 to 3600
+min_ledger = "8.0.8"    # minimum Cardano app version per vendor
+min_trezor = "2.7.2"
+min_keystone = "1.7.7"
+
+[handles]               # optional
+url = "https://preview.api.handle.me"       # ADA Handle API root override
 ```
 
 | Key | Type | Meaning |
@@ -33,17 +42,23 @@ url = "https://preview.koios.rest/api/v1"   # optional endpoint override
 | `[koios]` | section | The operator's choice of Koios as chain provider. Required when `mode = "light"`. Ignored in `offline` mode. |
 | `[koios] url` | string | Koios API root. When absent, the network's public endpoint. `https` is required except for a loopback host. |
 
+| `[hardware]` | section | Tuning of the hardware wallet signer. A bare section keeps every default. Not read when the binary has no `cardano-hw-cli`. |
+| `[hardware] wait_seconds` | integer | How long a command waits for the device to answer before failing with "no hardware wallet answered" (1 to 3600; default 60). |
+| `[hardware] min_ledger`, `min_trezor`, `min_keystone` | string | Minimum app (Ledger) or firmware version of that vendor, dotted numbers such as `8.0.8`. Defaults are upstream's (`8.0.8`, `2.7.2`, `1.7.7`). Lowering one is the operator's decision and the device's profile is judged against it. |
+| `[handles]` | section | ADA Handle API settings. |
+| `[handles] url` | string | Handle API root. When absent, the network's (`mainnet` `https://api.handle.me`, `preprod` `https://preprod.api.handle.me`, `preview` `https://preview.api.handle.me`). `https` is required except for a loopback host. An unusable value makes capability `ada-handle` absent with the reason; other commands are unaffected. |
+
 There is no default provider. `[koios]` is written only after the operator confirms the privacy statement, at `init --mode light` or `provider set koios`.
 
 ## Network presets
 
 From the upstream presets ([Cconf](../../spec/upstream/common/Cconf.md): SPO-Cconf-INV-004, INV-006, INV-011).
 
-| Network | Network id | Address prefix | Byron epochs | Koios URL | Light-mode parameters |
-| --- | --- | --- | --- | --- | --- |
-| `mainnet` | `mainnet` | `addr` | 208 | `https://api.koios.rest/api/v1` | `https://uptime.live/data/cardano/parms/mainnet-parameters.json` |
-| `preprod` | `1` | `addr_test` | 4 | `https://preprod.koios.rest/api/v1` | `https://uptime.live/data/cardano/parms/preprod-parameters.json` |
-| `preview` | `2` | `addr_test` | 0 | `https://preview.koios.rest/api/v1` | `https://uptime.live/data/cardano/parms/preview-parameters.json` |
+| Network | Network id | Address prefix | Byron epochs | Koios URL | Light-mode parameters | Handle API |
+| --- | --- | --- | --- | --- | --- | --- |
+| `mainnet` | `mainnet` | `addr` | 208 | `https://api.koios.rest/api/v1` | `https://uptime.live/data/cardano/parms/mainnet-parameters.json` | `https://api.handle.me` |
+| `preprod` | `1` | `addr_test` | 4 | `https://preprod.koios.rest/api/v1` | `https://uptime.live/data/cardano/parms/preprod-parameters.json` | `https://preprod.api.handle.me` |
+| `preview` | `2` | `addr_test` | 0 | `https://preview.koios.rest/api/v1` | `https://uptime.live/data/cardano/parms/preview-parameters.json` | `https://preview.api.handle.me` |
 
 The address prefix is CIP-19, not part of Cconf. The light-mode parameters URL is in the table but no command uses it yet.
 

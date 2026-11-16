@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mochipool/workbench/spo/internal/app/airgap"
+	appassets "github.com/mochipool/workbench/spo/internal/app/assets"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/transfer"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -217,6 +218,11 @@ not compared with the transaction.`,
 					return fmt.Errorf("%w: %s does not exist; create it with: spo offline new", transfer.ErrNoFile, o.TransferFile)
 				}
 				printInfo(w, o.TransferFile, res, env)
+				if b, found, err := env.Bundle.ReadBundle(ctx); err == nil && found {
+					if subs, err := b.SubmittedAssetUpdates(); err == nil && len(subs) > 0 {
+						fmt.Fprintf(w, "\nThe history records %d submitted asset record update(s). On the machine that holds the asset record, apply them (once) with: spo asset settle\n", len(subs))
+					}
+				}
 				return nil
 			})
 		},
@@ -404,8 +410,18 @@ submitted. Light or online mode only.`,
 			}
 			f := chainFlags{transfer: tf}
 			spec := envSpec{flags: &f, config: true, needs: []Need{CapBundle, CapClock, CapSubmit, CapUtxos, CapRewards, CapTxID}}
-			return a.withEnv(cmd, spec, func(ctx context.Context, _ *session, env *Env, o WireOptions) error {
-				uc := airgap.ExecuteTx{Bundle: env.Bundle, Submitter: env.Submitter, Utxos: env.Utxos, Rewards: env.Rewards,
+			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, o WireOptions) error {
+				// A queued asset mint or burn carries its record update in the
+				// queue entry (hazard H9). After the submit the hook applies it
+				// when this workspace holds the record or the pending update;
+				// the result also goes into the history of the file, for
+				// `spo asset settle` on the machine that queued it. It never
+				// fails the submission.
+				var hook ports.AssetUpdateHook
+				if s.Store != nil && env.Clock != nil {
+					hook = appassets.UpdateHook{Store: s.Store, Clock: env.Clock}
+				}
+				uc := airgap.ExecuteTx{Bundle: env.Bundle, Submitter: env.Submitter, Assets: hook, Utxos: env.Utxos, Rewards: env.Rewards,
 					Sync: env.Sync, Confirmer: executeConfirmer{a}, Clock: env.Clock, OnlineCLI: a.versions(o).CLI,
 					TxIDs: env.TxIDs, Metadata: env.Metadata, Hasher: env.MetadataHasher, Tickers: env.Tickers}
 				if yes {

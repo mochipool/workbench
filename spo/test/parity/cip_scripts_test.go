@@ -531,8 +531,6 @@ func newest(t *testing.T, dir, pattern string, before map[string]bool) string {
 // script refuses without it, and the port has no QR code: the artefact is
 // secret (SPO-Pfiles-SEC-001) and its PIN encryption is the tool's, not
 // specified by the spec nor checkable here.
-//
-// spec: SPO-09a-IN-001, SPO-09a-PRE-008
 func TestCatalystQrCodeScriptRefusesWithoutTool(t *testing.T) {
 	e := setup(t)
 	upDir := e.upstreamWorkspace(t)

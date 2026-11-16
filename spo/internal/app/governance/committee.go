@@ -12,6 +12,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/governance"
 	"github.com/mochipool/workbench/spo/internal/domain/stake"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
+	"github.com/mochipool/workbench/spo/internal/domain/txparam"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -101,6 +102,10 @@ type AuthorizeCommitteeHotKey struct {
 type AuthorizeRequest struct {
 	Cold, Hot, Payer string
 	Message          []string
+	// Extras are the parsed extra parameters (txparam.Parse with
+	// txparam.ForCertificate); Passphrase is the `pass:` of Extras. Optional.
+	Extras     *txparam.Extras
+	Passphrase *ports.Secret
 }
 
 // Run authorises the hot key.
@@ -147,7 +152,7 @@ func (uc AuthorizeCommitteeHotKey) Run(ctx context.Context, req AuthorizeRequest
 		return Result{}, err
 	}
 	probe := stake.Certificate{Spec: stake.Spec{Kind: stake.CertCommitteeAuthorize, Stake: cold.hash, Hot: hot}}
-	run := txRun{payer: pay, signers: []txflow.Slot{cold.slot()}, certs: []stake.Certificate{probe}, message: req.Message}
+	run := txRun{payer: pay, signers: []txflow.Slot{cold.slot()}, certs: []stake.Certificate{probe}, message: req.Message, extras: req.Extras, pass: req.Passphrase, refuseMixed: true}
 	if err := uc.early(run); err != nil {
 		return Result{}, err
 	}
@@ -203,6 +208,10 @@ type ResignRequest struct {
 	Cold, Payer string
 	URL, Hash   string
 	Message     []string
+	// Extras are the parsed extra parameters (txparam.Parse with
+	// txparam.ForCertificate); Passphrase is the `pass:` of Extras. Optional.
+	Extras     *txparam.Extras
+	Passphrase *ports.Secret
 }
 
 // Run resigns the cold key. `<cold>.cc-cold-ret.cert` is written after the
@@ -245,7 +254,7 @@ func (uc ResignCommitteeColdKey) Run(ctx context.Context, req ResignRequest) (Re
 		return Result{}, err
 	}
 	probe := stake.Certificate{Spec: stake.Spec{Kind: stake.CertCommitteeResign, Stake: cold.hash}}
-	run := txRun{payer: pay, signers: []txflow.Slot{cold.slot()}, certs: []stake.Certificate{probe}, message: req.Message}
+	run := txRun{payer: pay, signers: []txflow.Slot{cold.slot()}, certs: []stake.Certificate{probe}, message: req.Message, extras: req.Extras, pass: req.Passphrase, refuseMixed: true}
 	if err := uc.early(run); err != nil {
 		return Result{}, err
 	}

@@ -35,6 +35,15 @@ func (c terminalConfirmer) Confirm(ctx context.Context, sum ports.TxSummary) (bo
 	return ans == "y" || ans == "yes", nil
 }
 
+// assetText is policy id and hex name, as `policy.name`.
+func assetText(a chain.AssetID) string {
+	name := fmt.Sprintf("%x", a.Policy[:])
+	if len(a.Name) > 0 {
+		name += fmt.Sprintf(".%x", a.Name)
+	}
+	return name
+}
+
 func routeVerb(route string) string {
 	if route == "queue" {
 		return "queue"
@@ -76,11 +85,7 @@ func printTxSummary(w io.Writer, s ports.TxSummary) {
 		}
 		fmt.Fprintf(w, "  %-14s %s  %s\n", label, o.Address, lovelaceText(o.Lovelace))
 		for _, as := range o.Assets {
-			name := fmt.Sprintf("%x", as.Asset.Policy[:])
-			if len(as.Asset.Name) > 0 {
-				name += fmt.Sprintf(".%x", as.Asset.Name)
-			}
-			fmt.Fprintf(w, "  %-14s   + %d %s\n", "", as.Quantity, name)
+			fmt.Fprintf(w, "  %-14s   + %d %s\n", "", as.Quantity, assetText(as.Asset))
 		}
 	}
 	fmt.Fprintf(w, "  fee          %s\n", lovelaceText(s.Fee))
@@ -104,6 +109,7 @@ func (a *app) walletCommand() *cobra.Command {
 		messages []string
 		yes      bool
 		flags    chainFlags
+		extra    extraFlags
 	)
 	send := &cobra.Command{
 		Use:   "send <from> <to> <amount> [--message TEXT]... [--yes] [--transfer-file PATH]",
@@ -120,30 +126,22 @@ Offline mode reads the UTxOs and the protocol parameters from the offline
 transfer file (--transfer-file, default ` + TransferFileName + ` in the workspace directory)
 and appends the signed transaction to it for an online machine to submit.
 Light mode submits through the chain provider. --message adds a CIP-20 line
-(at most 64 bytes; repeatable).`,
+(at most 64 bytes; repeatable).
+
+The extra parameters of upstream's script are flags: --metadata-file FILE
+(.json or .cbor, repeatable), --encrypt-messages (CIP-83; the passphrase is asked
+for without echo or read from --message-passphrase-fd N), --utxo-limit N,
+--only-utxo-with-asset ID, --skip-utxo-with-asset ID and --input TXHASH#IX.`,
 		Args: cobra.ExactArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			spec := envSpec{flags: &flags, config: true, needs: []Need{
+			spec := envSpec{flags: &flags, config: true, extras: &extra, needs: []Need{
 				CapSigners, CapGenesis, CapTip, CapParams, CapUtxos,
 				CapAddress, CapMinOut, CapFees, CapBodies, CapAssemble,
 				OneOf(CapSubmit, CapQueue),
 			}}
 			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, o WireOptions) error {
-				uc := wallet.SendLovelaces{
-					Store: s.Store, Signers: env.Signers, Utxos: env.Utxos, Params: env.Params, Tip: env.Tip,
-					Addresses: env.AddressInspector, Min: env.MinOutputCalculator, Fees: env.FeeEstimator,
-					Bodies: env.TxBodyBuilder, Assembler: env.TxAssembler, Confirmer: terminalConfirmer{a},
-					Submitter: env.Submitter, Queue: env.Queue, NetworkID: env.NetworkID,
-				}
-				if env.Submitter != nil && env.Queue != nil {
-					// The use case takes exactly one; a mode that has a
-					// provider submits.
-					uc.Queue = nil
-				}
-				if yes {
-					uc.Approval = wallet.ApprovalSkip
-				}
-				req := wallet.SendRequest{Source: args[0], Destination: args[1], Amount: args[2], Message: messages}
+				uc := a.sendLovelaces(s, env, yes)
+				req := wallet.SendRequest{Source: args[0], Destination: args[1], Amount: args[2], Message: messages, Extras: extra.ex, Passphrase: extra.pass}
 				res, err := uc.Run(ctx, req)
 				if err != nil {
 					if errors.Is(err, wallet.ErrDeclined) {
@@ -170,9 +168,33 @@ Light mode submits through the chain provider. --message adds a CIP-20 line
 	}
 	send.Flags().StringArrayVar(&messages, "message", nil, "CIP-20 message line, at most 64 bytes (repeatable)")
 	send.Flags().BoolVar(&yes, "yes", false, "approve without asking (the summary is still printed)")
+	extra.add(send, &messages, extraSend)
 	addChainFlags(send, &flags, true)
-	w.AddCommand(a.walletNewCommand(), send, a.claimRewardsCommand())
+	w.AddCommand(a.walletNewCommand(), send, a.walletSendAssetsCommand(), a.claimRewardsCommand())
 	return w
+}
+
+// sendLovelaces is the payment use case wired from the Env: the one
+// `wallet send` and `poll submit` share. Exactly one of the submitter and the
+// queue is set (a mode that has a provider submits). A hardware payer is
+// brought to the device's body form by the canonicalizer; an ADA Handle
+// destination is resolved by the handles resolver.
+func (a *app) sendLovelaces(s *session, env *Env, yes bool) wallet.SendLovelaces {
+	uc := wallet.SendLovelaces{
+		Store: s.Store, Signers: env.Signers, Utxos: env.Utxos, Params: env.Params, Tip: env.Tip,
+		Addresses: env.AddressInspector, Min: env.MinOutputCalculator, Fees: env.FeeEstimator,
+		Bodies: env.TxBodyBuilder, Assembler: env.TxAssembler, Confirmer: terminalConfirmer{a},
+		Submitter: env.Submitter, Queue: env.Queue, NetworkID: env.NetworkID,
+		Files: env.MetadataFiles, Encrypter: env.MsgEncrypter,
+		Canonicalizer: env.Canonicalizer, Handles: env.Handles,
+	}
+	if env.Submitter != nil && env.Queue != nil {
+		uc.Queue = nil
+	}
+	if yes {
+		uc.Approval = wallet.ApprovalSkip
+	}
+	return uc
 }
 
 func routeOf(r wallet.SendResult) string {

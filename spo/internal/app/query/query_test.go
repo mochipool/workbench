@@ -12,6 +12,7 @@ import (
 
 	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/transferfile"
+	"github.com/mochipool/workbench/spo/internal/app/handles"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -545,5 +546,44 @@ func TestQueryOpCertCounter(t *testing.T) {
 		if _, err := uc.Run(bg, bad); !errors.Is(err, ErrPoolUnresolved) {
 			t.Errorf("%q: %v", bad, err)
 		}
+	}
+}
+
+type handleFake struct {
+	res handles.Resolved
+	err error
+	got string
+}
+
+func (h *handleFake) Resolve(_ context.Context, text string) (handles.Resolved, error) {
+	h.got = text
+	return h.res, h.err
+}
+
+// A handle is resolved, lower-cased, and the report shows the handle as the
+// name and the address it resolved to; an unverified, ambiguous or unresolvable
+// answer is refused (ADR 0006).
+//
+// spec: SPO-01queryAddress-IN-005, SPO-01queryAddress-PRE-001, SPO-Caddr-IF-001, SPO-Caddr-IF-002, SPO-Caddr-PRE-006
+func TestHandleAddressIsShownWithItsResolution(t *testing.T) {
+	us := utxos{src: "koios preview", us: []chain.Utxo{tx(hashA, 1, 20_000_000)}}
+	hf := &handleFake{res: handles.Resolved{Address: payAddr, Kind: handles.RootClassic, VerifiedBy: "holder utxo"}}
+	rep, err := QueryAddress{Addresses: inspector{}, Utxos: us, Handles: hf}.Run(bg, "$Alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hf.got != "$alice" || rep.Name != "$alice" || rep.Address != payAddr || rep.Handle == nil || rep.Handle.VerifiedBy != "holder utxo" || rep.TotalLovelace != 20_000_000 {
+		t.Errorf("%q %+v", hf.got, rep)
+	}
+	for name, h := range map[string]*handleFake{
+		"ambiguous":  {err: handles.ErrAmbiguous},
+		"unverified": {res: handles.Resolved{Address: payAddr}},
+	} {
+		if _, err := (QueryAddress{Addresses: inspector{}, Utxos: us, Handles: h}).Run(bg, "$alice"); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	if _, err := (QueryAddress{Addresses: inspector{}, Utxos: us}).Run(bg, "$alice"); !errors.Is(err, ErrAdaHandleUnsupported) {
+		t.Errorf("no resolver: %v", err)
 	}
 }

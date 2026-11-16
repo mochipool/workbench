@@ -49,7 +49,7 @@ func (a *app) wireOptions(cmd *cobra.Command, f *chainFlags, needConfig bool) (W
 	if !haveCfg && needConfig {
 		return WireOptions{}, "", fmt.Errorf("%s has no %s; create the workspace with: spo init --network <name>", a.workspace, configFile)
 	}
-	o := WireOptions{Workspace: a.workspace, Config: cfg, HaveConfig: haveCfg, Offline: f.offline}
+	o := WireOptions{Ctx: cmd.Context(), Workspace: a.workspace, Config: cfg, HaveConfig: haveCfg, Offline: f.offline, Toolchain: a.d.Toolchain, Tools: a.d.Tools}
 	switch {
 	case f.offline:
 		o.Mode = ModeOffline
@@ -99,6 +99,10 @@ type envSpec struct {
 	needs []Need
 	// config makes a missing spo.toml an error.
 	config bool
+	// extras are the extra-parameter flags of the command: parsed before the
+	// workspace is opened, their needs checked with the others, and the
+	// message passphrase asked for after the needs are met.
+	extras *extraFlags
 	// local is for a command that reads and writes only public files (the
 	// transfer file) and needs neither the store nor a passphrase: it runs
 	// without opening the workspace.
@@ -113,6 +117,12 @@ func (a *app) withEnv(cmd *cobra.Command, spec envSpec, fn func(ctx context.Cont
 	ctx := cmd.Context()
 	if a.d.Wire == nil {
 		return errors.New("this build has no environment wiring")
+	}
+	if spec.extras != nil {
+		if err := spec.extras.parse(); err != nil {
+			return err
+		}
+		spec.needs = append(append([]Need(nil), spec.needs...), spec.extras.needs()...)
 	}
 	flags := spec.flags
 	if flags == nil {
@@ -156,6 +166,21 @@ func (a *app) withEnv(cmd *cobra.Command, spec envSpec, fn func(ctx context.Cont
 	env.Absent(CapGenesis, genesisWhy)
 	if err := env.Require(spec.needs...); err != nil {
 		return err
+	}
+	if spec.extras != nil && len(spec.extras.records) > 0 {
+		mf, err := newRecordFiles(s.Store, spec.extras.records, env.MetadataFiles)
+		if err != nil {
+			return err
+		}
+		env.MetadataFiles = mf
+	}
+	if spec.extras != nil {
+		pass, err := a.messagePassphrase(ctx, spec.extras)
+		if err != nil {
+			return err
+		}
+		spec.extras.pass = pass
+		defer func() { pass.Destroy(); spec.extras.pass = nil }()
 	}
 	return fn(ctx, s, env, o)
 }

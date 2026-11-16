@@ -198,11 +198,15 @@ its anchor.`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			files := args[1:]
-			spec := envSpec{flags: &f.chain, config: true, needs: govTxNeeds(CapVoteFiles)}
+			spec := envSpec{flags: &f.chain, config: true, needs: govTxNeeds(CapVoteFiles), extras: &f.extra}
 			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, wo WireOptions) error {
+				unrestricted, err := a.unrestrictedConsent(ctx, f.unrestricted)
+				if err != nil {
+					return err
+				}
 				details := voteDetails(ctx, s, env, files)
 				uc := governance.RegisterVote{Base: a.govBase(s, env, &f, govConfirmer{a: a, details: details}), Votes: env.VoteFiles}
-				res, err := uc.Run(ctx, governance.RegisterVoteRequest{Voter: voter, Payer: args[0], Files: files, Message: f.messages})
+				res, err := uc.Run(ctx, governance.RegisterVoteRequest{Voter: voter, Payer: args[0], Files: files, Message: f.messages, Extras: f.extra.ex, Passphrase: f.extra.pass, Unrestricted: unrestricted})
 				if err != nil {
 					if voter == "" && errors.Is(err, governance.ErrNoVoterKey) {
 						return &explained{msg: err.Error() + "\npass --voter NAME to name the stored key that signs the votes", err: err}
@@ -215,7 +219,7 @@ its anchor.`,
 		},
 	}
 	cmd.Flags().StringVar(&voter, "voter", "", "name of the voter whose key signs (default: the stored key whose hash is the voter of the vote files, found by the file names)")
-	f.add(cmd, govOpts{tx: true})
+	f.add(cmd, govOpts{tx: true, unrestricted: true})
 	return cmd
 }
 

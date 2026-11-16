@@ -13,11 +13,11 @@ import (
 // The presets are the values the spec states.
 func TestPresetsMatchTheSpec(t *testing.T) {
 	want := map[string]Preset{
-		"mainnet": {Magic: "mainnet", ByronToShelleyEpochs: 208, KoiosURL: "https://api.koios.rest/api/v1",
+		"mainnet": {Magic: "mainnet", ByronToShelleyEpochs: 208, KoiosURL: "https://api.koios.rest/api/v1", HandleURL: "https://api.handle.me",
 			LightParametersURL: "https://uptime.live/data/cardano/parms/mainnet-parameters.json", AddressPrefix: "addr"},
-		"preprod": {Magic: "1", ByronToShelleyEpochs: 4, KoiosURL: "https://preprod.koios.rest/api/v1",
+		"preprod": {Magic: "1", ByronToShelleyEpochs: 4, KoiosURL: "https://preprod.koios.rest/api/v1", HandleURL: "https://preprod.api.handle.me",
 			LightParametersURL: "https://uptime.live/data/cardano/parms/preprod-parameters.json", AddressPrefix: "addr_test"},
-		"preview": {Magic: "2", ByronToShelleyEpochs: 0, KoiosURL: "https://preview.koios.rest/api/v1",
+		"preview": {Magic: "2", ByronToShelleyEpochs: 0, KoiosURL: "https://preview.koios.rest/api/v1", HandleURL: "https://preview.api.handle.me",
 			LightParametersURL: "https://uptime.live/data/cardano/parms/preview-parameters.json", AddressPrefix: "addr_test"},
 	}
 	if got := Networks(); strings.Join(got, ",") != "mainnet,preprod,preview" {
@@ -49,6 +49,49 @@ func TestRoundTrip(t *testing.T) {
 		if got.Network != c.Network || got.Mode != c.Mode || (got.Koios == nil) != (c.Koios == nil) ||
 			(c.Koios != nil && got.Koios.URL != c.Koios.URL) {
 			t.Errorf("got %+v want %+v", got, c)
+		}
+	}
+}
+
+func TestHardwareAndHandlesSections(t *testing.T) {
+	c := Config{Network: "preview", Mode: ModeOffline,
+		Hardware: &Hardware{WaitSeconds: 120, MinLedger: "8.1.0", MinTrezor: "2.8.0", MinKeystone: "1.8.0"},
+		Handles:  &Handles{URL: "https://handles.example"}}
+	b, err := Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Parse(b)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, b)
+	}
+	if *got.Hardware != *c.Hardware || *got.Handles != *c.Handles {
+		t.Errorf("got %+v %+v\n%s", got.Hardware, got.Handles, b)
+	}
+	if got.HandleURL() != "https://handles.example" || (Config{Network: "preprod"}).HandleURL() != "https://preprod.api.handle.me" {
+		t.Error("handle url")
+	}
+	// A bare section keeps every default.
+	g, err := Parse([]byte("network = \"preview\"\nmode = \"offline\"\n[hardware]\n"))
+	if err != nil || g.Hardware == nil || *g.Hardware != (Hardware{}) {
+		t.Errorf("%v %+v", err, g.Hardware)
+	}
+	for _, c := range []struct{ text, want string }{
+		{"[hardware]\nwait_seconds = 0\n", "wait_seconds must be 1 to 3600"},
+		{"[hardware]\nwait_seconds = 99999\n", "wait_seconds must be 1 to 3600"},
+		{"[hardware]\nwait_seconds = \"5\"\n", "must be a whole number"},
+		{"[hardware]\nmin_ledger = \"new\"\n", ""},
+		{"[hardware]\nmin_ledger = 8\n", "must be a string"},
+		{"[hardware]\nvendor = \"x\"\n", `unknown key "vendor" in [hardware]`},
+		{"[handles]\ntoken = \"x\"\n", `unknown key "token" in [handles]`},
+	} {
+		_, err := Parse([]byte("network = \"preview\"\nmode = \"offline\"\n" + c.text))
+		if c.want == "" {
+			// min_ledger "new" is checked by Validate, at parse time.
+			c.want = "is not a version"
+		}
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%q: got %v, want %q", c.text, err, c.want)
 		}
 	}
 }

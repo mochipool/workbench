@@ -2,6 +2,7 @@ package transferfile
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -155,5 +156,39 @@ func TestEnqueueWritesTheExtraFields(t *testing.T) {
 			t.Fatalf("%s is missing or out of order in\n%s", want, s)
 		}
 		at += i
+	}
+}
+
+// A mint or burn carries its asset record update as the port's own field of
+// the entry; the bundle reads it back, and the fields upstream reads by name
+// (type, fromAddr, sendFromAddr, toAddr, sendToAddr, txJSON) are untouched.
+func TestEnqueueCarriesTheAssetUpdate(t *testing.T) {
+	f := write(t, snapshot)
+	q := queuedTx()
+	q.Type = "Asset-Minting"
+	update := `{"txid":"ab","record":"p.tok","delta":"100"}`
+	q.Extra = []ports.QueuedField{{Key: "spoAssetPending", Value: update}}
+	if err := f.Enqueue(context.Background(), q); err != nil {
+		t.Fatal(err)
+	}
+	b, _, err := f.ReadBundle(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	es, err := b.Queue()
+	if err != nil || len(es) != 1 || es[0].AssetPending != update || es[0].Type != "Asset-Minting" || es[0].FromName != q.FromName || es[0].CborHex == "" {
+		t.Fatalf("%v %+v", err, es)
+	}
+	raw, _ := os.ReadFile(f.Path)
+	var doc struct {
+		Transactions []map[string]json.RawMessage `json:"transactions"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"type", "era", "fromAddr", "sendFromAddr", "toAddr", "sendToAddr", "txJSON", "date"} {
+		if _, ok := doc.Transactions[0][k]; !ok {
+			t.Errorf("upstream's field %s is missing", k)
+		}
 	}
 }

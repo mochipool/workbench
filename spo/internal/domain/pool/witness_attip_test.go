@@ -16,7 +16,7 @@ func TestStateAtTipExpiresAtTheTTLSlot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for tip, want := range map[uint64]CollectionState{999: CollectionOpenIncomplete, 1000: CollectionExpired, 1001: CollectionExpired} {
+	for tip, want := range map[uint64]CollectionState{999: CollectionOpenIncomplete, 1000: CollectionExpired, 1001: CollectionExpired, 1<<64 - 1: CollectionExpired} {
 		if got := c.StateAtTip(tip); got != want {
 			t.Errorf("tip %d: %s, want %s", tip, got, want)
 		}

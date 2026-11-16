@@ -135,10 +135,15 @@ func cborHead(b []byte, major byte, n uint64) []byte {
 	}
 }
 
-// Signers is the directory of the signers this build has. Only the vault
-// signer exists in process; devices and remote parties are other adapters.
+// Signers is the directory of the signers this build has. The vault signer
+// exists in process; a hardware signer is optional and is another adapter
+// (hwcli.Lazy), as are remote parties.
 type Signers struct {
 	Vault ports.Vault
+	// Hardware, when set, is the signer of every key held on a hardware wallet.
+	// It is opened lazily by its own Profile, so a software-only run never
+	// touches a device.
+	Hardware ports.Signer
 }
 
 // SignerFor implements ports.SignerDirectory.
@@ -147,7 +152,10 @@ func (s Signers) SignerFor(key custody.KeyRef) (ports.Signer, error) {
 	case custody.HolderVault:
 		return VaultSigner{Vault: s.Vault}, nil
 	case custody.HolderHardware:
-		return nil, errors.New("no hardware signer is configured")
+		if s.Hardware != nil {
+			return s.Hardware, nil
+		}
+		return nil, ports.ErrNoHardwareSigner
 	case custody.HolderRemote:
 		return nil, errors.New("no remote signer is configured")
 	}

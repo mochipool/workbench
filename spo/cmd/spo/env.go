@@ -3,25 +3,50 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/mochipool/workbench/spo/internal/adapters/cli"
+	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/genesisfile"
+	"github.com/mochipool/workbench/spo/internal/adapters/gpg"
 	"github.com/mochipool/workbench/spo/internal/adapters/httpfetch"
 	"github.com/mochipool/workbench/spo/internal/adapters/koios"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/adapters/offline"
 	"github.com/mochipool/workbench/spo/internal/adapters/systemclock"
 	"github.com/mochipool/workbench/spo/internal/adapters/transferfile"
-	dgov "github.com/mochipool/workbench/spo/internal/domain/governance"
+	"github.com/mochipool/workbench/spo/internal/app/handles"
+	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
+	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
 // chainCaps are the capabilities that depend on the mode.
-var chainCaps = []cli.Cap{cli.CapTip, cli.CapSync, cli.CapOpCertCount, cli.CapParams, cli.CapUtxos, cli.CapRewards, cli.CapPools, cli.CapDReps, cli.CapCrossCheck, cli.CapSubmit, cli.CapQueue}
+var chainCaps = []cli.Cap{cli.CapTip, cli.CapSync, cli.CapOpCertCount, cli.CapParams, cli.CapUtxos, cli.CapRewards, cli.CapPools, cli.CapDReps, cli.CapCrossCheck, cli.CapSubmit, cli.CapQueue, cli.CapCalidusRead, cli.CapAdaHandle, cli.CapPollQuestion}
 
 func init() { chainCaps = append(chainCaps, cli.GovernanceChainCaps...) }
+
+// noCalidusReader is why `pool calidus status` is unavailable: no provider
+// adapter reads CIP-88 registrations yet.
+const noCalidusReader = "no chain provider reads the Calidus keys registered on chain (CIP-88) yet; the Koios adapter has no reader for them"
+
+// signatureDirectory hands out the vault signer with the signature
+// capabilities for a key held in the vault, and leaves every other holder to
+// the directory of the build.
+type signatureDirectory struct {
+	vault ports.Vault
+	other ports.SignerDirectory
+}
+
+// SignerFor implements ports.SignerDirectory.
+func (d signatureDirectory) SignerFor(key custody.KeyRef) (ports.Signer, error) {
+	if key.Holder == custody.HolderVault {
+		return native.VaultSignatures{VaultSigner: native.VaultSigner{Vault: d.vault}}, nil
+	}
+	return d.other.SignerFor(key)
+}
 
 // anchorLimit is the most bytes of an anchor document that is downloaded.
 const anchorLimit = 1 << 20
@@ -65,23 +90,6 @@ func governanceReaders(env *cli.Env, src any, why string) {
 // source, and the operator acknowledges that with --single-source (ADR 0006).
 const noDRepCross = "there is no second independent DRep-state source besides the provider, so a DRep retirement is refused unless the command is given --single-source"
 
-// actionFiles is the action-file builder with the sentinel of an unbuilt
-// parameter-change file mapped to the one the layers above can match
-// (ports.ErrParameterChangeUnsupported, which they test with errors.Is).
-//
-// TODO(native): adapters/native/govaction.go should return
-// ports.ErrParameterChangeUnsupported (or wrap it) itself, and this mapping
-// can then go.
-type actionFiles struct{ ports.ActionFileBuilder }
-
-func (a actionFiles) BuildActionFile(act dgov.Action) (ports.ActionFile, error) {
-	f, err := a.ActionFileBuilder.BuildActionFile(act)
-	if errors.Is(err, native.ErrParameterChangeUnsupported) {
-		return f, fmt.Errorf("%w: %w", ports.ErrParameterChangeUnsupported, err)
-	}
-	return f, err
-}
-
 // wire builds the Env of a command: the local capabilities every mode has,
 // then the chain capabilities the mode and provider can supply. What a mode
 // cannot supply stays nil with the reason, so a command that needs it is
@@ -89,7 +97,13 @@ func (a actionFiles) BuildActionFile(act dgov.Action) (ports.ActionFile, error) 
 // keys, which is enough to describe the environment. Nothing here touches
 // the network.
 func wire(store ports.Store, o cli.WireOptions) (*cli.Env, error) {
+	return wireTo(os.Stderr, store, o)
+}
+
+// wireTo is wire with the writer the hardware wallet's progress lines go to.
+func wireTo(errw io.Writer, store ports.Store, o cli.WireOptions) (*cli.Env, error) {
 	env := &cli.Env{Mode: o.Mode, Endpoints: map[string]string{}}
+	hw := wireHardware(env, store, o, errw)
 
 	var vault ports.Vault
 	if store != nil {
@@ -100,19 +114,31 @@ func wire(store ports.Store, o cli.WireOptions) (*cli.Env, error) {
 		vault = v
 	}
 	if store == nil || vault != nil {
-		for _, s := range []ports.Signer{native.VaultSigner{Vault: vault}} {
+		// The vault signer with the message, CIP-36 and CIP-88 capabilities
+		// (ADR 0008): it also issues operational certificates and witnesses
+		// transactions, so it replaces the plain vault signer.
+		vs := native.VaultSignatures{VaultSigner: native.VaultSigner{Vault: vault}}
+		for _, s := range []ports.Signer{vs} {
 			if err := ports.CheckSigner(s); err != nil {
+				return nil, err
+			}
+			if err := ports.CheckSignatureSigner(s); err != nil {
 				return nil, err
 			}
 			env.SignerKinds = append(env.SignerKinds, s)
 		}
-		env.Signers = native.Signers{Vault: vault}
+		env.SignatureSigner = vs
+		env.Signers = signatureDirectory{vault: vault, other: native.Signers{Vault: vault, Hardware: hw}}
+	} else {
+		env.Absent(cli.CapSignatures, "the store cannot release signing keys to a signer")
 	}
 
-	env.KesKeys, env.VrfKeys = native.KeyGen{}, native.KeyGen{}
+	env.KesKeys, env.VrfKeys, env.BLSKeys = native.KeyGen{}, native.KeyGen{}, native.KeyGen{}
 	soft := native.SoftwareKeys{}
 	env.ColdKeys, env.PaymentKeys, env.StakeKeys = soft, soft, soft
 	env.Mnemonics, env.WalletDeriver = soft, soft
+	env.CalidusKeys, env.VotingKeys = soft, soft
+	env.Absent(cli.CapCalidusRead, noCalidusReader)
 	clock := systemclock.Clock{}
 	env.Clock = clock
 	led := native.Ledger{}
@@ -127,8 +153,11 @@ func wire(store ports.Store, o cli.WireOptions) (*cli.Env, error) {
 	env.Bundle = tf
 	env.Sinks = func(dir string) (ports.FileSink, error) { return transferfile.DirSink{Dir: dir}, nil }
 	env.TxViewer = native.TxViewer{}
+	env.MetadataFiles, env.MsgEncrypter, env.PolicyIDs = fsstore.MetadataFiles{}, native.CIP83{}, led
+	env.VKeyDeriver = native.VKeyDeriver{}
+	wireKeyCrypto(env, o)
 	env.DRepKeys, env.ComColdKeys, env.ComHotKeys, env.GovDeriver = soft, soft, soft, soft
-	env.VoteFiles, env.ActionFiles = led, actionFiles{led}
+	env.VoteFiles, env.ActionFiles = led, led
 	env.NetworkID = ports.NetworkTestnet
 	if o.Config.Network == "mainnet" {
 		env.NetworkID = ports.NetworkMainnet
@@ -174,7 +203,31 @@ func wire(store ports.Store, o cli.WireOptions) (*cli.Env, error) {
 	return env, nil
 }
 
+// wireKeyCrypto gives the Env upstream's gpg envelope for signing keys, when
+// the toolchain has gpg. The sealed store needs none of it: gpg is for the keys
+// of an upstream-layout directory that were encrypted by upstream's scripts.
+func wireKeyCrypto(env *cli.Env, o cli.WireOptions) {
+	const only = "gpg is needed only to read or write upstream's encrypted signing keys; nothing else here uses it"
+	if len(o.Tools) == 0 || o.Toolchain == nil {
+		env.Absent(cli.CapKeyCrypto, "this binary runs without a toolchain manifest, so it cannot locate gpg: run the packaged binary (nix run .#spo). "+only)
+		return
+	}
+	for _, t := range o.Tools {
+		if t == ports.GPG {
+			g := gpg.GPG{Tools: o.Toolchain, Runner: execx.OS{}}
+			env.KeyEncryptor, env.KeyDecryptor = g, g
+			return
+		}
+	}
+	env.Absent(cli.CapKeyCrypto, "the release set of this binary has no gpg. "+only)
+}
+
 func wireOffline(env *cli.Env, o cli.WireOptions, f *transferfile.File, clock ports.Clock, genesis genesisfile.Shelley) {
+	// A resolver that only refuses, so a handle destination fails with the
+	// reason (SPO-Caddr-PRE-002) and not with "not supported".
+	env.Handles = handles.Resolver{Policy: handlePolicy(o), Mainnet: o.Config.Network == "mainnet", Offline: true}
+	env.Absent(cli.CapAdaHandle, handles.ErrOffline.Error()+": give the address, or run in light mode")
+	env.Absent(cli.CapPollQuestion, "SPO polls are read from the chain: run in light mode")
 	switch {
 	case env.Genesis == nil:
 		env.Absent(cli.CapTip, "offline mode computes the slot from the clock and the Shelley genesis, which is not available (see genesis)")
@@ -287,6 +340,8 @@ func wireLight(env *cli.Env, o cli.WireOptions) error {
 		env.Absent(cli.CapConstitution, noDoc)
 		env.Absent(cli.CapLastEnacted, noDoc)
 	}
+	env.Polls, _ = any(k).(ports.PollQuestionReader)
+	wireHandles(env, o, k, native.Ledger{})
 	env.Absent(cli.CapStakeDist, "light mode computes no tally from stake distributions (upstream does not: it reads the proposal voting summary, capability voting-summary), and Koios is not asked for them here")
 	governanceReaders(env, k, noGovernanceReader)
 	env.Absent(cli.CapQueue, "light mode submits through the provider; there is no queue")

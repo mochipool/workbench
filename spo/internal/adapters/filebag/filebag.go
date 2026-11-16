@@ -84,7 +84,7 @@ var (
 
 // Transport is the bag as the sending side of multisig: its kind is the file
 // transport, so a cold-key request may go through it (SPO-Xparty-PRE-004).
-func (b *Bag) Transport() ports.Transport { return ports.NewTransport(b, ports.ViaFile) }
+func (b *Bag) Transport() ports.Transport { return ports.FileTransport(b) }
 
 // Open opens the bag on an existing directory.
 func Open(dir string) (*Bag, error) {
@@ -170,23 +170,23 @@ func (b *Bag) Write(name string, envelope []byte) (err error) {
 // polling, until one exists or ctx ends. A file that is not a regular file,
 // is too large or cannot be read is renamed with ".rejected", noted in
 // Rejected, and skipped.
-func (b *Bag) Receive(ctx context.Context) ([]byte, ports.TransportKind, error) {
+func (b *Bag) Receive(ctx context.Context) (ports.Received, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil, 0, err
+			return ports.Received{}, err
 		}
 		data, found, err := b.next()
 		if err != nil {
-			return nil, 0, err
+			return ports.Received{}, err
 		}
 		if found {
-			return data, ports.ViaFile, nil
+			return ports.FileReceived(data), nil
 		}
 		select {
 		case <-ctx.Done():
-			return nil, 0, ctx.Err()
+			return ports.Received{}, ctx.Err()
 		case <-time.After(b.poll):
 		}
 	}

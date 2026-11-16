@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,6 +26,36 @@ type Pair struct {
 	Receiver ports.EnvelopeReceiver
 	To       party.Fingerprint
 	Via      ports.TransportKind
+	// Hello is the frame a connection-oriented sender writes itself as the
+	// first frame of every connection (tailcat's Hello, SPO-Xparty-INV-018):
+	// the receiver delivers it once, before the first envelope the suite
+	// sends, and the suite takes it as not one of its own. nil for a transport
+	// with no connection.
+	Hello []byte
+}
+
+// skipFirst drops the connection's own first frame.
+type skipFirst struct {
+	mu    sync.Mutex
+	r     ports.EnvelopeReceiver
+	first []byte
+	done  bool
+}
+
+func (s *skipFirst) Receive(ctx context.Context) (ports.Received, error) {
+	for {
+		got, err := s.r.Receive(ctx)
+		if err != nil {
+			return got, err
+		}
+		s.mu.Lock()
+		skip := !s.done && bytes.Equal(got.Envelope, s.first)
+		s.done = true
+		s.mu.Unlock()
+		if !skip {
+			return got, nil
+		}
+	}
 }
 
 const wait = 20 * time.Second
@@ -41,11 +72,11 @@ func recv(t *testing.T, r ports.EnvelopeReceiver) ([]byte, ports.TransportKind) 
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	defer cancel()
-	b, via, err := r.Receive(ctx)
+	got, err := r.Receive(ctx)
 	if err != nil {
 		t.Fatalf("Receive: %v", err)
 	}
-	return b, via
+	return got.Envelope, got.Via()
 }
 
 // quiet asserts that nothing more is delivered.
@@ -53,8 +84,8 @@ func quiet(t *testing.T, r ports.EnvelopeReceiver, d time.Duration) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), d)
 	defer cancel()
-	if b, _, err := r.Receive(ctx); err == nil {
-		t.Fatalf("an unexpected envelope of %d bytes was delivered", len(b))
+	if got, err := r.Receive(ctx); err == nil {
+		t.Fatalf("an unexpected envelope of %d bytes was delivered", len(got.Envelope))
 	} else if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Receive = %v, want the context's deadline", err)
 	}
@@ -62,7 +93,14 @@ func quiet(t *testing.T, r ports.EnvelopeReceiver, d time.Duration) {
 
 // Run runs the contract against pairs made by mk, a fresh one per subtest.
 // mk registers its own cleanup with t.
-func Run(t *testing.T, mk func(t *testing.T) Pair) {
+func Run(t *testing.T, mk0 func(t *testing.T) Pair) {
+	mk := func(t *testing.T) Pair {
+		p := mk0(t)
+		if p.Hello != nil {
+			p.Receiver = &skipFirst{r: p.Receiver, first: p.Hello}
+		}
+		return p
+	}
 	t.Run("Delivery", func(t *testing.T) {
 		p := mk(t)
 		want := map[[32]byte]bool{}
@@ -121,7 +159,7 @@ func Run(t *testing.T, mk func(t *testing.T) Pair) {
 		p := mk(t)
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
-		go func() { _, _, err := p.Receiver.Receive(ctx); done <- err }()
+		go func() { _, err := p.Receiver.Receive(ctx); done <- err }()
 		time.Sleep(100 * time.Millisecond)
 		cancel()
 		select {

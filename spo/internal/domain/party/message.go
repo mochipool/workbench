@@ -141,10 +141,18 @@ func (m SigningRequest) Validate() error {
 	return nil
 }
 
-// CheckTxSize is the transaction half of SPO-Xparty-INV-008.
+// CheckTxSize is the transaction half of SPO-Xparty-INV-008: the body and the
+// auxiliary data together are the transaction's size.
 func (m SigningRequest) CheckTxSize(maxTxSize int) error {
-	if len(m.TxBody) > maxTxSize {
-		return bad("transaction body is %d bytes, maxTxSize is %d", len(m.TxBody), maxTxSize)
+	return CheckTxSize(len(m.TxBody), len(m.AuxData), maxTxSize)
+}
+
+// CheckTxSize refuses a body and auxiliary data whose sizes together exceed
+// maxTxSize (SPO-Xparty-INV-008). The coordinator runs it before sealing, the
+// signer on receipt.
+func CheckTxSize(bodyLen, auxLen, maxTxSize int) error {
+	if bodyLen < 0 || auxLen < 0 || bodyLen > maxTxSize || auxLen > maxTxSize-bodyLen {
+		return bad("transaction body (%d bytes) and auxiliary data (%d bytes) together exceed maxTxSize %d", bodyLen, auxLen, maxTxSize)
 	}
 	return nil
 }
@@ -186,10 +194,15 @@ const (
 	RefuseCannotResolveInputs
 	RefuseNotASignerInput
 	RefuseUndisplayable
+	// RefuseScriptInput: the body spends a script address, withdraws from a
+	// script reward account or carries a certificate or vote with a script
+	// credential (SPO-Xparty-PR-004). Silent, like the other reasons that
+	// depend on the signer's own chain view.
+	RefuseScriptInput
 )
 
 // Valid reports whether r is a defined code.
-func (r RefusalReason) Valid() bool { return r >= RefuseNoKey && r <= RefuseUndisplayable }
+func (r RefusalReason) Valid() bool { return r >= RefuseNoKey && r <= RefuseScriptInput }
 
 // Disclosed reports whether a signer tells the coordinator it refused for
 // this reason (SPO-Xparty-INV-006). A reason that depends on the signer's
@@ -425,6 +438,8 @@ func (r RefusalReason) String() string {
 		return "no input of the body is this signer's"
 	case RefuseUndisplayable:
 		return "the body has a part that cannot be displayed in full"
+	case RefuseScriptInput:
+		return "the body spends or acts for a script, whose witness set the signer cannot see"
 	}
 	return "unknown reason"
 }

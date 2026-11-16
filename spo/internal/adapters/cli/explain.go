@@ -5,8 +5,25 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/mochipool/workbench/spo/internal/app/governance"
+	"github.com/mochipool/workbench/spo/internal/app/txflow"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
+	"github.com/mochipool/workbench/spo/internal/ports"
 )
+
+// Explain wraps err so that it prints as msg and still unwraps to err. The
+// composition root uses it for the typed errors of adapters, which this
+// package does not import (Deps.MapError).
+func Explain(err error, msg string) error {
+	if err == nil {
+		return nil
+	}
+	var ex *explained
+	if errors.As(err, &ex) {
+		return err
+	}
+	return &explained{msg: msg, err: err}
+}
 
 // explained is an error whose message says what happened and what to do. It
 // still unwraps to the sentinel, so errors.Is keeps working.
@@ -56,19 +73,47 @@ func explain(err error) error {
 	case errors.Is(err, ErrBadRecoveryKey):
 		msg = "that is not a recovery key: it is 14 groups of 4 characters (letters A-Z and digits 2-7), as printed when it was made; dashes and spaces are accepted"
 	default:
+		return explainHardware(err)
+	}
+	return &explained{msg: msg, err: err}
+}
+
+// explainHardware turns the errors of the hardware path that app and ports
+// declare into what to do next. The ones the hardware adapter declares are
+// mapped in the composition root (Deps.MapError).
+func explainHardware(err error) error {
+	var notCanon *ports.ErrNotHardwareCanonical
+	var msg string
+	switch {
+	case errors.Is(err, txflow.ErrNoCanonicalizer), errors.Is(err, ports.ErrNoHardwareSigner):
+		msg = err.Error() + "\nThis build cannot drive a hardware wallet: its release set has no cardano-hw-cli (see `spo capabilities`, hardware-wallet). Run the packaged binary (nix run .#spo), or use keys held in the workspace. Nothing was signed, submitted or queued"
+	case errors.Is(err, txflow.ErrMixedHolders):
+		msg = err.Error() + "\nUse a paying address whose key is on the same device, or keep every key of this transaction in the workspace. Nothing was signed, submitted or queued"
+	case errors.Is(err, governance.ErrUnrestrictedNeeded):
+		msg = err.Error() + "\nTo allow it, enable expert mode in the device's Cardano app, then run the command again with --allow-unrestricted: you are asked to confirm, and the flag alone does not allow anything. Nothing was signed, submitted or queued"
+	case errors.As(err, &notCanon):
+		msg = err.Error() + "\nThis is a fault in spo, not something you did wrong: nothing was signed, submitted or queued. Run the command again, and report it (with `spo version`) if it repeats"
+	default:
 		return err
 	}
 	return &explained{msg: msg, err: err}
 }
 
 // explainAll wraps the RunE of every command under c so each error leaves
-// the command tree explained.
-func explainAll(c *cobra.Command) {
+// the command tree explained. mapErr, when set, first maps the errors that
+// only the composition root can name.
+func explainAll(c *cobra.Command, mapErr func(error) error) {
 	if c.RunE != nil {
 		run := c.RunE
-		c.RunE = func(cmd *cobra.Command, args []string) error { return explain(run(cmd, args)) }
+		c.RunE = func(cmd *cobra.Command, args []string) error {
+			err := run(cmd, args)
+			if err != nil && mapErr != nil {
+				err = mapErr(err)
+			}
+			return explain(err)
+		}
 	}
 	for _, sub := range c.Commands() {
-		explainAll(sub)
+		explainAll(sub, mapErr)
 	}
 }

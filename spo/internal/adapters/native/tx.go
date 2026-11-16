@@ -141,6 +141,21 @@ func encodeOutput(b []byte, o txbuild.Output) ([]byte, error) {
 	return b, nil
 }
 
+// sortedSigners returns the required-signer hashes ascending and without
+// duplicates: the ledger's set.
+func sortedSigners(in []txbuild.KeyHash) []txbuild.KeyHash {
+	out := append([]txbuild.KeyHash(nil), in...)
+	sort.Slice(out, func(i, j int) bool { return bytes.Compare(out[i][:], out[j][:]) < 0 })
+	w := 0
+	for i, h := range out {
+		if i == 0 || h != out[w-1] {
+			out[w] = h
+			w++
+		}
+	}
+	return out[:w]
+}
+
 func blake256(b []byte) [32]byte {
 	var out [32]byte
 	h, _ := blake2b.New256(nil)
@@ -220,6 +235,10 @@ func (Ledger) BuildBody(spec txbuild.BodySpec) (txbuild.TxBody, error) {
 	if len(spec.Proposals) > 0 {
 		n++
 	}
+	signers := sortedSigners(spec.RequiredSigners)
+	if len(signers) > 0 {
+		n++
+	}
 	var body []byte
 	body = cborMap(body, n)
 	body = cborUint(body, 0)
@@ -287,6 +306,16 @@ func (Ledger) BuildBody(spec txbuild.BodySpec) (txbuild.TxBody, error) {
 		for _, w := range ws {
 			body = cborBytes(body, w.addr)
 			body = cborUint(body, uint64(w.amt))
+		}
+	}
+	if len(signers) > 0 {
+		// Key 14: the required signers as a tag-258 set of 28-byte key hashes,
+		// sorted and without duplicates (`--required-signer-hash`).
+		body = cborUint(body, 14)
+		body = cborTag(body, 258)
+		body = cborArray(body, len(signers))
+		for _, h := range signers {
+			body = cborBytes(body, h[:])
 		}
 	}
 	if mint != nil {

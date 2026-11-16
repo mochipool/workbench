@@ -11,6 +11,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	stk "github.com/mochipool/workbench/spo/internal/domain/stake"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
+	"github.com/mochipool/workbench/spo/internal/domain/txparam"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -137,6 +138,10 @@ type RetirePool struct {
 	NetworkID uint8
 	DefTTL    uint64
 	Selection txbuild.SelectionStrategy
+	// Files and Encrypter are needed only by a request with Extras that name
+	// metadata files or ask for message encryption.
+	Files     ports.MetadataFileReader
+	Encrypter ports.MessageEncrypter
 }
 
 // RetireRequest names the pool and the paying address.
@@ -144,6 +149,10 @@ type RetireRequest struct {
 	Pool    string
 	Payer   string
 	Message []string
+	// Extras are the parsed extra parameters (txparam.Parse with
+	// txparam.ForCertificate); Passphrase is the `pass:` of Extras. Optional.
+	Extras     *txparam.Extras
+	Passphrase *ports.Secret
 }
 
 // RetireResult is what happened.
@@ -170,6 +179,11 @@ func (uc RetirePool) Run(ctx context.Context, req RetireRequest) (RetireResult, 
 		return RetireResult{}, errors.New("a retirement needs a pool and a paying address")
 	}
 	if err := txbuild.ValidateMessage(req.Message); err != nil {
+		return RetireResult{}, err
+	}
+	// spec: SPO-Pparam-IF-010, SPO-Pparam-IF-016
+	meta, err := txflow.ResolveExtras(txflow.ExtrasPorts{Files: uc.Files, Encrypter: uc.Encrypter}, req.Extras, req.Message, req.Passphrase)
+	if err != nil {
 		return RetireResult{}, err
 	}
 	name, err := poolName(req.Pool)
@@ -228,8 +242,11 @@ func (uc RetirePool) Run(ctx context.Context, req RetireRequest) (RetireResult, 
 		{Label: "payment", Key: custody.KeyRef{Role: custody.RolePayment, Holder: pay.holder, Owner: pay.name}, Hash: pay.hash},
 		{Label: "pool cold key", Key: custody.KeyRef{Role: custody.RolePoolCold, Holder: holder, Owner: name}, Hash: txbuild.KeyHash(id)},
 	}
-	// Refuse a holder no signer serves before any chain read (SPO-07b-INV-004).
-	if _, err := uc.Pipeline.Prepare(txbuild.Draft{Certificates: []stk.Certificate{att}, Message: req.Message}, slots, retireWitnesses); err != nil {
+	// Refuse a holder no signer serves before any chain read (SPO-07b-INV-004),
+	// and a hardware key mixed with a key-file key: "only a hardware cold key can
+	// be registered with a hardware payer" (SPO-07b-INV-004, SPO-Ptx-PRE-006).
+	retireOpts := txflow.PrepareOptions{RefuseMixed: true}
+	if _, err := uc.Pipeline.PrepareWith(txbuild.Draft{Certificates: []stk.Certificate{att}, Message: req.Message}, slots, retireWitnesses, retireOpts); err != nil {
 		return RetireResult{}, err
 	}
 	params, err := uc.Params.ProtocolParameters(ctx)
@@ -272,18 +289,23 @@ func (uc RetirePool) Run(ctx context.Context, req RetireRequest) (RetireResult, 
 	if err != nil {
 		return RetireResult{}, err
 	}
+	if req.Extras != nil {
+		if draft, err = meta.Attach(draft); err != nil {
+			return RetireResult{}, err
+		}
+	}
 	// Retirement is never approved by a skip policy (SPO-Ptx-PR-004,
 	// SPO-07b-PR-001).
 	pl := uc.Pipeline
 	pl.Approval = txflow.ApprovalAsk
-	prep, err := pl.Prepare(draft, slots, retireWitnesses)
+	prep, err := pl.PrepareWith(draft, slots, retireWitnesses, retireOpts)
 	if err != nil {
 		return RetireResult{}, err
 	}
 	ticker := d.Text(pool.FieldMetaTicker)
 	sum := ports.TxSummary{Kind: "pool retirement", Stage: "submit", Pool: id.Bech32(), Source: pay.name, SourceAddr: pay.addr, Account: name,
 		Attachments: draft.AttachmentLines()}
-	res, err := pl.Execute(ctx, txflow.Input{Draft: draft, Params: params, TTL: ttl, Prepared: prep, Witnesses: retireWitnesses, Summary: sum,
+	res, err := pl.Execute(ctx, txflow.Input{Draft: draft, Params: params, TTL: ttl, Prepared: prep, Witnesses: retireWitnesses, Summary: sum, HardwareChangeKeys: hwChangeKeys(slots[0].Key),
 		Queued: ports.QueuedTx{Type: "PoolRetirement", FromName: pay.name, FromAddr: pay.addr, ToName: pay.name, ToAddr: pay.addr,
 			Description: fmt.Sprintf("signed pool retirement transaction for '%s', payment via '%s'", ticker, pay.name),
 			Extra:       []ports.QueuedField{{Key: "poolMetaTicker", Value: ticker}}}})
@@ -317,4 +339,13 @@ func (uc RetirePool) Run(ctx context.Context, req RetireRequest) (RetireResult, 
 		"the retirement certificate is deleted with the record of the submission, where upstream leaves it reusable (SPO-07b-OUT-003)",
 		"the retirement epoch is checked against the current epoch and eMax before a fee is spent (SPO-07b-INV-003)",
 	}}, nil
+}
+
+// hwChangeKeys declares a hardware payment key to the device as the owner of the
+// change output (SPO-Ptx-INV-009); nil for any other key.
+func hwChangeKeys(pay custody.KeyRef) []custody.KeyRef {
+	if pay.Holder != custody.HolderHardware {
+		return nil
+	}
+	return []custody.KeyRef{pay}
 }

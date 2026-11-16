@@ -27,6 +27,7 @@ fake `http.RoundTripper`; no test touches the network.
 | `proposal_list_open_none.json` | `GET /proposal_list?return_address=eq.stake_test1uql3k3v9...&dropped_epoch=is.null&enacted_epoch=is.null&expired_epoch=is.null&select=proposal_tx_hash,proposal_index,deposit,return_address,dropped_epoch,enacted_epoch,expired_epoch` (SPO-Clight-EXT-006): `[]` |
 | `proposal_list_closed.json` | the same without the three `is.null` filters and with `&limit=2`: one proposal, expired in epoch 1483 |
 | `address_utxos.json` | `POST /address_utxos?select=tx_hash,tx_index,value,asset_list,datum_hash,inline_datum,reference_script` with `_extended:true` |
+| `utxo_info_unspent.json` | `POST /utxo_info?select=tx_hash,tx_index,address,value,asset_list,is_spent` with `{"_utxo_refs":["6b028c5a...#0"],"_extended":true}` (recorded 2026-11-16 from preview, the output of `address_utxos.json`): one row with `is_spent` false. Koios omits a reference it does not know from the answer (an unknown ref answers `[]`, checked by hand), so a missing row is Unknown, not None. A spent output was not recorded: the test derives it from this file by setting `is_spent` to true by hand. |
 | `light_parameters.json` | `GET ...preview-parameters.json?rnd=<unix>` |
 | `committee_info.json` | `GET /committee_info` (SPO-Clight-EXT-008): one element with `quorum_numerator` 2, `quorum_denominator` 3 and three members, each with `status` `authorized` and script cold and hot credentials (`cc_cold_has_script`, `cc_hot_has_script` true) |
 | `proposal_list_kinds.json` | `GET /proposal_list?proposal_id=in.(<seven ids>)&select=proposal_tx_hash,proposal_index,proposal_type,proposal_description,deposit,return_address,proposed_epoch,expiration,meta_url,meta_hash,dropped_epoch,enacted_epoch,expired_epoch`: one expired proposal of each of the seven kinds (found with `GET /proposal_list?proposal_type=eq.<kind>&limit=3`). The `proposal_description.tag` of a committee update is `UpdateCommittee` while `proposal_type` says `NewCommittee`; a ParameterChange description is `[prev id or null, {camelCase parameter: value}, guardrails script]` |
@@ -64,3 +65,11 @@ error case. The recorded data ages: `light_parameters.json` carries
 `lastUpdate` 2026-11-16, so tests fix the clock instead of using `time.Now`.
 To re-record, repeat the requests above and update the expected values in
 `koios_test.go`.
+
+ADA Handle (recorded 2026-11-16, Preview, public data): `handle_asset_addresses_cip68.json` and
+`handle_asset_addresses_none.json` are `GET /asset_addresses` for the CIP-68 root `$........`
+(asset name `000de140` + `2e2e2e2e2e2e2e2e`) and for its classic name (nobody holds it);
+`handle_api_virtual_subhandle.json` is the Handle API's record of the virtual sub-handle `$00f@hal`
+(`GET https://preview.api.handle.me/handles/00f@hal`) and `handle_asset_utxos_virtual.json` is
+`POST /asset_utxos?select=inline_datum` for its asset name (`_extended` true), whose inline datum states
+the same address the API does. The error cases are hand-written in `handles_test.go`.

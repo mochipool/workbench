@@ -10,6 +10,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	stk "github.com/mochipool/workbench/spo/internal/domain/stake"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
+	"github.com/mochipool/workbench/spo/internal/domain/txparam"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -20,9 +21,13 @@ type txRun struct {
 	stakeHold  custody.Holder
 	certs      []stk.Certificate
 	message    []string
-	params     chain.ProtocolParameters
-	summary    ports.TxSummary
-	queued     ports.QueuedTx
+	// extras and pass are the extra parameters of the request (metadata
+	// files, message encryption); nil for none.
+	extras  *txparam.Extras
+	pass    *ports.Secret
+	params  chain.ProtocolParameters
+	summary ports.TxSummary
+	queued  ports.QueuedTx
 }
 
 func (b Base) slots(r txRun) []txflow.Slot {
@@ -32,11 +37,26 @@ func (b Base) slots(r txRun) []txflow.Slot {
 	}
 }
 
-// early refuses what the signing plan refuses (a hardware holder) before
-// any chain read, with a draft that has the features of the certificates.
+// early refuses what the signing plan refuses before any chain read, with a
+// draft that has the features of the certificates: a signer that cannot meet
+// the demand (a vendor that lacks a feature, no canonicalizer wired) and, for
+// every stake script, a hardware key mixed with a key-file key
+// (SPO-Ptx-PRE-006).
 func (b Base) early(r txRun) error {
-	_, err := b.Pipeline.Prepare(txbuild.Draft{Certificates: r.certs, Message: r.message}, b.slots(r), stk.StakeWitnesses)
+	_, err := b.Pipeline.PrepareWith(txbuild.Draft{Certificates: r.certs, Message: r.message}, b.slots(r), stk.StakeWitnesses,
+		txflow.PrepareOptions{RefuseMixed: true})
 	return err
+}
+
+// changeKeys are the hardware keys declared to the device so it recognises the
+// change output: the payment and the stake key of the wallet, when both are on
+// the device (SPO-Ptx-INV-009).
+func (b Base) changeKeys(r txRun) []custody.KeyRef {
+	if r.payer.holder != custody.HolderHardware || r.stakeHold != custody.HolderHardware {
+		return nil
+	}
+	s := b.slots(r)
+	return []custody.KeyRef{s[0].Key, s[1].Key}
 }
 
 // execute is the tail of the certificate use cases: clock, inputs, the
@@ -46,6 +66,14 @@ func (b Base) early(r txRun) error {
 // spec: SPO-Ptx-INV-006, SPO-Ptx-INV-010
 func (b Base) execute(ctx context.Context, r txRun) (txflow.Result, error) {
 	if err := b.Pipeline.Check(); err != nil {
+		return txflow.Result{}, err
+	}
+	// The extra parameters are resolved before any network access: the
+	// metadata files are read, the message is encrypted.
+	//
+	// spec: SPO-Pparam-IF-010, SPO-Pparam-IF-016
+	meta, err := txflow.ResolveExtras(txflow.ExtrasPorts{Files: b.Files, Encrypter: b.Encrypter}, r.extras, r.message, r.pass)
+	if err != nil {
 		return txflow.Result{}, err
 	}
 	tip, err := b.Tip.Tip(ctx)
@@ -72,7 +100,12 @@ func (b Base) execute(ctx context.Context, r txRun) (txflow.Result, error) {
 	if err != nil {
 		return txflow.Result{}, err
 	}
-	prep, err := b.Pipeline.Prepare(draft, b.slots(r), stk.StakeWitnesses)
+	if r.extras != nil {
+		if draft, err = meta.Attach(draft); err != nil {
+			return txflow.Result{}, err
+		}
+	}
+	prep, err := b.Pipeline.PrepareWith(draft, b.slots(r), stk.StakeWitnesses, txflow.PrepareOptions{RefuseMixed: true})
 	if err != nil {
 		return txflow.Result{}, err
 	}
@@ -86,7 +119,7 @@ func (b Base) execute(ctx context.Context, r txRun) (txflow.Result, error) {
 		return txflow.Result{}, err
 	}
 	return b.Pipeline.Execute(ctx, txflow.Input{Draft: draft, Params: r.params, TTL: ttl, Prepared: prep, Witnesses: stk.StakeWitnesses,
-		Summary: sum, Queued: r.queued})
+		Summary: sum, Queued: r.queued, HardwareChangeKeys: b.changeKeys(r)})
 }
 
 func (b Base) params(ctx context.Context) (chain.ProtocolParameters, error) {
@@ -176,6 +209,10 @@ type RegisterRequest struct {
 	Stake   string
 	Payer   string
 	Message []string
+	// Extras are the parsed extra parameters (txparam.Parse with
+	// txparam.ForCertificate); Passphrase the `pass:` of Extras. Optional.
+	Extras     *txparam.Extras
+	Passphrase *ports.Secret
 }
 
 // Run registers the stake address.
@@ -215,8 +252,9 @@ func (uc RegisterStakeAddress) Run(ctx context.Context, req RegisterRequest) (Re
 		return Result{}, err
 	}
 
-	// The refusal of a hardware holder and the first look at the account
-	// come before the parameters and the clock.
+	// What the signing plan refuses (a device that lacks a feature of the
+	// certificate, a hardware key mixed with a key-file key, no canonicalizer)
+	// and the first look at the account come before the parameters and the clock.
 	probe := stk.Certificate{Spec: stk.Spec{Kind: stk.CertRegistration, Stake: key, Deposit: 1}}
 	if err := uc.early(txRun{payer: pay, stakeOwner: w, stakeHold: st.holder, certs: []stk.Certificate{probe}, message: req.Message}); err != nil {
 		return Result{}, err
@@ -249,7 +287,7 @@ func (uc RegisterStakeAddress) Run(ctx context.Context, req RegisterRequest) (Re
 		return Result{}, err
 	}
 	res, err := uc.execute(ctx, txRun{
-		payer: pay, stakeOwner: w, stakeHold: st.holder, certs: []stk.Certificate{cert}, message: req.Message, params: params,
+		payer: pay, stakeOwner: w, stakeHold: st.holder, certs: []stk.Certificate{cert}, message: req.Message, extras: req.Extras, pass: req.Passphrase, params: params,
 		summary: ports.TxSummary{Kind: "stake registration", Account: w, StakeAddr: st.addr, Sources: sources, Unchecked: unchecked},
 		queued: ports.QueuedTx{Type: "StakeKeyRegistration", FromName: pay.name, FromAddr: pay.addr, ToName: pay.name, ToAddr: pay.addr,
 			Description: fmt.Sprintf("signed staking key registration transaction for '%s.staking', payment via '%s'", w, pay.name),
@@ -297,6 +335,10 @@ type DelegationRegisterRequest struct {
 	Delegator string
 	Payer     string
 	Message   []string
+	// Extras are the parsed extra parameters (txparam.Parse with
+	// txparam.ForCertificate); Passphrase the `pass:` of Extras. Optional.
+	Extras     *txparam.Extras
+	Passphrase *ports.Secret
 }
 
 // Run registers the delegation.
@@ -400,7 +442,7 @@ func (uc RegisterPoolDelegation) Run(ctx context.Context, req DelegationRegister
 		return Result{}, err
 	}
 	res, err := uc.execute(ctx, txRun{
-		payer: pay, stakeOwner: w, stakeHold: st.holder, certs: []stk.Certificate{cert}, message: req.Message, params: params,
+		payer: pay, stakeOwner: w, stakeHold: st.holder, certs: []stk.Certificate{cert}, message: req.Message, extras: req.Extras, pass: req.Passphrase, params: params,
 		summary: ports.TxSummary{Kind: "pool delegation", Account: w, StakeAddr: st.addr, Sources: sources, SingleSource: single, Unchecked: unchecked},
 		queued: ports.QueuedTx{Type: "DelegationCertRegistration", FromName: pay.name, FromAddr: pay.addr, ToName: pay.name, ToAddr: pay.addr,
 			Description: fmt.Sprintf("signed delegation cert registration transaction for '%s', payment via '%s'", w, pay.name),
@@ -530,7 +572,7 @@ func (uc RegisterVoteDelegation) Run(ctx context.Context, req DelegationRegister
 	}
 
 	res, err := uc.execute(ctx, txRun{
-		payer: pay, stakeOwner: w, stakeHold: st.holder, certs: []stk.Certificate{cert}, message: req.Message, params: params,
+		payer: pay, stakeOwner: w, stakeHold: st.holder, certs: []stk.Certificate{cert}, message: req.Message, extras: req.Extras, pass: req.Passphrase, params: params,
 		summary: ports.TxSummary{Kind: "vote delegation", Account: w, StakeAddr: st.addr, Sources: sources, Unchecked: unchecked},
 		queued: ports.QueuedTx{Type: "VoteDelegationCertRegistration", FromName: pay.name, FromAddr: pay.addr, ToName: pay.name, ToAddr: pay.addr,
 			Description: fmt.Sprintf("signed vote-delegation cert registration transaction for '%s', payment via '%s'", w, pay.name),
@@ -640,7 +682,7 @@ func (uc DeregisterStakeAddress) Run(ctx context.Context, req RegisterRequest) (
 		return Result{}, err
 	}
 	res, err := uc.execute(ctx, txRun{
-		payer: pay, stakeOwner: w, stakeHold: st.holder, certs: []stk.Certificate{cert}, message: req.Message, params: params,
+		payer: pay, stakeOwner: w, stakeHold: st.holder, certs: []stk.Certificate{cert}, message: req.Message, extras: req.Extras, pass: req.Passphrase, params: params,
 		summary: ports.TxSummary{Kind: "stake deregistration", Account: w, StakeAddr: st.addr, Sources: ans.Sources, SingleSource: ans.Single},
 		queued: ports.QueuedTx{Type: "StakeKeyDeRegistration", FromName: pay.name, FromAddr: pay.addr, ToName: pay.name, ToAddr: pay.addr,
 			Description: fmt.Sprintf("signed staking key deregistration transaction for '%s.staking', payment via '%s'", w, pay.name),

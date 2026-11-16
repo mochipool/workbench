@@ -57,6 +57,7 @@ type govKeyRun func(ctx context.Context, s *session, env *Env, req governance.Ge
 
 func (a *app) govKeyCommand(use, short, long string, replace bool, needs func(derived, withWords bool) []Need, run govKeyRun) *cobra.Command {
 	var o govKeyOptions
+	var hw hardwareFlags
 	var cf chainFlags
 	cmd := &cobra.Command{
 		Use:   use,
@@ -65,12 +66,30 @@ func (a *app) govKeyCommand(use, short, long string, replace bool, needs func(de
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			fdSet := cmd.Flags().Changed("mnemonic-in-fd")
-			if err := o.validate(fdSet, a.passFD); err != nil {
+			if err := hw.validate(cmd); err != nil {
+				return err
+			}
+			if hw.on {
+				if o.mnemonic || fdSet {
+					return errors.New("--hardware cannot be combined with --mnemonic or --mnemonic-in-fd: a hardware key has no mnemonic")
+				}
+				if o.account > governance.MaxDerivationIndex || o.index > governance.MaxDerivationIndex {
+					return governance.ErrDerivationRange
+				}
+			} else if err := o.validate(fdSet, a.passFD); err != nil {
 				return err
 			}
 			derived := o.mnemonic || fdSet
-			return a.withEnv(cmd, envSpec{flags: &cf, needs: needs(derived, o.mnemonic)}, func(ctx context.Context, s *session, env *Env, _ WireOptions) error {
-				req := governance.GenerateKeysRequest{Name: args[0], Source: governance.KeysRandom, Replace: o.replace}
+			need := needs(derived, o.mnemonic)
+			if hw.on {
+				need = []Need{CapHardware}
+			}
+			return a.withEnv(cmd, envSpec{flags: &cf, needs: need}, func(ctx context.Context, s *session, env *Env, _ WireOptions) error {
+				req := governance.GenerateKeysRequest{Name: args[0], Source: governance.KeysRandom, Replace: o.replace, Holder: hw.holder()}
+				if hw.on {
+					req.Account, req.Index = o.account, o.index
+					a.noteDevice()
+				}
 				if derived {
 					req.Source, req.Account, req.Index = governance.KeysMnemonic, o.account, o.index
 				}
@@ -88,6 +107,7 @@ func (a *app) govKeyCommand(use, short, long string, replace bool, needs func(de
 		},
 	}
 	o.add(cmd, replace)
+	hw.add(cmd, 0)
 	addChainFlags(cmd, &cf, true)
 	return cmd
 }

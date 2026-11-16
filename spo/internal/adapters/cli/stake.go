@@ -32,8 +32,11 @@ const (
 type stakeFlags struct {
 	chain    chainFlags
 	messages []string
-	yes      bool
-	payer    string
+	// extra are the extra-parameter flags of the commands that put a
+	// transaction on the chain with a certificate (metadata files, encryption).
+	extra extraFlags
+	yes   bool
+	payer string
 	// stored makes a delegation use the certificate already stored.
 	stored bool
 
@@ -103,6 +106,7 @@ func (a *app) pipeline(s *session, env *Env, yes bool) txflow.Pipeline {
 	p := txflow.Pipeline{
 		Signers: env.Signers, Min: env.MinOutputCalculator, Fees: env.FeeEstimator, Bodies: env.TxBodyBuilder,
 		Assembler: env.TxAssembler, Confirmer: terminalConfirmer{a}, Submitter: env.Submitter, Queue: env.Queue,
+		Canonicalizer: env.Canonicalizer,
 	}
 	if p.Submitter != nil && p.Queue != nil {
 		p.Queue = nil
@@ -117,6 +121,7 @@ func (a *app) stakeBase(s *session, env *Env, yes bool) stake.Base {
 	return stake.Base{
 		Store: s.Store, Addresses: env.AddressInspector, Params: env.Params, Tip: env.Tip, Utxos: env.Utxos,
 		Pipeline: a.pipeline(s, env, yes), NetworkID: env.NetworkID,
+		Files: env.MetadataFiles, Encrypter: env.MsgEncrypter,
 	}
 }
 
@@ -197,6 +202,9 @@ func printStakeSummary(w io.Writer, s ports.TxSummary) {
 			fmt.Fprintf(w, "  to           %s\n", s.Destination)
 		}
 	}
+	if s.Amount != "" {
+		fmt.Fprintf(w, "  amount       %s\n", s.Amount)
+	}
 	for _, at := range s.Attachments {
 		fmt.Fprintf(w, "  attaches     %s\n", at)
 	}
@@ -218,6 +226,9 @@ func printStakeSummary(w io.Writer, s ports.TxSummary) {
 			label = "change"
 		}
 		fmt.Fprintf(w, "  %-12s %s  %s\n", label, o.Address, lovelaceText(o.Lovelace))
+		for _, as := range o.Assets {
+			fmt.Fprintf(w, "  %-12s   + %d %s\n", "", as.Quantity, assetText(as.Asset))
+		}
 	}
 	fmt.Fprintf(w, "  fee          %s\n", lovelaceText(s.Fee))
 	if s.TTL > 0 {
@@ -278,10 +289,10 @@ was made, so the answer is unknown and the command refuses until you pass
 --allow-unverified.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			spec := envSpec{flags: &f.chain, config: true, needs: stakeTxNeeds(CapCerts)}
+			spec := envSpec{flags: &f.chain, config: true, needs: stakeTxNeeds(CapCerts), extras: &f.extra}
 			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, wo WireOptions) error {
 				uc := stake.RegisterStakeAddress{Base: a.stakeBase(s, env, f.yes), Certs: env.Certs, Rewards: env.Rewards, AllowUnverified: f.allowUnverified}
-				res, err := uc.Run(ctx, stake.RegisterRequest{Stake: args[0], Payer: args[1], Message: f.messages})
+				res, err := uc.Run(ctx, stake.RegisterRequest{Stake: args[0], Payer: args[1], Message: f.messages, Extras: f.extra.ex, Passphrase: f.extra.pass})
 				if err != nil {
 					return f.hint(err)
 				}
@@ -292,6 +303,7 @@ was made, so the answer is unknown and the command refuses until you pass
 		},
 	}
 	f.add(cmd, false, true, false)
+	f.extra.add(cmd, &f.messages, extraCert)
 	return cmd
 }
 
@@ -350,7 +362,7 @@ second source or --single-source; a mode that cannot read pools at all needs
 			if !f.stored {
 				needs = append(needs, CapCerts)
 			}
-			spec := envSpec{flags: &f.chain, config: true, needs: needs}
+			spec := envSpec{flags: &f.chain, config: true, needs: needs, extras: &f.extra}
 			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, wo WireOptions) error {
 				var stored []ports.Ref
 				if !f.stored {
@@ -364,7 +376,7 @@ second source or --single-source; a mode that cannot read pools at all needs
 					Base: a.stakeBase(s, env, f.yes), Certs: env.CertDecoder, Builder: env.Addresses,
 					Pools: env.Pools, Rewards: env.Rewards, Sources: f.policy(), AllowUnverified: f.allowUnverified,
 				}
-				res, err := uc.Run(ctx, stake.DelegationRegisterRequest{Delegator: args[0], Payer: payerOr(f.payer, args[0]), Message: f.messages})
+				res, err := uc.Run(ctx, stake.DelegationRegisterRequest{Delegator: args[0], Payer: payerOr(f.payer, args[0]), Message: f.messages, Extras: f.extra.ex, Passphrase: f.extra.pass})
 				if err != nil {
 					return f.hint(err)
 				}
@@ -375,6 +387,7 @@ second source or --single-source; a mode that cannot read pools at all needs
 	}
 	cmd.Flags().BoolVar(&f.stored, "stored-cert", false, "use the stored <delegator-name>.deleg.cert (made by spo stake delegation-cert) instead of making one")
 	f.add(cmd, true, true, true)
+	f.extra.add(cmd, &f.messages, extraCert)
 	return cmd
 }
 
@@ -442,7 +455,7 @@ the summary lists each check that was not made.`,
 			if !f.stored {
 				needs = append(needs, CapCerts)
 			}
-			spec := envSpec{flags: &f.chain, config: true, needs: needs}
+			spec := envSpec{flags: &f.chain, config: true, needs: needs, extras: &f.extra}
 			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, wo WireOptions) error {
 				var stored []ports.Ref
 				if !f.stored {
@@ -457,7 +470,7 @@ the summary lists each check that was not made.`,
 					Base: a.stakeBase(s, env, f.yes), Certs: env.CertDecoder, Builder: env.Addresses,
 					DReps: env.DReps, Rewards: env.Rewards, AllowUnverified: f.allowUnverified,
 				}
-				res, err := uc.Run(ctx, stake.DelegationRegisterRequest{Delegator: args[0], Payer: payerOr(f.payer, args[0]), Message: f.messages})
+				res, err := uc.Run(ctx, stake.DelegationRegisterRequest{Delegator: args[0], Payer: payerOr(f.payer, args[0]), Message: f.messages, Extras: f.extra.ex, Passphrase: f.extra.pass})
 				if err != nil {
 					return f.hint(err)
 				}
@@ -468,6 +481,7 @@ the summary lists each check that was not made.`,
 	}
 	cmd.Flags().BoolVar(&f.stored, "stored-cert", false, "use the stored <delegator-name>.vote-deleg.cert (made by spo stake vote-delegation-cert) instead of making one")
 	f.add(cmd, true, true, false)
+	f.extra.add(cmd, &f.messages, extraCert)
 	return cmd
 }
 
@@ -489,7 +503,7 @@ independent source to agree, or --single-source to go on with one. The summary
 names the sources and says when it was one.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			spec := envSpec{flags: &f.chain, config: true, needs: stakeTxNeeds(CapCerts, CapCertDecode, CapRewards)}
+			spec := envSpec{flags: &f.chain, config: true, needs: stakeTxNeeds(CapCerts, CapCertDecode, CapRewards), extras: &f.extra}
 			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, wo WireOptions) error {
 				gen, err := stake.GenerateDeregistrationCertificate{
 					Store: s.Store, Addresses: env.AddressInspector, Certs: env.Certs, Account: env.Rewards, CrossCheck: env.CrossCheck,
@@ -501,7 +515,7 @@ names the sources and says when it was one.`,
 				uc := stake.DeregisterStakeAddress{
 					Base: a.stakeBase(s, env, f.yes), Certs: env.CertDecoder, Account: env.Rewards, CrossCheck: env.CrossCheck, Sources: f.policy(),
 				}
-				res, err := uc.Run(ctx, stake.RegisterRequest{Stake: args[0], Payer: args[1], Message: f.messages})
+				res, err := uc.Run(ctx, stake.RegisterRequest{Stake: args[0], Payer: args[1], Message: f.messages, Extras: f.extra.ex, Passphrase: f.extra.pass})
 				if err != nil {
 					return f.hint(err)
 				}
@@ -511,6 +525,7 @@ names the sources and says when it was one.`,
 		},
 	}
 	f.add(cmd, false, false, true)
+	f.extra.add(cmd, &f.messages, extraCert)
 	return cmd
 }
 
@@ -602,7 +617,7 @@ func printStakeStatus(w io.Writer, st stake.StakeStatus, poolSource string) {
 func (a *app) claimRewardsCommand() *cobra.Command {
 	var f stakeFlags
 	cmd := &cobra.Command{
-		Use:   "claim-rewards <stake-name> <destination> [--payer NAME] [--message TEXT]... [--yes] [--transfer-file PATH]",
+		Use:   "claim-rewards <stake-name> <destination> [--payer NAME] [--message TEXT]... [--metadata-file FILE]... [--encrypt-messages] [--yes] [--transfer-file PATH]",
 		Short: "Withdraw the whole reward balance of a stake account to an address",
 		Long: `Withdraw all the rewards of <stake-name> to <destination>, a stored address name
 or an address. The fee is paid by --payer; when it is not given, the
@@ -614,18 +629,20 @@ Offline, the balance comes from the transfer file, which must hold the stake
 address (01_workOffline add).`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			spec := envSpec{flags: &f.chain, config: true, needs: stakeTxNeeds(CapRewards)}
+			spec := envSpec{flags: &f.chain, config: true, needs: stakeTxNeeds(CapRewards), extras: &f.extra}
 			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, wo WireOptions) error {
 				p := a.pipeline(s, env, f.yes)
 				uc := wallet.ClaimRewards{
 					Store: s.Store, Signers: env.Signers, Utxos: env.Utxos, Params: env.Params, Tip: env.Tip, Addresses: env.AddressInspector,
 					Min: env.MinOutputCalculator, Fees: env.FeeEstimator, Bodies: env.TxBodyBuilder, Assembler: env.TxAssembler,
 					Confirmer: p.Confirmer, Rewards: env.Rewards, Submitter: p.Submitter, Queue: p.Queue, NetworkID: env.NetworkID,
+					Files: env.MetadataFiles, Encrypter: env.MsgEncrypter, Canonicalizer: env.Canonicalizer, Handles: env.Handles,
 				}
 				if f.yes {
 					uc.Approval = wallet.ApprovalSkip
 				}
-				res, err := uc.Run(ctx, wallet.ClaimRequest{Stake: args[0], Destination: args[1], Payer: f.payer, Message: f.messages})
+				res, err := uc.Run(ctx, wallet.ClaimRequest{Stake: args[0], Destination: args[1], Payer: f.payer, Message: f.messages,
+					Extras: f.extra.ex, Passphrase: f.extra.pass})
 				if err != nil {
 					return f.hint(err)
 				}
@@ -647,5 +664,6 @@ address (01_workOffline add).`,
 		},
 	}
 	f.add(cmd, true, false, false)
+	f.extra.add(cmd, &f.messages, extraCert)
 	return cmd
 }

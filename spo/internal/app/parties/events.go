@@ -27,6 +27,11 @@ type Event struct {
 	BodyHash   string `json:"bodyHash,omitempty"`
 	Reason     string `json:"reason,omitempty"`
 	Detail     string `json:"detail,omitempty"`
+	// Count and LastSeen are set on a coalesced refusal (AppendRefusal): how
+	// many times the same sender was refused for the same reason, and when
+	// last. Zero for an ordinary event.
+	Count    int       `json:"count,omitempty"`
+	LastSeen time.Time `json:"lastSeen,omitempty"`
 }
 
 // The record holds two logs (SPO-Xparty-INV-023). Security events are what
@@ -99,6 +104,63 @@ func AppendEvent(w ports.Writer, e Event) error {
 		return err
 	}
 	e.At = e.At.UTC().Truncate(time.Second)
+	l.Security = append(l.Security, e)
+	if len(l.Security) > MaxSecurityEvents {
+		l.Security = l.Security[len(l.Security)-MaxSecurityEvents:]
+	}
+	return writeLog(w, l)
+}
+
+// MaxRefusalEntriesPerSender bounds the security-log entries one authenticated
+// sender can cause with refused envelopes (SPO-Xparty-INV-023): repeats of the
+// same refusal are one entry with a counter and the time last seen, and a
+// sender that is refused for more distinct reasons than this has the rest
+// counted in one further entry.
+const MaxRefusalEntriesPerSender = 16
+
+// OtherRefusals is the reason of the entry that counts a sender's refusals
+// beyond MaxRefusalEntriesPerSender.
+const OtherRefusals = "further refusals for other reasons"
+
+// AppendRefusal adds a refusal of an authenticated sender to the security log
+// inside the caller's transaction, coalescing it: the same kind, sender and
+// reason as an earlier entry raises that entry's Count and LastSeen instead of
+// adding one. A hostile but enrolled party that sends refused envelopes in a
+// loop cannot push the operator's own history out of the log.
+func AppendRefusal(w ports.Writer, e Event) error {
+	l, err := readLog(w)
+	if err != nil {
+		return err
+	}
+	e.At = e.At.UTC().Truncate(time.Second)
+	distinct, other := 0, -1
+	for i := range l.Security {
+		x := &l.Security[i]
+		if x.Kind != e.Kind || x.Peer != e.Peer {
+			continue
+		}
+		if x.Reason == OtherRefusals {
+			other = i
+		}
+		if x.Reason == e.Reason && x.Reason != OtherRefusals {
+			if x.Count == 0 {
+				x.Count = 1
+			}
+			x.Count++
+			x.LastSeen = e.At
+			return writeLog(w, l)
+		}
+		distinct++
+	}
+	if distinct >= MaxRefusalEntriesPerSender {
+		if other >= 0 {
+			l.Security[other].Count++
+			l.Security[other].LastSeen = e.At
+			return writeLog(w, l)
+		}
+		e.Reason, e.Detail = OtherRefusals, ""
+	}
+	e.Count, e.LastSeen = 1, e.At
 	l.Security = append(l.Security, e)
 	if len(l.Security) > MaxSecurityEvents {
 		l.Security = l.Security[len(l.Security)-MaxSecurityEvents:]

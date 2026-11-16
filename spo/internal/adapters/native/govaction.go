@@ -43,8 +43,10 @@ var actionDescriptions = map[governance.ActionKind]string{
 }
 
 // ErrParameterChangeUnsupported: the parameter-update proposal is not built
-// by this adapter yet (the 41-parameter table of SPO-25a-IF-022).
-var ErrParameterChangeUnsupported = errors.New("a ParameterChange action file is not built by this adapter yet")
+// by this adapter yet (the 41-parameter table of SPO-25a-IF-022). It is the
+// port's sentinel, so the layers above, which cannot import this package,
+// match it with errors.Is(err, ports.ErrParameterChangeUnsupported).
+var ErrParameterChangeUnsupported = fmt.Errorf("%w", ports.ErrParameterChangeUnsupported)
 
 const (
 	actTagHardFork     = 1

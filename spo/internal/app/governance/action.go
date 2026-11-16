@@ -12,6 +12,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/governance"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
+	"github.com/mochipool/workbench/spo/internal/domain/txparam"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -426,6 +427,10 @@ type RegisterActionRequest struct {
 	Payer   string
 	Files   []string
 	Message []string
+	// Extras are the parsed extra parameters (txparam.Parse with
+	// txparam.ForCertificate); Passphrase is the `pass:` of Extras. Optional.
+	Extras     *txparam.Extras
+	Passphrase *ports.Secret
 }
 
 // ActionRegistered is the result: the transaction and the ids the actions will have.
@@ -518,7 +523,7 @@ func (uc RegisterAction) Run(ctx context.Context, req RegisterActionRequest) (Ac
 	}); err != nil {
 		return out, err
 	}
-	run := txRun{payer: pay, props: props, message: req.Message, ttl: ProposalTTL}
+	run := txRun{payer: pay, props: props, message: req.Message, extras: req.Extras, pass: req.Passphrase, ttl: ProposalTTL}
 	if err := uc.early(run); err != nil {
 		return out, err
 	}

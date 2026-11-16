@@ -29,7 +29,7 @@ snapshot: the date of the snapshot is printed and the answer is that old.`,
 			spec := envSpec{flags: &flags, needs: []Need{CapAddress, OneOf(CapUtxos, CapRewards)}}
 			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, o WireOptions) error {
 				uc := query.QueryAddress{Store: s.Store, Addresses: env.AddressInspector, Utxos: env.Utxos,
-					Rewards: env.Rewards, Pools: env.Pools, Sync: env.Sync}
+					Rewards: env.Rewards, Pools: env.Pools, Sync: env.Sync, Handles: env.Handles}
 				if o.Mode == ModeOffline {
 					// The answer is a snapshot: have the use case say how old.
 					uc.Snapshot = env.Bundle
@@ -65,6 +65,9 @@ func printAddressReport(w io.Writer, r query.AddressReport) {
 		name = r.Name + " "
 	}
 	fmt.Fprintf(w, "%s address %s%s\n", map[string]string{"payment": "Payment", "stake": "Stake"}[r.Kind], name, r.Address)
+	if h := r.Handle; h != nil {
+		fmt.Fprintf(w, "  ADA Handle   %s resolved to %s (%s handle, verified against the chain: %s)\n", h.Handle, r.Address, h.Kind, h.VerifiedBy)
+	}
 	if r.FromSnapshot || r.SnapshotDate != "" {
 		used := "unused"
 		if r.SnapshotUsed {

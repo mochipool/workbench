@@ -142,13 +142,15 @@ func OpenCollection(c Collection) (Collection, error) {
 }
 
 // State derives the state from the slots and the chain tip. A collection is
-// Expired when its TTL is below the tip (equal is open); expiry is a function
-// of time, nothing is stored (SPO-05d-INV-003, SPO-Xparty-INV-015).
+// Expired when its TTL is at or below the tip: a transaction is invalid from
+// its TTL slot on, so the collection is not collected for after that. Expiry
+// is a function of time, nothing is stored (SPO-05d-INV-003, which is looser
+// by one slot, and SPO-Xparty-INV-015, which is the rule here).
 func (c Collection) State(tipSlot uint64) CollectionState {
 	if c.closed != "" {
 		return c.closed
 	}
-	if c.TTL < tipSlot {
+	if c.TTL <= tipSlot {
 		return CollectionExpired
 	}
 	for _, s := range c.Slots {
@@ -159,11 +161,10 @@ func (c Collection) State(tipSlot uint64) CollectionState {
 	return CollectionOpenComplete
 }
 
-// StateAtTip is State at the chain tip, with the boundary of the signer's own
-// rule (SPO-Xparty-INV-015, PRE-006): a transaction is invalid from its TTL
-// slot on, so a collection whose TTL is at or below the tip is Expired. State
-// itself keeps the older boundary, where equal is still open.
-func (c Collection) StateAtTip(tip uint64) CollectionState { return c.State(tip + 1) }
+// StateAtTip is State at the chain tip (SPO-Xparty-INV-015, PRE-006). It is
+// the same rule as State and is kept as the name the multi-party code uses;
+// there is no arithmetic on the tip, so no tip overflows it.
+func (c Collection) StateAtTip(tip uint64) CollectionState { return c.State(tip) }
 
 // Missing lists the names of the empty slots, in slot order.
 func (c Collection) Missing() []string {

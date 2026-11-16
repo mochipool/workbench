@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -24,6 +26,34 @@ type KeyFinder interface {
 	FindKey(ctx context.Context, role custody.Role, hash [28]byte) (custody.KeyRef, bool, error)
 }
 
+// ErrNoAddressInspector: the signer was built without an address inspector.
+// Without one it cannot classify an address, so it refuses to work on any
+// request rather than pass one unchecked (SPO-Xparty-PR-004). It is a
+// configuration error of the wiring, not a refusal of a request.
+var ErrNoAddressInspector = errors.New("multisig: the signer has no address inspector: configure Signer.Addresses")
+
+// OwnResolver is the signer's own view of the chain, as the signer use case
+// accepts it (SPO-Xparty-PR-005). An offline snapshot is not authenticated:
+// whoever wrote it chose what each input is. It is therefore a resolver only
+// when it is the signer's own, a snapshot this operator made on this machine
+// from a provider it trusts. A transfer file received from another party, a
+// coordinator's bundle above all, is never a resolver source: it would let the
+// coordinator tell the signer that a script input is its own or a foreign one.
+// The two constructors are the only way to make one; the wiring that calls
+// OwnSnapshot states that the file is the operator's own.
+type OwnResolver struct{ r ports.UtxoResolver }
+
+// OwnProvider is the signer's own chain provider (a node, a Koios connection
+// it configured).
+func OwnProvider(r ports.UtxoResolver) OwnResolver { return OwnResolver{r} }
+
+// OwnSnapshot is an offline snapshot that the operator took on this machine.
+// Never call it with a file that arrived from another party.
+func OwnSnapshot(r ports.UtxoResolver) OwnResolver { return OwnResolver{r} }
+
+// IsSet reports whether there is a resolver at all.
+func (o OwnResolver) IsSet() bool { return o.r != nil }
+
 // Signer is the party asked for a signature.
 type Signer struct {
 	Node
@@ -34,22 +64,33 @@ type Signer struct {
 	Keys    KeyFinder
 	// NetworkMagic is the workspace's network.
 	NetworkMagic uint32
-	// Owned is what this signer owns, from its own store: the review marks
-	// every output Own or not by it and resolves the inputs of a body in the
-	// UTxO sets of its payment addresses (SPO-Xparty-PR-002). It is never
-	// taken from the coordinator. nil owns nothing.
-	Owned ports.OwnedAddresses
-	// Utxos is the signer's OWN chain provider or offline snapshot, never the
-	// coordinator's. nil, or a failing lookup, means the inputs cannot be
-	// resolved: a payment-key request is then refused, and the review of any
-	// other key says its inputs were not checked.
-	Utxos ports.UtxoReader
+	// Owned is what this signer owns, as credentials: the key hashes of the
+	// payment keys and stake keys in its own store (SPO-Xparty-PR-002). The
+	// wiring derives it from the store; it is never taken from the
+	// coordinator. The zero value owns nothing.
+	Owned party.OwnedKeys
+	// Resolver is the signer's OWN chain provider or offline snapshot, never
+	// the coordinator's: it resolves every input of a body by reference. Only
+	// OwnProvider and OwnSnapshot make one, so a bundle that a coordinator
+	// carried cannot be passed by accident (SPO-Xparty-PR-005). The zero value,
+	// or an input it cannot resolve, means the inputs were not checked: a
+	// payment-key request is then refused, and the review of any other key
+	// says its inputs were not checked.
+	Resolver OwnResolver
+	// Addresses decodes an address, to tell whose it is by its credentials.
+	// Without it no input or output can be classified.
+	Addresses ports.AddressInspector
 	// Gate asks the operator to authenticate again before a key signs. There
 	// is no default: with no gate Approve refuses (SPO-Xparty-INV-016).
 	Gate ports.ApprovalGate
 	// MaxTxSize is the protocol's maxTxSize; zero takes the upper bound
 	// party.DefaultMaxTxSize (SPO-Xparty-INV-008).
 	MaxTxSize int
+	// GateTimeout is how long a claimed approval may hold the request in the
+	// signing state before another approval may take it over: a crash between
+	// the claim and the stored response leaves it there. Zero takes
+	// DefaultGateTimeout (SPO-Xparty-INV-028).
+	GateTimeout time.Duration
 	// OnInvite stores the tailcat address of an Invite. It runs inside the
 	// store transaction that records the invitation's message id, with that
 	// transaction's Writer, so the address and the replay entry commit
@@ -59,6 +100,16 @@ type Signer struct {
 	// checked to be the coordinator's enrolled one. A nil hook refuses an
 	// Invite.
 	OnInvite func(w ports.Writer, from party.Party, inv party.Invite) error
+}
+
+// DefaultGateTimeout is how long a claimed approval is believed to be alive.
+const DefaultGateTimeout = 10 * time.Minute
+
+func (s Signer) gateTimeout() time.Duration {
+	if s.GateTimeout > 0 {
+		return s.GateTimeout
+	}
+	return DefaultGateTimeout
 }
 
 // Request states.
@@ -96,7 +147,10 @@ type storedRequest struct {
 	// Reviewed is the body hash the operator was shown; an approval needs
 	// it to equal BodyHash (SPO-Xparty-INV-016).
 	Reviewed string `json:"reviewed,omitempty"`
-	Reason   string `json:"reason,omitempty"`
+	// SigningSince is the unix time of the claim that put the request in the
+	// signing state.
+	SigningSince int64  `json:"signingSince,omitempty"`
+	Reason       string `json:"reason,omitempty"`
 	// Silent: the refusal was kept to ourselves (SPO-Xparty-INV-006).
 	Silent bool `json:"silent,omitempty"`
 	// Response is the sealed answer, a SigningResponse or a SigningRefusal,
@@ -136,14 +190,51 @@ func (s *signerState) pendingFrom(from string) int {
 	return n
 }
 
-// keep drops requests that expired more than a day ago: an answered request
-// can only be asked again until its envelope expires.
+// claimable reports that an approval may take the request: it is pending, or
+// it was claimed by an approval that never stored its response and has been in
+// the signing state longer than timeout (a crash mid-sign). That is the only
+// way out of the signing state other than the approval's own end
+// (SPO-Xparty-INV-028).
+// overNetwork: the request did not arrive by file. A stored via that is
+// anything but "file" is a network (SPO-Xparty-PRE-007).
+func (q storedRequest) overNetwork() bool { return q.Via != ports.ViaFile.String() }
+
+func (q storedRequest) claimable(now time.Time, timeout time.Duration) bool {
+	return q.State == reqPending ||
+		(q.State == reqSigning && now.Unix() >= q.SigningSince+int64(timeout/time.Second))
+}
+
+// prune drops what can no longer matter. A refused request is dropped when its
+// envelope expires: a later duplicate is refused by the window check, and the
+// replay log holds the id until then. Every other request is kept a day past
+// its expiry. Refused entries per sender are capped at party.MaxReplayPerSender,
+// oldest first, so a flood of short-lived refused requests leaves bounded
+// state (SPO-Xparty-INV-029).
 func (s *signerState) prune(now time.Time) {
 	kept := s.Requests[:0]
 	for _, q := range s.Requests {
-		if q.Expires+86400 >= now.Unix() {
+		limit := q.Expires + 86400
+		if q.State == reqRefused {
+			limit = q.Expires
+		}
+		if limit >= now.Unix() {
 			kept = append(kept, q)
 		}
+	}
+	s.Requests = kept
+	refused := map[string]int{}
+	for _, q := range s.Requests {
+		if q.State == reqRefused {
+			refused[q.From]++
+		}
+	}
+	kept = s.Requests[:0]
+	for _, q := range s.Requests {
+		if q.State == reqRefused && refused[q.From] > party.MaxReplayPerSender {
+			refused[q.From]--
+			continue
+		}
+		kept = append(kept, q)
 	}
 	s.Requests = kept
 }
@@ -209,10 +300,18 @@ func (s Signer) authorise(st signerState, slotTime func(uint64) (time.Time, erro
 // transport, is answered again with the stored response, never signed again
 // (SPO-Xparty-INV-017).
 //
-// via is how the envelope arrived; an unknown kind is a network.
+// A request whose id is already stored (answered, refused in silence or still
+// waiting) and arrives again, which the coordinator does on every new
+// connection until the slot is filled, is not a replay and has no security
+// event: an answered one is answered again with the stored response, the
+// others change nothing (SPO-Xparty-INV-017).
 //
-// spec: SPO-Xparty-PRE-002, SPO-Xparty-PRE-006, SPO-Xparty-INV-006, SPO-Xparty-INV-007, SPO-Xparty-INV-010, SPO-Xparty-INV-017, SPO-Xparty-SEC-002
-func (s Signer) Handle(ctx context.Context, raw []byte, via ports.TransportKind) (Handled, error) {
+// rcv carries how the envelope arrived, set by the transport that delivered
+// it (SPO-Xparty-INV-024); an unknown kind is a network.
+//
+// spec: SPO-Xparty-PRE-002, SPO-Xparty-PRE-006, SPO-Xparty-INV-006, SPO-Xparty-INV-007, SPO-Xparty-INV-010, SPO-Xparty-INV-017, SPO-Xparty-INV-024, SPO-Xparty-SEC-002
+func (s Signer) Handle(ctx context.Context, rcv ports.Received) (Handled, error) {
+	raw, via := rcv.Envelope, rcv.Via()
 	local, err := s.Kit.Local(ctx)
 	if err != nil {
 		return Handled{}, err
@@ -240,7 +339,7 @@ func (s Signer) Handle(ctx context.Context, raw []byte, via ports.TransportKind)
 			return err
 		}
 		body, err = o.Admit(func(id party.MessageID) (bool, error) {
-			if q := st.byID(hexMsg(id)); q != nil && q.Response != nil && q.From == hexFP(o.Sender().Fingerprint) {
+			if q := st.byID(hexMsg(id)); q != nil && q.From == hexFP(o.Sender().Fingerprint) {
 				cp := *q
 				again = &cp
 				return false, nil // INV-017: handled below, not a replay
@@ -260,8 +359,11 @@ func (s Signer) Handle(ctx context.Context, raw []byte, via ports.TransportKind)
 	h := Handled{Type: o.Type(), Sender: o.Sender().Fingerprint, HasSender: true}
 	switch m := body.(type) {
 	case party.SigningRequest:
-		if again != nil {
+		if again != nil && again.Response != nil {
 			return s.resend(ctx, o, again, now)
+		}
+		if again != nil { // waiting, signing or refused in silence: nothing to answer, nothing to record
+			return Handled{Type: party.TypeSigningRequest, Sender: o.Sender().Fingerprint, HasSender: true, Request: o.ID(), Effect: "duplicate"}, nil
 		}
 		return s.onRequest(ctx, local, o, m, via, slotNow, now)
 	case party.CollectionClosed:
@@ -339,7 +441,7 @@ func (s Signer) Handle(ctx context.Context, raw []byte, via ports.TransportKind)
 func (s Signer) rejectEffect(ctx context.Context, o ports.OpenedEnvelope, why error, now time.Time) (Handled, error) {
 	ev := eventOf(now, "message-refused", "", 0, [32]byte{})
 	ev.Peer, ev.Reason, ev.Detail = o.Sender().Fingerprint.String(), why.Error(), string(o.Type())
-	if err := s.Store.Update(ctx, func(w ports.Writer) error { return appendEvent(w, ev) }); err != nil {
+	if err := s.Store.Update(ctx, func(w ports.Writer) error { return appendRefusal(w, ev) }); err != nil {
 		return Handled{}, err
 	}
 	return Handled{Type: o.Type(), Sender: o.Sender().Fingerprint, HasSender: true, Refused: true, Reason: why.Error()}, nil
@@ -372,49 +474,120 @@ func responseType(q storedRequest) string {
 }
 
 // resolveFlow works out whose money the body moves from the signer's own
-// addresses and chain view (SPO-Xparty-PR-002). It never fails: when the
-// inputs cannot be resolved the Flow says so, and Flow.Refusal decides what
-// that means for the key role.
-func (s Signer) resolveFlow(ctx context.Context, v party.TxView, role custody.Role) party.Flow {
-	f := party.FlowFacts{}
-	if s.Owned != nil {
-		f.IsOwnAddress = func(a string) bool { return s.Owned.IsOwn(chain.Address(a)) }
-		f.IsOwnReward = func(a string) bool { return s.Owned.IsOwnReward(chain.StakeAddress(a)) }
+// credentials and chain view (SPO-Xparty-PR-002). Every input is resolved by
+// reference through the signer's own resolver and classified by the payment
+// credential of the address it is at, so an input at any address form of an
+// owned payment key is the signer's, whatever address the coordinator or the
+// signer's own lists name. It fails only on an amount beyond any supply or a
+// sum that overflows (party.ErrAmount): that body is refused. When the inputs
+// cannot be resolved the Flow says so, and Flow.Refusal decides what that means
+// for the key role.
+func (s Signer) resolveFlow(ctx context.Context, v party.TxView, role custody.Role, overNetwork bool) (party.Flow, error) {
+	if s.Addresses == nil {
+		return party.Flow{}, ErrNoAddressInspector
 	}
-	notChecked := func(why string) party.Flow {
+	f := party.FlowFacts{Role: role}
+	inspect := func(a string) (ports.AddressInfo, bool) {
+		info, err := s.Addresses.InspectAddress(chain.Address(a))
+		return info, err == nil
+	}
+	f.OutputOwnership = func(a string) (bool, string) {
+		info, ok := inspect(a)
+		if !ok {
+			return false, ""
+		}
+		return s.Owned.OutputOwnership(keyHashPtr(info.PaymentKeyHash, info.PaymentIsScript), info.Kind == ports.AddrEnterprise, keyHashPtr(info.StakeKeyHash, false))
+	}
+	f.IsOwnReward = func(a string) bool {
+		info, ok := inspect(a)
+		return ok && info.Kind == ports.AddrReward && info.StakeKeyHash != nil && s.Owned.OwnsStake(*info.StakeKeyHash)
+	}
+	// Fail closed: an account that cannot be inspected, is not a reward
+	// account or has no key credential is a script's.
+	f.IsScriptReward = func(a string) bool {
+		info, ok := inspect(a)
+		return !ok || info.Kind != ports.AddrReward || info.StakeKeyHash == nil
+	}
+	f.IsOwnCredential = s.Owned.OwnsCredential
+	// notChecked: why is a stable sentence; whatever the provider said goes in
+	// detail, which is shown but not part of the digest (SPO-Xparty-INV-026).
+	// For a key that cannot spend from its own address the review says plainly
+	// that the inputs were not checked and what that leaves open
+	// (SPO-Xparty-PR-004).
+	notChecked := func(why, detail string) (party.Flow, error) {
+		f.NotChecked, f.NotCheckedDetail = why, detail
 		if role != custody.RolePayment {
-			why = party.NotCheckedText
+			f.NotChecked = party.NotCheckedText
+			if s.Resolver.IsSet() {
+				f.NotChecked += " (" + why + ")"
+			}
 		}
-		f.NotChecked = why
-		fl, err := party.BuildFlow(v, f)
-		if err != nil {
-			return party.Flow{NotChecked: err.Error()}
+		return party.BuildFlow(v, f)
+	}
+	if !s.Resolver.IsSet() {
+		return notChecked("this signer has no chain view of its own", "")
+	}
+	refs := make([]chain.OutRef, 0, len(v.Inputs))
+	for _, in := range v.Inputs {
+		ref := chain.OutRef{TxID: chain.TxID(in.TxID), Index: in.Index}
+		if !slices.Contains(refs, ref) {
+			refs = append(refs, ref)
 		}
-		return fl
 	}
-	if s.Utxos == nil {
-		return notChecked("this signer has no chain view of its own")
-	}
-	if s.Owned == nil {
-		return notChecked("this signer knows no addresses of its own")
-	}
-	addrs, err := s.Owned.PaymentAddresses(ctx)
+	got, err := s.Resolver.r.ResolveUtxos(ctx, refs)
 	if err != nil {
-		return notChecked("its own addresses cannot be listed: " + err.Error())
+		return notChecked("the inputs cannot be resolved", err.Error())
 	}
-	for _, a := range addrs {
-		us, err := s.Utxos.Utxos(ctx, a)
-		if err != nil {
-			return notChecked("the UTxOs of its own address cannot be read: " + err.Error())
+	f.Inputs = map[party.ViewInput]party.ResolvedInput{}
+	for _, in := range v.Inputs {
+		ref := chain.OutRef{TxID: chain.TxID(in.TxID), Index: in.Index}
+		reading := got[ref]
+		u, ok := reading.Get()
+		switch {
+		case !ok && reading.IsNone():
+			return notChecked(fmt.Sprintf("input %s does not exist or is spent, as the provider says", ref), "")
+		case !ok:
+			return notChecked(fmt.Sprintf("input %s was not resolved", ref), reading.Why())
 		}
-		f.OwnUtxos = append(f.OwnUtxos, us...)
+		info, err := s.Addresses.InspectAddress(u.Address)
+		r := party.ResolvedInput{Lovelace: uint64(u.Lovelace)}
+		switch {
+		case err != nil && overNetwork:
+			return notChecked(fmt.Sprintf("input %s is at an address that cannot be read", ref), err.Error())
+		case err != nil:
+			// Fail closed: an address that cannot be inspected is treated as a
+			// script's and refused, never as foreign.
+			r.Script = true
+			f.Inputs[in] = r
+			continue
+		}
+		// A script payment credential is never own: its input is refused
+		// (RefuseScriptInput), not classified foreign. The header of the
+		// address says so too, whatever the inspector says.
+		r.Script = info.PaymentIsScript || party.AddressPaymentIsScript(string(u.Address))
+		if p := keyHashPtr(info.PaymentKeyHash, r.Script); p != nil {
+			r.Own = s.Owned.OwnsPayment(*p)
+		}
+		for _, a := range u.Assets {
+			if a.Quantity > math.MaxInt64 {
+				return party.Flow{}, party.ErrAmount
+			}
+			r.Assets = append(r.Assets, party.ViewAsset{Policy: a.Asset.Policy, Name: a.Asset.Name, Quantity: int64(a.Quantity)})
+		}
+		f.Inputs[in] = r
 	}
 	f.Checked = true
-	fl, err := party.BuildFlow(v, f)
-	if err != nil {
-		return party.Flow{NotChecked: err.Error()}
+	return party.BuildFlow(v, f)
+}
+
+// keyHashPtr is the key hash of an address credential, nil for a script or a
+// credential that is not there.
+func keyHashPtr(h *txbuild.KeyHash, isScript bool) *[28]byte {
+	if h == nil || isScript {
+		return nil
 	}
-	return fl
+	out := [28]byte(*h)
+	return &out
 }
 
 // decodeRequest is what the signer decodes and verifies about a request from
@@ -459,12 +632,17 @@ func (s Signer) decodeRequest(req party.SigningRequest, facts party.RequestFacts
 // first and are sent when they refuse; the checks that depend on what this
 // signer holds, owns or trusts come last and are never sent: scope, the key
 // held, the inputs, the plan. A refusal is kept without the body.
+//
+// spec: SPO-Xparty-PRE-006, SPO-Xparty-PR-004, SPO-Xparty-INV-029
 func (s Signer) onRequest(ctx context.Context, local ports.LocalIdentity, o ports.OpenedEnvelope, req party.SigningRequest, via ports.TransportKind, slotNow uint64, now time.Time) (Handled, error) {
+	if s.Addresses == nil {
+		return Handled{}, ErrNoAddressInspector
+	}
 	facts := party.RequestFacts{WorkspaceMagic: s.NetworkMagic, CurrentSlot: slotNow, OverNetwork: !via.IsFile()}
 	view, _, reason, detail, refuse := s.decodeRequest(req, facts)
 	var key custody.KeyRef
 	if !refuse {
-		if err := party.CheckScope(o.Sender().Scope, req.KeyRole, poolsOf(view)); err != nil {
+		if err := party.CheckScope(o.Sender().Scope, req.KeyRole, view); err != nil {
 			reason, detail, refuse = party.RefuseOutOfScope, err.Error(), true
 		}
 	}
@@ -479,8 +657,16 @@ func (s Signer) onRequest(ctx context.Context, local ports.LocalIdentity, o port
 		key = k
 	}
 	if !refuse {
-		if reason, refuse = s.resolveFlow(ctx, view, req.KeyRole).Refusal(req.KeyRole); refuse {
-			detail = reason.String()
+		fl, err := s.resolveFlow(ctx, view, req.KeyRole, facts.OverNetwork)
+		switch {
+		case errors.Is(err, party.ErrAmount):
+			reason, detail, refuse = party.RefuseUndisplayable, err.Error(), true
+		case err != nil:
+			return Handled{}, err
+		default:
+			if reason, refuse = fl.Refusal(req.KeyRole, facts.OverNetwork); refuse {
+				detail = reason.String()
+			}
 		}
 	}
 	if !refuse {
@@ -526,8 +712,8 @@ func (s Signer) onRequest(ctx context.Context, local ports.LocalIdentity, o port
 		if err != nil {
 			return err
 		}
-		st.prune(now)
 		st.Requests = append(st.Requests, q)
+		st.prune(now)
 		if err := writeJSON(w, signerRef, st); err != nil {
 			return err
 		}
@@ -544,7 +730,7 @@ func (s Signer) onRequest(ctx context.Context, local ports.LocalIdentity, o port
 		if q.Silent {
 			ev.Detail += " (not sent to the coordinator)"
 		}
-		if err := appendEvent(w, ev); err != nil {
+		if err := appendRefusal(w, ev); err != nil {
 			return err
 		}
 		if q.Silent {
@@ -567,7 +753,7 @@ func (s Signer) Pending(ctx context.Context) ([]PendingRequest, error) {
 	err := s.Store.View(ctx, func(r ports.Reader) error {
 		st, err := readSigner(r)
 		for _, q := range st.Requests {
-			if q.State == reqPending && q.Expires >= s.Clock.Now().Unix() && q.Closed == "" {
+			if q.claimable(s.Clock.Now(), s.gateTimeout()) && q.Expires >= s.Clock.Now().Unix() && q.Closed == "" {
 				id, _ := msgOfHex(q.ID)
 				out = append(out, PendingRequest{ID: id, From: q.FromName, Collection: q.Collection, Slot: q.Slot, Role: custody.Role(q.Role), Via: q.Via,
 					Expires: time.Unix(q.Expires, 0).UTC()})
@@ -627,6 +813,9 @@ type Review struct {
 type reviewToken struct {
 	id   party.MessageID
 	hash [32]byte
+	// flow is the digest of the flow the operator was shown: Approve works
+	// the flow out again and refuses when it is another (SPO-Xparty-INV-016).
+	flow [32]byte
 }
 
 // Approval is the decision to sign one reviewed request. It can only be
@@ -640,6 +829,13 @@ type Approval struct{ tok *reviewToken }
 // flow does not meet the rule of its key role, or it has a part that cannot
 // be displayed (the reason is in the error). The operator can still decline it.
 var ErrCannotReview = errors.New("the request cannot be approved")
+
+// ErrReviewStale: something the review depended on is not as it was shown when
+// the approval is claimed: the sender is no longer an active coordinator, the
+// scope it is enrolled with no longer allows the request, or the flow the
+// signer works out now differs from the one the operator read. Nothing is
+// signed; the request can be reviewed again (SPO-Xparty-INV-016).
+var ErrReviewStale = errors.New("the request or the signer's own view changed since the review: nothing was signed, review it again")
 
 // ErrNoGate: Approve needs an ApprovalGate and the signer has none.
 var ErrNoGate = errors.New("this signer has no approval gate: it does not approve without authenticating the operator again")
@@ -691,7 +887,7 @@ func (s Signer) ReviewRequest(ctx context.Context, id party.MessageID) (Review, 
 	if err != nil {
 		return Review{}, err
 	}
-	if q.State != reqPending && q.State != reqSigning {
+	if !q.claimable(now, s.gateTimeout()) {
 		return Review{}, fmt.Errorf("%w: it is %s", ErrNotPending, q.State)
 	}
 	hash := blake2b.Sum256(q.Body)
@@ -723,12 +919,15 @@ func (s Signer) ReviewRequest(ctx context.Context, id party.MessageID) (Review, 
 	// The flow is worked out now, from the signer's own view as it is at the
 	// time of the review, and an approval is possible only when it meets the
 	// rule of the key role (SPO-Xparty-PR-002).
-	flow := s.resolveFlow(ctx, view, custody.Role(q.Role))
-	if reason, bad := flow.Refusal(custody.Role(q.Role)); bad {
+	flow, err := s.resolveFlow(ctx, view, custody.Role(q.Role), q.overNetwork())
+	if err != nil {
+		return Review{}, fmt.Errorf("%w: %v", ErrCannotReview, err)
+	}
+	if reason, bad := flow.Refusal(custody.Role(q.Role), q.overNetwork()); bad {
 		return Review{}, fmt.Errorf("%w: %s", ErrCannotReview, reason)
 	}
 	rv := Review{RequestID: id, BodyHash: hash, Role: custody.Role(q.Role), Coordinator: q.FromName, Via: q.Via, View: view, Flow: flow, Aux: aux,
-		TotalOutput: view.TotalOutput(), ClaimedPurpose: q.Purpose, token: &reviewToken{id: id, hash: hash}}
+		TotalOutput: view.TotalOutput(), ClaimedPurpose: q.Purpose, token: &reviewToken{id: id, hash: hash, flow: flow.Digest()}}
 	copy(rv.KeyHash[:], kh)
 	err = s.Store.Update(ctx, func(w ports.Writer) error {
 		st, err := readSigner(w)
@@ -736,7 +935,7 @@ func (s Signer) ReviewRequest(ctx context.Context, id party.MessageID) (Review, 
 			return err
 		}
 		p := st.byID(hexMsg(id))
-		if p == nil || (p.State != reqPending && p.State != reqSigning) || p.BodyHash != q.BodyHash {
+		if p == nil || !p.claimable(now, s.gateTimeout()) || p.BodyHash != q.BodyHash {
 			return ErrNotPending
 		}
 		p.Reviewed = p.BodyHash
@@ -760,7 +959,7 @@ func (s Signer) ReviewRequest(ctx context.Context, id party.MessageID) (Review, 
 // of an answered request is refused, and the stored response is what goes out
 // again (SPO-Xparty-INV-017).
 //
-// spec: SPO-Xparty-OUT-006, SPO-Xparty-INV-016, SPO-Xparty-INV-017, SPO-Xparty-PRE-005
+// spec: SPO-Xparty-OUT-006, SPO-Xparty-INV-016, SPO-Xparty-INV-017, SPO-Xparty-INV-025, SPO-Xparty-INV-026, SPO-Xparty-INV-028, SPO-Xparty-PRE-005
 func (s Signer) Approve(ctx context.Context, a Approval) (Handled, error) {
 	if a.tok == nil {
 		return Handled{}, ErrNoReview
@@ -778,10 +977,36 @@ func (s Signer) Approve(ctx context.Context, a Approval) (Handled, error) {
 	if err != nil {
 		return Handled{}, err
 	}
+	// What the claim re-checks is worked out first, outside the store
+	// transaction: the chain view of the signer may be a network call. The
+	// claim then compares it with what was reviewed.
 	var q storedRequest
+	if err := s.Store.View(ctx, func(r ports.Reader) error {
+		st, err := readSigner(r)
+		if err != nil {
+			return err
+		}
+		p := st.byID(hexMsg(a.tok.id))
+		if p == nil {
+			return ErrUnknownRequest
+		}
+		q = *p
+		return nil
+	}); err != nil {
+		return Handled{}, err
+	}
+	var view party.TxView
+	var flow party.Flow
+	var flowErr error
+	view, viewErr := s.Viewer.View(q.Body)
+	if viewErr == nil {
+		flow, flowErr = s.resolveFlow(ctx, view, custody.Role(q.Role), q.overNetwork())
+	}
 	var coord party.Party
 	// Claim: the request must be pending, reviewed for this body hash, not
-	// expired, and not closed; it is marked as being signed.
+	// expired, and not closed; the sender must still be an active
+	// coordinator with a scope that still allows it; the flow must be the one
+	// reviewed. It is then marked as being signed.
 	err = s.Store.Update(ctx, func(w ports.Writer) error {
 		st, err := readSigner(w)
 		if err != nil {
@@ -791,7 +1016,10 @@ func (s Signer) Approve(ctx context.Context, a Approval) (Handled, error) {
 		if p == nil {
 			return ErrUnknownRequest
 		}
-		if p.State != reqPending && p.State != reqSigning {
+		// Only a pending request is claimed, or one whose earlier claim is
+		// older than the gate timeout (a crash mid-sign); a second approval
+		// while the first is at the gate is refused (SPO-Xparty-INV-028).
+		if !p.claimable(now, s.gateTimeout()) {
 			return fmt.Errorf("%w: it is %s", ErrNotPending, p.State)
 		}
 		if p.Reviewed != hexHash(a.tok.hash) || p.BodyHash != hexHash(a.tok.hash) {
@@ -810,14 +1038,25 @@ func (s Signer) Approve(ctx context.Context, a Approval) (Handled, error) {
 		}
 		found := false
 		for _, c := range ps {
-			if c.Fingerprint == fp && c.Active() {
+			if c.Fingerprint == fp {
 				coord, found = c, true
 			}
 		}
-		if !found {
-			return errors.New("the coordinator is not an active enrolled party")
+		switch {
+		case !found || !coord.Active():
+			return fmt.Errorf("%w: the coordinator is not an active enrolled party", ErrReviewStale)
+		case !coord.HasRole(party.RoleCoordinator):
+			return fmt.Errorf("%w: the sender no longer has the coordinator role", ErrReviewStale)
+		case viewErr != nil || flowErr != nil:
+			return fmt.Errorf("%w: the request no longer displays: %v", ErrReviewStale, errors.Join(viewErr, flowErr))
 		}
-		p.State = reqSigning
+		if err := party.CheckScope(coord.Scope, custody.Role(p.Role), view); err != nil {
+			return fmt.Errorf("%w: %v", ErrReviewStale, err)
+		}
+		if _, bad := flow.Refusal(custody.Role(p.Role), p.overNetwork()); bad || flow.Digest() != a.tok.flow {
+			return fmt.Errorf("%w: what the body moves for this signer is not what was shown", ErrReviewStale)
+		}
+		p.State, p.SigningSince = reqSigning, now.Unix()
 		q = *p
 		return writeJSON(w, signerRef, st)
 	})
@@ -832,8 +1071,8 @@ func (s Signer) Approve(ctx context.Context, a Approval) (Handled, error) {
 			if err != nil {
 				return err
 			}
-			if p := st.byID(q.ID); p != nil && p.State == reqSigning {
-				p.State = reqPending
+			if p := st.byID(q.ID); p != nil && p.State == reqSigning && p.SigningSince == q.SigningSince {
+				p.State, p.SigningSince = reqPending, 0
 			}
 			return writeJSON(w, signerRef, st)
 		})
@@ -848,7 +1087,11 @@ func (s Signer) Approve(ctx context.Context, a Approval) (Handled, error) {
 		if p == nil {
 			return ErrUnknownRequest
 		}
-		p.State, p.ResponseID, p.Response = reqApproved, hexMsg(rid), env
+		if p.State != reqSigning || p.SigningSince != q.SigningSince {
+			// Another approval took over a stale claim: its answer stands.
+			return fmt.Errorf("%w: it is %s", ErrNotPending, p.State)
+		}
+		p.State, p.SigningSince, p.ResponseID, p.Response = reqApproved, 0, hexMsg(rid), env
 		if err := writeJSON(w, signerRef, st); err != nil {
 			return err
 		}
@@ -950,7 +1193,7 @@ func (s Signer) Refuse(ctx context.Context, id party.MessageID) (Handled, error)
 		if q == nil {
 			return ErrUnknownRequest
 		}
-		if q.State != reqPending {
+		if !q.claimable(now, s.gateTimeout()) {
 			return fmt.Errorf("%w: it is %s", ErrNotPending, q.State)
 		}
 		fp, err := fpOfHex(q.From)
@@ -995,16 +1238,18 @@ func (s Signer) Refuse(ctx context.Context, id party.MessageID) (Handled, error)
 	return out, err
 }
 
-// Hello opens a connection to a coordinator when the signer has nothing else
-// to send, so that it can receive its pending requests. It is sent at once,
-// not queued, lives five minutes, and has no effect beyond authenticating the
-// connection (SPO-Xparty-INV-021).
+// NewHello seals a fresh Hello to a coordinator: a new message id and a
+// five-minute expiry each time. The tailcat client calls it, through the
+// callback the wiring gives it, as the first frame of every connection, so
+// that no connection starts with a message that is in the coordinator's
+// replay log (SPO-Xparty-INV-018, INV-021). The adapter holds no identity key:
+// the key stays here.
 //
-// spec: SPO-Xparty-INV-021
-func (s Signer) Hello(ctx context.Context, coordinator string, send ports.EnvelopeSender) error {
+// spec: SPO-Xparty-INV-018, SPO-Xparty-INV-021
+func (s Signer) NewHello(ctx context.Context, coordinator string) ([]byte, error) {
 	local, err := s.Kit.Local(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer local.Destroy()
 	var coord party.Party
@@ -1014,13 +1259,33 @@ func (s Signer) Hello(ctx context.Context, coordinator string, send ports.Envelo
 		return err
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !coord.Active() || !coord.HasRole(party.RoleCoordinator) {
-		return fmt.Errorf("%s is not an active coordinator", coordinator)
+		return nil, fmt.Errorf("%s is not an active coordinator", coordinator)
 	}
 	now := s.Clock.Now()
 	env, _, err := local.Seal(coord.Identity, party.Hello{}, now, now.Add(party.MaxHelloLifetime))
+	return env, err
+}
+
+// Hello sends one Hello to a coordinator at once, not queued. The tailcat
+// client already sends one as the first frame of every connection, so a signer
+// that has nothing to send only has to connect; Hello is for a transport that
+// does not (SPO-Xparty-INV-021).
+//
+// spec: SPO-Xparty-INV-021
+func (s Signer) Hello(ctx context.Context, coordinator string, send ports.EnvelopeSender) error {
+	env, err := s.NewHello(ctx, coordinator)
+	if err != nil {
+		return err
+	}
+	var coord party.Party
+	err = s.Store.View(ctx, func(r ports.Reader) error {
+		var err error
+		coord, err = s.Parties.ByName(r, coordinator)
+		return err
+	})
 	if err != nil {
 		return err
 	}

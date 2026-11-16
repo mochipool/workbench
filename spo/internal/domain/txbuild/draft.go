@@ -107,6 +107,10 @@ type Draft struct {
 	// parameters beside Message; see WithMetadata.
 	MetadataFiles     []MetadataFile
 	MessageEncryption string
+	// RequiredSigners are the key hashes listed in the body's required
+	// signers (key 14); see BodySpec.RequiredSigners. The workflow counts
+	// their witnesses itself.
+	RequiredSigners []KeyHash
 
 	mode layoutMode
 }
