@@ -42,6 +42,9 @@ func (Ledger) BuildCertificate(spec stake.Spec) (stake.Certificate, error) {
 	if err := spec.Validate(); err != nil {
 		return stake.Certificate{}, err
 	}
+	if spec.IsGovernance() {
+		return buildGovCertificate(spec)
+	}
 	cred := common.Credential{CredType: common.CredentialTypeAddrKeyHash, Credential: common.CredentialHash(spec.Stake)}
 	var cert any
 	switch spec.Kind {
@@ -119,6 +122,9 @@ func (Ledger) DecodeCertificate(envelope []byte) (stake.Certificate, error) {
 	raw, err := hex.DecodeString(e.CborHex)
 	if err != nil {
 		return stake.Certificate{}, errors.New("the certificate cborHex is not hex")
+	}
+	if c, ok, err := decodeGovCertificate(raw, envelope); ok {
+		return c, err
 	}
 	var w common.CertificateWrapper
 	if err := w.UnmarshalCBOR(raw); err != nil {

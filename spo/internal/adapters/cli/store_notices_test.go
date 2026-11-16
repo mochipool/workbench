@@ -20,6 +20,7 @@ type scriptedStore struct {
 	notices    []string
 	rekeyAdds  string // a notice the rekey adds
 	rekeyErr   error
+	keyErr     error  // returned together with the key (an unknown outcome)
 	closeAdds  string // a notice Close adds
 	closeErr   error
 	cleanupErr error
@@ -34,6 +35,9 @@ func (s *scriptedStore) rekey() (*secret.Buffer, error) {
 	s.calls = append(s.calls, "rekey")
 	if s.rekeyErr != nil {
 		return nil, s.rekeyErr
+	}
+	if s.keyErr != nil {
+		return secret.Take([]byte("ABCD-EFGH-IJKL-MNOP")), s.keyErr
 	}
 	if s.rekeyAdds != "" {
 		s.notices = append(s.notices, s.rekeyAdds)
@@ -254,5 +258,98 @@ func TestStoreVerifyWordingAndDeep(t *testing.T) {
 	out, err = run("--deep")
 	if err != nil || !deepCalled || !strings.Contains(out, "decrypted under the current keys") {
 		t.Errorf("--deep: %v called=%v\n%s", err, deepCalled, out)
+	}
+}
+
+func TestUnknownRekeyOutcomeShowsTheKeyWithGuidance(t *testing.T) {
+	for name, args := range map[string][]string{
+		"passphrase change": {"store", "passphrase", "change", "--new-passphrase-fd", "@NEWFD", "--recovery-key-fd", "@RKFD"},
+		"recovery-key new":  {"store", "recovery-key", "new", "--recovery-key-fd", "@RKFD"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			st := &scriptedStore{keyErr: ErrOutcomeUnknown}
+			stdout, _, err := storeRun(t, st, args...)
+			if err == nil || !errors.Is(err, ErrOutcomeUnknown) {
+				t.Fatalf("err %v", err)
+			}
+			for _, want := range []string{"valid ONLY IF the change took effect", "recovery key was written to file descriptor"} {
+				if !strings.Contains(stdout, want) {
+					t.Errorf("stdout lacks %q:\n%s", want, stdout)
+				}
+			}
+			wants := []string{"Reopen the workspace with the NEW", "OLD recovery key no longer works", "keep the key just shown", "the key just shown is void"}
+			if name == "recovery-key new" {
+				wants = []string{"Run `spo store recovery-key new` again", "valid key either way"}
+			}
+			for _, want := range wants {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("guidance lacks %q: %v", want, err)
+				}
+			}
+			if st.keyFile == nil {
+				t.Fatal("no key file")
+			}
+			st.keyFile.Seek(0, 0)
+			var b bytes.Buffer
+			b.ReadFrom(st.keyFile)
+			if !strings.Contains(b.String(), "ABCD-EFGH-IJKL-MNOP") {
+				t.Errorf("the key was not delivered: %q", b.String())
+			}
+			// explain keeps the specific advice.
+			if got := explain(err); got.Error() != err.Error() {
+				t.Errorf("explain replaced the advice: %v", got)
+			}
+		})
+	}
+}
+
+func TestOutcomeUnknownAdviceForOrdinaryCommands(t *testing.T) {
+	err := explain(ErrOutcomeUnknown)
+	for _, want := range []string{"may or may not have been stored", "spo store verify", "twice"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("advice lacks %q: %v", want, err)
+		}
+	}
+}
+
+// R6-F4: wording of the unknown-outcome path for `store recover`, which no
+// longer has an OLD passphrase to refer to.
+func TestUnknownRecoverOutcomeAdvice(t *testing.T) {
+	st := &scriptedStore{keyErr: ErrOutcomeUnknown}
+	rin := tokenFile(t, "ABCD-EFGH-IJKL-MNOP\n")
+	_, _, err := storeRunNoPass(t, st, "store", "recover", "--recovery-key-in-fd", rin, "--new-passphrase-fd", "@NEWFD", "--recovery-key-fd", "@RKFD")
+	if err == nil || !errors.Is(err, ErrOutcomeUnknown) {
+		t.Fatalf("err %v", err)
+	}
+	for _, want := range []string{"Try the NEW passphrase", "keep the key just shown", "run `spo store recover` again with the recovery key you used"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("advice lacks %q: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "OLD passphrase") {
+		t.Errorf("advice mentions the lost OLD passphrase: %v", err)
+	}
+}
+
+// R6-F4: a failed type-back in the unknown-outcome path does not call the key
+// "the valid key of the workspace".
+type wrongGroupTerm struct{}
+
+func (wrongGroupTerm) ReadSecret(context.Context, string) (*secret.Buffer, error) {
+	return secret.Take([]byte("ZZZZ")), nil
+}
+func (wrongGroupTerm) ReadLine(context.Context, string) (string, error) { return "", ErrNoTerminal }
+
+func TestUnconfirmedKeyInUnknownOutcomeIsNotCalledValid(t *testing.T) {
+	var out, errw bytes.Buffer
+	a := newApp(Deps{Out: &out, Err: &errw})
+	a.term = wrongGroupTerm{}
+	key := secret.Take([]byte("ABCD-EFGH-IJKL-MNOP"))
+	err := a.deliverUnknownRekey(context.Background(), key, -1, "recovery key", ErrOutcomeUnknown)
+	if err == nil {
+		t.Fatal("no error")
+	}
+	if strings.Contains(err.Error(), "valid key of the workspace") || !strings.Contains(err.Error(), "valid only if the change took effect") {
+		t.Errorf("wording: %v", err)
 	}
 }

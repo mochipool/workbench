@@ -108,6 +108,14 @@ The password policy of SPO-Ckey-INV-001 belongs to the `Vault` seal policy; the 
 * Authenticate `type` and `description` with the ciphertext in any new envelope (SPO-Ckey-SEC-004).
 * Refuse a malformed envelope (unparsable JSON, missing `type`, `description` or `cborHex`/`encrHex`) with a distinct error before any decryption attempt, so a corrupted file is not reported as a wrong password or retried forever (SPO-Ckey-PRE-003, SPO-Ckey-PRE-006, SPO-Ckey-PRE-010).
 
+*Observed 2026-11-16* (pinned gpg 2.4.8, upstream scripts of Update-2026-04, driven on a pseudo terminal; `spo/test/parity/workspace_test.go`):
+
+* An envelope made by `01_protectKey enc` decrypts in the port to the identical `cborHex`, and one made by the port decrypts through `01_protectKey dec`, for a password with a backslash, one with a trailing space and a plain one. The envelope the port renders (`keyfile.EncryptedEnvelope`) equals upstream's file byte for byte (two-space `jq -M .` form, trailing newline), mode `0400`.
+* The passphrase is the one `ask_pass` returned (see the quirk under SPO-Cui-IF-003): the keystrokes `Abc\def-12345` encrypt as `Abcdef-12345`, and the keystrokes alone do not open the file. A trailing space is kept (`IFS=` is empty). A port that wants the same keystrokes to work in upstream's prompt must encrypt with the unescaped form, and one that opens upstream files tries the keystrokes and the unescaped form (`keyfile.PasswordCandidates`).
+* A corrupted encrypted key (SPO-Ckey-PRE-010) given to `04d` was still asking for the password after four wrong strong passwords: the loop is real.
+* `gpg 2.4.8 --symmetric --no-autostart` with a static passphrase prints "no gpg-agent running in this session" and exits 2 although it wrote the message, so an isolated gpg run lets the agent start in its private home and stops it with `gpgconf --kill gpg-agent`. `--log-file /dev/null` (as upstream passes it) also hides every gpg diagnostic, including the stderr a port needs to tell a wrong passphrase ("decryption failed: Bad session key") from a damaged message ("no valid OpenPGP data found"); a truncated message can exit 0 with no output.
+* `--passphrase-file` reads one line, so a passphrase with a line break cannot be passed that way; the port refuses it.
+
 ## Open questions
 
 * The gpg version range in which `--passphrase` works without `--pinentry-mode loopback` is not stated by upstream. The packet structure quoted in SPO-Ckey-INV-003 was observed by encrypting with gpg 2.4.9.

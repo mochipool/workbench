@@ -105,7 +105,7 @@ func TestRewardAccountFromTheSnapshot(t *testing.T) {
 	}
 }
 
-// spec: SPO-Ptransfer-OUT-008, SPO-22b-PRE-002
+// spec: SPO-Ptransfer-OUT-007, SPO-22b-PRE-002
 func TestDRepStateFromTheSnapshot(t *testing.T) {
 	var id chain.DRepID
 	id.Hash[0] = 0x11

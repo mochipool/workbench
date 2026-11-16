@@ -17,6 +17,7 @@ import (
 
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/governance"
 )
 
 // KeyHash is the blake2b-224 hash of a stake verification key: the stake
@@ -44,6 +45,19 @@ const (
 const (
 	CertPoolRegistration CertKind = "pool-registration"
 	CertPoolRetirement   CertKind = "pool-retirement"
+)
+
+// The governance certificates (spec/upstream/scripts/21b, 21d, 23c, 23e). Their
+// credential is in Stake (the DRep key hash, or the committee cold key hash) and
+// not a stake credential: no stake key witnesses them. A committee authorisation
+// names the hot key in Hot. The anchor of a registration, an update or a
+// resignation is in Anchor.
+const (
+	CertDRepRegistration   CertKind = "drep-registration"
+	CertDRepUpdate         CertKind = "drep-update"
+	CertDRepRetirement     CertKind = "drep-retirement"
+	CertCommitteeAuthorize CertKind = "committee-hot-key-authorization"
+	CertCommitteeResign    CertKind = "committee-cold-resignation"
 )
 
 // DRepKind is the target of a vote delegation.
@@ -97,6 +111,11 @@ type Spec struct {
 	Pool    chain.PoolID // CertPoolDelegation, CertPoolRegistration, CertPoolRetirement
 	DRep    DRep         // CertVoteDelegation
 	Epoch   uint64       // CertPoolRetirement
+	// Hot is the authorised committee hot key hash (CertCommitteeAuthorize);
+	// Anchor the optional anchor of CertDRepRegistration, CertDRepUpdate and
+	// CertCommitteeResign.
+	Hot    KeyHash
+	Anchor governance.Anchor
 }
 
 // ErrBadSpec: a certificate spec that does not describe a certificate.
@@ -131,6 +150,24 @@ func (s Spec) Validate() error {
 		if s.Deposit != 0 {
 			return fmt.Errorf("%w: a retirement carries no deposit", ErrBadSpec)
 		}
+	case CertDRepRegistration, CertDRepRetirement:
+		if s.Deposit == 0 {
+			return fmt.Errorf("%w: a %s certificate carries the DRep deposit, which is zero", ErrBadSpec, s.Kind)
+		}
+		if s.Kind == CertDRepRetirement && !s.Anchor.IsZero() {
+			return fmt.Errorf("%w: a DRep retirement carries no anchor", ErrBadSpec)
+		}
+	case CertDRepUpdate, CertCommitteeResign:
+		if s.Deposit != 0 {
+			return fmt.Errorf("%w: a %s certificate carries no deposit", ErrBadSpec, s.Kind)
+		}
+	case CertCommitteeAuthorize:
+		if s.Deposit != 0 || !s.Anchor.IsZero() {
+			return fmt.Errorf("%w: a hot-key authorisation carries no deposit and no anchor", ErrBadSpec)
+		}
+		if s.Hot == (KeyHash{}) {
+			return fmt.Errorf("%w: a hot-key authorisation names the hot key", ErrBadSpec)
+		}
 	default:
 		return fmt.Errorf("%w: kind %q", ErrBadSpec, s.Kind)
 	}
@@ -160,6 +197,16 @@ func (c Spec) Feature() custody.Feature {
 		return custody.FeatPoolRegistrationOper
 	case CertPoolRetirement:
 		return custody.FeatPoolRetirement
+	case CertDRepRegistration:
+		return custody.FeatDRepRegistration
+	case CertDRepUpdate:
+		return custody.FeatDRepUpdate
+	case CertDRepRetirement:
+		return custody.FeatDRepRetirement
+	case CertCommitteeAuthorize:
+		return custody.FeatCommitteeAuthorize
+	case CertCommitteeResign:
+		return custody.FeatCommitteeResign
 	default:
 		return custody.FeatVoteDelegation
 	}
@@ -179,9 +226,24 @@ func (c Spec) Features() []custody.Feature {
 // and owners, not a stake credential of its own.
 func (c Spec) IsPool() bool { return c.Kind == CertPoolRegistration || c.Kind == CertPoolRetirement }
 
+// IsGovernance reports a DRep or committee certificate: its witness is the
+// DRep key or the committee cold key, not a stake key.
+func (c Spec) IsGovernance() bool {
+	switch c.Kind {
+	case CertDRepRegistration, CertDRepUpdate, CertDRepRetirement, CertCommitteeAuthorize, CertCommitteeResign:
+		return true
+	}
+	return false
+}
+
+// GovernanceWitnesses is the witness count of a DRep or committee
+// certificate transaction (SPO-21b-INV-004, SPO-23c-INV-004): the payment
+// key and the DRep or committee cold key.
+const GovernanceWitnesses uint = 2
+
 // Paid is the deposit a transaction with this certificate pays.
 func (c Spec) Paid() chain.Lovelace {
-	if c.Kind == CertRegistration || c.Kind == CertPoolRegistration {
+	if c.Kind == CertRegistration || c.Kind == CertPoolRegistration || c.Kind == CertDRepRegistration {
 		return c.Deposit
 	}
 	return 0
@@ -189,7 +251,7 @@ func (c Spec) Paid() chain.Lovelace {
 
 // Refunded is the deposit a transaction with this certificate gets back.
 func (c Spec) Refunded() chain.Lovelace {
-	if c.Kind == CertDeregistration {
+	if c.Kind == CertDeregistration || c.Kind == CertDRepRetirement {
 		return c.Deposit
 	}
 	return 0

@@ -131,5 +131,5 @@ Use case `CheckDRepOnChain(drepRef)` on aggregate `DRep` (read side).
 
 ## Open questions
 
-* Whether the pinned cardano-cli prints the CIP-105 or CIP-129 form for `governance drep id`. This decides whether rule 6 shows the right "legacy" and "CIP129" lines. A real run settles it.
+* ~~Whether the pinned cardano-cli prints the CIP-105 or CIP-129 form for `governance drep id`.~~ Resolved 2026-11-16: the legacy CIP-105 form, so rule 6 shows the right "legacy" line (see 21a). The Go port keeps the credential type of a CIP-129 id (key `22`, script `23`) instead of dropping it, so a script DRep can be checked from its id.
 * Whether `query drep-state` accepts the same hash for `--drep-key-hash` and `--drep-script-hash` in one call and returns both matches; the script depends on it.

@@ -51,6 +51,7 @@ func trustRows(t *testing.T, s *Store) {
 	}
 	defer rows.Close()
 	recs := map[string]chainState{}
+	tags, tagOf := map[string]string{}, map[string]string{}
 	for rows.Next() {
 		var id, tag []byte
 		var kind string
@@ -64,12 +65,13 @@ func trustRows(t *testing.T, s *Store) {
 			t.Fatal(err)
 		}
 		recs[string(id)] = chainState{version: uint64(v), hash: h}
+		tags[string(tag)], tagOf[string(id)] = string(id), string(tag)
 	}
 	head, err := chainHead(ctx, s.db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.known = &chainKnown{head: head, recs: recs}
+	s.known = &chainKnown{head: head, recs: recs, tags: tags, tagOf: tagOf}
 }
 
 // snapshot hashes every file in dir (the store, -wal, -shm, the head file and
@@ -219,16 +221,29 @@ func TestTriggerDoesNotTurnRekeyIntoLoss(t *testing.T) {
 	}
 }
 
+// onWriteConn makes every write connection run stmt before its transaction.
+// Writes run on connections of their own, so a TEMP trigger (outside
+// sqlite_master, where the allow-list does not look) must be created on each of
+// them through a test hook.
+func onWriteConn(t *testing.T, stmt string) {
+	t.Helper()
+	afterWriteConnect = func(c *sql.Conn) {
+		if _, err := c.ExecContext(ctx, stmt); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { afterWriteConnect = nil })
+}
+
 // F1(c): even if the schema check were bypassed, what a rekey or an update
-// wrote is read back before COMMIT. A TEMP trigger lives on the handle's own
-// connection, outside sqlite_master, so the allow-list does not see it and only
-// the write verification can.
+// wrote is read back before COMMIT. Only the write verification can catch a
+// TEMP trigger.
 func TestWriteVerificationCatchesRowsRewrittenBehindTheStore(t *testing.T) {
 	t.Run("rekey, records", func(t *testing.T) {
 		s, path, _ := scratch(t)
 		putSecret(t, s, skey0, "the kes key")
 		put(t, s, counter, "7")
-		exec(t, s, `CREATE TEMP TRIGGER evil AFTER UPDATE OF wrapped_key ON main.records BEGIN UPDATE main.records SET wrapped_key = old.wrapped_key, owner_sealed = old.owner_sealed WHERE id = new.id; END`)
+		onWriteConn(t, `CREATE TEMP TRIGGER evil AFTER UPDATE OF wrapped_key ON main.records BEGIN UPDATE main.records SET wrapped_key = old.wrapped_key, owner_sealed = old.owner_sealed WHERE id = new.id; END`)
 		rk, err := s.ChangePassphraseRekey(ctx, passT(t, "np"))
 		if !errors.Is(err, ErrVerify) || rk != nil {
 			t.Fatalf("rekey: %v (key %v)", err, rk != nil)
@@ -243,7 +258,7 @@ func TestWriteVerificationCatchesRowsRewrittenBehindTheStore(t *testing.T) {
 	t.Run("rekey, key slots", func(t *testing.T) {
 		s, path, _ := scratch(t)
 		put(t, s, counter, "7")
-		exec(t, s, `CREATE TEMP TRIGGER evil2 AFTER INSERT ON main.keyslots BEGIN UPDATE main.keyslots SET wrapped_key = zeroblob(48) WHERE id = new.id; END`)
+		onWriteConn(t, `CREATE TEMP TRIGGER evil2 AFTER INSERT ON main.keyslots BEGIN UPDATE main.keyslots SET wrapped_key = zeroblob(48) WHERE id = new.id; END`)
 		rk, err := s.ChangePassphraseRekey(ctx, passT(t, "np"))
 		if !errors.Is(err, ErrVerify) || rk != nil {
 			t.Fatalf("rekey: %v (key %v)", err, rk != nil)
@@ -259,12 +274,12 @@ func TestWriteVerificationCatchesRowsRewrittenBehindTheStore(t *testing.T) {
 		s, _, _ := scratch(t)
 		put(t, s, counter, "1")
 		// A trigger that silently puts the old content back.
-		exec(t, s, `CREATE TEMP TRIGGER undo AFTER UPDATE ON main.records BEGIN UPDATE main.records SET nonce = old.nonce, ciphertext = old.ciphertext, wrapped_key = old.wrapped_key, owner_sealed = old.owner_sealed, version = old.version WHERE id = new.id; END`)
+		onWriteConn(t, `CREATE TEMP TRIGGER undo AFTER UPDATE ON main.records BEGIN UPDATE main.records SET nonce = old.nonce, ciphertext = old.ciphertext, wrapped_key = old.wrapped_key, owner_sealed = old.owner_sealed, version = old.version WHERE id = new.id; END`)
 		err := s.Update(ctx, func(w ports.Writer) error { return w.Put(counter, []byte("2")) })
 		if !errors.Is(err, ErrVerify) {
 			t.Fatalf("update: %v", err)
 		}
-		exec(t, s, `DROP TRIGGER undo`)
+		afterWriteConnect = nil
 		if b, _ := get(s, counter); string(b) != "1" {
 			t.Errorf("the refused update left %q", b)
 		}
@@ -274,7 +289,7 @@ func TestWriteVerificationCatchesRowsRewrittenBehindTheStore(t *testing.T) {
 	})
 	t.Run("audit row", func(t *testing.T) {
 		s, _, _ := scratch(t)
-		exec(t, s, `CREATE TEMP TRIGGER undo AFTER INSERT ON main.audit BEGIN UPDATE main.audit SET at = 0 WHERE seq = new.seq; END`)
+		onWriteConn(t, `CREATE TEMP TRIGGER undo AFTER INSERT ON main.audit BEGIN UPDATE main.audit SET at = 0 WHERE seq = new.seq; END`)
 		err := s.Update(ctx, func(w ports.Writer) error { return w.Put(counter, []byte("2")) })
 		if !errors.Is(err, ErrVerify) {
 			t.Fatalf("update: %v", err)
@@ -763,8 +778,26 @@ func TestReadOnlyVerifyReportsAMissingHeadFileWithoutCreatingIt(t *testing.T) {
 	if !found {
 		t.Errorf("no notice about the missing head file: %q", res.Notices)
 	}
-	if after := snapshot(t, filepath.Dir(path)); !reflect.DeepEqual(before, after) {
-		t.Errorf("a read-only verification changed the files:\n%v\n%v", before, after)
+	checkUnchanged(t, before, snapshot(t, filepath.Dir(path)))
+}
+
+// checkUnchanged: every file that existed is byte for byte as it was (the -shm
+// holds no data and may be rebuilt) and the only new files are the -wal and -shm
+// that SQLite creates; the store removes nothing.
+func checkUnchanged(t *testing.T, before, after map[string]string) {
+	t.Helper()
+	for f, h := range before {
+		if strings.HasSuffix(f, "-shm") {
+			continue
+		}
+		if after[f] != h {
+			t.Errorf("%s changed or was removed", f)
+		}
+	}
+	for f := range after {
+		if _, had := before[f]; !had && !strings.HasSuffix(f, "-wal") && !strings.HasSuffix(f, "-shm") {
+			t.Errorf("%s was created", f)
+		}
 	}
 }
 

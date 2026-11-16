@@ -21,9 +21,11 @@ type Withdrawal struct {
 type layoutMode int
 
 const (
-	modePayment layoutMode = iota // Destination gets Amount, the payer the rest
-	modeChange                    // one output, the change, to the payer
-	modeClaim                     // withdrawals go to Destination; the payer gets the inputs less the fee
+	modePayment    layoutMode = iota // Destination gets Amount, the payer the rest
+	modeChange                       // one output, the change, to the payer
+	modeClaim                        // withdrawals go to Destination; the payer gets the inputs less the fee
+	modeMint                         // one change output with the minted and burned assets applied
+	modeSendAssets                   // Destination gets Send and the lovelace, the payer the rest
 )
 
 // Errors of the stake drafts.
@@ -104,6 +106,11 @@ func (d Draft) flows() (credit, debit chain.Lovelace, err error) {
 			return
 		}
 	}
+	for _, p := range d.Proposals {
+		if debit, err = addL(debit, p.Action.Deposit); err != nil {
+			return
+		}
+	}
 	return
 }
 
@@ -150,7 +157,7 @@ func (d Draft) RequiredStakeKeys() []stake.KeyHash {
 		}
 	}
 	for _, c := range d.Certificates {
-		if !c.IsPool() { // a pool certificate names no stake credential
+		if !c.IsPool() && !c.IsGovernance() { // a pool or governance certificate names no stake credential
 			add(c.Stake)
 		}
 	}
@@ -181,10 +188,26 @@ func (d Draft) AttachmentLines() []string {
 			}
 		case stake.CertPoolRetirement:
 			out = append(out, fmt.Sprintf("retirement of pool %s at epoch %d", c.Pool.Bech32(), c.Epoch))
+		case stake.CertDRepRegistration:
+			out = append(out, fmt.Sprintf("DRep registration %x, deposit %d lovelace", c.Stake[:], c.Deposit))
+		case stake.CertDRepUpdate:
+			out = append(out, fmt.Sprintf("DRep update %x", c.Stake[:]))
+		case stake.CertDRepRetirement:
+			out = append(out, fmt.Sprintf("DRep retirement %x, refund %d lovelace", c.Stake[:], c.Deposit))
+		case stake.CertCommitteeAuthorize:
+			out = append(out, fmt.Sprintf("committee hot key %x authorised for cold key %x", c.Hot[:], c.Stake[:]))
+		case stake.CertCommitteeResign:
+			out = append(out, fmt.Sprintf("committee cold key %x resigns", c.Stake[:]))
 		}
 	}
 	for _, w := range d.Withdrawals {
 		out = append(out, fmt.Sprintf("withdrawal of %d lovelace from %s", w.Amount, w.Reward))
+	}
+	for _, v := range d.Votes {
+		out = append(out, fmt.Sprintf("%s vote %s on %s", v.Vote.Voter.Role, v.Vote.Decision, v.Vote.Action.Hex()))
+	}
+	for _, p := range d.Proposals {
+		out = append(out, fmt.Sprintf("%s proposal, deposit %d lovelace", p.Action.Kind, p.Action.Deposit))
 	}
 	return out
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 
 	"github.com/blinklabs-io/bursa"
@@ -140,25 +141,6 @@ func encodeOutput(b []byte, o txbuild.Output) ([]byte, error) {
 	return b, nil
 }
 
-// encodeAuxData writes the auxiliary data of a CIP-20 message in the
-// Alonzo-and-later form cardano-cli writes: tag 259 over a map whose key 0
-// is the metadata map.
-func encodeAuxData(lines []string) []byte {
-	var b []byte
-	b = cborTag(b, 259)
-	b = cborMap(b, 1)
-	b = cborUint(b, 0)
-	b = cborMap(b, 1)
-	b = cborUint(b, 674)
-	b = cborMap(b, 1)
-	b = cborText(b, "msg")
-	b = cborArray(b, len(lines))
-	for _, l := range lines {
-		b = cborText(b, l)
-	}
-	return b
-}
-
 func blake256(b []byte) [32]byte {
 	var out [32]byte
 	h, _ := blake2b.New256(nil)
@@ -200,9 +182,19 @@ func (Ledger) BuildBody(spec txbuild.BodySpec) (txbuild.TxBody, error) {
 			return txbuild.TxBody{}, fmt.Errorf("input %s#%d appears twice", ins[i].TxID, ins[i].Index)
 		}
 	}
-	var aux []byte
-	if len(spec.Message) > 0 {
-		aux = encodeAuxData(spec.Message)
+	aux, err := composeAuxData(spec.MetadataFiles, spec.Message, spec.MessageEncryption)
+	if err != nil {
+		return txbuild.TxBody{}, err
+	}
+	var mint []byte
+	var scripts []byte
+	if len(spec.Mint) > 0 {
+		if mint, err = encodeMint(spec.Mint); err != nil {
+			return txbuild.TxBody{}, err
+		}
+		if scripts, err = mintScriptSet(spec.MintScripts); err != nil {
+			return txbuild.TxBody{}, err
+		}
 	}
 	n := 4
 	if len(spec.Certificates) > 0 {
@@ -212,6 +204,20 @@ func (Ledger) BuildBody(spec txbuild.BodySpec) (txbuild.TxBody, error) {
 		n++
 	}
 	if aux != nil {
+		n++
+	}
+	if mint != nil {
+		n++
+	}
+	var votes []byte
+	if len(spec.Votes) > 0 {
+		var err error
+		if votes, err = encodeVotingProcedures(spec.Votes); err != nil {
+			return txbuild.TxBody{}, err
+		}
+		n++
+	}
+	if len(spec.Proposals) > 0 {
 		n++
 	}
 	var body []byte
@@ -283,15 +289,47 @@ func (Ledger) BuildBody(spec txbuild.BodySpec) (txbuild.TxBody, error) {
 			body = cborUint(body, uint64(w.amt))
 		}
 	}
+	if mint != nil {
+		// Key 9: the mint field, policy -> asset name -> signed amount. cardano-cli
+		// writes it before the auxiliary data hash (key 7).
+		body = cborUint(body, 9)
+		body = append(body, mint...)
+	}
 	if aux != nil {
 		h := blake256(aux)
 		body = cborUint(body, 7)
 		body = cborBytes(body, h[:])
 	}
+	if len(spec.Votes) > 0 {
+		// Key 19: the voting procedures of every vote file, merged under one map.
+		body = cborUint(body, 19)
+		body = append(body, votes...)
+	}
+	if len(spec.Proposals) > 0 {
+		// Key 20: the proposal procedures as a tag-258 set in the order given.
+		props := make([][]byte, len(spec.Proposals))
+		for i, p := range spec.Proposals {
+			if len(p.CBOR) == 0 {
+				return txbuild.TxBody{}, errors.New("a proposal has no encoding")
+			}
+			props[i] = p.CBOR
+		}
+		body = cborUint(body, 20)
+		body = encodeProposals(body, props)
+	}
 
 	tx := cborArray(nil, 4)
 	tx = append(tx, body...)
-	tx = append(tx, 0xa0, 0xf5) // empty witness set, valid
+	if scripts != nil {
+		// The native scripts the mint field refers to travel in the witness
+		// set (key 1), as cardano-cli writes them into the body file; the
+		// signers add key 0.
+		tx = append(tx, 0xa1, 0x01)
+		tx = append(tx, scripts...)
+		tx = append(tx, 0xf5)
+	} else {
+		tx = append(tx, 0xa0, 0xf5) // empty witness set, valid
+	}
 	if aux != nil {
 		tx = append(tx, aux...)
 	} else {
@@ -417,3 +455,60 @@ var (
 	_ ports.TxBodyBuilder       = Ledger{}
 	_ ports.TxAssembler         = Ledger{}
 )
+
+// encodeMint writes the mint field: policies ascending, asset names ascending
+// within a policy, each amount a signed integer. An asset named twice is one
+// entry whose amounts are added; a policy-asset whose amounts cancel is
+// refused.
+func encodeMint(entries []txbuild.MintEntry) ([]byte, error) {
+	type key struct {
+		p [28]byte
+		n string
+	}
+	sum := map[key]int64{}
+	for _, e := range entries {
+		k := key{e.Asset.Policy, string(e.Asset.Name)}
+		s := sum[k]
+		if (e.Quantity > 0 && s > math.MaxInt64-e.Quantity) || (e.Quantity < 0 && s < math.MinInt64-e.Quantity) {
+			return nil, fmt.Errorf("%w: the mint of %x.%x", txbuild.ErrOverflow, e.Asset.Policy, e.Asset.Name)
+		}
+		sum[k] = s + e.Quantity
+	}
+	var keys []key
+	for k, v := range sum {
+		if v == 0 {
+			return nil, fmt.Errorf("the mint of %x.%x adds up to zero", k.p, k.n)
+		}
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if c := bytes.Compare(keys[i].p[:], keys[j].p[:]); c != 0 {
+			return c < 0
+		}
+		return keys[i].n < keys[j].n
+	})
+	var policies [][]key
+	for _, k := range keys {
+		if n := len(policies); n > 0 && policies[n-1][0].p == k.p {
+			policies[n-1] = append(policies[n-1], k)
+		} else {
+			policies = append(policies, []key{k})
+		}
+	}
+	var b []byte
+	b = cborMap(b, len(policies))
+	for _, p := range policies {
+		pid := p[0].p
+		b = cborBytes(b, pid[:])
+		b = cborMap(b, len(p))
+		for _, k := range p {
+			b = cborBytes(b, []byte(k.n))
+			if q := sum[k]; q > 0 {
+				b = cborUint(b, uint64(q))
+			} else {
+				b = cborHead(b, 1, uint64(-(q + 1)))
+			}
+		}
+	}
+	return b, nil
+}

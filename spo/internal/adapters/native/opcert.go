@@ -29,7 +29,11 @@ func (VaultSigner) Profile() custody.Profile {
 		Allow(custody.RolePoolCold, custody.OpIssueOpCert, custody.OpWitnessTx).
 		// A software signer signs a body hash: no limit on features.
 		Allow(custody.RolePayment, custody.OpWitnessTx).
-		Allow(custody.RoleStake, custody.OpWitnessTx)
+		Allow(custody.RoleStake, custody.OpWitnessTx).
+		Allow(custody.RolePolicy, custody.OpWitnessTx).
+		Allow(custody.RoleDRep, custody.OpWitnessTx).
+		Allow(custody.RoleCommitteeCold, custody.OpWitnessTx).
+		Allow(custody.RoleCommitteeHot, custody.OpWitnessTx)
 }
 
 // coldSeed extracts the 32-byte seed from a cardano-cli StakePoolSigningKey_ed25519

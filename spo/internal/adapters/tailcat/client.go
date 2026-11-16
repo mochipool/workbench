@@ -25,9 +25,10 @@ type ClientConfig struct {
 	// Coordinator is who the address leads to. Send accepts only this
 	// recipient.
 	Coordinator party.Fingerprint
-	// ExpectServerKey is the coordinator's node key from the same Invite.
-	// When set, NewClient refuses an address whose server key differs, so a
-	// mismatched address and invite are caught before any dial.
+	// ExpectServerKey is the coordinator's node key from the same Invite. It
+	// is required: NewClient refuses an address whose server key differs, so
+	// a mismatched address and invite are caught before any dial, and refuses
+	// to be built without one.
 	ExpectServerKey *party.NodeKey
 	// Port is the coordinator's served port; zero means DefaultPort.
 	Port        uint16
@@ -64,6 +65,9 @@ var (
 // NewClient checks the configuration and builds the tailcat client. It does
 // not dial.
 func NewClient(cfg ClientConfig) (*Client, error) {
+	if cfg.ExpectServerKey == nil || *cfg.ExpectServerKey == (party.NodeKey{}) {
+		return nil, errors.New("tailcat: the coordinator's node key from the invitation is required")
+	}
 	var addr tc.Addr
 	if err := cfg.Address.Use(func(b []byte) error { addr = tc.Addr(b); return nil }); err != nil {
 		return nil, err
@@ -72,7 +76,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("tailcat: bad address: %w", err)
 	}
-	if cfg.ExpectServerKey != nil && party.NodeKey(info.ServerPublic.Raw32()) != *cfg.ExpectServerKey {
+	if party.NodeKey(info.ServerPublic.Raw32()) != *cfg.ExpectServerKey {
 		return nil, errors.New("tailcat: the address leads to a different node key than the invite named")
 	}
 	priv, err := nodePrivate(cfg.NodeKey)
@@ -97,6 +101,10 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	return &Client{cfg: cfg, idle: idle, port: port, inbox: make(chan []byte, MaxFramesPerConn), done: make(chan struct{}),
 		tc: &tc.Client{Server: addr, Key: priv, Logf: logf, DERPMapURL: cfg.DERPMapURL}}, nil
 }
+
+// Transport is the client as the sending side of multisig: its kind is a
+// network.
+func (c *Client) Transport() ports.Transport { return ports.NewTransport(c, ports.ViaNetwork) }
 
 // PublicKey is the node public key the coordinator must have enrolled.
 func (c *Client) PublicKey() party.NodeKey { return party.NodeKey(c.tc.PublicKey().Raw32()) }

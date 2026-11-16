@@ -127,7 +127,7 @@ python3 spec/tools/specctl.py coverage --tests spo --config spo/spec-coverage.to
 
 Things that will bite:
 
-* **The sealed store is not yet cleared for real keys.** It has had four security reviews; the fourth left one required fix (an interrupt during commit can report a committed rekey as failed) and a list of recommended ones. See the *Status* table in the concerns page before relying on it.
+* **The sealed store passed its seventh security review** with operating conditions (ADR 0003). Its history matters: each of the first five fix rounds introduced a new defect, mostly around rekeying, locking and SQLite's side files. Change `spo/internal/adapters/sqlitestore` only with a regression test per change and an Opus review afterwards. **Multi-party signing is not yet cleared**: see the *Status* table in the concerns page.
 * **Parity tests that need cardano-signer skip inside the Nix sandbox.** The signer is a prebuilt binary whose interpreter path cannot be patched, so it does not run there. Run them in the development loop: `source <scratch>/env.sh` style variables as described in `spo/test/parity/parity_test.go`, then `go test ./test/parity/`. The Nix check allows exactly that skip and fails on any other.
 * **Tailcat adds about 18 MB** to the binary and a large test-only dependency set (concern T8).
 

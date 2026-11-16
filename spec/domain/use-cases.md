@@ -14,13 +14,13 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 
 | Use case | Specs | Requirements |
 | --- | --- | --- |
-| `EnrollParty` | [`Xparty`](../extensions/Xparty.md) | 46 |
-| `ImportSigningResponse` | [`Xparty`](../extensions/Xparty.md) | 46 |
+| `EnrollParty` | [`Xparty`](../extensions/Xparty.md) | 50 |
+| `ImportSigningResponse` | [`Xparty`](../extensions/Xparty.md) | 50 |
 | `ImportWorkspace` | [`Pfiles`](../upstream/patterns/Pfiles.md) | 51 |
 | `ProtectSigningKey` | [`01protectKey`](../upstream/scripts/01_protectKey.md) | 29 |
-| `RequestSignatures` | [`Xparty`](../extensions/Xparty.md) | 46 |
-| `ReviewSigningRequest` | [`Xparty`](../extensions/Xparty.md) | 46 |
-| `RevokeParty` | [`Xparty`](../extensions/Xparty.md) | 46 |
+| `RequestSignatures` | [`Xparty`](../extensions/Xparty.md) | 50 |
+| `ReviewSigningRequest` | [`Xparty`](../extensions/Xparty.md) | 50 |
+| `RevokeParty` | [`Xparty`](../extensions/Xparty.md) | 50 |
 | `SealKey` | [`Pfiles`](../upstream/patterns/Pfiles.md) | 51 |
 | `StoreArtefact` | [`Pfiles`](../upstream/patterns/Pfiles.md) | 51 |
 | `UnprotectSigningKey` | [`01protectKey`](../upstream/scripts/01_protectKey.md) | 29 |
@@ -219,4 +219,4 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 | [`25a_genAction`](../upstream/scripts/25a_genAction.md) | Generate a governance action file | governance | 75 | draft |
 | [`25b_regAction`](../upstream/scripts/25b_regAction.md) | Submit governance actions | governance, transaction-construction | 71 | draft |
 
-Totals: 68 specs, 2303 requirements, 83 use cases.
+Totals: 68 specs, 2307 requirements, 83 use cases.

@@ -32,7 +32,8 @@ A workspace is a directory with:
 * `workspace.spo`: the sealed store. Every record, name and key is encrypted; see [ADR 0003](../explanation/adr/README.md).
 * `workspace.spo.head`: the chain head recorded after every write, for rollback detection. Not secret; keep it beside `workspace.spo`.
 * `spo.toml`: non-secret settings, mode `0600`. See [spo.toml](./spo-toml.md).
-* `offlineTransfer.json` (offline mode only, made on the online machine): read by `wallet send`; see its `--transfer-file`.
+* `offlineTransfer.json` (offline mode only, made on the online machine with `offline new` and `offline add`): read by `wallet send` and `address`, and managed by the `offline` commands; see `--transfer-file`.
+* `extracted/` (created by `offline extract`): the files carried in the transfer file.
 
 Without `--upstream-layout`, every command that touches keys or records opens the sealed store.
 
@@ -155,11 +156,11 @@ Changes `mode` in `spo.toml`. `light` is refused while there is no `[koios]` sec
 
 Prints what the environment of this workspace's configuration provides, from the same `Env` the commands use. It opens no store and uses no network.
 
-* **Chain capabilities**: for each of `tip`, `sync-check`, `opcert-counter`, `protocol-parameters`, `utxo`, `reward-account`, `pool-state`, `drep-state`, `reward-account-crosscheck`, `tx-submit`, `tx-queue`, the provider that supplies it (and its endpoint), or under **Not available** the reason and the remedy, for example "offline mode has no transaction submitter; queue to a transfer file instead" or "no chain provider is configured: spo provider set koios".
-* **Local**: clock, genesis, key generation (`kes-keygen`, `vrf-keygen`, `cold-keygen`, `payment-keygen`, `stake-keygen`), `mnemonic-generation`, `wallet-derivation`, `address-building`, address inspection, minimum output, fee estimation, transaction body and assembly, `certificate-building` and `certificate-decoding`.
+* **Chain capabilities**: for each of `tip`, `sync-check`, `opcert-counter`, `protocol-parameters`, `utxo`, `reward-account`, `pool-state`, `drep-state`, `reward-account-crosscheck`, `tx-submit`, `tx-queue`, and the governance readers `committee-state`, `governance-actions`, `constitution`, `last-enacted-action`, `stake-distribution`, `epoch`, `voting-summary`, `drep-state-crosscheck`, the provider that supplies it (and its endpoint), or under **Not available** the reason and the remedy, for example "offline mode has no transaction submitter; queue to a transfer file instead" or "no chain provider is configured: spo provider set koios".
+* **Local**: clock, genesis, key generation (`kes-keygen`, `vrf-keygen`, `cold-keygen`, `payment-keygen`, `stake-keygen`), `mnemonic-generation`, `wallet-derivation`, `address-building`, address inspection, minimum output, fee estimation, transaction body and assembly, `certificate-building` and `certificate-decoding`, and for the governance commands `drep-keygen`, `committee-cold-keygen`, `committee-hot-keygen`, `governance-derivation`, `vote-file`, `action-file` (always), `anchor-fetch` (light) and `anchor-verification` (never: no verifier is built), and for the pool commands `pool-certificate-building`, `pool-certificate-decoding`, `metadata-hash`, `tx-id` and `tx-view` (always), `transfer-file` (always: the bundle at `--transfer-file`) and `extract-sink` (always), `era` (offline with a transfer file; light, from the Koios tip), `transfer-attach` (offline, with a transfer file), `metadata-fetch` (light) and `ticker-protection` (never: see [Pool registration](#pool-registration-and-retirement)).
 * **Signers**: each signer with its profile (role, then the operations it can do).
 
-Offline mode lists `utxo`, `protocol-parameters`, `tx-queue`, `reward-account` and `drep-state` only when the transfer file (`offlineTransfer.json` in the workspace directory) exists. Light mode takes the protocol parameters from the network's hosted light-mode parameters file, as upstream does, and everything else from Koios. Online mode names the missing cardano-node socket adapter.
+Offline mode lists `utxo`, `protocol-parameters`, `tx-queue`, `reward-account` and `drep-state` only when the transfer file (`offlineTransfer.json` in the workspace directory) exists. Light mode takes the protocol parameters from the network's hosted light-mode parameters file, as upstream does, and everything else from Koios. Online mode names the missing cardano-node socket adapter. The Koios adapter reads the committee (`GET /committee_info`), the open governance actions with their votes (`/proposal_list`, `/proposal_votes`), the epoch and era (`/tip`) and the voting summary of an action (`/proposal_voting_summary`); the constitution and the last enacted action ids come from the hosted light-mode parameters document, as upstream's light mode takes them. Every field follows the three-valued rule: an empty, failed or uninterpretable answer is unknown, never none. No adapter reads the DRep and pool stake distribution (upstream's light mode does not; `stake-distribution` is absent in every mode, with the reason) or a second DRep source (`drep-state-crosscheck`). Offline mode has none of the governance readers. Readers are picked up by type assertion when an adapter gains the interface.
 
 ### `pool keys generate POOL`
 
@@ -199,6 +200,29 @@ Issues the operational certificate for the waiting KES key. Needs: signers, cloc
 | `--shelley-genesis FILE` | Override the bundled Shelley genesis. Required with a binary that has no manifest. |
 | `--byron-genesis FILE` | Override the bundled Byron genesis. Needed for the offline slot on a network with Byron epochs when none is bundled. |
 | `--byron-to-shelley-epochs N` | Override the network preset (mainnet 208, preprod 4, preview 0). |
+
+### `pool opcert check [POOL] [--next] [--opcert-file FILE] [--number N]`
+
+```
+spo pool opcert check [POOL] [--next] [--opcert-file FILE] [--number N]
+     [--offline] [--shelley-genesis FILE] [--byron-genesis FILE] [--byron-to-shelley-epochs N]
+```
+
+Upstream `04e`. Checks the counter and the KES period of an operational certificate: the newest stored one of `POOL` (`--number N` picks another), or the file given with `--opcert-file` (no pool name then). Without `--next` the counter in the certificate must equal the counter of the pool's last block on the chain (0 and no block yet passes); with `--next` it must be that counter plus one. The KES period of the tip must lie inside the certificate's validity. Needs: tip, genesis, opcert-counter.
+
+The output lists the pool, the counter in the certificate, the counter on the chain with its source, the counter the next certificate needs, the KES window, and a verdict line:
+
+| Verdict | Meaning |
+| --- | --- |
+| `VERDICT: OK` | Both checks passed. |
+| `VERDICT: FALSE` | A check failed; each reason is listed. |
+| `VERDICT: UNKNOWN` | The chain's counter is not known and no check failed: no connection, a pool the provider does not know (an unregistered pool and a wrong network look alike), or offline mode. The reason is printed. |
+
+**Exit status: `0` only for OK. FALSE and UNKNOWN both exit `1`.** Upstream `04e` exits `0` after a FALSE verdict. This is a deliberate change: a script that tests the status must not read a FALSE or UNKNOWN verdict as success. An unknown counter together with a KES period out of range is FALSE.
+
+### `pool opcert counter POOL|POOL-ID`
+
+Shows the counter of the pool's last block on the chain (with its source), the number the next certificate must carry, and the registered ticker and name when the provider states them. `POOL` is a stored pool name (its `.pool.id-bech`), or a pool id in bech32 or hex. Needs: opcert-counter. The exit status is `1` when the chain's answer is not known.
 
 ### `wallet new`
 
@@ -262,10 +286,10 @@ Two policy flags exist, never on by default, and a mode never implies them. A re
 
 | Flag | Gives up |
 | --- | --- |
-| `--allow-unverified` | The chain checks that cannot be made: the registration state of the stake address (in offline mode an address the transfer file does not hold is an unknown answer), the pool registration (no reader in any mode today), the DRep registration. A wrong answer only makes the ledger reject the transaction. The summary lists each skipped check. |
+| `--allow-unverified` | The chain checks that cannot be made: the registration state of the stake address (in offline mode an address the transfer file does not hold is an unknown answer), the pool registration (light mode reads it from Koios; offline has no reader unless the transfer file holds pool state), the DRep registration. A wrong answer only makes the ledger reject the transaction. The summary lists each skipped check. |
 | `--single-source` | The corroboration of a read that rests on one source: the reward balance and deposit before a deregistration, the pool registration. A false answer from one provider can cost the deposit or the rewards. The summary says the read rested on one source. |
 
-The second reward-account source (`reward-account-crosscheck`) exists in no mode today, so `stake deregister` always needs `--single-source` and `stake delegate` needs it as soon as a pool reader exists.
+The second reward-account source (`reward-account-crosscheck`) exists in no mode today, so `stake deregister` always needs `--single-source`, and so do `stake delegate` and `pool register` whenever a pool reader exists (light mode).
 
 ### `stake register`
 
@@ -319,10 +343,202 @@ Locates each external tool in the manifest and applies the version gates. Exit s
 
 Prints the binary version and release set.
 
+## Pool registration and retirement
+
+The pool commands are upstream `05a`, `05c`, `05d` (the importing side), `05e`, `07a` and `07b`. They work on the descriptor `POOL.pool.json` kept in the workspace. The descriptor holds a pool's operator fields (the ones you edit) and what the commands record (ids, metadata hash, certificate and registration records, the open witness collection, the registration protection key).
+
+### `pool descriptor new`, `show`, `set`
+
+```
+spo pool descriptor new POOL [--owner NAME[:WITNESS]]... [--reward NAME] [--pledge LOVELACE] [--cost LOVELACE]
+    [--margin 0.05] [--relay TYPE:ENTRY:PORT]... [--meta-name S] [--meta-description S] [--meta-ticker S]
+    [--meta-homepage URL] [--meta-url URL] [--extended-meta-url URL]
+spo pool descriptor show POOL
+spo pool descriptor set POOL KEY=VALUE...
+```
+
+`new` writes the template of upstream `05a` (SPO-05a-IF-003), in the upstream field order, with the operator fields from the flags. A field you do not give keeps a `CHANGE-ME` placeholder (owner, reward account, relay, metadata) or the template default (pledge `100000000000`, cost `10000000000`, margin `0.10`); the output lists both. It refuses to overwrite a descriptor. `--owner` is `NAME` or `NAME:WITNESS`; the witness is `local` (this workspace signs) unless you give another word, conventionally `external`, which makes that owner's stake key sign elsewhere. `--relay` is `IP:ADDRESS:PORT`, `IP6:ADDRESS:PORT`, `DNS:NAME:PORT` or `SRV:NAME` (no port).
+
+`show` prints the descriptor without `regProtectionKey` (it says on stderr that the key is set). `set` changes the operator fields `poolOwner` (`NAME[:WITNESS],...`), `poolRewards`, `poolPledge`, `poolCost`, `poolMargin`, `poolRelays` (`TYPE:ENTRY:PORT,...`), `poolMetaName`, `poolMetaDescription`, `poolMetaTicker`, `poolMetaHomepage`, `poolMetaUrl`, `poolExtendedMetaUrl`. Each value is validated as certificate generation validates it, and once no placeholder is left the whole descriptor is checked. Fields the commands write are refused, and so is any change while a witness collection is open. A change after the certificate was generated is reported: generate the certificate again.
+
+### `pool cert generate`
+
+```
+spo pool cert generate POOL [--raise-cost] [--accept-ticker] [--protection-key-fd N] [--transfer-file PATH] [--offline] [genesis options]
+spo pool metadata show POOL [--extended]
+```
+
+Checks the descriptor, then in one store transaction writes the metadata, the pool id files and `POOL.pool.cert`; a refusal writes nothing. The descriptor must hold no `CHANGE-ME` placeholder. The two prompts of `05a` are flags, both off: `--raise-cost` raises `poolCost` to the protocol minimum, `--accept-ticker` accepts the ticker with disallowed characters replaced by `_`. The refusal names the flag and the figures. `--protection-key-fd N` reads the registration protection key from an inherited descriptor (never from argv or the environment); it is recorded in the descriptor for the offline entry, never sent anywhere and never printed. `metadata show` prints the public `POOL.metadata.json` (or the extended one) so you can publish it at `poolMetaUrl`. Needs: `protocol-parameters`, `clock`, `pool-certificate-building`, `metadata-hash`.
+
+### `pool register`
+
+```
+spo pool register POOL PAYER [--type REG|REREG] [--allow-unverified] [--single-source] [--allow-pending]
+    [--message TEXT]... [--transfer-file PATH] [--offline] [genesis options]
+```
+
+Builds one transaction with the pool certificate and the owners' delegation certificates, collects one witness per signer (the cold key, `PAYER`, every owner), and sends it (light) or queues it (offline). `PAYER` names the stored address that pays the fee and, for a first registration, the pool deposit. Needs: the `wallet send` needs, `pool-certificate-decoding`, `certificate-decoding`, `tx-id`, `metadata-hash`, `clock`.
+
+**There is no `--yes`.** The flag exists only to be refused, with the reason, before anything is read. You are asked twice: before the body is built and the witnesses collected (a decline stores nothing), and again before the transaction goes out. The default is No. Both summaries show the registration type (first registration, which pays the deposit, or re-registration), the pool id, pledge, cost, margin, reward account, owners, relays, metadata URL and hash, the deposit, the fee, the TTL, who holds each signature (this workspace, hardware wallet, signs elsewhere with the party, missing or signed), the sources the checks rest on and each check not made. No key and no protection key is printed.
+
+The type is decided from the chain when a pool reader exists (light mode) and from the descriptor otherwise; `--type` forces it. A chain check that cannot be made refuses unless `--allow-unverified`; a registration state that rests on one source (`reward-account-crosscheck` exists in no mode) refuses unless `--single-source`. In light mode the published metadata at `poolMetaUrl` is downloaded and its hash compared with `poolMetaHash` (https only, or http to the loopback; at most 3 redirects, all https; 20 seconds in all; at most 512 bytes; no credentials, cookies or proxy; the User-Agent is `spo`); offline it is not, and the summary says so. The ticker-protection lookup is not built (hazard H6: upstream sends the ticker and the protection key to a third-party URL): `ticker-protection` is absent in every mode with the reason "ticker protection lookup is not built; it will be opt-in and will never send the protection key", and the use case runs without it. After a queued registration the metadata files are attached to the transfer file.
+
+`--allow-pending` leaves the slots whose signer is not in this workspace empty. The collection stays open, a witness transfer file `POOL_SLOT_ID.witness` is written to the workspace for each open slot, the output lists each open slot with its role and holder, and the command exits 0 saying `waiting for N signature(s)`. Without the flag a registration that cannot be assembled yet is an error. Import each signed file with `pool witness import`, then run `pool register` again: the stored collection is final, so `--type` and `--message` are refused while it is open, and one confirmation remains.
+
+### `pool witness import`, `pool witness status`
+
+```
+spo pool witness import POOL FILE [--overwrite] [--offline] [genesis options]
+spo pool witness status POOL [--offline] [genesis options]
+```
+
+`import` verifies the signed witness in `FILE` against the stored body hash and the key hash of its slot, and stores it. The file carries no authenticated sender, and the output says so. A slot that already holds a witness is replaced only with `--overwrite`. `status` prints the lifecycle (`Draft`, `CertificateIssued`, `CollectingWitnesses`, `Registered`, `RetirementScheduled`) and, for an open collection, its id, body hash, payer, TTL, the state at the current slot (`OpenIncomplete`, `OpenComplete`, `Expired`) and each slot with its holder and whether it is signed. Needs: `tx-id` (import also `tip`, `genesis`); `status` shows the current slot when it can.
+
+### `pool status`
+
+```
+spo pool status POOL|POOL-ID [--transfer-file PATH] [--offline] [genesis options]
+```
+
+Reads the registration of a pool (upstream `05e`) and prints each fact with its `[source]`: status (`registered`, `retiring`, `retired`, `not registered`), name, ticker, retirement epoch, pledge, cost, margin, reward address, metadata URL and hash, as far as the provider reports them. An answer the provider did not give is `unknown` and fails the command; it is never `not registered`. Needs: `pool-state` (light mode: Koios; offline: only a transfer file that holds pool state).
+
+### `pool retire-cert`, `pool retire`
+
+```
+spo pool retire-cert POOL [--epoch N] [--transfer-file PATH] [--offline] [genesis options]
+spo pool retire POOL PAYER [--message TEXT]... [--transfer-file PATH] [--offline] [genesis options]
+```
+
+`retire-cert` (upstream `07a`) stores `POOL.pool.dereg-cert` for `--epoch` (default: the next epoch); an epoch outside the window the ledger accepts is moved to the nearest edge and the output says so. `retire` (upstream `07b`) sends it in one transaction signed by `PAYER` and the cold key; no deposit moves. As for `pool register`, `--yes` is refused and the question is always asked. The epoch is checked again before a fee is spent. Needs: the `wallet send` needs, `pool-certificate-decoding`, `clock`.
+
+## Governance: DReps, committee, votes, actions
+
+Governance commands follow the stake commands: the same transaction options (`--message TEXT`, `--yes`, `--transfer-file PATH`, `--offline`, the genesis options), the same confirmation (default No; no terminal and no `--yes` refuses) and the same `wallet send` needs, checked before the passphrase is asked. Each command adds the needs named below; a refusal lists every missing capability with its reason. Key material and mnemonics are never printed. The summary names the account, the payer, the certificate, votes or proposals, the deposit paid or refunded, the fee, the valid-until slot, the sources and the checks not made. A **Details** block adds what the public files hold: the DRep id, the anchor URL and hash, each vote as voter role, action id (hex and `gov_action1...`) and decision, each proposal as kind, deposit, return address and anchor. With `--yes` the same summary is printed after signing, attachments, deposit and refund included: the use case returns the summary it prepared.
+
+Four policy flags exist, never on by default and never implied by a mode. A refusal that one of them would lift names it and what it gives up.
+
+| Flag | Where | Gives up |
+| --- | --- | --- |
+| `--anchor-unverified` | `vote create`, `action create`, `drep status`, `drep register`, `committee resign` | The check of the anchor document against CIP-100/108/119: this build has no verifier (`anchor-verification` is absent in every mode). The hash is recorded as given. The output says `NOT CHECKED`. |
+| `--single-source` | `drep retire` | The corroboration of the DRep deposit the refund rests on. A second DRep source (capability `drep-state-crosscheck`) corroborates it; none exists in any mode today, so the command needs the flag. A false answer from one provider can cost the deposit. The summary says the read rested on one source. |
+| `--allow-unverified` | `action submit` | The check that the deposit-return stake address is registered, when no reader answers. A wrong answer only makes the ledger reject the transaction. The summary lists the skipped check. |
+| `--allow-anchor-clear` | `drep register` | Lets an update without an anchor replace the anchor the DRep has on chain with none. |
+
+An anchor is `--anchor-url URL` (https or ipfs, at most 128 characters) with `--anchor-hash HEX`. Where the mode downloads documents (light) the document is hashed and its own hash replaces `--anchor-hash`. Where it does not (offline) both are required together and the hash is recorded as given. `drep register` and `committee resign` give an anchor the same policy as `vote create` (`drep register` for CIP-119, `committee resign` for CIP-100): with an anchor and no verifier they are refused, before anything is read, unless `--anchor-unverified` is given, and the decision is recorded and printed as `Decision: the anchor document was not verified`.
+
+### `drep keys generate`, `committee keys generate-cold`, `committee keys generate-hot`
+
+```
+spo drep keys generate NAME [--mnemonic | --mnemonic-in-fd N] [--account N] [--index N]
+spo committee keys generate-cold NAME [same options]
+spo committee keys generate-hot NAME [--replace] [same options]
+```
+
+Upstream `21a`, `23a`, `23b`. Stores `NAME.drep.{vkey,skey,id}` or `NAME.cc-cold.*` / `NAME.cc-hot.*` (`vkey`, `skey`, `hash`); prints the id or hash in every spelling, never the signing key. `--mnemonic` derives the key (CIP-1852, role 3, 4 or 5) from a fresh 24-word phrase stored sealed and not shown; `--mnemonic-in-fd N` derives it from a phrase read from descriptor N; `--account` and `--index` select the path and need one of them. An existing key is refused; `--replace` (hot key only) deletes the old key, its signing key and its files first. Needs: `drep-keygen`, `committee-cold-keygen` or `committee-hot-keygen` (`governance-derivation` with a mnemonic, plus `mnemonic-generation` for a fresh phrase). The era is checked when parameters are available.
+
+### `drep register`
+
+```
+spo drep register NAME PAYER [--anchor-url URL --anchor-hash HEX] [--anchor-unverified] [--allow-anchor-clear] [common options]
+```
+
+Upstream `21b`. There is no separate update command: the use case reads the DRep state and makes a registration (pays the `dRepDeposit`) or an update (no deposit); an unknown answer is refused. The payment key and the DRep key sign (two witnesses). Needs also: `certificate-building`, `drep-state` (offline: the DRep must be in the transfer file, `offline add-drep`). Stores `NAME.drep-reg.cert` after the transaction was sent or queued.
+
+### `drep retire`
+
+```
+spo drep retire NAME PAYER [--single-source] [common options]
+```
+
+Upstream `21d`. Refunds the deposit of the on-chain DRep state. "Not registered" and an unknown answer are errors. Needs `--single-source` unless a second DRep source answers (`drep-state-crosscheck`, absent today; two sources that disagree are refused). Needs also: `certificate-building`, `drep-state`. Stores `NAME.drep-ret.cert`.
+
+### `drep status`
+
+```
+spo drep status NAME|DREP-ID [--anchor-unverified] [--transfer-file PATH] [--offline] [genesis options]
+```
+
+Upstream `21c`. Prints registered, registered but expired, or not registered, with the ids, epoch, deposit, expiry, delegated stake, anchor and its check, and the source. Needs: `drep-state`. The `epoch` reader is optional: without one (or when it fails) registration, deposit and anchor are still reported, the standing is `registered (expiry not assessed)` and the epoch line says `unknown` with the reason. An expiry or stake the provider does not state is printed as `unknown: <reason>`, never as zero; a DRep the provider has never seen (Koios answers `[]`) is an error, not "not registered".
+
+### `committee authorize`, `committee resign`, `committee status`
+
+```
+spo committee authorize COLD HOT PAYER [common options]
+spo committee resign COLD PAYER [--anchor-url URL --anchor-hash HEX] [--anchor-unverified] [common options]
+spo committee status NAME|HASH|ID
+```
+
+Upstream `23c`, `23e`, `23d`. `authorize` and `resign` sign with the payment key and the cold key; the hot key never signs. They read the committee state from the chain and are refused when the transaction would be queued (offline). A resigned cold key cannot be authorised; a key that is not on chain cannot resign; a key that already resigned resigns again and the output says so. Stores `HOT.cc-hot.cert` and `COLD.cc-cold-ret.cert` after sending. `status` tries the hash as a key and as a script credential, as cold key and then as authorised hot key; "not a member" is an answer. The Koios committee list states the authorisation and the expiration epoch but neither a member status (`Active`, `Expired`) nor a pending change: those lines are omitted, not invented. Needs also: `certificate-building` (not `status`), `committee-state`.
+
+### `vote create`, `vote submit`, `vote tally`
+
+```
+spo vote create VOTER ACTION-ID yes|no|abstain [--anchor-url URL --anchor-hash HEX] [--anchor-unverified]
+spo vote create VOTER all [--anchor-unverified]
+spo vote submit PAYER VOTE-FILE... [--voter NAME] [common options]
+spo vote tally [all | ACTION-ID | VOTER | STAKE-ACCOUNT | ACTION-KIND]...
+```
+
+Upstream `24a`, `24b`, `24c`. `create` writes `NAME_yymmddHHMMSS.drep.vote`, `.cc-hot.vote` or `.pool.vote`; with an action id and a decision nothing is asked, with `all` you are asked per open action (default cancel). The action must be open and the voter's role must be allowed to vote on its kind. Needs: `governance-actions`, `protocol-parameters`, `epoch`, `clock`, `vote-file`; it is refused offline. `submit` puts the votes in one transaction signed by the payment key and the voter's key; no chain state is consulted. The voter's key is derived from the vote files: the stored key of the files' role whose hash is the voter in them, looked up under the part of each file name before its time stamp; `--voter NAME` overrides it, and a refusal that no stored key matches says to pass it. Needs: `vote-file`. `tally` is a read model: percentages, thresholds and verdict per DRep, pool and committee body for each matching open action, with the source of each input. Nothing is decided or gated by it. Needs: `governance-actions`, `protocol-parameters`, `epoch` and one of `stake-distribution` (percentages computed here from the DRep and pool stake and the committee) or `voting-summary` (light mode: the percentages are the provider's own, Koios `proposal_voting_summary`, as upstream's light mode takes them; only the thresholds, from the protocol parameters and the committee quorum, are computed here). No adapter reads the stake distribution: in light mode `voting-summary` serves.
+
+### `action create`, `action submit`
+
+```
+spo action create KIND RETURN --anchor-url URL [--anchor-hash HEX] [--anchor-unverified] [kind options]
+spo action submit PAYER ACTION-FILE... [--allow-unverified] [common options]
+```
+
+Upstream `25a`, `25b`. `KIND` is `info`, `no-confidence`, `update-committee`, `new-constitution`, `hard-fork`, `treasury-withdrawal` or `parameter-change`. `RETURN` is a stored stake account or a stake address. Kind options: `--amount` and `--to` (treasury), `--version MAJOR[.MINOR]` (hard fork), `--threshold`, `--add-key`, `--add-script`, `--remove-key`, `--remove-script`, `--term-epoch` (committee), `--constitution-url`, `--constitution-hash`; an option of another kind is refused by name. `parameter-change` is refused (`ErrParameterChangeUnsupported`, matched by type, not text): its file is not built yet and nothing is written. `create` needs `protocol-parameters`, `clock` and `action-file`, and each kind adds only what it reads: `last-enacted-action` for the kinds that name a previous action (`no-confidence`, `update-committee`, `new-constitution`, `hard-fork`, `parameter-change`), `constitution` for `treasury-withdrawal` and `parameter-change`, `epoch` for `update-committee`. An `info` action therefore needs no chain reader and also runs offline from the transfer file's parameters. `submit` puts the proposals in one transaction paid by `PAYER` and signed by the payment key, valid for 25000 slots; the return address must be registered (checked when a `reward-account` reader answers). Treasury withdrawals and parameter changes carry the constitution's guardrails script, which this build does not evaluate: the command checks the rest and refuses, printing what is missing. After success it prints the id each proposal will have. Needs: `action-file`.
+
+## Address queries
+
+### `address NAME|ADDRESS`
+
+```
+spo address NAME|ADDRESS [--offline] [--transfer-file PATH]
+     [--shelley-genesis FILE] [--byron-genesis FILE] [--byron-to-shelley-epochs N]
+```
+
+Upstream `01_queryAddress`. `NAME` is a stored address (`NAME`, or `NAME.staking` for the stake address); an address is used as given. An ADA Handle is refused (not supported yet). Needs: address-inspection and one of utxo, reward-account.
+
+For a payment address: the UTxOs (reference and lovelace; native assets with policy, name and CIP-14 fingerprint; datum hash), the total lovelace and the asset totals. For a stake address: the registration deposit, the rewards, the pool and vote delegation and the governance deposits that will be refunded to it. Every line names the source that stated it (`[koios preview]`, `[offline transfer file]`); a value the source did not state is printed as "not stated" with the reason, never as zero. An address with no funds and an unregistered stake address are errors.
+
+In offline mode the answer is read from the offline transfer file: the output carries a `snapshot` line with the date of the snapshot and says it is not the chain as it is now. An address that is not in the file is refused with the remedy (`offline add` on the online machine).
+
+## The transfer file: `offline`
+
+The transfer file (`offlineTransfer.json`, in the workspace directory unless `--transfer-file PATH` says otherwise) carries a snapshot of the chain to the offline machine, the signed transactions queued there back to the online one, and small files in both directions. The format is upstream's and stays compatible with `01_workOffline.sh`. Every `offline` command takes `--transfer-file`.
+
+`new`, `add`, `add-drep` and `execute` need the chain: they are refused in offline mode, before any prompt, with the missing capabilities and why (for example `sync-check: offline mode has no chain to check the sync of`). `info`, `attach`, `extract` and `clear` work in every mode and read only the transfer file: they do not open the workspace and do not ask for the passphrase (`extract` still uses the workspace directory to place `extracted/`).
+
+### `offline new [--yes]`
+
+Writes a new transfer file: the protocol parameters, the era, the work mode, an empty queue. Needs: transfer-file, clock, protocol-parameters, sync-check. An existing file is replaced; when it holds queued transactions or attached files you are asked first (default No; `--yes` approves).
+
+### `offline add NAME`, `offline add-drep NAME DREP-ID`
+
+`add` records the UTxOs of a stored payment address (`NAME`) or the reward account of a stored stake address (`NAME.staking`) and refreshes the protocol parameters. `add-drep` records the state of a DRep (`DREP-ID` in bech32). The output names the amounts, the source of the state and of the parameters, and the date. A stake address that is not registered, a DRep whose state is not known and a source that is not synced are refused and the file is left as it was. Needs: the `new` needs, plus address-inspection, utxo and reward-account (`add`), or drep-state (`add-drep`).
+
+### `offline info`
+
+Shows the general information (usable or not, era, versions, last action, history length), the addresses with their balances, the DReps, the queued transactions (position, type, era, date, names, and the fee and id computed from the signed transaction), and the attached files by name and size. Every other field of a queue entry is the file writer's claim and is not compared with the transaction; the output says so. A missing file is an error.
+
+### `offline execute [N] [--yes]`
+
+Submits the `N`th queued transaction (default 1) through the chain provider (light mode). It first checks that the UTxOs of the paying address, and the rewards for a withdrawal, are as in the snapshot. It then prints a summary (the entry, the tx id computed from the signed transaction, the provider, `WARNING` lines, `checked` lines and `NOT CHECKED` lines) and asks `Submit this transaction? [y/N]`; the default is No, and no terminal without `--yes` refuses. A declined run submits nothing and leaves the queue as it was (exit `1`). `--yes` is the explicit skip of the question: the summary is still printed (after the run, from what the checks found), the skip is reported, and the exit status is as for any other run. The entry is removed from the queue only after the submission. Pool registrations also check the published metadata hash. Needs: transfer-file, clock, tx-submit, utxo, reward-account, tx-id.
+
+### `offline attach FILE [--name NAME]`, `offline extract [--dir DIR] [--overwrite]`
+
+`attach` stores a file of at most 1 MiB under `NAME` (default: the file's own name, which must be a plain file name). `extract` writes every attached file that was not extracted yet into `DIR`, by default the new subdirectory `extracted/` of the workspace. It never writes into the workspace directory itself (`--dir` naming it is refused), and writes only plain file names inside `DIR`: an entry whose name is a path (`../x`, an absolute path) is refused and listed, and makes the command fail. An existing file is kept (`skipped`) unless `--overwrite` is given. An extracted file is removed from the transfer file and the history records it.
+
+### `offline clear transactions|history|files [--yes]`
+
+Removes the queue, the history or the attached files and records that in the history. Clearing the queue or the files discards work that is stored nowhere else, so you are asked first (default No; `--yes` approves). Clearing the history is not asked.
+
 ## Output rules
 
 No command prints a passphrase, a token or a signing key. The recovery key appears only in the one-time display of `init`, `store passphrase change`, `store recovery-key new` and `store recover` (or on the descriptor given), and is read only by `store recover`. Error messages never include them.
 
 ## Exit status
 
-`0` on success, `1` on any error. The message is on stderr, prefixed `spo:`.
+`0` on success, `1` on any error. The message is on stderr, prefixed `spo:`. A check whose verdict is not OK (`pool opcert check`: FALSE or UNKNOWN) is an error, unlike upstream `04e`, which exits `0` after a FALSE verdict.

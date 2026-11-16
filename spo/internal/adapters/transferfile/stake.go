@@ -181,11 +181,11 @@ func (f *File) RewardAccount(_ context.Context, addr chain.StakeAddress) (chain.
 
 // DRepState implements ports.DRepStateReader from
 // drep."<DRep id>".drepStateJSON, which `01_workOffline add-drep` stores
-// (SPO-Ptransfer-OUT-008): `[]` for a DRep that is not registered and
+// (SPO-Ptransfer-OUT-007): `[]` for a DRep that is not registered and
 // `[credential, {deposit, ...}]` for one that is. A DRep that has no entry is
 // Unknown; the entry's key may be the legacy or the CIP-129 id.
 //
-// spec: SPO-Ptransfer-OUT-008, SPO-22b-PRE-002
+// spec: SPO-Ptransfer-OUT-007, SPO-22b-PRE-002
 func (f *File) DRepState(_ context.Context, id chain.DRepID) (chain.Reading[chain.DRepState], error) {
 	doc, err := f.load()
 	if err != nil {

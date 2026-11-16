@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
@@ -71,6 +72,16 @@ func mapErr(err error) error {
 	return err
 }
 
+// busyOrLocked reports a plain SQLITE_BUSY (5) or SQLITE_LOCKED (6) error.
+func busyOrLocked(err error) bool {
+	var se *sqlite.Error
+	if errors.As(err, &se) {
+		c := se.Code() & 0xff
+		return c == sqliteBusy || c == 6
+	}
+	return false
+}
+
 func tagFor(keys *seal.Keys, name string, kind string, num int) ([]byte, error) {
 	return keys.Index.Tag(tagNamespace, []byte(name), []byte(kind), []byte(strconv.Itoa(num)))
 }
@@ -125,15 +136,19 @@ var errBadVersion = errors.New("bad version")
 
 // fetchTag reads the record row with lookup tag tag, or ports.ErrNotFound.
 // Every row it returns has been compared with the handle's record map: its
-// version and hash must be what the audit chain recorded for its id, or the
-// result is an ErrVerify (a record changed or rolled back behind this
-// handle's back).
+// version and hash must be what the audit chain recorded for its id, and its
+// tag the one the map holds for that id, or the result is an ErrVerify (a
+// record changed or rolled back behind this handle's back). So is a missing row
+// for a tag the map lists.
 func (t *txn) fetchTag(tag []byte) (*recRow, error) {
 	var r recRow
 	var v int64
 	err := t.q.QueryRowContext(t.ctx, `SELECT id, kind, version, nonce, wrapped_key, owner_sealed, ciphertext FROM records WHERE lookup_tag = ?`, tag).
 		Scan(&r.id, &r.kind, &v, &r.sealed.Nonce, &r.sealed.WrappedKey, &r.sealed.Owner, &r.sealed.Ciphertext)
 	if errors.Is(err, sql.ErrNoRows) {
+		if _, live := t.s.known.tags[string(tag)]; live {
+			return nil, errRecordChanged() // the chain lists a record with this tag, and it is gone
+		}
 		return nil, ports.ErrNotFound
 	}
 	if err != nil {
@@ -147,7 +162,7 @@ func (t *txn) fetchTag(tag []byte) (*recRow, error) {
 	if err != nil {
 		return nil, err
 	}
-	if st, ok := t.s.known.recs[string(r.id)]; !ok || st.deleted || st.version != r.version || !bytes.Equal(st.hash, h) {
+	if st, ok := t.s.known.recs[string(r.id)]; !ok || st.deleted || st.version != r.version || !bytes.Equal(st.hash, h) || t.s.known.tags[string(tag)] != string(r.id) {
 		return nil, errRecordChanged()
 	}
 	return &r, nil
@@ -680,7 +695,14 @@ func (s *Store) checkEpoch(ctx context.Context, q dbq) error {
 //
 // Every record row a View, Update or Open then reads (fetchTag) is compared
 // with the map: its version and recordHash must be the recorded ones, else the
-// call returns an ErrVerify that names nothing. The handle's own commits are
+// call returns an ErrVerify that names nothing. The map also holds the lookup
+// tag of every live record (verification reads the tags; the audit entries do
+// not carry them, so for a record the chain says was written since, extend reads
+// the row by its id and requires its hash to be the recorded one): a lookup
+// that finds no row for a tag the map lists, or a row under another id, is the
+// same ErrVerify, not "not found". Without it a record deleted behind the
+// handle's back, with one junk row inserted so the row count still balances,
+// would read as absent and a Put would create it again. The handle's own commits are
 // not applied to the map directly: the next transaction's catchUp reads them
 // back from the chain like anybody else's (one MAC check per row), which makes
 // them the same code path. A Rekey drops the map (the chain starts a new
@@ -748,6 +770,7 @@ func (s *Store) extend(ctx context.Context, q dbq) error {
 		return err
 	}
 	prev := k.head
+	touchedIDs := map[string]bool{}
 	for _, r := range fresh {
 		if uint64(r.seq) != prev.Seq+1 || !bytes.Equal(r.prev, prev.MAC) {
 			return changed("has a row out of sequence")
@@ -775,10 +798,16 @@ func (s *Store) extend(ctx context.Context, q dbq) error {
 			if why := noteEntry(k.recs, e); why != "" {
 				return changed("has an inconsistent record history (" + why + ")")
 			}
+			touchedIDs[string(e.ID)] = true
 		}
 		prev = Head{Seq: uint64(r.seq), MAC: r.mac}
 	}
 	k.head = prev
+	for id := range touchedIDs {
+		if err := k.bindTag(ctx, q, id); err != nil {
+			return err
+		}
+	}
 	live := 0
 	for _, st := range k.recs {
 		if !st.deleted {
@@ -795,48 +824,168 @@ func (s *Store) extend(ctx context.Context, q dbq) error {
 	return nil
 }
 
-// withWriteTx runs body inside BEGIN IMMEDIATE ... COMMIT on a dedicated
-// connection, so a concurrent writer waits for the busy timeout and then
-// fails with ports.ErrConflict, instead of failing later on a lock upgrade.
-// When body returns a new chain head it is recorded in the head file after
-// the commit. committed reports whether the transaction committed: a non-nil
-// error with committed set means only the head file write failed. The caller
-// holds the gate.
-func (s *Store) withWriteTx(ctx context.Context, body func(q dbq) (*Head, error)) (committed bool, err error) {
-	conn, err := s.db.Conn(ctx)
+// ErrOutcomeUnknown: a COMMIT returned an error and the store could not read
+// the file back to find out whether it took effect. Open the workspace again and
+// look before repeating the operation. Rekey, ChangePassphraseRekey and
+// AddRecoverySlot return it together with the new recovery key text, which is
+// valid only if the change took effect.
+var ErrOutcomeUnknown = errors.New("sqlitestore: a commit returned an error and whether it took effect could not be determined; check the workspace before repeating the operation")
+
+// afterWriteConnect is a test hook: called with a write connection after it has
+// been opened, before its transaction begins.
+var afterWriteConnect func(*sql.Conn)
+
+// execCommit runs COMMIT. (A variable so a test can make it report an error for
+// a commit that happened.)
+var execCommit = func(ctx context.Context, conn *sql.Conn) error {
+	_, err := conn.ExecContext(ctx, "COMMIT")
+	return err
+}
+
+// writeConn opens a connection of its own for one write transaction (see
+// CONCURRENCY). It refuses a path that no longer names the file this handle
+// has locked. The caller closes it with the returned function.
+func (s *Store) writeConn(ctx context.Context) (*sql.Conn, func(), error) {
+	if err := s.samePath(); err != nil {
+		return nil, nil, err
+	}
+	db, err := openDB(s.path, false, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		db.Close()
+		return nil, nil, err
+	}
+	if afterWriteConnect != nil {
+		afterWriteConnect(conn)
+	}
+	if err := s.samePath(); err != nil { // the connection opened what the path named a moment ago
+		conn.Close()
+		db.Close()
+		return nil, nil, err
+	}
+	return conn, func() { conn.Close(); db.Close() }, nil
+}
+
+// samePath refuses a path that names another file than the one this handle has
+// open and locked (the file was replaced behind the handle's back).
+func (s *Store) samePath() error {
+	a, err := os.Stat(s.path)
+	b, err2 := s.lock.Stat()
+	if err != nil || err2 != nil || !os.SameFile(a, b) {
+		return &VerifyError{Problems: []string{"the path no longer names the workspace file this handle opened (it was replaced); nothing was done"}}
+	}
+	return nil
+}
+
+// checkWriteSnapshot is the first thing a write transaction does, right after
+// BEGIN IMMEDIATE, on the connection that goes on to write: it makes SQLite
+// parse the schema again from the file (PRAGMA writable_schema=RESET; the
+// connection parsed it while connecting, before it held the write lock), then
+// checks the key epoch and compares the schema text with the allow-list. Under
+// the write lock nothing can change between these and the statements that
+// follow, so the schema checked is the schema executed.
+func (s *Store) checkWriteSnapshot(ctx context.Context, q dbq) error {
+	if _, err := q.ExecContext(ctx, `PRAGMA writable_schema=RESET`); err != nil {
+		return err
+	}
+	if err := s.checkEpoch(ctx, q); err != nil {
+		return err
+	}
+	return checkSchema(ctx, q, s.schemaV)
+}
+
+// withWriteTx runs body inside BEGIN IMMEDIATE ... COMMIT on a connection of its
+// own, so a concurrent writer waits for the busy timeout and then fails with
+// ports.ErrConflict, instead of failing later on a lock upgrade. When body
+// returns a new chain head it is recorded in the head file after the commit.
+// committed reports whether the transaction committed (a failure to advance the
+// head file after it is a notice, not an error). The caller holds the gate.
+//
+// The caller's context ends the transaction only before COMMIT starts (ENDING A
+// WRITE, in the package comment). If COMMIT reports an error, confirm (or, when
+// it is nil, whether the chain holds the row body returned the head of) says
+// whether the transaction took effect.
+func (s *Store) withWriteTx(ctx context.Context, body func(q dbq) (*Head, error), confirm func(context.Context, dbq) (bool, error)) (committed bool, err error) {
+	return s.withWriteTxMode(ctx, false, body, confirm)
+}
+
+// withWriteTxMode is withWriteTx. With strict set (a Rekey, whose new recovery
+// key exists nowhere else), any COMMIT error other than a plain busy or locked
+// one (SQLite primary codes 5 and 6) is ErrOutcomeUnknown whatever a read-back
+// shows: a COMMIT that failed on fsync may have left its frame in the WAL,
+// where a crash can make it take effect.
+func (s *Store) withWriteTxMode(ctx context.Context, strict bool, body func(q dbq) (*Head, error), confirm func(context.Context, dbq) (bool, error)) (committed bool, err error) {
+	conn, closeConn, err := s.writeConn(ctx)
 	if err != nil {
 		return false, err
 	}
-	defer conn.Close()
+	defer closeConn()
+	nc := context.WithoutCancel(ctx)
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return false, mapErr(err)
 	}
 	defer func() {
 		if !committed {
-			conn.ExecContext(context.WithoutCancel(ctx), "ROLLBACK")
+			conn.ExecContext(nc, "ROLLBACK")
 		}
 	}()
-	if err := s.checkEpoch(ctx, conn); err != nil {
-		return false, err
-	}
-	if err := checkSchema(ctx, conn, s.schemaV); err != nil {
+	if err := s.checkWriteSnapshot(ctx, conn); err != nil {
 		return false, err
 	}
 	head, err := body(conn)
 	if err != nil {
 		return false, mapErr(err)
 	}
-	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return false, mapErr(err)
+	// The point of no return: until here the context cancels the transaction.
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if cerr := execCommit(nc, conn); cerr != nil {
+		// Nothing about this connection can be trusted (a COMMIT that failed may
+		// have left its transaction open, which would show our own writes): close
+		// it and read the file back on a new one.
+		closeConn()
+		if strict && !busyOrLocked(cerr) {
+			return false, fmt.Errorf("%w (commit: %v)", ErrOutcomeUnknown, cerr)
+		}
+		took, derr := s.readBack(nc, head, confirm)
+		if derr != nil {
+			return false, fmt.Errorf("%w (commit: %v; reading the file back: %v)", ErrOutcomeUnknown, cerr, derr)
+		}
+		if !took {
+			return false, mapErr(cerr)
+		}
+		s.notice("a commit reported an error (" + cerr.Error() + ") but the file shows it took effect; it was treated as committed")
 	}
 	committed = true
 	if head != nil {
 		s.setHead(*head)
 		if err := advanceHeadFile(s.path, s.ws, *head); err != nil {
-			return true, fmt.Errorf("sqlitestore: the change is committed but the head file could not be written: %w", err)
+			// The next open accepts a file that is ahead of its head file and advances it.
+			s.notice("the change is committed but the head file could not be written: " + err.Error())
 		}
 	}
 	return true, nil
+}
+
+// readBack says whether a transaction whose COMMIT reported an error took
+// effect, on a connection of its own.
+func (s *Store) readBack(ctx context.Context, head *Head, confirm func(context.Context, dbq) (bool, error)) (bool, error) {
+	db, err := openDB(s.path, true, false)
+	if err != nil {
+		return false, err
+	}
+	defer db.Close()
+	switch {
+	case confirm != nil:
+		return confirm(ctx, db)
+	case head != nil:
+		return chainContains(ctx, db, *head)
+	}
+	return false, nil
 }
 
 // View implements ports.Store: reads at one consistent snapshot.
@@ -886,7 +1035,7 @@ func (s *Store) Update(ctx context.Context, fn func(ports.Writer) error) error {
 			return nil, err
 		}
 		return t.apply()
-	})
+	}, nil)
 	return err
 }
 

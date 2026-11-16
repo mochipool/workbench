@@ -158,6 +158,8 @@ Use cases: `ProtectSigningKey(key, passphrase)` for `enc` and `UnprotectSigningK
 * With remote or multi-party signing, sealing is the point where a key leaves the operator's custody. Record who sealed it and with which policy.
 * Apply the password policy to `enc` only (SPO-Ckey-INV-001); do not make the strength rule a gate on `dec` for new envelopes.
 
+*Observed 2026-11-16* (`spo/test/parity/workspace_test.go`, pinned scripts on a pseudo terminal, answers `y`, password, confirmation, `n`, `y` for `enc` and `y`, password, `y` for `dec`): `enc` leaves a `0400` file equal to the envelope the port renders; `enc` of an already encrypted file exits non-zero; `dec` of an envelope made by the port gives the original `cborHex` in the two-space `jq` formatting (SPO-01protectKey-OUT-002); `dec` with a wrong strong password exits 1 with no retry (SPO-01protectKey-EXT-002).
+
 ## Open questions
 
 * The type of a hardware signing file (`.hwsfile`) is expected not to contain `SigningKey`, which would make this script refuse it (SPO-01protectKey-PRE-001); a look at a real `cardano-hw-cli` file settles it.

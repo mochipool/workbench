@@ -22,6 +22,7 @@ type signingRequestWire struct {
 	TTLSlot    uint64
 	Magic      uint32
 	Purpose    string
+	AuxData    []byte
 }
 
 type signingResponseWire struct {
@@ -53,6 +54,10 @@ type inviteWire struct {
 	Node    []byte
 }
 
+type helloWire struct {
+	_ struct{} `cbor:",toarray"`
+}
+
 type attachmentWire struct {
 	_    struct{} `cbor:",toarray"`
 	Name string
@@ -75,7 +80,7 @@ func encodeBody(b party.Body) ([]byte, error) {
 	case party.SigningRequest:
 		return marshal(signingRequestWire{Collection: m.Collection[:], Slot: uint16(m.Slot), KeyRole: string(m.KeyRole),
 			KeyHash: m.KeyHash[:], Operation: m.Operation, TxBody: m.TxBody, BodyHash: m.BodyHash[:], TTLSlot: m.TTLSlot,
-			Magic: m.NetworkMagic, Purpose: m.Purpose})
+			Magic: m.NetworkMagic, Purpose: m.Purpose, AuxData: m.AuxData})
 	case party.SigningResponse:
 		return marshal(signingResponseWire{Collection: m.Collection[:], Slot: uint16(m.Slot), Request: m.Request[:], Witness: m.Witness})
 	case party.SigningRefusal:
@@ -84,6 +89,8 @@ func encodeBody(b party.Body) ([]byte, error) {
 		return marshal(collectionClosedWire{Collection: m.Collection[:], Outcome: string(m.Outcome), TxID: m.TxID})
 	case party.Invite:
 		return marshal(inviteWire{Address: m.Address, Node: m.Node[:]})
+	case party.Hello:
+		return marshal(helloWire{})
 	case party.Bundle:
 		w := bundleWire{Snapshot: m.Snapshot, Transactions: m.Transactions}
 		for _, a := range m.Attachments {
@@ -108,7 +115,7 @@ func decodeBody(t party.Type, raw []byte) (party.Body, error) {
 			return nil, err
 		}
 		m := party.SigningRequest{Slot: party.SlotID(w.Slot), KeyRole: custody.Role(w.KeyRole), Operation: w.Operation,
-			TxBody: w.TxBody, TTLSlot: w.TTLSlot, NetworkMagic: w.Magic, Purpose: w.Purpose}
+			TxBody: w.TxBody, TTLSlot: w.TTLSlot, NetworkMagic: w.Magic, Purpose: w.Purpose, AuxData: w.AuxData}
 		if err = firstErr(fixed(m.Collection[:], w.Collection), fixed(m.KeyHash[:], w.KeyHash), fixed(m.BodyHash[:], w.BodyHash)); err != nil {
 			return nil, err
 		}
@@ -153,6 +160,12 @@ func decodeBody(t party.Type, raw []byte) (party.Body, error) {
 			return nil, err
 		}
 		body = m
+	case party.TypeHello:
+		var w helloWire
+		if err = unmarshal(raw, &w); err != nil {
+			return nil, err
+		}
+		body = party.Hello{}
 	case party.TypeBundle:
 		var w bundleWire
 		if err = unmarshal(raw, &w); err != nil {

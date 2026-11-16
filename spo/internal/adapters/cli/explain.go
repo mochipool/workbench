@@ -18,6 +18,10 @@ type explained struct {
 func (e *explained) Error() string { return e.msg }
 func (e *explained) Unwrap() error { return e.err }
 
+// ErrOutcomeUnknown: a write may or may not have been stored (the sealed store
+// could not read the file back after a failed COMMIT).
+var ErrOutcomeUnknown = errors.New("the outcome of the write is unknown")
+
 // MemlockAdvice is the one message for a locked-memory shortage, used by the
 // command tree and by main.
 const MemlockAdvice = "spo could not lock memory for its secrets. Raise the locked-memory limit and run again: `ulimit -l unlimited` in the shell (or a larger value in KiB), or RLIMIT_MEMLOCK / LimitMEMLOCK in the service or limits.conf that starts spo"
@@ -27,8 +31,14 @@ func explain(err error) error {
 	if err == nil {
 		return nil
 	}
+	var ex *explained
+	if errors.As(err, &ex) {
+		return err // already has its own advice
+	}
 	var msg string
 	switch {
+	case errors.Is(err, ErrOutcomeUnknown):
+		msg = "the write may or may not have been stored. Run `spo store verify` and check the result before retrying: repeating an operation that did take effect (such as issuing an operational certificate) would apply it twice"
 	case errors.Is(err, secret.ErrMemoryLimit):
 		msg = MemlockAdvice
 	case errors.Is(err, ErrRolledBack):

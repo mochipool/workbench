@@ -185,6 +185,8 @@ Use case `AuthorizeCommitteeHotKey(cold, hot, payer, metadata?)` on aggregate `C
 
 ## Port notes
 
+* Observed 2026-11-16 (cardano-cli 11.2.3.0): the authorisation certificate is `83 0e 8200 581c<cold> 8200 581c<hot>` (type 14), the resignation `83 0f 8200 581c<cold> <anchor | f6>` (type 15); descriptions `Constitutional Committee Hot Key Registration Certificate` and `Constitutional Committee Cold Key Resignation Certificate`. Offline, 23c and 23e print that offline is not supported and exit 0 with nothing queued; the port returns `ErrOfflineUnsupported` (`TestGovOfflineRefusalsMatchUpstream`).
+
 * Offline: the script refuses because the committee state cannot come from Koios into the transfer file. A port should add the committee state to the transfer snapshot (an `add-committee` counterpart of `add-drep`) and then queue the transaction like the DRep scripts.
 * Return a non-zero code for a failed submission, and a distinct result for "already authorised" and "resigned".
 * Look up script credentials as well as key hashes, and compare the hot credential by type.

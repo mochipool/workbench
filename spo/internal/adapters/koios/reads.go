@@ -262,6 +262,12 @@ func (c *Client) Utxos(ctx context.Context, addr chain.Address) ([]chain.Utxo, e
 			HasInlineDatum:     r.Inline.present && !r.Inline.null,
 			HasReferenceScript: r.RefScript.present && !r.RefScript.null,
 		}
+		if u.HasDatumHash {
+			var dh string
+			if json.Unmarshal(r.DatumHash.val, &dh) == nil {
+				u.DatumHash = strings.ToLower(dh)
+			}
+		}
 		for _, a := range r.Assets {
 			pol, err := decodeHex(a.Policy, 28)
 			if err != nil {

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -80,11 +81,80 @@ func TestWriteNamingModeAndAtomicity(t *testing.T) {
 	if got := recvNow(t, b); string(got) != "env" {
 		t.Fatalf("got %q", got)
 	}
-	// Read files are renamed and not delivered again.
+	// Delivered is not read: the file is marked only once it was handled.
+	if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+		t.Fatalf("a delivered file was moved before it was handled: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, name+".read")); err == nil {
+		t.Fatal("marked read before Ack")
+	}
+	expectNothing(t, b) // not delivered twice by this process either
+	if err := b.Ack(); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.Stat(filepath.Join(dir, name+".read")); err != nil {
 		t.Fatal(err)
 	}
 	expectNothing(t, b)
+}
+
+// A file that was delivered and never acknowledged (the handler failed or the
+// process died) is delivered again by the next bag on that directory.
+// spec: SPO-Xparty-IF-004
+func TestUnhandledFileIsDeliveredAgain(t *testing.T) {
+	dir := t.TempDir()
+	b := open(t, dir)
+	if err := b.Write("a-one.spo", []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	if got := recvNow(t, b); string(got) != "one" {
+		t.Fatalf("got %q", got)
+	}
+	b.Close()
+	b2 := open(t, dir)
+	if got := recvNow(t, b2); string(got) != "one" {
+		t.Fatalf("after a restart got %q", got)
+	}
+	if err := b2.Ack(); err != nil {
+		t.Fatal(err)
+	}
+	expectNothing(t, b2)
+}
+
+// A FIFO in the place of an envelope file does not block the bag, and is not
+// delivered. The file is opened without blocking and the opened descriptor
+// is checked.
+// spec: SPO-Ptransfer-SEC-001
+func TestFIFOIsRejectedWithoutBlocking(t *testing.T) {
+	dir := t.TempDir()
+	b := open(t, dir)
+	if err := syscall.Mkfifo(filepath.Join(dir, "a-fifo.spo"), 0o600); err != nil {
+		t.Skip("no fifo")
+	}
+	if err := b.Write("b-ok.spo", []byte("fine")); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan []byte, 1)
+	go func() { done <- recvNow(t, b) }()
+	select {
+	case got := <-done:
+		if string(got) != "fine" {
+			t.Fatalf("got %q", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the bag blocked on a FIFO")
+	}
+	if r := b.Rejected(); len(r) != 1 || r[0].Name != "a-fifo.spo" {
+		t.Fatalf("rejected = %+v", r)
+	}
+}
+
+// The file transport states its own kind.
+// spec: SPO-Xparty-PRE-004, SPO-Xparty-INV-024
+func TestTransportKind(t *testing.T) {
+	if k := open(t, t.TempDir()).Transport().Kind(); k != ports.ViaFile {
+		t.Fatalf("kind = %v", k)
+	}
 }
 
 // spec: SPO-Xparty-IF-004, SPO-Ptransfer-SEC-001

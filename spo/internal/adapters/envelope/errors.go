@@ -27,9 +27,10 @@ var (
 )
 
 // Refusal wraps the reason an envelope was refused with the sender, when it
-// is known. Sender is set only from the step where the sender fingerprint
-// was read and an enrolled party matched; before then it is unknown, and an
-// attacker-chosen fingerprint is never recorded as the sender.
+// is known. Sender is set only once the signature has verified under the
+// enrolled party's key; before that, including when the signature fails or
+// the party is revoked, the fingerprint is the claim of whoever sent the
+// bytes, and an attacker-chosen fingerprint is never recorded as the sender.
 type Refusal struct {
 	Err       error
 	Sender    party.Fingerprint

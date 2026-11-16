@@ -115,7 +115,7 @@ type lightDoc struct {
 // local cardano-cli version is configured, it must not be older than
 // versionCLI (SPO-Cconf-PRE-008). Upstream's unspecified behaviour for a
 // missing or unparsable lastUpdate (Cconf open question) is a refusal here.
-func (l *LightParameters) ProtocolParameters(ctx context.Context) (chain.ProtocolParameters, error) {
+func (l *LightParameters) fetch(ctx context.Context) ([]byte, lightDoc, error) {
 	// SPO-Clight-EXT-001: cache-buster rnd=<unix seconds>, no-cache header,
 	// no Koios authorization (auth false). Compression is negotiated by the
 	// Go transport.
@@ -125,20 +125,28 @@ func (l *LightParameters) ProtocolParameters(ctx context.Context) (chain.Protoco
 	}
 	status, body, err := l.c.do(ctx, request{op: "light parameters", method: "GET", query: q, retry: true, noCache: true})
 	if err != nil {
-		return chain.ProtocolParameters{}, err
+		return nil, lightDoc{}, err
 	}
 	if status != 200 {
-		return chain.ProtocolParameters{}, fmt.Errorf("koios light parameters: %s%s answered HTTP %d",
+		return nil, lightDoc{}, fmt.Errorf("koios light parameters: %s%s answered HTTP %d",
 			l.c.base.Host, l.c.base.Path, status)
 	}
 	var d lightDoc
 	if err := strictUnmarshal(body, &d); err != nil {
-		return chain.ProtocolParameters{}, fmt.Errorf("koios light parameters: not a JSON parameters document: %w", err)
+		return nil, lightDoc{}, fmt.Errorf("koios light parameters: not a JSON parameters document: %w", err)
 	}
 	if d.Meta == nil {
-		return chain.ProtocolParameters{}, errors.New("koios light parameters: no sposcriptsLightMode object")
+		return nil, lightDoc{}, errors.New("koios light parameters: no sposcriptsLightMode object")
 	}
 	if err := l.check(d.Meta.LastUpdate, d.Meta.Magic, d.Meta.VersionCLI); err != nil {
+		return nil, lightDoc{}, err
+	}
+	return body, d, nil
+}
+
+func (l *LightParameters) ProtocolParameters(ctx context.Context) (chain.ProtocolParameters, error) {
+	body, d, err := l.fetch(ctx)
+	if err != nil {
 		return chain.ProtocolParameters{}, err
 	}
 	var miss []string

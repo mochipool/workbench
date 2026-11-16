@@ -137,8 +137,9 @@ type RestoreOptions struct {
 // after verifying the backup with the passphrase. The backup is copied beside
 // the destination first and verified there (so the bytes checked are the
 // bytes installed), then moved into place. An existing destination is refused
-// unless overwrite is true; a destination with -wal or -shm files (a workspace
-// that is open or was not closed cleanly) is always refused. Replacing an
+// unless overwrite is true; a destination that is open is refused (ErrLocked),
+// and one with uncheckpointed changes in its -wal is checkpointed first or
+// refused (ErrUncheckpointed). Replacing an
 // existing workspace also requires that the backup is of the same workspace
 // and is not older than it: see RestoreWithOptions.
 func Restore(backupPath, destPath string, passphrase *secret.Buffer, overwrite bool) error {
@@ -191,11 +192,6 @@ func restore(backupPath, destPath string, cred credential, o RestoreOptions) (er
 	if exists && !o.Overwrite {
 		return fmt.Errorf("%w: %s (pass overwrite to replace it)", ErrExists, dest)
 	}
-	for _, side := range []string{"-wal", "-shm", "-journal"} {
-		if _, err := os.Lstat(dest + side); err == nil {
-			return fmt.Errorf("sqlitestore: %s%s exists: the workspace is open or was not closed cleanly; refusing to restore over it", dest, side)
-		}
-	}
 	in, err := os.Open(src)
 	if err != nil {
 		return err
@@ -244,12 +240,23 @@ func restore(backupPath, destPath string, cred credential, o RestoreOptions) (er
 			return lerr
 		}
 		defer lock.Close()
+		// Only now, under the lock, can the side files be trusted: another
+		// process may have written and closed since the copy began. Fold a
+		// committed WAL into the file before the file is inspected.
+		if err = checkpointDest(ctx, dest); err != nil {
+			return err
+		}
 		if err = checkReplace(ctx, dest, tmpPath, ws, o); err != nil {
 			return err
 		}
 	}
 	os.Remove(tmpPath + "-shm")
 	os.Remove(tmpPath + "-wal")
+	// Immediately before the swap (under the lock when the destination exists):
+	// the destination's side files belong to the file about to be replaced.
+	if err = clearDestSides(dest); err != nil {
+		return err
+	}
 	if o.Overwrite {
 		err = os.Rename(tmpPath, dest)
 	} else {
@@ -265,6 +272,49 @@ func restore(backupPath, destPath string, cred credential, o RestoreOptions) (er
 		return err
 	}
 	return syncDir(filepath.Dir(dest))
+}
+
+// ErrUncheckpointed: the destination workspace has changes in its -wal file that
+// could not be folded into the database (or a rollback journal), so it is in
+// use or was not closed cleanly. Open and close it once, then restore again.
+var ErrUncheckpointed = errors.New("sqlitestore: the workspace has uncheckpointed changes (it is in use, or was not closed cleanly): open and close it once, then restore again")
+
+// checkpointDest folds a non-empty -wal of the existing destination into the
+// database, so that the file is inspected, and replaced, in its true state. The
+// caller holds the exclusive lock on dest.
+func checkpointDest(ctx context.Context, dest string) error {
+	if _, err := os.Lstat(dest + "-journal"); err == nil {
+		return fmt.Errorf("%w (%s-journal exists)", ErrUncheckpointed, dest)
+	}
+	if !hasWAL(dest) {
+		return nil
+	}
+	db, err := openDB(dest, false, false)
+	if err != nil {
+		return fmt.Errorf("%w (%v)", ErrUncheckpointed, err)
+	}
+	var busy, logFrames, done int
+	cerr := db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &done)
+	db.Close()
+	if cerr != nil || busy != 0 || hasWAL(dest) {
+		return fmt.Errorf("%w (checkpoint: busy=%d error=%v)", ErrUncheckpointed, busy, cerr)
+	}
+	return nil
+}
+
+// clearDestSides removes the stale -shm and empty -wal beside dest, which belong
+// to the database file about to be replaced, and refuses a rollback journal or
+// a WAL that still holds anything.
+func clearDestSides(dest string) error {
+	if _, err := os.Lstat(dest + "-journal"); err == nil {
+		return fmt.Errorf("%w (%s-journal exists)", ErrUncheckpointed, dest)
+	}
+	if hasWAL(dest) {
+		return fmt.Errorf("%w (%s-wal is not empty)", ErrUncheckpointed, dest)
+	}
+	os.Remove(dest + "-wal")
+	os.Remove(dest + "-shm")
+	return nil
 }
 
 // checkReplace decides, from structural data only, whether the verified backup

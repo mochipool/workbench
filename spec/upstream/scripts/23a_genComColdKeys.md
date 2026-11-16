@@ -151,6 +151,8 @@ Use case `GenerateCommitteeColdKey(name, protection, derivation?)` on aggregate 
 
 ## Port notes
 
+* Observed 2026-11-16 (cardano-cli 11.2.3.0, cardano-signer 1.35.0): `governance committee key-gen-cold` writes type `ConstitutionalCommitteeColdVerificationKey_ed25519` / `ConstitutionalCommitteeColdSigningKey_ed25519` with descriptions `Constitutional Committee Cold Verification Key` / `... Cold Signing Key`; `committee key-hash` prints the 56 hex digits **with** a trailing newline, which is what the `.cc-cold.hash` file holds. The `mnemonics` form (cardano-signer, path role 4) writes the extended signing key as type `ConstitutionalCommitteeColdExtendedSigningKey_ed25519_bip32`, description `Constitutional Committee Cold Extended Signing Key`, two-space indent. The port is byte-equal for both forms (`TestGovKeyGenerationParity`, `TestGovMnemonicKeysMatchUpstream`).
+
 * The cold key is the most valuable CC credential and should be kept offline; a port should refuse `cli` plaintext by default and prefer a hardware or sealed form.
 * Store the hash natively and never through a redirection that can leave an empty file; make generation atomic as in 21a.
 * A committee member needs a cold key and a hot key; a port can offer both in one use case and keep the separate scripts as thin wrappers.

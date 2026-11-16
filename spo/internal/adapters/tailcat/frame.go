@@ -37,6 +37,8 @@ const (
 	IdleTimeout             = 30 * time.Second // between frames, and for one frame to arrive
 	MaxConns                = 16               // concurrent connections
 	MaxConnsPerKeyPerMinute = 6                // new connections per node key per minute
+	MaxLivePerKey           = 2                // live connections per node key (SPO-Xparty-INV-022)
+	MaxConnLifetime         = 10 * time.Minute // a connection is closed this long after it opened
 )
 
 // DefaultPort is the one TCP port the coordinator serves.

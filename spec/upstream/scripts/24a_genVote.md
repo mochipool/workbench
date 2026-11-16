@@ -139,6 +139,11 @@ Online and light only: offline mode is refused because the action state is read 
 | `vote create` fails | 1 | SPO-24a-EXT-004 |
 | Cancel | 0 | SPO-24a-PR-001 |
 
+## Real-tool notes
+
+* Observed 2026-11-16 (cardano-cli 11.2.3.0): the vote file is type `Governance voting procedures`, a one-voter, one-action map `{[type, hash] => {[tx id, index] => [vote, anchor | null]}}` with voter type 0 (committee hot key), 1 (hot script), 2 (DRep key), 3 (DRep script), 4 (pool) and vote 0 (no), 1 (yes), 2 (abstain); cardano-cli writes it with four-space indent and an empty description, and the script's `jq` rewrite (SPO-24a-OUT-001) turns it into two-space indent with the description in place. `TestGovVoteFilesMatchCardanoCLI` compares both. A transaction merges the vote files into one voting-procedures map (body key 19) ordered committee hot, DRep, pool, then by action id (`TestGovTransactionsMatchCardanoCLI`).
+* Port decision (SPO-24a-INV-004): the role rule for a pool on a parameter change is applied as the ledger applies it (a vote of a pool on a change that touches no security-group parameter is disallowed), from the governance state's own statement of the security group; a state that does not say is refused.
+
 ## Security
 
 - **SPO-24a-SEC-001** No secret is read or written: only verification keys are used and the vote file contains no key material. (src: L169, L1170)

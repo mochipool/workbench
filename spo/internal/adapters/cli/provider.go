@@ -203,6 +203,7 @@ use, without the network and without opening the workspace.`,
 			w := a.d.Out
 			fmt.Fprintf(w, "Workspace %s: network %s, mode %s\n\nChain capabilities:\n", a.workspace, cfg.Network, cfg.Mode)
 			chainCaps := []Cap{CapTip, CapSync, CapOpCertCount, CapParams, CapUtxos, CapRewards, CapPools, CapDReps, CapCrossCheck, CapSubmit, CapQueue}
+			chainCaps = append(chainCaps, GovernanceChainCaps...)
 			var absent []Cap
 			for _, c := range chainCaps {
 				if !env.Has(c) {
@@ -226,7 +227,8 @@ use, without the network and without opening the workspace.`,
 				}
 			}
 			fmt.Fprintln(w, "\nLocal:")
-			for _, c := range []Cap{CapClock, CapGenesis, CapKesKeys, CapVrfKeys, CapColdKeys, CapPaymentKeys, CapStakeKeys, CapMnemonics, CapDeriver, CapAddressMake, CapAddress, CapMinOut, CapFees, CapBodies, CapAssemble, CapCerts, CapCertDecode} {
+			local := append([]Cap{CapClock, CapGenesis, CapKesKeys, CapVrfKeys, CapColdKeys, CapPaymentKeys, CapStakeKeys, CapMnemonics, CapDeriver, CapAddressMake, CapAddress, CapMinOut, CapFees, CapBodies, CapAssemble, CapCerts, CapCertDecode, CapPoolCerts, CapPoolCertDecode, CapMetaHash, CapTxID, CapTxView, CapBundle, CapEras, CapFileSink, CapAttach, CapMetaFetch, CapTickers}, GovernanceLocalCaps...)
+			for _, c := range local {
 				if env.Has(c) {
 					fmt.Fprintf(w, "  %-20s yes\n", c)
 				} else {

@@ -49,8 +49,50 @@ type chainState struct {
 // the chain row it has verified up to, and for every record id the version and
 // hash the chain recorded last (see THE HANDLE'S RECORD MAP).
 type chainKnown struct {
-	head Head
-	recs map[string]chainState
+	head  Head
+	recs  map[string]chainState
+	tags  map[string]string // lookup tag -> record id, for every live record
+	tagOf map[string]string // record id -> lookup tag
+}
+
+// setTag records that the live record id has lookup tag tag.
+func (k *chainKnown) setTag(id, tag []byte) {
+	if old, ok := k.tagOf[string(id)]; ok && k.tags[old] == string(id) {
+		delete(k.tags, old)
+	}
+	k.tagOf[string(id)] = string(tag)
+	k.tags[string(tag)] = string(id)
+}
+
+// bindTag brings the tag maps in line with the chain's last word on id: a
+// deleted record loses its tag; a live one gets the tag of its row, which must
+// be the recorded version of it (the audit entries carry the hash, not the tag).
+func (k *chainKnown) bindTag(ctx context.Context, q dbq, id string) error {
+	st := k.recs[id]
+	if st.deleted {
+		if old, ok := k.tagOf[id]; ok {
+			if k.tags[old] == id { // a record created in the same batch may have the tag now
+				delete(k.tags, old)
+			}
+			delete(k.tagOf, id)
+		}
+		return nil
+	}
+	changed := &VerifyError{Problems: []string{"a record the audit chain lists does not match its row while the workspace was open"}}
+	row, err := readStored(ctx, q, []byte(id))
+	if err != nil {
+		return err
+	}
+	if row == nil || row.version < 1 || uint64(row.version) != st.version {
+		return changed
+	}
+	if h, err := recordHash(row.kind, row.tag, row.sealed); err != nil {
+		return err
+	} else if !bytes.Equal(h, st.hash) {
+		return changed
+	}
+	k.setTag([]byte(id), row.tag)
+	return nil
 }
 
 // noteEntry applies one touched entry to state and returns what is wrong with
@@ -369,6 +411,7 @@ func (s *Store) verify(ctx context.Context, q dbq, withHeadFile bool) (res Verif
 	}
 	defer rrows.Close()
 	seen := map[string]bool{}
+	tags, tagOf := map[string]string{}, map[string]string{}
 	for rrows.Next() {
 		var id, tag []byte
 		var kind string
@@ -378,6 +421,7 @@ func (s *Store) verify(ctx context.Context, q dbq, withHeadFile bool) (res Verif
 			return res, nil, nil, err
 		}
 		seen[string(id)] = true
+		tags[string(tag)], tagOf[string(id)] = string(id), string(tag)
 		name := hex.EncodeToString(id)
 		st, ok := state[string(id)]
 		h, err := recordHash(kind, tag, r)
@@ -424,7 +468,7 @@ func (s *Store) verify(ctx context.Context, q dbq, withHeadFile bool) (res Verif
 	if len(problems) > 0 {
 		return fail()
 	}
-	return res, chain, &chainKnown{head: res.Head, recs: state}, nil
+	return res, chain, &chainKnown{head: res.Head, recs: state, tags: tags, tagOf: tagOf}, nil
 }
 
 // integrityCheck runs PRAGMA integrity_check. It returns "" when SQLite

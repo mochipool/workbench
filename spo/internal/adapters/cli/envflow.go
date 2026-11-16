@@ -99,6 +99,10 @@ type envSpec struct {
 	needs []Need
 	// config makes a missing spo.toml an error.
 	config bool
+	// local is for a command that reads and writes only public files (the
+	// transfer file) and needs neither the store nor a passphrase: it runs
+	// without opening the workspace.
+	local bool
 }
 
 // withEnv resolves the command's environment, checks its needs, opens the
@@ -127,6 +131,9 @@ func (a *app) withEnv(cmd *cobra.Command, spec envSpec, fn func(ctx context.Cont
 		return err
 	}
 
+	if spec.local {
+		return fn(ctx, &session{}, probe, o)
+	}
 	s, err := a.open(ctx)
 	if err != nil {
 		return err

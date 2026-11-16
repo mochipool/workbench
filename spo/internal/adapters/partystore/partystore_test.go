@@ -2,11 +2,13 @@ package partystore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -63,6 +65,8 @@ func (m *memStore) Update(_ context.Context, fn func(ports.Writer) error) error 
 	return nil
 }
 
+var snd = party.Fingerprint{0xaa}
+
 var t0 = time.Unix(1_800_000_000, 0).UTC()
 
 func mkParty(seed byte, name string) party.Party {
@@ -72,7 +76,7 @@ func mkParty(seed byte, name string) party.Party {
 		id.Node = &n
 	}
 	return party.Party{Identity: id, Fingerprint: id.Fingerprint(), Name: name,
-		Roles: []party.Role{party.RoleCoordinator, party.RoleSigner}, Pools: []string{"p1"}, State: party.StateActive, EnrolledAt: t0}
+		Roles: []party.Role{party.RoleCoordinator, party.RoleSigner}, Scope: party.Scope{Pools: []string{"p1"}, KeyRoles: []custody.Role{custody.RoleStake}, Unscoped: true}, State: party.StateActive, EnrolledAt: t0}
 }
 
 // spec: SPO-Xparty-OUT-001, SPO-Xparty-IF-003, SPO-Xparty-INV-005
@@ -94,7 +98,7 @@ func TestRegistry(t *testing.T) {
 			t.Fatalf("ByName = %+v, %v", got, err)
 		}
 		got, err = reg.ByFingerprint(r, a.Fingerprint)
-		if err != nil || got.Name != "alice" || got.Identity.Node != nil || len(got.Roles) != 2 || got.Pools[0] != "p1" {
+		if err != nil || got.Name != "alice" || got.Identity.Node != nil || len(got.Roles) != 2 || got.Scope.Pools[0] != "p1" || got.Scope.KeyRoles[0] != custody.RoleStake || !got.Scope.Unscoped {
 			t.Fatalf("ByFingerprint = %+v, %v", got, err)
 		}
 		if _, err := reg.ByName(r, "carol"); !errors.Is(err, ports.ErrNotFound) {
@@ -160,7 +164,7 @@ func TestReplayLog(t *testing.T) {
 	s, log := newMem(), Replay{}
 	id := party.MessageID{1}
 	exp := t0.Add(time.Hour)
-	if err := s.Update(ctx, func(w ports.Writer) error { return log.Record(w, id, exp, t0) }); err != nil {
+	if err := s.Update(ctx, func(w ports.Writer) error { return log.Record(w, snd, id, exp, t0) }); err != nil {
 		t.Fatal(err)
 	}
 	seen := func(at time.Time) bool {
@@ -174,17 +178,17 @@ func TestReplayLog(t *testing.T) {
 	if seen(exp.Add(time.Second)) {
 		t.Fatal("expired id still seen")
 	}
-	if err := s.Update(ctx, func(w ports.Writer) error { return log.Record(w, id, exp, t0) }); !errors.Is(err, ports.ErrReplay) {
+	if err := s.Update(ctx, func(w ports.Writer) error { return log.Record(w, snd, id, exp, t0) }); !errors.Is(err, ports.ErrReplay) {
 		t.Fatalf("second record: %v", err)
 	}
 	// Expired entries are dropped by the next write; the id may be recorded
 	// again after expiry (it cannot arrive again: the envelope is expired).
 	if err := s.Update(ctx, func(w ports.Writer) error {
-		return log.Record(w, party.MessageID{2}, exp.Add(2*time.Hour), exp.Add(time.Minute))
+		return log.Record(w, snd, party.MessageID{2}, exp.Add(2*time.Hour), exp.Add(time.Minute))
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(s.data[replayRef]) != entryLen {
+	if len(s.data[replayRef]) != len(replayMagic)+entryLen {
 		t.Fatalf("log holds %d bytes, want one entry", len(s.data[replayRef]))
 	}
 }
@@ -198,7 +202,7 @@ func TestReplayAtomicWithEffect(t *testing.T) {
 	effect := ports.Ref{Name: "x", Kind: ports.NodeCounter}
 	boom := errors.New("effect failed")
 	err := s.Update(ctx, func(w ports.Writer) error {
-		if err := log.Record(w, id, t0.Add(time.Hour), t0); err != nil {
+		if err := log.Record(w, snd, id, t0.Add(time.Hour), t0); err != nil {
 			return err
 		}
 		if err := w.Put(effect, []byte("1")); err != nil {
@@ -216,9 +220,9 @@ func TestReplayAtomicWithEffect(t *testing.T) {
 		return nil
 	})
 	// Two transactions for one id: the second is refused inside its own transaction.
-	ok := s.Update(ctx, func(w ports.Writer) error { return log.Record(w, id, t0.Add(time.Hour), t0) })
+	ok := s.Update(ctx, func(w ports.Writer) error { return log.Record(w, snd, id, t0.Add(time.Hour), t0) })
 	dup := s.Update(ctx, func(w ports.Writer) error {
-		if err := log.Record(w, id, t0.Add(time.Hour), t0); err != nil {
+		if err := log.Record(w, snd, id, t0.Add(time.Hour), t0); err != nil {
 			return err
 		}
 		return w.Put(effect, []byte("2"))
@@ -237,21 +241,81 @@ func TestReplayAtomicWithEffect(t *testing.T) {
 func TestReplayFullAndCorrupt(t *testing.T) {
 	ctx := context.Background()
 	s, log := newMem(), Replay{}
-	big := make([]byte, MaxReplayEntries*entryLen)
+	big := []byte(replayMagic)
+	big = append(big, make([]byte, MaxReplayEntries*entryLen)...)
 	for i := 0; i < MaxReplayEntries; i++ {
-		big[i*entryLen] = byte(i)
-		big[i*entryLen+1] = byte(i >> 8)
-		big[i*entryLen+2] = 1
-		big[i*entryLen+16+3] = 0x7f // far-future expiry
+		o := len(replayMagic) + i*entryLen
+		big[o] = byte(i) // a different sender every 256 entries: no quota is hit
+		big[o+1] = byte(i >> 8)
+		big[o+2] = 1
+		big[o+20] = byte(i)
+		big[o+21] = byte(i >> 8)
+		big[o+22] = 1
+		big[o+36+3] = 0x7f // far-future expiry
 	}
 	s.data[replayRef] = big
-	err := s.Update(ctx, func(w ports.Writer) error { return log.Record(w, party.MessageID{0xee}, t0.Add(time.Hour), t0) })
+	err := s.Update(ctx, func(w ports.Writer) error { return log.Record(w, snd, party.MessageID{0xee}, t0.Add(time.Hour), t0) })
 	if !errors.Is(err, ports.ErrReplayFull) {
 		t.Fatalf("err = %v", err)
 	}
-	s.data[replayRef] = []byte{1, 2, 3}
+	s.data[replayRef] = []byte(replayMagic + "\x01\x02\x03")
 	err = s.View(ctx, func(r ports.Reader) error { _, err := log.Seen(r, party.MessageID{}, t0); return err })
 	if !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// One sender over its quota is refused and another is not.
+// spec: SPO-Xparty-INV-022
+func TestReplayQuotaIsPerSender(t *testing.T) {
+	ctx := context.Background()
+	s, log := newMem(), Replay{}
+	far := t0.Add(time.Hour)
+	for i := 0; i < party.MaxReplayPerSender; i++ {
+		id := party.MessageID{byte(i), byte(i >> 8), 1}
+		if err := s.Update(ctx, func(w ports.Writer) error { return log.Record(w, snd, id, far, t0) }); err != nil {
+			t.Fatalf("entry %d: %v", i, err)
+		}
+	}
+	err := s.Update(ctx, func(w ports.Writer) error { return log.Record(w, snd, party.MessageID{0xff, 0xff, 2}, far, t0) })
+	if !errors.Is(err, ports.ErrReplayFull) {
+		t.Fatalf("over quota: %v", err)
+	}
+	other := party.Fingerprint{0xbb}
+	if err := s.Update(ctx, func(w ports.Writer) error { return log.Record(w, other, party.MessageID{0xff, 0xff, 3}, far, t0) }); err != nil {
+		t.Fatalf("another sender was refused: %v", err)
+	}
+	// The quota frees as entries expire.
+	if err := s.Update(ctx, func(w ports.Writer) error {
+		return log.Record(w, snd, party.MessageID{0xff, 0xff, 4}, far.Add(2*time.Hour), far.Add(time.Minute))
+	}); err != nil {
+		t.Fatalf("after expiry: %v", err)
+	}
+}
+
+// A record written before scopes existed reads as the most restrictive scope.
+// spec: SPO-Xparty-INV-010
+func TestOldRecordReadsAsEmptyScope(t *testing.T) {
+	ctx := context.Background()
+	s := newMem()
+	p := party.Party{Identity: party.Identity{Label: "old", Created: t0}, Name: "old", Roles: []party.Role{party.RoleCoordinator},
+		State: party.StateActive, EnrolledAt: t0}
+	p.Identity.Ed25519[0], p.Identity.X25519[0] = 1, 1
+	p.Fingerprint = p.Identity.Fingerprint()
+	j := toJSON(p)
+	j.Scope = nil // as an older record: no scope, and the older list of pools
+	j.Roles = []string{"coordinator"}
+	raw, _ := json.Marshal([]map[string]any{{"name": j.Name, "label": j.Label, "ed25519": j.Ed25519, "x25519": j.X25519, "created": j.Created,
+		"fingerprint": j.Fingerprint, "roles": j.Roles, "pools": []string{"pool1x"}, "state": j.State, "enrolled_at": j.EnrolledAt}})
+	s.data[recordsRef] = raw
+	var got party.Party
+	if err := s.View(ctx, func(r ports.Reader) error { var err error; got, err = Registry{}.ByName(r, "old"); return err }); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Scope.KeyRoles) != 0 || len(got.Scope.Pools) != 0 || got.Scope.Unscoped {
+		t.Fatalf("scope = %+v", got.Scope)
+	}
+	if party.CheckScope(got.Scope, custody.RoleStake, []string{"pool1x"}) == nil {
+		t.Fatal("an old record's coordinator may ask for something")
 	}
 }

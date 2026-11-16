@@ -72,13 +72,9 @@ const (
 // compact is the 32 lower-case base32 characters of the fingerprint.
 func (f Fingerprint) compact() string { return strings.ToLower(fpEnc.EncodeToString(f[:])) }
 
-// String shows the fingerprint as 8 groups of lower-case base32 characters
-// separated by '-'.
-//
-// SPEC DEFECT: SPO-Xparty-INV-002 says "8 groups of 5" characters, but 20
-// bytes are 160 bits, which is 32 base32 characters: 8 groups of 4. Eight
-// groups of five would be 25 bytes. We keep the 20-byte value and show 8
-// groups of 4.
+// String shows the fingerprint as 8 groups of 4 lower-case base32
+// characters separated by '-': 20 bytes are 160 bits, 32 characters
+// (SPO-Xparty-INV-002).
 func (f Fingerprint) String() string {
 	c := f.compact()
 	parts := make([]string, 0, Groups)
@@ -112,6 +108,19 @@ func ParseFingerprint(s string) (Fingerprint, error) {
 		return Fingerprint{}, fmt.Errorf("%w: bad base32", ErrFingerprint)
 	}
 	return fp, nil
+}
+
+// Tail is the last Groups-ConfirmGroups groups: the only part of a fingerprint
+// the enrollment display shows (SPO-Xparty-PR-001). The first ConfirmGroups
+// groups are typed by the operator, read out by the other party, and never
+// shown here.
+func (f Fingerprint) Tail() string {
+	c := f.compact()[ConfirmGroups*GroupLen:]
+	parts := make([]string, 0, Groups-ConfirmGroups)
+	for i := 0; i < len(c); i += GroupLen {
+		parts = append(parts, c[i:i+GroupLen])
+	}
+	return strings.Join(parts, "-")
 }
 
 // ConfirmPrefix reports whether typed is the first ConfirmGroups groups of

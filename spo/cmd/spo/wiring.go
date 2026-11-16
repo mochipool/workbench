@@ -84,6 +84,8 @@ func mapStoreErr(err error) error {
 		return cli.ErrOtherWorkspace
 	case errors.Is(err, sqlitestore.ErrOlderBackup):
 		return cli.ErrOlderBackup
+	case errors.Is(err, sqlitestore.ErrOutcomeUnknown):
+		return fmt.Errorf("%w (%v)", cli.ErrOutcomeUnknown, err)
 	}
 	return err
 }
@@ -130,7 +132,7 @@ func (w sealedStore) View(ctx context.Context, fn func(ports.Reader) error) erro
 	return w.s.View(ctx, fn)
 }
 func (w sealedStore) Update(ctx context.Context, fn func(ports.Writer) error) error {
-	return w.s.Update(ctx, fn)
+	return mapStoreErr(w.s.Update(ctx, fn))
 }
 func (w sealedStore) Open(ctx context.Context, ref ports.Ref) (*secret.Buffer, error) {
 	return w.s.Open(ctx, ref)
@@ -144,10 +146,12 @@ func (w sealedStore) BackupWithHead(ctx context.Context, dest string) (cli.Head,
 	return toHead(h), err
 }
 func (w sealedStore) ChangePassphraseRekey(ctx context.Context, p *secret.Buffer) (*secret.Buffer, error) {
-	return w.s.ChangePassphraseRekey(ctx, p)
+	key, err := w.s.ChangePassphraseRekey(ctx, p)
+	return key, mapStoreErr(err)
 }
 func (w sealedStore) RekeyKeepPassphrase(ctx context.Context, p *secret.Buffer) (*secret.Buffer, error) {
-	return w.s.Rekey(ctx, []sqlitestore.Credential{sqlitestore.PassphraseCredential(p)})
+	key, err := w.s.Rekey(ctx, []sqlitestore.Credential{sqlitestore.PassphraseCredential(p)})
+	return key, mapStoreErr(err)
 }
 func (w sealedStore) Notices() []string { return w.s.Notices() }
 func (w sealedStore) Head() cli.Head {

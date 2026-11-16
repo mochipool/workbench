@@ -92,6 +92,21 @@ type Draft struct {
 	// cases; see NewCertificateDraft and NewClaimDraft.
 	Certificates []stake.Certificate
 	Withdrawals  []Withdrawal
+	// Votes and Proposals are the attachments of the governance use cases;
+	// see NewVoteDraft and NewProposalDraft.
+	Votes     []VoteAttachment
+	Proposals []ProposalAttachment
+	// Send is the assets a send-assets draft sends to the destination
+	// (sorted, merged); see NewSendAssetsDraft.
+	Send []chain.AssetAmount
+	// Mint and MintScripts are the mint field and the native script files
+	// (JSON) of a mint or burn; see NewMintDraft.
+	Mint        []MintEntry
+	MintScripts [][]byte
+	// MetadataFiles and MessageEncryption are the metadata of the extra
+	// parameters beside Message; see WithMetadata.
+	MetadataFiles     []MetadataFile
+	MessageEncryption string
 
 	mode layoutMode
 }
@@ -146,8 +161,14 @@ func (d Draft) Features() (custody.Features, error) {
 	if len(t.Assets) > 0 {
 		fs[custody.FeatMultiAssetOutput] = struct{}{}
 	}
-	if len(d.Message) > 0 {
+	if len(d.Message) > 0 || len(d.MetadataFiles) > 0 {
 		fs[custody.FeatMetadata] = struct{}{}
+	}
+	if len(d.Mint) > 0 {
+		fs[custody.FeatMint] = struct{}{}
+		// The change output carries what is minted, so it can be a
+		// multi-asset output even when the inputs hold none.
+		fs[custody.FeatMultiAssetOutput] = struct{}{}
 	}
 	for _, c := range d.Certificates {
 		for _, f := range c.Features() {
@@ -156,6 +177,12 @@ func (d Draft) Features() (custody.Features, error) {
 	}
 	if len(d.Withdrawals) > 0 {
 		fs[custody.FeatWithdrawal] = struct{}{}
+	}
+	if len(d.Votes) > 0 {
+		fs[custody.FeatVote] = struct{}{}
+	}
+	if len(d.Proposals) > 0 {
+		fs[custody.FeatGovernanceAction] = struct{}{}
 	}
 	return fs, nil
 }

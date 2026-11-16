@@ -179,6 +179,10 @@ This script follows the shared pipeline [`Ptx`](../patterns/Ptx.md). One require
 | Confirmation declined | 0 | SPO-Ptx-PR-002 |
 | Light submit fails; offline read-back mismatch | 0 | SPO-Ptx-MODE-009, SPO-Ptx-MODE-010 |
 
+## Real-tool notes
+
+* Observed 2026-11-16 (offline): `24b_regVote.sh d ...` with a DRep named `d` that also has a payment key `d.skey` takes `d.skey` first (SPO-24b-IN-001) and exits 1 because the stem does not end `.drep`; the voter argument has to be `d.drep`. The queued transaction, the fee, the witnesses and the transfer file entry are byte-equal to the port's (`TestGovTransactionsMatchUpstream`): the history line reads `signed utxo-transaction from '<pay>' to ''`, as SPO-24b-MODE-003 says.
+
 ## Security
 
 - **SPO-24b-SEC-001** Signing keys never touch disk: each is decrypted into a shell variable and handed to `cardano-cli` through an anonymous pipe (SPO-Ptx-SEC-001). (src: L671-L702)

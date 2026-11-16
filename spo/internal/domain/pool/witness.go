@@ -19,6 +19,11 @@ type RegistrationType string
 const (
 	PoolRegistration   RegistrationType = "PoolRegistration"
 	PoolReRegistration RegistrationType = "PoolReRegistration"
+	// GenericTransaction is a collection for a transaction that is not a pool
+	// registration, opened through the multi-party entry point of
+	// app/multisig (SPO-Xparty-INV-013): any transaction can be signed by
+	// several parties the same way.
+	GenericTransaction RegistrationType = "Transaction"
 )
 
 // CollectionState is the derived state of a witness collection
@@ -112,7 +117,7 @@ func OpenCollection(c Collection) (Collection, error) {
 	if c.ID == 0 {
 		return Collection{}, fmt.Errorf("%w: id 0 means no collection", ErrBadCollection)
 	}
-	if c.Type != PoolRegistration && c.Type != PoolReRegistration {
+	if c.Type != PoolRegistration && c.Type != PoolReRegistration && c.Type != GenericTransaction {
 		return Collection{}, fmt.Errorf("%w: type %q", ErrBadCollection, c.Type)
 	}
 	if len(c.Body.CBOR) == 0 || c.Body.ID == (chain.TxID{}) {
@@ -153,6 +158,12 @@ func (c Collection) State(tipSlot uint64) CollectionState {
 	}
 	return CollectionOpenComplete
 }
+
+// StateAtTip is State at the chain tip, with the boundary of the signer's own
+// rule (SPO-Xparty-INV-015, PRE-006): a transaction is invalid from its TTL
+// slot on, so a collection whose TTL is at or below the tip is Expired. State
+// itself keeps the older boundary, where equal is still open.
+func (c Collection) StateAtTip(tip uint64) CollectionState { return c.State(tip + 1) }
 
 // Missing lists the names of the empty slots, in slot order.
 func (c Collection) Missing() []string {
@@ -239,6 +250,27 @@ func (c Collection) Fill(f Fill, tipSlot uint64) (Collection, error) {
 	out.Slots[i].Witness, out.Slots[i].Unauthenticated = &w, f.Unauthenticated
 	out.Version++
 	return out, nil
+}
+
+// Unassign takes an empty slot from the remote party it was assigned to
+// (SPO-Xparty-INV-005: a revoked party's unfilled slots become unassigned).
+// A filled slot keeps its witness and its party: the witness was verified.
+// The slot stays remote, with no party, until the operator assigns another.
+func (c Collection) Unassign(name string) (Collection, error) {
+	for i, s := range c.Slots {
+		if s.Name != name {
+			continue
+		}
+		if s.Filled() {
+			return c, fmt.Errorf("%w: %q", ErrSlotFilled, name)
+		}
+		out := c
+		out.Slots = append([]Slot(nil), c.Slots...)
+		out.Slots[i].Party = ""
+		out.Version++
+		return out, nil
+	}
+	return c, fmt.Errorf("%w: %q", ErrUnknownSlot, name)
 }
 
 // Close ends the collection as Submitted or Discarded.

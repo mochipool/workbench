@@ -62,6 +62,26 @@ func (a *app) deliverRekeyed(ctx context.Context, st SealedStore, log *noticeLog
 	return nil
 }
 
+// deliverUnknownRekey handles a rekey whose outcome the store could not
+// determine: it shows the new recovery key with a banner that it is valid only
+// if the change took effect, says how to find out, and fails.
+func (a *app) deliverUnknownRekey(ctx context.Context, key *secret.Buffer, fd int, cred string, err error) error {
+	defer key.Destroy()
+	fmt.Fprintln(a.d.Out, "WARNING: the workspace could not confirm whether this change was stored. The recovery key below is valid ONLY IF the change took effect.")
+	derr := a.deliverRecoveryKeyMode(ctx, key, fd, true)
+	msg := "the outcome of the change is unknown. Reopen the workspace with the NEW " + cred + ". If it opens, the change took effect and the OLD recovery key no longer works: keep the key just shown (or run `spo store recovery-key new`). If only the OLD " + cred + " opens, nothing changed and the key just shown is void"
+	switch cred {
+	case "recovery key":
+		msg = "the outcome of the change is unknown. Run `spo store recovery-key new` again: it yields a valid key either way"
+	case "recover":
+		msg = "the outcome of the change is unknown. Try the NEW passphrase: if it opens the workspace, keep the key just shown; if it does not, run `spo store recover` again with the recovery key you used"
+	}
+	if derr != nil {
+		msg += " (" + derr.Error() + ")"
+	}
+	return &explained{msg: msg, err: err}
+}
+
 func (a *app) storeCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "store", Short: "Check, back up and manage the sealed workspace"}
 	cmd.AddCommand(a.storeVerify(), a.storeBackup(), a.storeRestore(), a.storeSlots(), a.storePassphrase(), a.storeRecoveryKey(), a.storeRecover())
@@ -287,6 +307,9 @@ key. Make a new backup after changing.`,
 			defer np.Destroy()
 			key, err := s.Sealed.ChangePassphraseRekey(cmd.Context(), np)
 			if err != nil {
+				if key != nil && errors.Is(err, ErrOutcomeUnknown) {
+					return a.deliverUnknownRekey(cmd.Context(), key, rkFD, "passphrase", err)
+				}
 				return err
 			}
 			defer key.Destroy()
@@ -327,6 +350,9 @@ recovery key of their time.`,
 			defer s.closeInto(&err)
 			key, err := s.Sealed.RekeyKeepPassphrase(cmd.Context(), s.Pass)
 			if err != nil {
+				if key != nil && errors.Is(err, ErrOutcomeUnknown) {
+					return a.deliverUnknownRekey(cmd.Context(), key, rkFD, "recovery key", err)
+				}
 				return err
 			}
 			defer key.Destroy()
@@ -401,6 +427,9 @@ apply here.`,
 			defer np.Destroy()
 			key, err := st.ChangePassphraseRekey(ctx, np)
 			if err != nil {
+				if key != nil && errors.Is(err, ErrOutcomeUnknown) {
+					return a.deliverUnknownRekey(ctx, key, rkFD, "recover", err)
+				}
 				return err
 			}
 			defer key.Destroy()
