@@ -249,6 +249,13 @@
           spo-compat = mkAssertion wb.pkgs "spo-compat" spoCompat.failures;
           # Orchestrator unit tests against stand-in scripts (no haskell toolchain).
           workbench-tests = wb.workbench.tests;
+          # The upstream spec corpus (spec/) must match the pinned spo-scripts
+          # tree: file and function hashes, mechanical facts, source ranges,
+          # unique ids, full coverage. See spec/README.md.
+          spec-lint = wb.pkgs.runCommand "spec-lint" { nativeBuildInputs = [ wb.pkgs.python3 ]; } ''
+            SPO_SCRIPTS_SRC=${spo-scripts} SPO_SCRIPTS_REV=${spo-scripts.rev} python3 ${self}/spec/tools/specctl.py lint
+            echo ok > $out
+          '';
           # The readme's generated requirements section must match the nix data.
           readme-sync = wb.pkgs.runCommand "readme-sync" { } ''
             ${extractBlock wb.pkgs} ${self}/readme.md > actual
