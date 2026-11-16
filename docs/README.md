@@ -58,3 +58,10 @@ Operator workflows:
 * [Work modes](./explanation/work-modes.md)
 * [Orchestrator design](./explanation/orchestrator-design.md)
 * [Security model](./explanation/security-model.md)
+
+## Development
+
+For contributors and agents, outside the four quadrants above:
+
+* [Handoff: state of the workbench](./development/handoff.md)
+* [Roadmap: native port of the SPO scripts](./development/roadmap-native-port.md)
