@@ -74,6 +74,31 @@ func (s KesState) Generate() (KesState, int, error) {
 	return s, n, nil
 }
 
+// ErrKesCountersMissing means a KES counter file is absent, so no key has
+// been generated yet.
+var ErrKesCountersMissing = errors.New("the KES counters are missing: generate a KES key first")
+
+// ErrNoKesKeyWaiting means the newest KES key already has an operational
+// certificate (or the counters disagree), so there is nothing to issue.
+var ErrNoKesKeyWaiting = errors.New("no unused KES key: the KES counters differ")
+
+// Issue records that the waiting KES key received an operational
+// certificate and returns its number. It requires current == next and
+// leaves next = current + 1, so the next key may be generated.
+//
+// spec: SPO-04d-PRE-003, SPO-04d-PRE-004, SPO-04d-OUT-003, SPO-04d-INV-008
+func (s KesState) Issue() (KesState, int, error) {
+	if !s.hasCurrent || !s.hasNext {
+		return s, 0, ErrKesCountersMissing
+	}
+	if s.current != s.next {
+		return s, 0, fmt.Errorf("%w (current %03d, next %03d)", ErrNoKesKeyWaiting, s.current, s.next)
+	}
+	n := s.current
+	s.next = n + 1
+	return s, n, nil
+}
+
 // FormatCounter renders a counter as upstream stores it: decimal,
 // zero-padded to three digits, wider when needed, with a newline.
 //

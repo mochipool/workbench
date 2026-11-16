@@ -18,6 +18,7 @@ const (
 	NodeVKey       Kind = "node.vkey"
 	NodeSKey       Kind = "node.skey"
 	NodeCounter    Kind = "node.counter"
+	NodeHwsFile    Kind = "node.hwsfile" // hardware signing file of the cold key; not secret (SPO-Pfiles-OUT-010)
 	VrfVKey        Kind = "vrf.vkey"
 	VrfSKey        Kind = "vrf.skey"
 	KesVKey        Kind = "kes.vkey"         // numbered
@@ -34,7 +35,7 @@ type kindInfo struct {
 }
 
 var kinds = map[Kind]kindInfo{
-	NodeVKey: {}, NodeSKey: {secret: true}, NodeCounter: {},
+	NodeVKey: {}, NodeSKey: {secret: true}, NodeCounter: {}, NodeHwsFile: {},
 	VrfVKey: {}, VrfSKey: {secret: true},
 	KesVKey: {numbered: true}, KesSKey: {secret: true, numbered: true},
 	KesCounter: {}, KesCounterNext: {},

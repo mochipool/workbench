@@ -3,7 +3,7 @@
 # comment line containing `spec:` and the ids, in a *_test.go file under spo/:
 #   // spec: SPO-04c-PRE-001, SPO-04c-PRE-002
 # Add a code here when its use case is implemented.
-implemented = ["04c"]
+implemented = ["04c", "04d"]
 
 # Requirement ids deliberately not covered, each with a non-empty reason:
 #   "SPO-04c-PR-002" = "display only; the port never shows a password"
@@ -20,3 +20,13 @@ implemented = ["04c"]
 "SPO-04c-PRE-005" = "enc mode not ported at generation: no interactive phase to interrupt"
 "SPO-04c-OUT-002" = "enc mode not ported at generation: the gpg envelope is written by the key-protection use case"
 "SPO-04c-SEC-002" = "enc mode not ported at generation: the port never displays a password"
+
+# 04d: the operational certificate is issued natively (VaultSigner). Offline mode
+# is wired; the chain-checked modes wait for their adapters.
+"SPO-04d-PRE-001" = "sync check of the online and light modes; not ported until the node and Koios adapters exist (offline mode skips it, as upstream does)"
+"SPO-04d-MODE-001" = "online mode (cardano-cli kes-period-info) not ported: no node adapter yet; `spo pool opcert issue` without --offline refuses with 'not wired yet'"
+"SPO-04d-MODE-002" = "light mode Koios request not ported until the Koios adapter is wired; the port requires an OpCertCounterReader that distinguishes None from Unknown instead"
+"SPO-04d-MODE-004" = "light mode decodes the issued counter from the opcert file to compare it with Koios; the port knows the counter it asked the signer to use, so it never decodes it back"
+"SPO-04d-PR-003" = "hardware confirmation prompt: belongs to the hardware signer adapter, which does not exist yet; a hardware-held cold key is refused up front by the signer directory"
+"SPO-04d-EXT-004" = "cardano-hw-cli issue-op-cert not ported: no hardware signer adapter yet (ADR 0008 puts it behind ports.OpCertIssuer)"
+"SPO-04d-EXT-005" = "display of the KES key and pool id in bech32 is not ported; the pool id is derived internally (chain.PoolIDOf, checked against cardano-cli in the parity test)"

@@ -1,0 +1,69 @@
+package ports
+
+import (
+	"context"
+
+	"github.com/mochipool/workbench/spo/internal/domain/chain"
+)
+
+// Chain access is a set of narrow readers (ADR 0008). An adapter implements
+// the ones its provider can answer; a use case names the ones it needs.
+
+// ChainSource is implemented by every chain adapter.
+type ChainSource interface {
+	// Source names the provider, for the operator and the audit log.
+	Source() chain.Source
+}
+
+// TipReader reads the current tip.
+type TipReader interface {
+	ChainSource
+	Tip(ctx context.Context) (chain.Tip, error)
+}
+
+// SyncChecker reports whether the provider has caught up with the chain.
+type SyncChecker interface {
+	ChainSource
+	Synced(ctx context.Context) (bool, error)
+}
+
+// OpCertCounterReader reads the operational-certificate counter the chain
+// has seen for a pool. None means the pool has made no block. A provider
+// that fails or gives an answer it cannot interpret returns Unknown; it
+// never guesses None. A false answer here is harmful (ADR 0006).
+type OpCertCounterReader interface {
+	ChainSource
+	OpCertCounter(ctx context.Context, pool chain.PoolID) (chain.Reading[uint64], error)
+}
+
+// GenesisReader gives the genesis values of the configured network.
+type GenesisReader interface {
+	Genesis(ctx context.Context) (chain.Genesis, error)
+}
+
+// ProtocolParametersReader reads the current protocol parameters.
+type ProtocolParametersReader interface {
+	ChainSource
+	ProtocolParameters(ctx context.Context) (chain.ProtocolParameters, error)
+}
+
+// UtxoReader lists the unspent outputs at an address. A false answer only
+// makes a transaction fail, so a plain slice is enough; a provider that may
+// have truncated the list returns an error instead.
+type UtxoReader interface {
+	ChainSource
+	Utxos(ctx context.Context, addr chain.Address) ([]chain.Utxo, error)
+}
+
+// RewardAccountReader reads a stake address. None means the address is not
+// registered; Unknown means the provider did not say.
+type RewardAccountReader interface {
+	ChainSource
+	RewardAccount(ctx context.Context, stake chain.StakeAddress) (chain.Reading[chain.RewardAccount], error)
+}
+
+// TxSubmitter submits a signed transaction (CBOR bytes) and returns its id.
+type TxSubmitter interface {
+	ChainSource
+	Submit(ctx context.Context, signedTx []byte) (chain.TxID, error)
+}

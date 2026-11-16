@@ -60,7 +60,7 @@ let
     pname = "spo-unwrapped";
     inherit version;
     src = lib.cleanSource ../spo;
-    vendorHash = "sha256-3s9zAc9XYmaZAOrVMe+t/EFc+OaekT20+riJYwN0c+A=";
+    vendorHash = "sha256-xJjJYo1XjvhGCCLPFXSZRxxORVKp1rJpIEaeHPMVw7U=";
     env.CGO_ENABLED = 0;
     subPackages = [ "cmd/spo" ];
     ldflags = [ "-s" "-w" "-X main.version=${version}" ];
@@ -89,6 +89,10 @@ let
       export HOME=$TMPDIR
       export SPO_TOOLCHAIN=${toolchain}
       export SPO_PARITY_WORKBENCH=${workbench}/bin/workbench
+      # The preview Shelley genesis of the release set: the same file the
+      # workbench manifest gives the upstream scripts, so both sides of the
+      # opcert parity test use one genesis.
+      export SPO_PARITY_SHELLEY_GENESIS_PREVIEW=$(${pkgs.jq}/bin/jq -r .networks.preview.common.genesisfile ${workbench.toolchain})
       go test -count=1 -v ./test/parity/ | tee parity.log
       if grep -q -- "--- SKIP" parity.log; then
         echo "a parity test was skipped; the check must run them all"

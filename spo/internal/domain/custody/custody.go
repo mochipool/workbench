@@ -35,6 +35,12 @@ const (
 	RoleCatalystVote  Role = "catalyst-vote"
 )
 
+// Roles lists every role.
+func Roles() []Role {
+	return []Role{RolePayment, RoleStake, RolePoolCold, RoleKES, RoleVRF, RoleDRep, RoleCommitteeCold,
+		RoleCommitteeHot, RolePolicy, RoleCalidus, RoleCatalystVote}
+}
+
 // Holder is where a key lives.
 type Holder string
 

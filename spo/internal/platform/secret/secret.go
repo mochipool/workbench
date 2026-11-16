@@ -31,6 +31,19 @@ func Take(src []byte) *Buffer {
 	return &Buffer{b: memguard.NewBufferFromBytes(src)}
 }
 
+// Fill returns a buffer of n bytes that fn writes into directly, so a value
+// that is computed (a decryption, a derived key) never exists outside
+// guarded memory. The buffer is destroyed when fn fails.
+func Fill(n int, fn func(b []byte) error) (*Buffer, error) {
+	b := memguard.NewBuffer(n)
+	if err := fn(b.Bytes()); err != nil {
+		b.Destroy()
+		return nil, err
+	}
+	b.Freeze()
+	return &Buffer{b: b}, nil
+}
+
 // Read fills a new buffer from r until EOF. It reads in guarded memory.
 func Read(r io.Reader) (*Buffer, error) {
 	b, err := memguard.NewBufferFromEntireReader(r)

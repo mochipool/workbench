@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -11,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mochipool/workbench/spo/internal/app/poolops"
+	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -27,6 +29,28 @@ type Deps struct {
 	// directory in upstream's file layout, where signing keys are not sealed.
 	OpenStore func(dir string, upstreamLayout bool) (ports.Store, error)
 	KeyGen    ports.KesKeyGenerator
+
+	// OfflineOpCert wires the ports IssueOperationalCertificate needs for a
+	// machine that does not consult the chain. byronEpochs is the number of
+	// Byron epochs before the hard fork; byronGenesis may be empty when it
+	// is 0.
+	OfflineOpCert func(store ports.Store, o OfflineOptions) (OpCertWiring, error)
+}
+
+// OfflineOptions are the genesis inputs of offline mode.
+type OfflineOptions struct {
+	ShelleyGenesis string
+	ByronGenesis   string
+	ByronEpochs    uint64
+}
+
+// OpCertWiring is the set of ports a composition root provides.
+type OpCertWiring struct {
+	Signers  ports.SignerDirectory
+	Tip      ports.TipReader
+	Genesis  ports.GenesisReader
+	Counters ports.OpCertCounterReader
+	Clock    ports.Clock
 }
 
 // NewRoot builds the command tree.
@@ -88,6 +112,7 @@ func NewRoot(d Deps) *cobra.Command {
 		},
 	})
 	poolCmd.AddCommand(kesCmd)
+	poolCmd.AddCommand(opcertCommand(d, &workspace, &upstreamLayout))
 	root.AddCommand(poolCmd)
 	return root
 }
@@ -118,4 +143,89 @@ func checkToolchain(ctx context.Context, d Deps) error {
 		return fmt.Errorf("%d tool(s) failed the release-set gates", failed)
 	}
 	return nil
+}
+
+func opcertCommand(d Deps, workspace *string, upstreamLayout *bool) *cobra.Command {
+	cmd := &cobra.Command{Use: "opcert", Short: "Operational certificates"}
+
+	var (
+		counter     uint64
+		offline     bool
+		shelley     string
+		byron       string
+		byronEpochs uint64
+	)
+	issue := &cobra.Command{
+		Use:   "issue <pool>",
+		Short: "Issue the operational certificate for the waiting KES key",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !offline {
+				return errors.New("checking the counter against the chain is not wired yet; pass --offline to issue without the check")
+			}
+			if shelley == "" {
+				return errors.New("--shelley-genesis is required")
+			}
+			if byronEpochs > 0 && byron == "" {
+				return errors.New("--byron-to-shelley-epochs above 0 needs --byron-genesis")
+			}
+			if d.OfflineOpCert == nil {
+				return errors.New("offline operation is not available in this build")
+			}
+			store, err := d.OpenStore(*workspace, *upstreamLayout)
+			if err != nil {
+				return err
+			}
+			w, err := d.OfflineOpCert(store, OfflineOptions{ShelleyGenesis: shelley, ByronGenesis: byron, ByronEpochs: byronEpochs})
+			if err != nil {
+				return err
+			}
+			var opts poolops.IssueOptions
+			if cmd.Flags().Changed("counter") {
+				opts.CounterOverride = &counter
+			}
+			res, err := poolops.IssueOperationalCertificate{
+				Store: store, Signers: w.Signers, Tip: w.Tip, Genesis: w.Genesis,
+				Counters: w.Counters, Clock: w.Clock, AllowUnverified: true,
+			}.Run(cmd.Context(), args[0], opts)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(d.Out, "Issued operational certificate %s.node-%03d.opcert with counter %d for KES period %d.\n",
+				res.Pool, res.KesNumber, res.Counter, res.KesPeriod)
+			fmt.Fprintf(d.Out, "KES key %03d expires in period %d, about %s.\n",
+				res.KesNumber, res.Expiry.ExpireKESPeriod, res.Expiry.ExpireKESDate.Local().Format(pool.ExpireDateLayout))
+			if !res.Verified {
+				fmt.Fprintln(d.Out, "The counter was not checked against the chain (offline). Check it on an online machine before use.")
+			}
+			return nil
+		},
+	}
+	issue.Flags().Uint64Var(&counter, "counter", 0, "issue with this counter instead of the stored one (also creates a missing counter file)")
+	issue.Flags().BoolVar(&offline, "offline", false, "do not consult the chain; the current slot comes from the clock")
+	issue.Flags().StringVar(&shelley, "shelley-genesis", "", "path of the Shelley genesis file")
+	issue.Flags().StringVar(&byron, "byron-genesis", "", "path of the Byron genesis file (offline mode on a network with a Byron era)")
+	issue.Flags().Uint64Var(&byronEpochs, "byron-to-shelley-epochs", 0, "Byron epochs before the hard fork (mainnet 208, preprod 4, preview 0)")
+	cmd.AddCommand(issue)
+
+	var value uint64
+	newCounter := &cobra.Command{
+		Use:   "new-counter <pool>",
+		Short: "Create the issue counter of a pool that has none",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := d.OpenStore(*workspace, *upstreamLayout)
+			if err != nil {
+				return err
+			}
+			if err := (poolops.CreateIssueCounter{Store: store}).Run(cmd.Context(), args[0], value); err != nil {
+				return err
+			}
+			fmt.Fprintf(d.Out, "Created the issue counter of pool %s at %d.\n", args[0], value)
+			return nil
+		},
+	}
+	newCounter.Flags().Uint64Var(&value, "value", 0, "the next issue number")
+	cmd.AddCommand(newCounter)
+	return cmd
 }

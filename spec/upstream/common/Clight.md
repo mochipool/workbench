@@ -206,6 +206,16 @@ The Koios adapter of `ChainQuery` and `Submitter` implements these. The reshapin
 * Keep the cli-compatible shapes behind the adapter so that online (cardano-cli) and light (Koios) adapters can be swapped and compared with a contract test per shape.
 * The submit body is raw CBOR; the Koios token is a secret and must not be logged.
 
+## Notes from recorded responses (2026-11-16, Koios preview)
+
+Settled by recording real responses (`spo/internal/adapters/koios/testdata/`); no id changes.
+
+* The light-mode parameters file (`preview-parameters.json`) has these fields beyond cardano-cli's: `sposcriptsLightMode.lastUpdate` is an RFC 1123 date with numeric zone (`Mon, 16 Nov 2026 09:51:02 +0100`), `magic` is the string `"2"`, `versionCLI` is `"10.14.0.0"`, and `lastTip` carries `block`, `epoch`, `era`, `hash`, `slot`, `slotInEpoch`, `slotsToEpochEnd` and `syncProgress`. The protocol-parameters part is cardano-cli's camelCase JSON (`txFeePerByte`, `txFeeFixed`, `utxoCostPerByte`, `stakeAddressDeposit`, `stakePoolDeposit`, `dRepDeposit`, `govActionDeposit`, `maxTxSize`, `maxValueSize`, `protocolVersion{major,minor}`, `minFeeRefScriptCostPerByte`, ...). This answers the second Open question.
+* `/account_info` answers one element with `"status":"not registered"` for an unregistered stake address; it does not answer `[]`. SPO-Clight-OUT-007 therefore fires on the status text, and an empty array means Koios gave no answer. `delegated_drep` was seen as `drep_always_abstain`; amounts (`rewards_available`, `deposit`, `value`) are strings, `tx_index` is a number.
+* `/pool_info` for a syntactically valid but never-registered pool id answers `[]`; for an id with a bad checksum it answers an error object (HTTP 400-class body with `code` and `message`). A pool with no block has `op_cert_counter` null (spec for SPO-04d-MODE-003); a retired pool keeps its counter.
+* `/address_utxos` with `select=` returns only the selected columns; the port also selects `datum_hash`, `inline_datum` and `reference_script` to learn which outputs carry them. An empty `asset_list` is `[]`.
+* `/epoch_params` (not used by upstream, which reads the hosted file) returns the same numbers: `min_fee_a`, `min_fee_b`, `coins_per_utxo_size`, `key_deposit`, `pool_deposit`, `drep_deposit`, `gov_action_deposit`, `max_tx_size`, `max_val_size`, `protocol_major`, `protocol_minor`, `min_fee_ref_script_cost_per_byte`; deposits are strings, the rest numbers.
+
 ## Open questions
 
 * Koios applies a default row limit (commonly 1000) to list endpoints such as `address_utxos`, and upstream never pages. Whether an address with more UTxOs is silently truncated needs a live test with a large address.
