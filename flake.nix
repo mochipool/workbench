@@ -21,6 +21,10 @@
   # manifest); checks.<system>.version-manifest enforces this.
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
+    # Go toolchain for `spo` only. Its tailcat dependency needs Go 1.27, which
+    # the release set's nixpkgs pin above predates. Locked separately so that
+    # moving it never moves the Cardano toolchain (ADR 0002).
+    nixpkgs-go.url = "github:nixos/nixpkgs?ref=nixos-unstable";
     cardano-node = {
       url = "github:IntersectMBO/cardano-node?ref=11.1.3";
       flake = true;
@@ -37,7 +41,7 @@
     };
   };
 
-  outputs = { self, nixpkgs, cardano-node, cardano-cli, spo-scripts, ... }@inputs:
+  outputs = { self, nixpkgs, nixpkgs-go, cardano-node, cardano-cli, spo-scripts, ... }@inputs:
     let
       inherit (nixpkgs) lib;
 
@@ -99,6 +103,17 @@
             inherit pkgs lib spo versions;
           };
 
+          # Go reference implementation, bound to this release set's toolchain
+          spoBin = import ./tools/spo.nix {
+            inherit pkgs lib versions cardano-signer;
+            inherit (import nixpkgs-go { inherit system; }) buildGoModule;
+            inherit (spoCompat) requirements;
+            cardano-cli = cardano-cli-pkgs.cardano-cli;
+            cardano-node = cardano-node-pkgs.cardano-node;
+            bech32 = cardano-node-pkgs.bech32;
+            cardano-hw-cli = cardano-hw-cli.cli;
+          };
+
           # Base system packages to include
           basePkgs = [
             cardano-node-pkgs.cardano-node
@@ -147,7 +162,7 @@
             };
         in {
           inherit pkgs cardano-node-pkgs cardano-cli-pkgs
-            cardano-hw-cli cardano-signer trezorctl doctor udevRules spo workbench mkNetworkShell;
+            cardano-hw-cli cardano-signer trezorctl doctor udevRules spo spoBin workbench mkNetworkShell;
         };
 
       workbench = forAllSystems workbenchFor;
@@ -217,6 +232,7 @@
           trezorctl = wb.trezorctl;
           doctor = wb.doctor;
           workbench = wb.workbench;
+          spo = wb.spoBin;
           spo-scripts-mainnet = (wb.spo.mkCommon { overrides.network = "Mainnet"; }).derivation;
           spo-scripts-testnet = (wb.spo.mkCommon { overrides.network = "PreProd"; }).derivation;
           # Re-exports for convenience (built by upstream flakes / IOG cache)
@@ -249,6 +265,8 @@
           spo-compat = mkAssertion wb.pkgs "spo-compat" spoCompat.failures;
           # Orchestrator unit tests against stand-in scripts (no haskell toolchain).
           workbench-tests = wb.workbench.tests;
+          # Go reference implementation: vet and unit tests (no haskell toolchain).
+          spo-tests = wb.spoBin.unwrapped;
           # The upstream spec corpus (spec/) must match the pinned spo-scripts
           # tree: file and function hashes, mechanical facts, source ranges,
           # unique ids, full coverage. See spec/README.md.
@@ -281,6 +299,10 @@
           workbench = {
             type = "app";
             program = "${workbench.${system}.workbench}/bin/workbench";
+          };
+          spo = {
+            type = "app";
+            program = "${workbench.${system}.spoBin}/bin/spo";
           };
         } // lib.optionalAttrs pkgs.stdenv.isLinux {
           # Prints (or with --install, installs) the Ledger/Trezor udev rules.
