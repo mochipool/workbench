@@ -16,6 +16,7 @@ A reproducible, hassle-free environment for Cardano SPOs. Mochi's SPO Workbench 
 ## 🌟 Features
 
 * 🌍 **Cross-Platform & Reproducible**: x86_64/aarch64 Linux and macOS, from one flake.
+* 🧭 **One-Command Workflows**: `workbench run kes-rotate` (and claim-rewards, send-ada, pool-update) validates inputs up front, resumes after interruptions, carries work across an air gap, and reports every file it produced.
 * 🔄 **Environment Switching**: Switch effortlessly between mainnet, preprod, or preview.
 * 🏷️ **Version Management**: One release set (`versions.nix`) pins every tool to a verified-compatible combination, enforced by `nix flake check`.
 * 🧹 **Minimal Host Impact**: Keeps your filesystem clean and organized.
@@ -32,10 +33,11 @@ A reproducible, hassle-free environment for Cardano SPOs. Mochi's SPO Workbench 
 | [cardano-hw-cli](https://github.com/vacuumlabs/cardano-hw-cli) | Ledger/Trezor/Keystone signing | official release binaries |
 | [cardano-signer](https://github.com/gitmachtl/cardano-signer) | CIP-8/CIP-36 signing & verification | official release binaries |
 | [trezorctl](https://github.com/trezor/trezor-firmware/tree/main/python) | Trezor firmware updates | built from PyPI (pinned) |
+| `workbench` | Runs common operator workflows (KES rotation, rewards, pool updates, payments) end to end, with validation, resume and air-gap hand-off | this flake |
 | `workbench-doctor` | Checks tools and your hardware wallet against the requirements below | this flake |
 | udev rules (Linux) | Ledger/Trezor USB access, ready to copy into place | this flake |
 
-The exact pinned versions live in [`versions.nix`](./versions.nix) — the single source of truth for the release set. See [RELEASING.md](./RELEASING.md) for the versioning policy and how compatibility is enforced.
+The exact pinned versions live in [`versions.nix`](./versions.nix) — the single source of truth for the release set. See [Release sets and versioning](./docs/explanation/release-sets-and-versioning.md) for the policy and how compatibility is enforced.
 
 ---
 
@@ -64,194 +66,39 @@ Supported systems: `x86_64-linux`, `aarch64-linux`, `aarch64-darwin`.
 _This section is generated from `versions.nix` and the scripts' `00_common.sh` — do not edit by hand; run `nix run .#update-readme`._
 <!-- END generated:requirements -->
 
+Details on the release set and how it is checked: [Release set reference](./docs/reference/release-set.md).
+
 ---
 
 ## ⚡ Quick Start
 
-### 1. Install Nix
-
 ```sh
+# 1. Install Nix (Determinate)
 curl -fsSL https://install.determinate.systems/nix | sh -s -- install --determinate
-```
 
-### 2. Clone the Repository
-
-```sh
+# 2. Clone the repository
 git clone https://github.com/mochipool/workbench.git
 cd workbench
-```
 
-### 3. Enter a Development Shell
-
-```sh
-# Default: mainnet
+# 3. Enter a shell (mainnet by default; .#preprod and .#preview also exist)
 nix develop --accept-flake-config
-
-# Switch network (example: preview)
 nix develop --accept-flake-config .#preview
 ```
 
-🎉 You're ready to run!
-
-**NOTE (Determinate Systems Nix):**
-
-When using Determinate Systems Nix, some extra configuration is needed to use the iog cache. It is highly recommended to do so to avoid building everything from source.
-
-Run the following script to configure the cache correctly. It requires sudo:
-
-```sh
-./scripts/determinate-nix-config.sh
-```
-
-The flake also sets `lazy-trees = false` in its `nixConfig` (applied via `--accept-flake-config`): Determinate Nix's lazy-trees default breaks import-from-derivation in haskell.nix, which the Cardano toolchain relies on.
+With Determinate Nix, configure the IOG cache first to avoid building from source: see [Configure Determinate Nix](./docs/how-to/configure-determinate-nix.md). For a guided walk-through, start with the [set-up tutorial](./docs/tutorials/set-up-the-workbench.md).
 
 ---
 
-## 💻 Supported Systems
+## 📚 Documentation
 
-| System | Node/CLI | hw-cli & signer | Notes |
-| --- | --- | --- | --- |
-| `x86_64-linux` | ✅ cached | ✅ native | Recommended for block producers |
-| `aarch64-linux` | ✅ node cached | ✅ native | First `cardano-cli` build compiles from source (no native upstream cache) |
-| `aarch64-darwin` | ✅ cached | ✅ hw-cli native, signer via Rosetta 2 | Client-side use (key/cert management, signing) |
+The documentation in [`docs/`](./docs/README.md) follows the Diataxis structure.
 
-* cardano-signer ships no native Apple Silicon binary; the bundled `mac-x64` build runs transparently under Rosetta 2. cardano-hw-cli ships a native `mac-arm64` build since 1.20.0.
-* `x86_64-darwin` (Intel Mac) is no longer supported: cardano-hw-cli 1.20.0+ (required by the SPO scripts) publishes no mac-x64 artifact.
-* On **NixOS**, the prebuilt hw-cli/signer binaries need [`nix-ld`](https://github.com/nix-community/nix-ld) (they are dynamically linked foreign binaries and cannot be patched without corrupting their embedded payload).
+* **Tutorials**: [Set up the workbench](./docs/tutorials/set-up-the-workbench.md), [Rotate KES keys on preview](./docs/tutorials/rotate-kes-on-preview.md)
+* **How-to guides**: [Check your environment](./docs/how-to/check-your-environment.md), [Configure Determinate Nix](./docs/how-to/configure-determinate-nix.md), [Give USB access to hardware wallets](./docs/how-to/give-usb-access-to-hardware-wallets.md), [Use on NixOS](./docs/how-to/use-on-nixos.md), [Customise script settings](./docs/how-to/customise-script-settings.md), [Cut a release](./docs/how-to/cut-a-release.md)
+* **Reference**: [Flake outputs](./docs/reference/flake-outputs.md), [Release set](./docs/reference/release-set.md), [Supported systems and networks](./docs/reference/supported-systems-and-networks.md)
+* **Explanation**: [Architecture](./docs/explanation/architecture.md), [Release sets and versioning](./docs/explanation/release-sets-and-versioning.md), [Work modes](./docs/explanation/work-modes.md)
 
----
-
-## 🛠️ Customization
-
-### SPO Scripts
-
-* Preconfigured for immediate use.
-* Override defaults by creating a `common.inc` in your working directory. It takes priority over `.common.inc`.
-
-### Hardware wallets
-
-Setup, firmware updates and troubleshooting are covered in the [how-to guides](#-how-to-guides).
-
----
-
-## 🧭 How-to guides
-
-Task-oriented recipes for keeping hardware wallets working with the workbench. The versions each device must meet are in [Requirements & compatibility](#-requirements--compatibility). All commands run inside `nix develop --accept-flake-config`, or via `nix run` as shown.
-
-### How to check that your environment is ready
-
-```sh
-workbench-doctor              # tools + connected hardware wallet
-workbench-doctor --no-device  # tools only
-# without entering the shell:
-nix run --accept-flake-config .#doctor
-```
-
-For the device check, connect and unlock the wallet, and on a Ledger open the Cardano app. The command exits non-zero if any tool or the device is below the required version, and warns when no device is found or the udev rules are missing.
-
-### How to give your user USB access to a Ledger or Trezor (Linux)
-
-The workbench ships one rules file covering both wallets (built from nixpkgs' maintained rule sets). It grants the logged-in user access, so no `sudo` is needed to run the tools.
-
-1. Install the rules:
-
-   ```sh
-   nix run --accept-flake-config .#install-udev-rules -- --install
-   ```
-
-   Without `--install` the command only prints the rules file path and the exact `sudo install …` command, so you can copy the file yourself.
-
-2. Unplug and replug the device.
-3. Confirm with `workbench-doctor`.
-
-On **NixOS** `/etc` is declarative, so add the rules to your system configuration instead (the command prints this for you):
-
-```nix
-services.udev.packages = [ workbench.packages.x86_64-linux.udev-rules ];
-```
-
-macOS needs no rules. Keystone needs none on any platform: it signs via QR code.
-
-### How to update Trezor firmware
-
-Cardano is only available in the **universal** firmware, not the Bitcoin-only variant, so do not pass `--bitcoin-only`.
-
-1. Make sure your recovery seed is backed up, and connect the device with a good cable.
-2. Reboot the device into bootloader mode:
-
-   ```sh
-   trezorctl device reboot-to-bootloader
-   ```
-
-   If that is not available on your model, enter the bootloader by the key combination in Trezor's documentation for your model.
-3. Preview what would be installed (downloads the firmware and verifies its fingerprint, but writes nothing):
-
-   ```sh
-   trezorctl firmware-update --dry-run
-   ```
-
-4. Install it, then confirm on the device when prompted:
-
-   ```sh
-   trezorctl firmware-update
-   # or a specific release:
-   trezorctl firmware-update --version <x.y.z>
-   ```
-
-5. Once the device restarts, confirm the new version with `workbench-doctor`.
-
-`trezorctl` checks the firmware fingerprint against `data.trezor.io` by default. To pin it yourself, pass `--fingerprint <hex>`.
-
-### How to update Keystone firmware
-
-Keystone firmware cannot be updated from the command line: the USB route is browser-only (WebUSB). The microSD route needs only a download and a file copy, and works on any OS. These steps are for the Keystone 3 Pro; see [Keystone's firmware guide](https://guide.keyst.one/docs/firmware-upgrade) for other models.
-
-1. Charge the device (Keystone recommends at least 70%).
-2. Download the firmware for your model from Keystone's official firmware page and note the published checksum.
-3. Verify the download, then copy it to the root of a FAT32 microSD card as `keystone3.bin`:
-
-   ```sh
-   sha256sum keystone3.bin    # compare with the checksum Keystone publishes
-   cp keystone3.bin /path/to/mounted/sdcard/keystone3.bin
-   sync
-   ```
-
-4. Insert the card into the device, tap **Update** on the *New firmware detected* prompt (or Device Settings → About → Firmware → Via MicroSD Card) and enter your PIN.
-5. After the device reboots, confirm the version with `workbench-doctor`.
-
-### How to update the Ledger Cardano app
-
-Ledger apps are installed through Ledger's own tooling, which is not packaged in this flake.
-
-1. Update the device firmware first in [Ledger Live](https://www.ledger.com/ledger-live), then update or install the **Cardano** app in its *My Ledger* tab.
-2. If the Cardano app version you need is not offered yet, the SPO scripts suggest enabling *Settings → Experimental Features → My Ledger provider* and setting it to `4`. This is at your own risk.
-3. Plug in the device, open the Cardano app, and confirm with `workbench-doctor`.
-
----
-
-## 🌐 Supported Networks
-
-| Network    | Default  | Notes               |
-| ---------- | -------  | ------------------- |
-| Mainnet    | ✅       | Default environment |
-| Preprod    |          | .#preprod |
-| Preview    |          | .#preview |
-
----
-
-## 🏷️ Versioning & Releases
-
-Every workbench tag (`vX.Y.Z`) pins a **release set**: one verified-compatible combination of node, CLI, scripts, and signing tools. Two flake checks enforce this on every commit:
-
-* `version-manifest` — flake inputs must match the revisions declared in `versions.nix`.
-* `spo-compat` — the pinned tool versions must satisfy the min/max version requirements the SPO scripts enforce at runtime.
-* `readme-sync` — the generated [requirements table](#-requirements--compatibility) above must match `versions.nix` and the scripts' requirements. After a bump, regenerate it with `nix run .#update-readme`.
-
-```sh
-nix flake check --accept-flake-config
-```
-
-See [RELEASING.md](./RELEASING.md) for the full release process.
+The full index, including the hardware wallet firmware guides, is in [docs/README.md](./docs/README.md). The release procedure is in [RELEASING.md](./RELEASING.md), which points into the docs.
 
 ---
 
