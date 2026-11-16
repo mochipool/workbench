@@ -70,12 +70,15 @@ export SPO_SCRIPTS_SRC=<path to the pinned gitmachtl/scripts tree>
 python3 spec/tools/specctl.py lint       # zero errors required
 python3 spec/tools/specctl.py ids        # every requirement id, for the test coverage check
 python3 spec/tools/specctl.py gaps [FILE] # code lines no requirement cites (review aid; display code is expected)
+python3 spec/tools/specctl.py coverage --tests spo --config spo/spec-coverage.toml  # every requirement of an implemented spec cited or waived
 python3 spec/tools/specctl.py index      # regenerate domain/use-cases.md after changing front matter
 ```
 
 At the pinned tag, about 95% of non-display upstream code lines are cited by some requirement. Most of the rest is display, usage text and loop scaffolding.
 
 `nix flake check` runs `checks.<system>.spec-lint` against the pinned input, so a stale hash, a bad range, a duplicate id, an undefined cross-reference, an uncovered upstream file or an unowned common function fails the build.
+
+`coverage` reads the specs listed under `implemented` in `spo/spec-coverage.toml` and fails when one of their requirements (withdrawn ones excepted) is cited by no `// spec: SPO-...` comment in a `*_test.go` file and has no entry under `[waived]`; `checks.<system>.spo-spec-coverage` runs it.
 
 What lint verifies mechanically:
 

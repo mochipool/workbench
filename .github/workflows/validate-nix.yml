@@ -51,6 +51,7 @@ jobs:
         run: |
           nix build --accept-flake-config --no-link -L \
             .#checks.${{ matrix.system }}.spec-lint \
+            .#checks.${{ matrix.system }}.spo-spec-coverage \
             .#checks.${{ matrix.system }}.workbench-tests \
             .#checks.${{ matrix.system }}.spo-tests
 
@@ -113,6 +114,13 @@ jobs:
       - name: Validate ${{ matrix.network }} environment
         run: |
           nix develop --accept-flake-config .#${{ matrix.network }} --command bash 00_common.sh
+
+      # Differential tests of the Go implementation against the pinned
+      # upstream scripts. Network-independent, so one run per system is enough.
+      - name: spo parity tests
+        if: matrix.network == 'preview'
+        run: |
+          nix build --accept-flake-config --no-link -L .#checks.${{ matrix.system }}.spo-parity
 
       # The doctor depends on cardano-node/cli, so it only runs here (not in
       # the cheap per-system job).

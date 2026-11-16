@@ -42,6 +42,11 @@ Updated as concerns close. A concern not listed here is open.
 | X2 | partly closed, one waiver pending | `execx` passes and captures secrets through inherited pipes, with tests on argv and environment. See the finding below |
 | P1 | partly closed | `packages.<sys>.spo` and `checks.<sys>.spo-tests` build on x86_64-linux; other systems and the parity harness are not yet exercised |
 | P2 | partly closed | CI runs `spec-lint`, `workbench-tests`, `spo-tests` and `govulncheck`; contract tests (X3) do not exist yet |
+| C4 | partly closed | `spo/test/parity` runs the pinned upstream script and the Go use case on separate workspaces and compares names, modes, counters and envelope types (`checks.<sys>.spo-parity`). `specctl coverage` with `spo/spec-coverage.toml` fails the build when an id of an implemented spec is neither cited by a test nor waived (`checks.<sys>.spo-spec-coverage`). Still missing: fixed-tip fixtures and recorded Koios responses |
+| C3 | started | First executed findings folded into the spec: the quirk notes under SPO-04c-INV-002 and SPO-04b-EXT-002. No spec is `reviewed` yet |
+| C5 | in use | Quirk decisions for 04c are recorded in the tests that cite the ids (`generate_kes_test.go`, `root_test.go`) |
+| S4 | partly closed | `spo/internal/adapters/fsstore` covers the pool key and KES artefacts; kinds are added as use cases need them |
+| C2 | in use | First use case at parity: `GenerateKesKey` (04c), 12 ids cited, 8 waived with reasons |
 | T1 | partly closed | Tailcat pinned at v0.7.0 (D11); confinement to its adapter is enforced by `archtest` |
 
 ### Finding under X2: cardano-cli cannot write KES or VRF keys to a pipe

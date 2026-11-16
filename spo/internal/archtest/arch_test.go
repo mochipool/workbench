@@ -42,6 +42,8 @@ func layer(path string) string {
 		return "app"
 	case strings.HasPrefix(rest, "internal/ports"):
 		return "ports"
+	case strings.HasPrefix(rest, "internal/adapters/cli"), strings.HasPrefix(rest, "internal/adapters/tui"):
+		return "ui" // driving adapters: they call use cases
 	case strings.HasPrefix(rest, "internal/adapters"):
 		return "adapters"
 	case strings.HasPrefix(rest, "internal/platform"):
@@ -59,7 +61,8 @@ var allowed = map[string][]string{
 	"app":      {"domain", "ports", "app"},
 	"platform": {"platform"},
 	"adapters": {"domain", "ports", "platform", "adapters"},
-	"cmd":      {"domain", "ports", "app", "platform", "adapters"},
+	"ui":       {"domain", "ports", "app", "platform"},
+	"cmd":      {"domain", "ports", "app", "platform", "adapters", "ui"},
 }
 
 func TestLayering(t *testing.T) {

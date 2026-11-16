@@ -17,6 +17,7 @@
 , bech32
 , cardano-hw-cli
 , cardano-signer
+, workbench # tools/workbench.nix: the parity tests' oracle (ADR 0001)
 }:
 let
   version = "0.1.0";
@@ -78,10 +79,29 @@ let
     };
   };
 
+  # Differential tests against the pinned upstream scripts (concern C4). They
+  # need the whole Cardano toolchain, so they are a separate check from the
+  # unit tests.
+  parity = unwrapped.overrideAttrs (old: {
+    pname = "spo-parity";
+    checkPhase = ''
+      runHook preCheck
+      export HOME=$TMPDIR
+      export SPO_TOOLCHAIN=${toolchain}
+      export SPO_PARITY_WORKBENCH=${workbench}/bin/workbench
+      go test -count=1 -v ./test/parity/ | tee parity.log
+      if grep -q -- "--- SKIP" parity.log; then
+        echo "a parity test was skipped; the check must run them all"
+        exit 1
+      fi
+      runHook postCheck
+    '';
+  });
+
   package = pkgs.runCommand "spo-${version}"
     {
       nativeBuildInputs = [ pkgs.makeWrapper ];
-      passthru = { inherit toolchain unwrapped; tests = unwrapped; };
+      passthru = { inherit toolchain unwrapped parity; tests = unwrapped; };
       meta = unwrapped.meta // {
         description = "Stake pool operations from one binary, with sealed keys and multi-party signing";
         platforms = lib.platforms.unix;

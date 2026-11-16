@@ -50,6 +50,7 @@ Creates the VRF (verifiable random function) key pair a block producer uses for 
    - **SPO-04b-OUT-001** Locks the `.vkey` and `.skey` (mode `0400`, SPO-Pfiles-INV-003). (src: L55-L56)
 3. **Generate with `enc`.**
    - **SPO-04b-EXT-002** Runs the same command with the signing key written to stdout and captured in memory. Unlike 04a, cardano-cli stderr is not discarded. The `.vkey` is locked at once. (src: L67-L69)
+     > **Upstream quirk (observed 2026-11-16, cardano-cli 11.2.3.0):** this path fails for a non-root operator, for the reason given under SPO-04c-INV-002: `node key-gen-VRF` cannot write its signing key to `/dev/stdout` or to a pipe (`/dev/: openTempFile: permission denied`, exit 1).
    - **SPO-04b-INV-001** With `enc` the plaintext VRF signing key is never written to disk. (src: L67, L115-L124)
    - **SPO-04b-PR-001** Asks for a password and a confirmation, repeating until they match and each passes the strong-password rule (SPO-Ckey-INV-001), as SPO-04c-PR-001. (src: L77-L104)
    - **SPO-04b-PRE-002** An empty entry at any of the four password prompts aborts with exit 1 and deletes the `.vkey`. Unlike SPO-04c-PRE-004, the confirmation prompt cleans up too. (src: L84, L88, L94, L98)

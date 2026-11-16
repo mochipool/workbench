@@ -10,6 +10,7 @@ Commands
   hunks  --old OLDDIR --new NEWDIR     Map every changed hunk to the requirement ids it touches.
   ids                                  Print every requirement id, one per line.
   gaps   [FILE...] [--upstream DIR]    List code lines no requirement cites (review aid; display-only code is expected here).
+  coverage --tests DIR --config FILE   Fail when a requirement of an implemented spec has no citing Go test and no waiver.
   index  [--check]                     Regenerate domain/use-cases.md from front matter (--check: fail if stale).
 
 DIR is the root of a gitmachtl/scripts checkout (the directory holding `cardano/`).
@@ -609,6 +610,58 @@ def cmd_ids(args) -> int:
     return 0
 
 
+def cmd_coverage(args) -> int:
+    specs = load_specs()
+    by_id: dict[str, Requirement] = {}
+    for s in specs:
+        for r in s.reqs:
+            by_id[r.id] = r
+    codes = {s.code for s in specs}
+    withdrawn = {i for i, r in by_id.items() if "~~withdrawn~~" in r.text}
+    with open(args.config, "rb") as fh:
+        cfg = tomllib.load(fh)
+    implemented = [str(c) for c in cfg.get("implemented", [])]
+    waived = {str(k): str(v) for k, v in (cfg.get("waived") or {}).items()}
+    errors: list[str] = []
+
+    cited: set[str] = set()
+    root = Path(args.tests)
+    for path in sorted(root.rglob("*_test.go")):
+        rel = path.relative_to(root).parts
+        if "vendor" in rel or "testdata" in rel:
+            continue
+        for n, line in enumerate(read_lines(path), 1):
+            if "//" not in line:
+                continue
+            comment = line[line.index("//"):]
+            if "spec:" not in comment:
+                continue
+            for rid in REQ_ANY.findall(comment):
+                if rid not in by_id:
+                    errors.append(f"{path}:{n}: cited id {rid} does not exist in the corpus")
+                else:
+                    cited.add(rid)
+
+    for code in implemented:
+        if code not in codes:
+            errors.append(f"{args.config}: implemented code {code!r} is not a spec code")
+    required = {r.id for c in implemented for s in specs if s.code == c for r in s.reqs if r.id not in withdrawn}
+    for rid in sorted(required - cited - set(waived)):
+        errors.append(f"{rid}: requirement of an implemented spec is neither cited by a test nor waived")
+    for rid, reason in sorted(waived.items()):
+        if rid not in by_id:
+            errors.append(f"{args.config}: waived id {rid} does not exist in the corpus")
+        elif not reason.strip():
+            errors.append(f"{args.config}: waived id {rid} has an empty reason")
+        elif rid in cited:
+            errors.append(f"{args.config}: waived id {rid} is also cited by a test; remove the stale waiver")
+    for e in sorted(errors):
+        print(e)
+    print(f"specctl coverage: {len(implemented)} implemented specs, {len(required)} requirements, "
+          f"{len(required & cited)} cited, {len(required & set(waived))} waived, {len(errors)} errors")
+    return 1 if errors else 0
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="specctl", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -618,6 +671,7 @@ def main(argv: list[str]) -> int:
     p = sub.add_parser("hunks"); p.add_argument("--old", required=True); p.add_argument("--new", required=True); p.set_defaults(fn=cmd_hunks)
     p = sub.add_parser("ids"); p.set_defaults(fn=cmd_ids)
     p = sub.add_parser("gaps"); p.add_argument("files", nargs="*"); p.add_argument("--upstream"); p.set_defaults(fn=cmd_gaps)
+    p = sub.add_parser("coverage"); p.add_argument("--tests", required=True); p.add_argument("--config", required=True); p.set_defaults(fn=cmd_coverage)
     p = sub.add_parser("index"); p.add_argument("--check", action="store_true"); p.set_defaults(fn=cmd_index)
     args = ap.parse_args(argv)
     return args.fn(args)

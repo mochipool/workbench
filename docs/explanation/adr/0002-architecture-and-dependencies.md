@@ -34,7 +34,7 @@ spo/
 
 ### Dependency rule
 
-`domain` imports nothing from this module except other `domain` packages named as shared kernel. `app` imports `domain` and `ports`. `adapters` import `ports`, `domain` and `platform`. Only `cmd/spo` imports adapters. A test (`go list` over the import graph) fails the build when the rule is broken. The same test asserts that `os/exec` is imported only by `platform/execx`, and that the tailcat module is imported only by `adapters/tailcat`.
+`domain` imports nothing from this module except other `domain` packages named as shared kernel. `app` imports `domain` and `ports`. Driven adapters (stores, tools, chain providers, transports) import `ports`, `domain` and `platform`. The two driving adapters, `adapters/cli` and `adapters/tui`, also import `app`, because calling use cases is their job; they import no other adapter. Only `cmd/spo` imports driven adapters. A test (`go list` over the import graph) fails the build when the rule is broken. The same test asserts that `os/exec` is imported only by `platform/execx`, and that the tailcat module is imported only by `adapters/tailcat`.
 
 ### Rules that follow from the concerns
 

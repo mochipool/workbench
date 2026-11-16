@@ -39,7 +39,7 @@ Unit tests use stand-ins (`tests/fake_scripts.py`) that reproduce the upstream f
 
 Started 2026-11-16. Read [Go reference implementation: concerns](./go-reference-implementation-concerns.md) and the [ADRs](../explanation/adr/README.md) before touching it. The concerns page has a *Status* table that says what is closed.
 
-State: milestone M0 (decisions and skeleton) is done. The binary has `spo version` and `spo toolchain check`. No use case is ported yet.
+State: milestone M0 (decisions and skeleton) is done, and M1 (parity harness) has its first vertical slice: `spo --upstream-layout pool kes generate <pool>` is at parity with upstream `04c` under a differential test. The sealed store does not exist yet, so the binary only works on a directory in the upstream layout, behind that flag.
 
 | What | Where |
 | --- | --- |
@@ -48,13 +48,21 @@ State: milestone M0 (decisions and skeleton) is done. The binary has `spo versio
 | Guarded memory for key material; core dumps disabled at start | `spo/internal/platform/secret` |
 | Release-set gates (upstream's bounds plus an exact match with the pin) | `spo/internal/adapters/toolchain`, manifest from `tools/spo.nix` |
 | Dependency rule and import confinement, enforced as a test | `spo/internal/archtest` |
+| Ports defined so far: `Toolchain`, `Store`, `Vault`, `KeyGen` | `spo/internal/ports` |
+| KES rotation state and the `GenerateKesKey` use case | `spo/internal/domain/pool`, `spo/internal/app/poolops` |
+| Upstream-layout store (plain files, keys unsealed) | `spo/internal/adapters/fsstore` |
+| cardano-cli key generation for KES and VRF | `spo/internal/adapters/cardanocli` |
+| Differential tests against the pinned upstream scripts | `spo/test/parity` |
+| Which specs are implemented, and the waived ids with reasons | `spo/spec-coverage.toml` |
 
 Verify:
 
 ```sh
 nix build --accept-flake-config --no-link -L .#checks.x86_64-linux.spo-tests   # go vet + go test in the sandbox
 nix run --accept-flake-config .#spo -- toolchain check                        # real pinned tools pass the gates
-cd spo && go test ./...                                                       # fast loop; needs Go 1.27
+cd spo && go test -count=1 ./...                                              # fast loop; needs Go 1.27. -count=1 matters: Go caches the import-rule test
+nix build --accept-flake-config --no-link -L .#checks.x86_64-linux.spo-parity # upstream 04c against the Go use case
+python3 spec/tools/specctl.py coverage --tests spo --config spo/spec-coverage.toml
 ```
 
 Things that will bite:
@@ -64,7 +72,15 @@ Things that will bite:
 * **Go version.** `spo` needs Go 1.27 (tailcat). It is built with the `nixpkgs-go` flake input, which is locked separately from the release set's `nixpkgs`.
 * **KES and VRF key generation cannot use a pipe** with cardano-cli 11.2.3.0. See the finding in the concerns page before writing the `KeyGen` adapter.
 
-Next: milestone M1, the parity harness (concerns C3, C4, S4, X3), then the single-operator slice.
+How to port a use case (the pattern `GenerateKesKey` sets):
+
+1. Read its specs. Put state rules in `domain/<context>`, the sequence in `app/<context>`, and add only the port operations it needs.
+2. Unit-test the use case with fakes, citing ids in `// spec:` comments. Record each upstream-quirk decision in the test that cites the id.
+3. Add a differential test in `spo/test/parity` that runs the upstream script through `workbench exec` and compares state.
+4. Add the spec code to `implemented` in `spo/spec-coverage.toml`; waive what is deliberately not ported, with a reason.
+5. Fold anything the real tools taught you back into the spec.
+
+Next, in order: `04d` and `04e` (needs the `Signer`, `ChainQuery` and `Clock` ports and the Koios adapter), the sealed store (ADR 0003), then send ADA through the shared transaction pipeline. After that the multi-party slice (M3).
 
 ## Backlog
 
