@@ -208,7 +208,7 @@ func (Registry) Put(w ports.Writer, p party.Party) error {
 		if q.Name == p.Name {
 			return party.ErrNameTaken
 		}
-		if p.Identity.Node != nil && q.Identity.Node != nil && *p.Identity.Node == *q.Identity.Node {
+		if q.Active() && p.Identity.Node != nil && q.Identity.Node != nil && *p.Identity.Node == *q.Identity.Node {
 			return party.ErrNodeKeyInUse
 		}
 	}
@@ -252,6 +252,40 @@ func (Registry) Revoke(w ports.Writer, name string) (party.Party, error) {
 		return r, store(w, ps)
 	}
 	return party.Party{}, ports.ErrNotFound
+}
+
+// Rotate replaces the record of old by retired and adds next, in one write: no
+// state of the store has both active, and none has neither (SPO-Xparty-INV-032).
+func (Registry) Rotate(w ports.Writer, old party.Fingerprint, retired, next party.Party) error {
+	ps, err := load(w)
+	if err != nil {
+		return err
+	}
+	at := slices.IndexFunc(ps, func(p party.Party) bool { return p.Fingerprint == old })
+	if at < 0 {
+		return ports.ErrNotFound
+	}
+	if retired.Fingerprint != old || retired.Active() {
+		return fmt.Errorf("partystore: the retired record must be the old identity, revoked")
+	}
+	if !next.Active() {
+		return fmt.Errorf("partystore: the new record must be active")
+	}
+	ps[at] = retired
+	for i, q := range ps {
+		if i == at {
+			continue
+		}
+		switch {
+		case q.Fingerprint == next.Fingerprint:
+			return party.ErrAlreadyEnrolled
+		case q.Name == next.Name || q.Name == retired.Name:
+			return party.ErrNameTaken
+		case q.Active() && next.Identity.Node != nil && q.Identity.Node != nil && *next.Identity.Node == *q.Identity.Node:
+			return party.ErrNodeKeyInUse
+		}
+	}
+	return store(w, append(ps, next))
 }
 
 // MaxReplayEntries caps the whole replay log (44 bytes each, about 1.4 MB). A

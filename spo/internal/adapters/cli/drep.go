@@ -144,10 +144,11 @@ the one of the protocol parameters, and it is read from the chain: "not
 registered" or an unknown answer is an error.
 
 A wrong refund can cost the deposit, so a second independent source must agree
-when the workspace has one (capability drep-state-crosscheck). No adapter gives
-a second DRep source today, so the command is refused unless you pass
---single-source, which accepts the one source; the summary then says the refund
-rests on one source.
+when the workspace has one (capability drep-state-crosscheck: a second
+provider, spo provider set blockfrost). Without one the command is refused
+unless you pass --single-source, which accepts the one source; the summary then
+says the refund rests on one source. Providers that disagree are refused
+whatever the flag.
 
 The certificate is stored as <name>.drep-ret.cert only after the transaction
 was sent or queued.`,
@@ -164,7 +165,7 @@ was sent or queued.`,
 					details = append(details, "DRep id       "+firstLineText(id))
 				}
 				uc := governance.RetireDRep{Base: a.govBase(s, env, &f, govConfirmer{a: a, details: details}),
-					Certs: env.Certs, DReps: env.DReps, CrossCheck: env.DRepCross, Sources: f.policy()}
+					Certs: env.Certs, DReps: env.DReps, CrossCheck: env.DRepCross, Sources: f.policy(), OnSingle: a.singleSourceHook(s, "spo drep retire")}
 				res, err := uc.Run(ctx, governance.RetireDRepRequest{DRep: args[0], Payer: args[1], Message: f.messages, Extras: f.extra.ex, Passphrase: f.extra.pass, Unrestricted: unrestricted})
 				if err != nil {
 					return f.hint(err)
@@ -206,37 +207,37 @@ signatures were not verified.`,
 				}
 				w := a.d.Out
 				fmt.Fprintf(w, "DRep %s\n  id (CIP-105)  %s\n  id (CIP-129)  %s\n  id (hex)      %s\n", rep.Standing, rep.IDs.Legacy, rep.IDs.CIP129, rep.IDs.Hex)
-				fmt.Fprintf(w, "  source        %s\n", rep.Source)
+				fmt.Fprintf(w, "  source        %s\n", shown(string(rep.Source)))
 				if rep.EpochKnown {
 					fmt.Fprintf(w, "  epoch         %d\n", rep.Epoch)
 				} else {
-					fmt.Fprintf(w, "  epoch         unknown: %s; whether the DRep is expired is not assessed\n", rep.EpochWhy)
+					fmt.Fprintf(w, "  epoch         unknown: %s; whether the DRep is expired is not assessed\n", shown(rep.EpochWhy))
 				}
 				if rep.Standing != "not registered" {
 					fmt.Fprintf(w, "  deposit       %s\n", lovelaceText(rep.State.Deposit))
 					if e, ok := rep.State.Expiry.Get(); ok {
 						fmt.Fprintf(w, "  expires       epoch %d\n", e)
 					} else if rep.State.Expiry.IsUnknown() {
-						fmt.Fprintf(w, "  expires       unknown: %s\n", rep.State.Expiry.Why())
+						fmt.Fprintf(w, "  expires       unknown: %s\n", shown(rep.State.Expiry.Why()))
 					}
 					if d, ok := rep.State.DelegatedStake.Get(); ok {
 						fmt.Fprintf(w, "  stake         %s\n", lovelaceText(d))
 					} else if rep.State.DelegatedStake.IsUnknown() {
-						fmt.Fprintf(w, "  stake         unknown: %s\n", rep.State.DelegatedStake.Why())
+						fmt.Fprintf(w, "  stake         unknown: %s\n", shown(rep.State.DelegatedStake.Why()))
 					}
 					fmt.Fprintf(w, "  anchor        %s\n", anchorText(rep.Anchor))
 					c := rep.AnchorCheck
 					switch {
 					case rep.Anchor.IsZero() && rep.State.AnchorURL == "":
 					case !c.Checked:
-						fmt.Fprintf(w, "  anchor check  %s\n", c.Reason)
+						fmt.Fprintf(w, "  anchor check  %s\n", shown(c.Reason))
 					case c.Reason != "":
-						fmt.Fprintf(w, "  anchor check  %s\n", c.Reason)
+						fmt.Fprintf(w, "  anchor check  %s\n", shown(c.Reason))
 					case c.HashMatch:
 						fmt.Fprintf(w, "  anchor check  the document hashes to the registered hash\n")
 					}
 					if c.Unverified != "" {
-						fmt.Fprintf(w, "  NOT CHECKED   %s\n", c.Unverified)
+						fmt.Fprintf(w, "  NOT CHECKED   %s\n", shown(c.Unverified))
 					}
 				}
 				return nil

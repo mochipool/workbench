@@ -8,7 +8,7 @@
 spo [-C DIR] [--upstream-layout] [--accept-rollback] tui
 ```
 
-The global options apply to the whole session. `--passphrase-fd` is refused: the TUI asks for the passphrase when a command needs it. `spo tui` needs a terminal on standard input and output. Bare `spo` still prints help.
+The global options apply to the whole session. `--passphrase-fd` is refused: the TUI asks for the passphrase when a command needs it. `spo tui` needs a terminal on standard input and output of at least 40 columns by 10 rows; a smaller terminal shows only a notice (keys still work, so a prompt can be cancelled with `ctrl+c`) until it is resized. Bare `spo` still prints help.
 
 The header shows the workspace directory, the network and mode from `spo.toml`, and whether the workspace is sealed. Nothing is opened to show it. The passphrase is asked for only when a command asks, and the workspace is open only while that command runs.
 
@@ -35,6 +35,15 @@ The header shows the workspace directory, the network and mode from `spo.toml`, 
 | `ctrl+u` | Clear the field. |
 | `esc` | Back to the menu; secret fields are wiped. |
 
+### Names, files and exclusions
+
+These are driven by metadata on the commands (see [ADR 0009](../explanation/adr/0009-tui.md)), not by TUI code.
+
+* **Name completion.** A field that names a workspace object (a wallet, pool, stake key, policy, asset, DRep, committee key, voting key, Calidus key or party) shows the matching names under it. `tab` completes to the common prefix, then steps through the candidates; with no candidate or an exact match it moves to the next field. Names only: no record content is read for this.
+* **Sealed workspaces.** Listing names needs the workspace open. The TUI does not open it to draw a form: with a sealed workspace the field says `names are sealed`, and `ctrl+n` asks for the passphrase once, in a hidden modal, lists the names, closes the workspace and forgets the passphrase. The names stay in memory until a command is run (it may change them) or the TUI ends. With `--upstream-layout` there is no passphrase and the names are listed when a form opens.
+* **File picker.** `ctrl+o` on a field that takes a path opens a keyboard picker that starts in the workspace directory. `up` `down` `enter` move and open, `left` goes up, `.` (`ctrl+a` when typing a new file name) shows or hides hidden entries, `s` chooses the current directory when a directory is wanted, `esc` cancels. A field that takes a new file also takes a typed name. Where the command names an extension, other files are not listed. A symbolic link is listed with its target (`name -> target`); it is followed or chosen only on a second `enter`, after the target was shown. The picker lists names; it never opens or reads a file.
+* **Exclusions.** Where a command declares flags mutually exclusive, required together, or one required (cobra's `MarkFlags...`), the form marks the flags: a field that conflicts with one already given is greyed (`not with --x`) and takes no input until the other is cleared, a flag that needs a partner says `needed with --x`, and `Run` is refused with the reason before the command starts. Cobra still validates when the command runs.
+
 **Run.** The command's output streams into a scrolling pane, with its questions answered in a modal. When it returns, the pane shows `done` or `spo: <error>`, exactly the message the CLI prints. `esc` goes back to the menu, `e` back to the form with your values, `up` `down` `PgUp` `PgDn` scroll, `q` quits.
 
 ## Prompts and secrets
@@ -48,9 +57,9 @@ The header shows the workspace directory, the network and mode from `spo.toml`, 
 
 ## What it deliberately does not do
 
-* It has no workflow of its own, no command the CLI lacks and no cache of what the workspace holds.
+* It has no workflow of its own and no command the CLI lacks.
 * It does not open the workspace to draw a screen, and keeps nothing between commands.
 * It runs one command at a time.
 * It does not offer file-descriptor options as numbers, and does not read the passphrase from `--passphrase-fd`.
-* It does not complete wallet, pool or policy names; type them. A read-only completion through the existing ports is possible and is not built.
+* It keeps no cache beyond the session's name list (see above), and nothing of it is written anywhere.
 * It has no mouse support, no themes and no configuration file.

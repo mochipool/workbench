@@ -111,8 +111,29 @@ type Draft struct {
 	// signers (key 14); see BodySpec.RequiredSigners. The workflow counts
 	// their witnesses itself.
 	RequiredSigners []KeyHash
+	// Plutus is the script witness, redeemers and collateral of a transaction
+	// that carries a Plutus script (see PlutusAttachment); nil for none.
+	Plutus *PlutusAttachment
 
 	mode layoutMode
+}
+
+// WithPlutus returns the draft with a Plutus attachment. The collateral is not
+// an input of the draft: the caller removed it from the inputs
+// (PickCollateral), so the change is computed without it (SPO-25b-INV-007).
+func (d Draft) WithPlutus(a PlutusAttachment) (Draft, error) {
+	if err := a.Validate(); err != nil {
+		return Draft{}, err
+	}
+	for _, c := range a.Collateral {
+		for _, in := range d.Inputs {
+			if in.TxID == c.TxID && in.Index == c.Index {
+				return Draft{}, fmt.Errorf("%w: the collateral %s#%d is also an input", ErrBadPlutus, c.TxID, c.Index)
+			}
+		}
+	}
+	d.Plutus = &a
+	return d, nil
 }
 
 // NewDraft checks and assembles a payment draft.
@@ -187,6 +208,11 @@ func (d Draft) Features() (custody.Features, error) {
 	}
 	if len(d.Proposals) > 0 {
 		fs[custody.FeatGovernanceAction] = struct{}{}
+	}
+	if d.Plutus != nil {
+		// A signer that must understand what it signs has to understand a
+		// script-data hash, redeemers and collateral.
+		fs[custody.FeatPlutusScript] = struct{}{}
 	}
 	return fs, nil
 }

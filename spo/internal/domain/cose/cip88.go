@@ -106,6 +106,14 @@ func (r Cip88) Witness(sig []byte) Sign1 {
 // Metadata is the registration metadata CBOR: the content of cardano-signer's
 // `--out-cbor` file and of a `.cbor` metadata file for the send transaction.
 func (r Cip88) Metadata(coldPub, sig []byte) []byte {
+	return r.MetadataFrom(coldPub, r.Witness(sig))
+}
+
+// MetadataFrom is Metadata with the witness a device made, whose protected
+// header is the device's own (the hardware flow of SPO-15-EXT-004 signs with
+// `message sign`, whose COSE_Sign1 the tool builds). The caller checks it with
+// VerifyCip88 before use.
+func (r Cip88) MetadataFrom(coldPub []byte, w Sign1) []byte {
 	b := putMap(nil, 1)
 	b = putUint(b, LabelCip88)
 	b = putMap(b, 3)
@@ -119,17 +127,21 @@ func (r Cip88) Metadata(coldPub, sig []byte) []byte {
 	b = putUint(b, 1)
 	b = append(b, EncodeKey(coldPub)...)
 	b = putUint(b, 2)
-	return append(b, r.Witness(sig).encodeInt()...)
+	return append(b, w.encodeInt()...)
 }
 
 // MetadataJSON is the compact JSON of the label-867 metadata as cardano-signer
 // prints it, byte strings as "0x<hex>" and the COSE maps spelled out. The
 // registration file of `genmeta` is this, pretty-printed (see RegistrationFile).
 func (r Cip88) MetadataJSON(coldPub, sig []byte) string {
-	w := r.Witness(sig)
+	return r.MetadataJSONFrom(coldPub, r.Witness(sig))
+}
+
+// MetadataJSONFrom is MetadataJSON with a given witness (see MetadataFrom).
+func (r Cip88) MetadataJSONFrom(coldPub []byte, w Sign1) string {
 	return `{"867":{"0":2,"1":{"1":[1,` + hex0x(r.PoolID[:]) + `],"2":[],"3":[2],"4":` + strconv.FormatUint(r.Nonce, 10) +
 		`,"7":` + hex0x(r.CalidusPub[:]) + `},"2":[{"1":{"1":1,"3":-8,"-1":6,"-2":` + hex0x(coldPub) +
-		`},"2":[` + hex0x(w.Protected) + `,0,` + hex0x(w.Payload) + `,` + hex0x(w.Signature) + `]}]}}`
+		`},"2":[` + hex0x(w.Protected) + `,` + hashedInt(w.Hashed) + `,` + hex0x(w.Payload) + `,` + hex0x(w.Signature) + `]}]}}`
 }
 
 // RegistrationFile is the `.calidus-registration.json` content: the compact
@@ -203,4 +215,11 @@ func VerifyCip88(metadata []byte) (Cip88, error) {
 		return r, ErrSignature
 	}
 	return r, nil
+}
+
+func hashedInt(h bool) string {
+	if h {
+		return "1"
+	}
+	return "0"
 }

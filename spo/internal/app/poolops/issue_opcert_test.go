@@ -128,7 +128,7 @@ func newIssueEnv(t *testing.T, counter uint64, reading chain.Reading[uint64]) is
 	return issueEnv{
 		uc: IssueOperationalCertificate{
 			Store: st, Signers: directory{vault: signer}, Tip: tip, Genesis: fakeGenesis{},
-			Counters: fakeCounters{reading: reading}, Clock: fixedClock{time.Date(2026, 11, 16, 8, 57, 1, 0, time.UTC)},
+			Counters: fakeCounters{reading: reading}, SingleSource: true, OnSingle: noopHook, Clock: fixedClock{time.Date(2026, 11, 16, 8, 57, 1, 0, time.UTC)},
 		},
 		signer: signer, tip: tip, dir: dir,
 	}
@@ -463,5 +463,23 @@ func TestCounterOfAnotherKeyIsRefused(t *testing.T) {
 	os.WriteFile(p, pool.IssueCounter{Next: 2}.Envelope(), 0o600)
 	if _, err := e.uc.Run(context.Background(), "mypool", IssueOptions{}); !errors.Is(err, ErrCounterKeyMismatch) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// A counter read from one provider with no second configured is refused unless
+// the operator acknowledged the single source (N7); the result names the
+// source and says the answer rests on one.
+//
+// spec: SPO-04d-INV-006 (ADR 0006, F2)
+func TestIssueFromOneProviderNeedsSingleSource(t *testing.T) {
+	e := newIssueEnv(t, 5, chain.Value(uint64(4)))
+	e.uc.SingleSource = false
+	if _, err := e.uc.Run(context.Background(), "mypool", IssueOptions{CounterOverride: u64(5)}); !errors.Is(err, ErrOpCertSingleSource) {
+		t.Fatalf("%v", err)
+	}
+	e.uc.SingleSource = true
+	res, err := e.uc.Run(context.Background(), "mypool", IssueOptions{CounterOverride: u64(5)})
+	if err != nil || !res.SingleSource || res.Source == "" {
+		t.Fatalf("%+v %v", res, err)
 	}
 }

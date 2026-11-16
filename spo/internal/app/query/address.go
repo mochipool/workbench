@@ -347,15 +347,18 @@ func (uc QueryAddress) annotate(ctx context.Context, rep *AddressReport) {
 	}
 }
 
-// readable gives a name when it is printable UTF-8 text (SPO-Cconv-OUT-016).
+// readable gives a name when it is plain printable UTF-8 text
+// (SPO-Cconv-OUT-016). Anyone can send a token with a hostile name to an
+// address, so a name that holds anything textsafe would escape (a C0 or C1
+// control, a bidirectional or invisible format character, a variation selector
+// or filler, a line separator) has no text and is shown as hex only.
 func readable(name []byte) string {
 	if len(name) == 0 || !utf8.Valid(name) {
 		return ""
 	}
-	for _, r := range string(name) {
-		if r < 0x20 || r == 0x7f {
-			return ""
-		}
+	s := string(name)
+	if !ports.IsPlainText(s) {
+		return ""
 	}
-	return string(name)
+	return s
 }

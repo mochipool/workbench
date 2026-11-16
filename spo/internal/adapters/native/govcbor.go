@@ -8,8 +8,12 @@ import (
 )
 
 // A small strict CBOR reader for the governance files (certificates, vote
-// files, proposals). It reads definite-length items only and keeps the exact
-// bytes of each item, so a decoded item can be handed back as it was carried.
+// files, proposals). It reads definite-length items and keeps the exact bytes
+// of each item, so a decoded item can be handed back as it was carried. Only
+// the action-file reader (gparseAllIndefinite) also reads indefinite-length
+// arrays, which cardano-cli writes for the cost models of a parameter update;
+// that reader then requires the bytes to equal what the builder writes, so an
+// indefinite array anywhere else is refused.
 
 type gitem struct {
 	major byte // 0 uint, 1 negative, 2 bytes, 3 text, 4 array, 5 map, 6 tag, 7 simple
@@ -47,11 +51,35 @@ func ghead(b []byte) (major byte, arg uint64, n int, err error) {
 	return major, arg, 1 + size, nil
 }
 
-func gparse(b []byte, depth int) (gitem, []byte, error) {
+func gparse(b []byte, depth int, indef bool) (gitem, []byte, error) {
 	if depth > gcborMaxDepth {
 		return gitem{}, nil, fmt.Errorf("%w: nested too deeply", errGCBOR)
 	}
 	start := b
+	if indef && len(b) > 0 && b[0] == 0x9f {
+		// An indefinite-length array: the ledger writes the cost models of a
+		// parameter update so. Read to the break and keep the exact bytes.
+		it := gitem{major: 4, u: 0}
+		b = b[1:]
+		for {
+			if len(b) == 0 {
+				return gitem{}, nil, errGCBOR
+			}
+			if b[0] == 0xff {
+				b = b[1:]
+				break
+			}
+			var c gitem
+			var err error
+			if c, b, err = gparse(b, depth+1, indef); err != nil {
+				return gitem{}, nil, err
+			}
+			it.arr = append(it.arr, c)
+		}
+		it.u = uint64(len(it.arr))
+		it.raw = start[:len(start)-len(b)]
+		return it, b, nil
+	}
 	major, arg, n, err := ghead(b)
 	if err != nil {
 		return gitem{}, nil, err
@@ -71,7 +99,7 @@ func gparse(b []byte, depth int) (gitem, []byte, error) {
 		}
 		for i := uint64(0); i < arg; i++ {
 			var c gitem
-			if c, b, err = gparse(b, depth+1); err != nil {
+			if c, b, err = gparse(b, depth+1, indef); err != nil {
 				return gitem{}, nil, err
 			}
 			it.arr = append(it.arr, c)
@@ -82,17 +110,17 @@ func gparse(b []byte, depth int) (gitem, []byte, error) {
 		}
 		for i := uint64(0); i < arg; i++ {
 			var k, v gitem
-			if k, b, err = gparse(b, depth+1); err != nil {
+			if k, b, err = gparse(b, depth+1, indef); err != nil {
 				return gitem{}, nil, err
 			}
-			if v, b, err = gparse(b, depth+1); err != nil {
+			if v, b, err = gparse(b, depth+1, indef); err != nil {
 				return gitem{}, nil, err
 			}
 			it.keys, it.vals = append(it.keys, k), append(it.vals, v)
 		}
 	case 6:
 		var c gitem
-		if c, b, err = gparse(b, depth+1); err != nil {
+		if c, b, err = gparse(b, depth+1, indef); err != nil {
 			return gitem{}, nil, err
 		}
 		it.inner = &c
@@ -101,9 +129,15 @@ func gparse(b []byte, depth int) (gitem, []byte, error) {
 	return it, b, nil
 }
 
-// gparseAll reads exactly one item and refuses trailing bytes.
-func gparseAll(b []byte) (gitem, error) {
-	it, rest, err := gparse(b, 0)
+// gparseAll reads exactly one definite-length item and refuses trailing bytes.
+func gparseAll(b []byte) (gitem, error) { return gparseOne(b, false) }
+
+// gparseAllIndefinite is gparseAll that also reads indefinite-length arrays.
+// Its caller must compare the bytes with a canonical re-encoding.
+func gparseAllIndefinite(b []byte) (gitem, error) { return gparseOne(b, true) }
+
+func gparseOne(b []byte, indef bool) (gitem, error) {
+	it, rest, err := gparse(b, 0, indef)
 	if err != nil {
 		return gitem{}, err
 	}

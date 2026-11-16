@@ -48,7 +48,7 @@ var notUpstream = map[ports.Kind]bool{
 	ports.PartyKeys: true, ports.PartyIdentity: true, ports.PartyRecords: true, ports.PartyReplay: true,
 	ports.TailcatNodeKey: true, ports.TailcatPSK: true, ports.TailcatAddr: true,
 	ports.MultisigCoordinator: true, ports.MultisigSigner: true, ports.MultisigOutbox: true,
-	ports.MultisigEvents: true, ports.MultisigCollection: true,
+	ports.MultisigEvents: true, ports.MultisigCollection: true, ports.MultisigSubmitted: true,
 	ports.UpstreamEncryptedSKey: false,
 }
 

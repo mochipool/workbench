@@ -279,7 +279,7 @@ func (f *pfix) events() []string {
 
 func (f *pfix) outbox() []multisig.OutItem {
 	f.t.Helper()
-	items, err := (multisig.Outbox{Store: f.st, Clock: f.clock}).Pending(context.Background())
+	items, err := (multisig.Outbox{Store: f.st, Clock: f.clock, Parties: realKit(f.st).Registry, Kit: realKit(f.st).Kit}).Pending(context.Background())
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -303,7 +303,10 @@ type pscene struct {
 	bodyID chain.TxID
 }
 
-func newPscene(t *testing.T) *pscene {
+func newPscene(t *testing.T) *pscene { return newPsceneMeta(t, "https://example.org/p.json") }
+
+// newPsceneMeta is newPscene for a registration whose metadata URL is metaURL.
+func newPsceneMeta(t *testing.T, metaURL string) *pscene {
 	t.Helper()
 	clock := partyrig.NewClock(partyT0)
 	ch := partyrig.NewChain(clock.Now())
@@ -321,7 +324,7 @@ func newPscene(t *testing.T) *pscene {
 	cert, err := native.Ledger{}.BuildPoolRegistration(pool.RegistrationSpec{Operator: poolID, VrfKeyHash: [32]byte{7}, Pledge: 1_000_000,
 		Cost: 340_000_000, Margin: chain.Rational{Num: 1, Den: 100}, RewardAccount: stake.KeyHash(s.hash), NetworkID: 0,
 		Owners: []stake.KeyHash{stake.KeyHash(s.hash)}, Relays: []pool.Relay{{Kind: pool.RelayDNS, Host: "relay.example.org", Port: 3001, HasPort: true}},
-		MetaURL: "https://example.org/p.json", MetaHash: [32]byte{9}})
+		MetaURL: metaURL, MetaHash: [32]byte{9}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -96,6 +96,8 @@ func TestConfinedImports(t *testing.T) {
 		"github.com/blinklabs-io":      module + "/internal/adapters/native",
 		"github.com/awnumar/memguard":  module + "/internal/platform/secret",
 		"modernc.org/sqlite":           module + "/internal/adapters/sqlitestore",
+		// The QR code encoder: only the qrcode adapter draws a QR code.
+		"rsc.io/qr": module + "/internal/adapters/qrcode",
 		// The terminal UI library and its text-width helper (ADR 0009).
 		"github.com/charmbracelet":      module + "/internal/adapters/tui",
 		"github.com/mattn/go-runewidth": module + "/internal/adapters/tui",
@@ -103,7 +105,11 @@ func TestConfinedImports(t *testing.T) {
 	for _, p := range load(t) {
 		for _, imp := range p.Imports {
 			for target, home := range confined {
-				if (imp == target || strings.HasPrefix(imp, target+"/")) && p.ImportPath != home {
+				// Blink Labs libraries are confined to adapters/native and its
+				// subpackages (adapters/native/n2c, the node-to-client adapter).
+				inHome := p.ImportPath == home ||
+					(target == "github.com/blinklabs-io" && strings.HasPrefix(p.ImportPath, home+"/"))
+				if (imp == target || strings.HasPrefix(imp, target+"/")) && !inHome {
 					t.Errorf("%s imports %s; only %s may", p.ImportPath, imp, home)
 				}
 			}

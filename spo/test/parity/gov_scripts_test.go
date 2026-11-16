@@ -429,7 +429,7 @@ func TestGovTransactionsMatchUpstream(t *testing.T) {
 			run: regDRep(govURL, govHash), wantFiles: []string{"d.drep-reg.cert"}},
 		{name: "21d retirement refunds the on-chain deposit", drep: registered(123_456_789), script: "21d_retDRepCert.sh", args: []string{"d", "w.payment"},
 			run: func(t *testing.T, k kit) (txflow.Result, error) {
-				res, err := governance.RetireDRep{Base: govBase(k), Certs: k.led, DReps: k.file, Sources: governance.SingleSourceAcknowledged}.Run(bg, governance.RetireDRepRequest{DRep: "d", Payer: "w.payment"})
+				res, err := governance.RetireDRep{Base: govBase(k), Certs: k.led, DReps: k.file, Sources: governance.SingleSourceAcknowledged, OnSingle: noopSingle}.Run(bg, governance.RetireDRepRequest{DRep: "d", Payer: "w.payment"})
 				return res.Result, err
 			}, wantFiles: []string{"d.drep-ret.cert"}},
 		{name: "24b one DRep vote", script: "24b_regVote.sh", args: []string{"d.drep", "w.payment", "d_240101000001.drep.vote"}, run: vote("d.drep", "d_240101000001.drep.vote")},

@@ -111,6 +111,30 @@ func (l *Lazy) SignCip36(ctx context.Context, key custody.Key[custody.Stake], re
 	return s.SignCip36(ctx, key, reg)
 }
 
+func (l *Lazy) SignCip36With(ctx context.Context, key custody.Key[custody.Stake], reg cose.Cip36, opt ports.Cip36HardwareOptions) (ports.Registration, error) {
+	s, err := l.Session(ctx)
+	if err != nil {
+		return ports.Registration{}, err
+	}
+	return s.SignCip36With(ctx, key, reg, opt)
+}
+
+func (l *Lazy) SignCip88(ctx context.Context, key custody.Key[custody.PoolCold], reg cose.Cip88) (ports.Registration, error) {
+	s, err := l.Session(ctx)
+	if err != nil {
+		return ports.Registration{}, err
+	}
+	return s.SignCip88(ctx, key, reg)
+}
+
+func (l *Lazy) WitnessMany(ctx context.Context, keys []custody.KeyRef, body txbuild.TxBody, opt ports.HardwareTxOptions) ([]txbuild.Witness, error) {
+	s, err := l.Session(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return s.WitnessMany(ctx, keys, body, opt)
+}
+
 func (l *Lazy) PolicyID(ctx context.Context, key custody.Key[custody.Policy], script []byte) (string, error) {
 	s, err := l.Session(ctx)
 	if err != nil {
@@ -120,12 +144,15 @@ func (l *Lazy) PolicyID(ctx context.Context, key custody.Key[custody.Policy], sc
 }
 
 var (
-	_ ports.SignerDirectory       = (*Lazy)(nil)
-	_ ports.HardwareKeyExporter   = (*Lazy)(nil)
-	_ ports.OpCertIssuer          = (*Lazy)(nil)
-	_ ports.HardwareWitnesser     = (*Lazy)(nil)
-	_ ports.HardwareCanonicalizer = (*Lazy)(nil)
-	_ ports.HardwarePolicyIDer    = (*Lazy)(nil)
-	_ ports.MessageSigner         = (*Lazy)(nil)
-	_ ports.Cip36Signer           = (*Lazy)(nil)
+	_ ports.SignerDirectory        = (*Lazy)(nil)
+	_ ports.HardwareKeyExporter    = (*Lazy)(nil)
+	_ ports.OpCertIssuer           = (*Lazy)(nil)
+	_ ports.HardwareWitnesser      = (*Lazy)(nil)
+	_ ports.HardwareCanonicalizer  = (*Lazy)(nil)
+	_ ports.HardwarePolicyIDer     = (*Lazy)(nil)
+	_ ports.MessageSigner          = (*Lazy)(nil)
+	_ ports.Cip36Signer            = (*Lazy)(nil)
+	_ ports.HardwareCip36Signer    = (*Lazy)(nil)
+	_ ports.Cip88Signer            = (*Lazy)(nil)
+	_ ports.HardwareMultiWitnesser = (*Lazy)(nil)
 )

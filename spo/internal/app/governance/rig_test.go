@@ -101,6 +101,8 @@ func (f fakeInspector) InspectAddress(a chain.Address) (ports.AddressInfo, error
 type fakeLedger struct {
 	l    *log
 	last chain.TxID
+	// specs are the body specs built, in order.
+	specs []txbuild.BodySpec
 }
 
 func (f *fakeLedger) MinOutput(chain.ProtocolParameters, txbuild.Output) (chain.Lovelace, error) {
@@ -115,10 +117,17 @@ func (f *fakeLedger) EstimateSize(b txbuild.TxBody, _ uint) (int, error) {
 }
 func (f *fakeLedger) BuildBody(s txbuild.BodySpec) (txbuild.TxBody, error) {
 	f.l.add("build")
+	f.specs = append(f.specs, s)
 	f.l.add(fmt.Sprintf("body certs=%d votes=%d proposals=%d ttl=%d", len(s.Certificates), len(s.Votes), len(s.Proposals), s.TTL))
 	b, _ := json.Marshal(s)
 	f.last = sha256.Sum256(b)
-	return txbuild.TxBody{CBOR: b, ID: f.last}, nil
+	body := txbuild.TxBody{CBOR: b, ID: f.last}
+	if s.Plutus != nil && s.Plutus.TotalCollateral != 0 {
+		// What the native builder reads back from the encoded body.
+		risk := s.Plutus.TotalCollateral
+		body.CollateralAtRisk = &risk
+	}
+	return body, nil
 }
 func (f *fakeLedger) Assemble(b txbuild.TxBody, ws []txbuild.Witness) (txbuild.SignedTx, error) {
 	f.l.add(fmt.Sprintf("assemble witnesses=%d", len(ws)))

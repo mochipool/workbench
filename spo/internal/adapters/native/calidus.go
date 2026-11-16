@@ -2,13 +2,19 @@ package native
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/blinklabs-io/bursa"
 	"github.com/blinklabs-io/bursa/bip32"
 
+	domcat "github.com/mochipool/workbench/spo/internal/domain/catalyst"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
+	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
@@ -91,3 +97,96 @@ var (
 	_ ports.CalidusKeyDeriver = SoftwareKeys{}
 	_ ports.VotingKeyDeriver  = SoftwareKeys{}
 )
+
+// VotingKeyQR implements ports.VotingKeyQRSource: it opens the voting signing
+// key of the vault, takes its 64-byte extended secret (the first 64 bytes of
+// the 128 of the envelope, spec SPO-09a-EXT-005) and encrypts it with the PIN
+// (domain/catalyst). The key bytes are wiped; the payload is the caller's.
+type VotingKeyQR struct {
+	Vault ports.Vault
+	// Random supplies the salt and nonce; crypto/rand when nil.
+	Random io.Reader
+}
+
+// VotingKeyQRPayload implements ports.VotingKeyQRSource.
+func (v VotingKeyQR) VotingKeyQRPayload(ctx context.Context, name string, pin domcat.PIN) ([]byte, error) {
+	if v.Vault == nil {
+		return nil, errors.New("the store cannot release signing keys")
+	}
+	env, err := v.Vault.Open(ctx, ports.Ref{Name: name, Kind: ports.VotingSKey})
+	if err != nil {
+		return nil, fmt.Errorf("open the voting signing key: %w", err)
+	}
+	defer env.Destroy()
+	var key []byte
+	defer func() { wipe(key) }()
+	err = env.Use(func(b []byte) error {
+		var e struct {
+			Type    string          `json:"type"`
+			CborHex json.RawMessage `json:"cborHex"`
+			Encr    json.RawMessage `json:"encrHex"`
+		}
+		if err := json.Unmarshal(b, &e); err != nil {
+			return errors.New("the voting signing key is not a text envelope")
+		}
+		defer wipe(e.CborHex)
+		if len(e.Encr) > 0 {
+			return errors.New("the voting signing key is gpg-encrypted; decrypt it first")
+		}
+		h := e.CborHex
+		if len(h) < 2 || h[0] != '"' || h[len(h)-1] != '"' {
+			return errors.New("the voting signing key has no cborHex")
+		}
+		raw := make([]byte, hex.DecodedLen(len(h)-2))
+		defer wipe(raw)
+		n, err := hex.Decode(raw, h[1:len(h)-1])
+		if err != nil {
+			return errors.New("the voting signing key cborHex is not hex")
+		}
+		// 5880 + kL||kR (64) + public key (32) + chain code (32): the extended key.
+		if e.Type != votingSType || n != 130 || raw[0] != 0x58 || raw[1] != 0x80 {
+			return fmt.Errorf("the QR code carries an extended voting key (%s); this key is %q of %d bytes", votingSType, e.Type, n)
+		}
+		key = append([]byte(nil), raw[2:2+domcat.SecretKeyBytes]...)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	rnd := v.Random
+	if rnd == nil {
+		rnd = rand.Reader
+	}
+	return domcat.Encode(key, pin, rnd)
+}
+
+var _ ports.VotingKeyQRSource = VotingKeyQR{}
+
+// SignText implements ports.TextSigner: a plain Ed25519 signature over the
+// text with the Calidus signing key of the vault (cardano-signer `sign
+// --data-text`, SPO-15-EXT-006). The key is a payment-type extended key.
+func (v VaultSignatures) SignText(ctx context.Context, key custody.Key[custody.Calidus], text []byte) (ports.TextSignature, error) {
+	var out ports.TextSignature
+	if v.Vault == nil {
+		return out, errors.New("the store cannot release signing keys")
+	}
+	env, err := v.Vault.Open(ctx, ports.Ref{Name: key.Ref().Owner, Kind: ports.CalidusSKey})
+	if err != nil {
+		return out, fmt.Errorf("open the Calidus signing key: %w", err)
+	}
+	defer env.Destroy()
+	lk, err := loadSigningKey(custody.RolePayment, env)
+	if err != nil {
+		return out, err
+	}
+	defer wipe(lk.SKey)
+	sig, err := signWith(lk, text)
+	if err != nil {
+		return out, err
+	}
+	copy(out.PublicKey[:], lk.VKey)
+	copy(out.Signature[:], sig)
+	return out, nil
+}
+
+var _ ports.TextSigner = VaultSignatures{}

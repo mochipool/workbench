@@ -201,6 +201,7 @@ Use cases: `GenerateVotingKey(name, method, mnemonic?)`, `BuildCatalystRegistrat
 * The nonce should be the slot at submission or a monotonic counter, not the creation slot; a remote or offline signer will hold the metadata for a long time (SPO-09a-INV-003).
 * A remote or multi-party signer can sign the registration with the stake key while a different party holds the voting keys, since only voting public keys are inputs.
 * QR code: use a stronger PIN or a passphrase, and never save the PNG next to the key without a warning.
+* Port deviation (SPO-09a-OUT-007, SPO-09a-SEC-002): upstream always draws the QR code in the terminal. The Go build writes only the PNG by default and draws the terminal image only with `--show` and only when standard output is a terminal (never into a pipe or file), with a warning that the drawing stays in scrollback, terminal logs and on shared screens and, like the PNG, is key-equivalent because a four-digit PIN protects it. The TUI wipes a command's output when its run view is left.
 * Make the account, role and index (`1694H/1815H/<acct>H/0/<idx>`) parameters instead of constants.
 
 ## Open questions

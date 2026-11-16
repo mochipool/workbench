@@ -55,6 +55,13 @@ const (
 	CapPools       Cap = "pool-state"
 	CapDReps       Cap = "drep-state"
 	CapCrossCheck  Cap = "reward-account-crosscheck"
+	// CapPoolCross is a second, independent source of the pool registration
+	// state (ADR 0006); CapCrossCheck is the one of the reward account and
+	// CapDRepCross the one of the DRep state.
+	CapPoolCross Cap = "pool-state-crosscheck"
+	// CapOpCertCross is a second, independent source of the operational
+	// certificate counter (the node and an indexer, say).
+	CapOpCertCross Cap = "opcert-counter-crosscheck"
 	CapSubmit      Cap = "tx-submit"
 	CapQueue       Cap = "tx-queue"
 
@@ -103,6 +110,9 @@ const (
 	CapVotingKeys  Cap = "voting-keygen"
 	CapSignatures  Cap = "registration-signing"
 	CapCalidusRead Cap = "calidus-registrations"
+	// CapVotingQR makes the QR code of a voting key (09a `qrcode`): a vault that
+	// builds the PIN-encrypted payload and a renderer.
+	CapVotingQR Cap = "voting-key-qr"
 
 	// CapHardware is a hardware wallet: the release set has cardano-hw-cli.
 	// Whether a device is connected, and which one, is found only when a
@@ -131,10 +141,15 @@ const (
 	CapPoolUpdates     Cap = "pool-updates"
 	CapVKeyEnvelope    Cap = "verification-key-envelope"
 	CapVrfVKey         Cap = "vrf-verification-key"
+	// CapTxEvaluator is a provider that evaluates the Plutus scripts of a
+	// transaction and reports their execution units (the guardrails script of
+	// a treasury withdrawal or parameter change). This build runs no Plutus
+	// itself.
+	CapTxEvaluator Cap = "plutus-script-evaluation"
 )
 
 // GovernanceChainCaps are the governance capabilities that read the chain.
-var GovernanceChainCaps = []Cap{CapCommittee, CapGovActions, CapConstitution, CapLastEnacted, CapStakeDist, CapEpoch, CapVotingSummary, CapDRepCross}
+var GovernanceChainCaps = []Cap{CapCommittee, CapGovActions, CapConstitution, CapLastEnacted, CapStakeDist, CapEpoch, CapVotingSummary, CapDRepCross, CapTxEvaluator}
 
 // GovernanceLocalCaps are the governance capabilities that need no chain.
 var GovernanceLocalCaps = []Cap{CapDRepKeys, CapComColdKeys, CapComHotKeys, CapGovDeriver, CapVoteFiles, CapActionFiles, CapAnchorFetch, CapAnchorVerify}
@@ -209,8 +224,15 @@ type Env struct {
 	// Reads of the "harmful if false" class (ADR 0006) need it, or the
 	// operator's explicit --single-source.
 	CrossCheck ports.RewardAccountReader
-	Submitter  ports.TxSubmitter
-	Queue      ports.TxQueue
+	// PoolCross is the second source of the pool registration state, as
+	// CrossCheck is of the reward account and DRepCross of the DRep state.
+	PoolCross ports.PoolStateReader
+	// OpCertCross is the second source of the operational certificate counter
+	// (OpCertCounters is the answering one). The two may mean different
+	// numbers (chain.CompareOpCertCounters says when they agree).
+	OpCertCross ports.OpCertCounterReader
+	Submitter   ports.TxSubmitter
+	Queue       ports.TxQueue
 
 	// Bundle is the air-gap transfer file at WireOptions.TransferFile, read
 	// and changed through the narrow bundle ports. It is present in every
@@ -274,6 +296,10 @@ type Env struct {
 	VotingKeys      ports.VotingKeyDeriver
 	SignatureSigner ports.Signer
 	CalidusReader   ports.CalidusKeyReader
+	// VotingQR builds the payload of a voting key's QR code from the vault;
+	// QRCodes draws it (CapVotingQR needs both).
+	VotingQR ports.VotingKeyQRSource
+	QRCodes  ports.QRCodeRenderer
 
 	// Hardware exports the keys of a hardware wallet, Canonicalizer brings a
 	// transaction body to the form a device accepts and PolicyIDer asks the
@@ -313,10 +339,16 @@ type Env struct {
 	// PoolInfos and PoolUpdates read the registration of a pool and its latest
 	// update (light mode); VKeyEnvelopes and VrfVKeys derive the verification
 	// key envelopes of the signing keys of an imported pool (local).
-	PoolInfos     ports.PoolInfoReader
-	PoolUpdates   ports.PoolUpdateReader
+	PoolInfos   ports.PoolInfoReader
+	PoolUpdates ports.PoolUpdateReader
+	// PoolInfoCross is the optional second, independent reader of a pool's
+	// registration, against which the pool import corroborates (ADR 0006).
+	PoolInfoCross ports.PoolInfoReader
 	VKeyEnvelopes ports.VKeyEnvelopeDeriver
 	VrfVKeys      ports.VrfVKeyDeriver
+	// TxEvaluator evaluates the Plutus scripts of a transaction (light mode,
+	// where the provider does; nil elsewhere).
+	TxEvaluator ports.TxEvaluator
 
 	// AllowUnverified is true only when the chain is not consulted.
 	AllowUnverified bool
@@ -325,8 +357,36 @@ type Env struct {
 	Mode string
 	// Endpoints names the endpoint of a provider, by its Source name.
 	Endpoints map[string]string
+	// SameHostOK is [provider] same_host_ok: the operator states that two
+	// sources of a cross-check that share a host are independent all the same.
+	// It weakens the check, and is why CheckIndependentSources skips the host
+	// comparison.
+	SameHostOK bool
+	// sharedHost lists the cross-checks whose two sources are on one host and
+	// that same_host_ok let through (set by CheckIndependentSources).
+	sharedHost []string
 
 	why map[Cap]string
+	// closers release what the wiring opened lazily (a node connection). A
+	// command's Env is closed when the command ends.
+	closers []func()
+}
+
+// OnClose registers a function Close calls: the wiring uses it for a
+// connection that is opened only when a read needs it.
+func (e *Env) OnClose(f func()) { e.closers = append(e.closers, f) }
+
+// Close runs the functions registered with OnClose, last first, once. It is
+// safe on a nil Env.
+func (e *Env) Close() {
+	if e == nil {
+		return
+	}
+	cl := e.closers
+	e.closers = nil
+	for i := len(cl) - 1; i >= 0; i-- {
+		cl[i]()
+	}
 }
 
 // Absent records why a capability is not there. The first reason wins, so a
@@ -441,6 +501,10 @@ func (e *Env) has(c Cap) bool {
 		v = e.DReps
 	case CapCrossCheck:
 		v = e.CrossCheck
+	case CapPoolCross:
+		v = e.PoolCross
+	case CapOpCertCross:
+		v = e.OpCertCross
 	case CapSubmit:
 		v = e.Submitter
 	case CapQueue:
@@ -505,6 +569,11 @@ func (e *Env) has(c Cap) bool {
 		v = e.SignatureSigner
 	case CapCalidusRead:
 		v = e.CalidusReader
+	case CapVotingQR:
+		if e.QRCodes == nil {
+			return false
+		}
+		v = e.VotingQR
 	case CapHardware:
 		v = e.Hardware
 	case CapAdaHandle:
@@ -532,6 +601,8 @@ func (e *Env) has(c Cap) bool {
 		v = e.VKeyEnvelopes
 	case CapVrfVKey:
 		v = e.VrfVKeys
+	case CapTxEvaluator:
+		v = e.TxEvaluator
 	}
 	return !isNil(v)
 }
@@ -568,6 +639,10 @@ func (e *Env) Source(c Cap) string {
 		v = e.DReps
 	case CapCrossCheck:
 		v = e.CrossCheck
+	case CapPoolCross:
+		v = e.PoolCross
+	case CapOpCertCross:
+		v = e.OpCertCross
 	case CapSubmit:
 		v = e.Submitter
 	case CapQueue:
@@ -596,6 +671,8 @@ func (e *Env) Source(c Cap) string {
 		v = e.PoolInfos
 	case CapPoolUpdates:
 		v = e.PoolUpdates
+	case CapTxEvaluator:
+		v = e.TxEvaluator
 	}
 	if isNil(v) {
 		return ""
@@ -672,6 +749,9 @@ type WireOptions struct {
 	// Token is the provider API token from the store, or nil. The wiring
 	// does not own it.
 	Token *secret.Buffer
+	// Tokens are the stored tokens of the other configured providers, by
+	// provider kind ("blockfrost": the project id). Nil entries are absent.
+	Tokens map[string]*secret.Buffer
 	// TransferFile is the offline transfer file to read and queue to.
 	// Whether it exists is for the wiring to find out.
 	TransferFile string

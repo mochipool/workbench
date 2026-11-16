@@ -27,7 +27,7 @@ func (r *rig) putCert(t *testing.T, kind ports.Kind, spec stk.Spec) {
 func (r *rig) pool() RegisterPoolDelegation {
 	r.putCert(&testing.T{}, ports.DelegCert, stk.Spec{Kind: stk.CertPoolDelegation, Pool: testPool})
 	return RegisterPoolDelegation{Base: r.base, Certs: r.certs, Builder: fakeBuilder{}, Pools: &fakePools{r: chain.Value(chain.PoolState{ID: testPool})},
-		Rewards: r.rewards, Sources: SingleSourceAcknowledged}
+		Rewards: r.rewards, Sources: SingleSourceAcknowledged, OnSingle: noopHook}
 }
 
 var delegReq = DelegationRegisterRequest{Delegator: "w.staking", Payer: "w.payment"}
@@ -143,6 +143,7 @@ func TestPoolRegistrationNeedsAcknowledgement(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 	uc.Sources = SingleSourceAcknowledged
+	uc.OnSingle = noopHook
 	res, err := uc.Run(bg, delegReq)
 	if err != nil || !res.SingleSource || !r.conf.got.SingleSource {
 		t.Fatalf("%+v %v", res, err)

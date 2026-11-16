@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/app/catalyst"
+	domcat "github.com/mochipool/workbench/spo/internal/domain/catalyst"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
@@ -381,5 +383,63 @@ func TestClaimRewardsTakesTheExtras(t *testing.T) {
 	// The payment filters are not a claim's flags.
 	if err := f.run(t, &scriptTerm{t: t}, "wallet", "claim-rewards", "s", "s.payment", "--utxo-limit", "2"); err == nil || !strings.Contains(err.Error(), "unknown flag") {
 		t.Errorf("%v", err)
+	}
+}
+
+type fakeQR struct{ png int }
+
+func (fakeQR) VotingKeyQRPayload(context.Context, string, domcat.PIN) ([]byte, error) {
+	return []byte("payload"), nil
+}
+func (q *fakeQR) WritePNG(string, []byte) error { q.png++; return nil }
+func (*fakeQR) Terminal([]byte) (string, error) { return "██DRAWING██\n", nil }
+
+// The key-equivalent QR code is drawn in the terminal only when the operator
+// asks (--show) and standard output is a terminal; by default only the PNG is
+// written. A piped or redirected output never gets the drawing. The warning
+// names scrollback, terminal logs and screen sharing and says the PNG and the
+// drawing are key-equivalent under a four-digit PIN.
+//
+// spec: SPO-09a-OUT-007, SPO-09a-SEC-002
+func TestCatalystQRCodeIsDrawnOnlyOnRequestAndOnATerminal(t *testing.T) {
+	f := newStakeFix(t)
+	d := &recDeriver{}
+	withRegistrations(f, d, nil)
+	qr := &fakeQR{}
+	old := f.deps.Wire
+	f.deps.Wire = func(st ports.Store, o WireOptions) (*Env, error) {
+		env, err := old(st, o)
+		if env != nil {
+			env.VotingQR, env.QRCodes = qr, qr
+		}
+		return env, err
+	}
+	fd := pipeFD(t, testPhrase+"\n")
+	f.mustRun(t, "catalyst", "key", "new", "v", "--mnemonic-in-fd", itoaFD(fd))
+	run := func(tty bool, extra ...string) string {
+		t.Helper()
+		defer func(o func(io.Writer) bool) { stdoutIsTerminal = o }(stdoutIsTerminal)
+		stdoutIsTerminal = func(io.Writer) bool { return tty }
+		pin := pipeFD(t, "4821\n")
+		return f.mustRun(t, append([]string{"catalyst", "key", "qrcode", "v", "--pin-fd", itoaFD(pin), "--out", "x.png"}, extra...)...)
+	}
+	for name, tc := range map[string]struct {
+		tty   bool
+		extra []string
+		draws bool
+	}{"default on a terminal": {true, nil, false}, "--show on a pipe": {false, []string{"--show"}, false}, "default on a pipe": {false, nil, false}, "--show on a terminal": {true, []string{"--show"}, true}} {
+		out := run(tc.tty, tc.extra...)
+		if got := strings.Contains(out, "DRAWING"); got != tc.draws {
+			t.Errorf("%s: drawn = %v\n%s", name, got, out)
+		}
+		mustContain(t, out, "key-equivalent", "four-digit PIN")
+	}
+	out := run(true, "--show")
+	mustContain(t, out, "scrollback", "terminal log", "shared screen")
+	if strings.Contains(out, "4821") {
+		t.Error("the PIN was printed")
+	}
+	if qr.png != 5 {
+		t.Errorf("PNGs written: %d", qr.png)
 	}
 }

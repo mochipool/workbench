@@ -53,7 +53,7 @@ func assetName(policy, nameHex, nameText string) string {
 		n += "." + nameHex
 	}
 	if nameText != "" {
-		n += " (" + nameText + ")"
+		n += " (" + shown(nameText) + ")"
 	}
 	return n
 }
@@ -62,20 +62,20 @@ func printAddressReport(w io.Writer, r query.AddressReport) {
 	src := "[" + string(r.Source) + "]"
 	name := ""
 	if r.Name != "" {
-		name = r.Name + " "
+		name = shown(r.Name) + " "
 	}
 	fmt.Fprintf(w, "%s address %s%s\n", map[string]string{"payment": "Payment", "stake": "Stake"}[r.Kind], name, r.Address)
 	if h := r.Handle; h != nil {
-		fmt.Fprintf(w, "  ADA Handle   %s resolved to %s (%s handle, verified against the chain: %s)\n", h.Handle, r.Address, h.Kind, h.VerifiedBy)
+		fmt.Fprintf(w, "  ADA Handle   %s resolved to %s (%s handle, verified against the chain: %s)\n", shown(h.Handle), r.Address, shown(string(h.Kind)), shown(h.VerifiedBy))
 	}
 	if r.FromSnapshot || r.SnapshotDate != "" {
 		used := "unused"
 		if r.SnapshotUsed {
 			used = "used"
 		}
-		fmt.Fprintf(w, "  snapshot     as of %s (%s); this is not the chain as it is now\n", r.SnapshotDate, used)
+		fmt.Fprintf(w, "  snapshot     as of %s (%s); this is not the chain as it is now\n", shown(r.SnapshotDate), used)
 	}
-	fmt.Fprintf(w, "  source       %s\n", r.Source)
+	fmt.Fprintf(w, "  source       %s\n", shown(string(r.Source)))
 	switch r.Kind {
 	case "payment":
 		fmt.Fprintf(w, "  UTxOs        %d  %s\n", len(r.Utxos), src)
@@ -85,14 +85,14 @@ func printAddressReport(w io.Writer, r query.AddressReport) {
 				fmt.Fprintf(w, "      + %d %s\n", as.Quantity, assetName(as.Policy, as.NameHex, as.NameText))
 			}
 			if u.HasDatumHash {
-				fmt.Fprintf(w, "      datum hash %s\n", u.DatumHash)
+				fmt.Fprintf(w, "      datum hash %s\n", shown(u.DatumHash))
 			}
 		}
 		fmt.Fprintf(w, "  total        %s  %s\n", lovelaceText(r.TotalLovelace), src)
 		if len(r.Assets) > 0 {
 			fmt.Fprintf(w, "  assets       %d type(s)\n", len(r.Assets))
 			for _, as := range r.Assets {
-				fmt.Fprintf(w, "    %d %s\n      fingerprint %s\n", as.Quantity, assetName(as.Policy, as.NameHex, as.NameText), as.Fingerprint)
+				fmt.Fprintf(w, "    %d %s\n      fingerprint %s\n", as.Quantity, assetName(as.Policy, as.NameHex, as.NameText), shown(as.Fingerprint))
 			}
 		}
 	case "stake":
@@ -100,9 +100,9 @@ func printAddressReport(w io.Writer, r query.AddressReport) {
 		fmt.Fprintf(w, "  rewards      %s  %s\n", lovelaceText(r.Rewards), src)
 		fmt.Fprintf(w, "  pool         %s  %s\n", readingText(r.Pool, "not delegated", func(p chain.PoolID) string { return p.Bech32() }), src)
 		if st, ok := r.PoolInfo.Get(); ok {
-			fmt.Fprintf(w, "               %s (%s)\n", st.Ticker, st.Name)
+			fmt.Fprintf(w, "               %s (%s)\n", shown(st.Ticker), shown(st.Name))
 		}
-		fmt.Fprintf(w, "  vote         %s  %s\n", readingText(r.VoteDelegation, "no vote delegation", func(s string) string { return s }), src)
+		fmt.Fprintf(w, "  vote         %s  %s\n", readingText(r.VoteDelegation, "no vote delegation", shown), src)
 		fmt.Fprintf(w, "  gov deposits %s  %s\n", readingText(r.GovDeposits, "none", func(g []chain.GovActionDeposit) string {
 			if len(g) == 0 {
 				return "none"

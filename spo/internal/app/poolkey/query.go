@@ -13,6 +13,8 @@ import (
 
 func hexDecode(s string) ([]byte, error) { return hex.DecodeString(s) }
 
+func hexString(b []byte) string { return hex.EncodeToString(b) }
+
 // QueryCalidus lists the Calidus keys registered on chain (upstream 15 `query`).
 // The subject is classified in upstream's order (SPO-15-IF-005); the provider
 // behind Reader answers for registered pools only.

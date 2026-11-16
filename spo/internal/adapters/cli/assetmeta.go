@@ -6,14 +6,13 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
 	"github.com/mochipool/workbench/spo/internal/app/registry"
 	"github.com/mochipool/workbench/spo/internal/domain/assets"
 	"github.com/mochipool/workbench/spo/internal/domain/tokenmeta"
+	"github.com/mochipool/workbench/spo/internal/platform/textsafe"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -21,24 +20,20 @@ import (
 // registry entry is built from (SPO-12a-OUT-001).
 var metaFields = []string{"metaName", "metaDescription", "metaDecimals", "metaTicker", "metaUrl", "metaLogoPNG"}
 
-// plainText makes text of a third party fit on one terminal line: control
-// characters (an escape sequence among them) become '?', and a long text is
-// cut. The registry's answer is not ours.
+// plainText makes text of a third party fit on one terminal line: everything
+// textsafe escapes (controls of C0 and C1, bidirectional and invisible
+// characters, newlines) is written as \u{hex}, and a long text is cut. The registry's answer is not ours.
 func plainText(s string, max int) string {
-	var b strings.Builder
-	n := 0
-	for _, r := range s {
-		if n == max {
-			b.WriteString("...")
-			break
-		}
-		if r == utf8.RuneError || unicode.IsControl(r) {
-			r = '?'
-		}
-		b.WriteRune(r)
-		n++
+	rs := []rune(s)
+	cut := len(rs) > max
+	if cut {
+		rs = rs[:max]
 	}
-	return b.String()
+	out := textsafe.Text(string(rs))
+	if cut {
+		out += "..."
+	}
+	return out
 }
 
 func (a *app) assetMetaCommand() *cobra.Command {

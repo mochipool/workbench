@@ -16,10 +16,108 @@ type Outbox struct {
 	Clock ports.Clock
 	// Offline refuses a network transport (SPO-Xparty-MODE-001).
 	Offline bool
+	// Parties and Kit let the outbox check, before anything leaves, that each
+	// item is for an active enrolled party and was sealed by this machine's
+	// current identity (SPO-Xparty-INV-038). Node.Outbox sets them; an Outbox
+	// without them refuses to list or flush.
+	Parties ports.PartyReader
+	Kit     ports.IdentityKit
+}
+
+// ErrOutboxNotWired: an Outbox was built without the registry and identity kit
+// it needs to check what it carries.
+var ErrOutboxNotWired = errors.New("the outbox has no party registry or identity kit to check what it carries: nothing is listed or sent")
+
+// Outbox is the outbox of this node.
+func (n Node) Outbox() Outbox {
+	return Outbox{Store: n.Store, Clock: n.Clock, Offline: n.Offline, Parties: n.Parties, Kit: n.Kit}
+}
+
+// sweep drops, with an event for each, the undelivered items that must not
+// leave: the recipient is not an active enrolled party now (it was revoked, or
+// its identity was replaced), or the item was sealed by an identity other than
+// this machine's current one. An announcement queued by enqueueRotation is sealed
+// by the identity it replaces by design and is only checked for its recipient. Nothing is sent from here: it
+// is the backstop behind the checks that stop such an item being queued
+// (SPO-Xparty-INV-038).
+func (o Outbox) sweep(ctx context.Context) error {
+	if o.Parties == nil || o.Kit == nil {
+		return ErrOutboxNotWired
+	}
+	bad := func(r ports.Reader, it OutItem) (string, error) {
+		to, err := fpOfHex(it.To)
+		if err != nil {
+			return "", err
+		}
+		p, err := o.Parties.ByFingerprint(r, to)
+		switch {
+		case errors.Is(err, ports.ErrNotFound) || (err == nil && !p.Active()):
+			return "the recipient is not an active enrolled party", nil
+		case err != nil:
+			return "", err
+		}
+		if it.Rotation && it.Type == string(party.TypeRotation) {
+			return "", nil
+		}
+		cur, err := localFingerprintOf(o.Kit, r)
+		if err != nil {
+			return "", err
+		}
+		if it.From != hexFP(cur) {
+			return "it was not sealed by this machine's current identity", nil
+		}
+		return "", nil
+	}
+	var found bool
+	if err := o.Store.View(ctx, func(r ports.Reader) error {
+		items, err := readOutbox(r)
+		for _, it := range items {
+			if it.Delivered {
+				continue
+			}
+			why, berr := bad(r, it)
+			if berr != nil {
+				return berr
+			}
+			found = found || why != ""
+		}
+		return err
+	}); err != nil || !found {
+		return err
+	}
+	return o.Store.Update(ctx, func(w ports.Writer) error {
+		items, err := readOutbox(w)
+		if err != nil {
+			return err
+		}
+		kept := items[:0]
+		now := o.Clock.Now()
+		for _, it := range items {
+			why := ""
+			if !it.Delivered {
+				if why, err = bad(w, it); err != nil {
+					return err
+				}
+			}
+			if why == "" {
+				kept = append(kept, it)
+				continue
+			}
+			ev := eventOf(now, "outbox-item-dropped", it.Collection, it.Slot, [32]byte{})
+			ev.Peer, ev.Reason, ev.Detail = it.To, why, it.Type+" "+it.ID
+			if err := appendEvent(w, ev); err != nil {
+				return err
+			}
+		}
+		return writeJSON(w, outboxRef, kept)
+	})
 }
 
 // Pending lists the envelopes not yet delivered and not expired.
 func (o Outbox) Pending(ctx context.Context) ([]OutItem, error) {
+	if err := o.sweep(ctx); err != nil {
+		return nil, err
+	}
 	var out []OutItem
 	err := o.Store.View(ctx, func(r ports.Reader) error {
 		items, err := readOutbox(r)
@@ -110,6 +208,33 @@ func (o Outbox) Rearm(ctx context.Context) error {
 	return o.Store.Update(ctx, func(w ports.Writer) error {
 		return rearm(w, nil)
 	})
+}
+
+// RearmRotations makes the rotation announcements that were handed over, and
+// have not expired, waiting again, so that the next export or serve carries
+// them once more. An announcement is sealed and signed already and is kept in
+// the outbox for its whole lifetime for this: it cannot be made again without
+// the old private key. An announcement for a party that is no longer active is
+// dropped by the next listing. It returns how many were rearmed.
+func (o Outbox) RearmRotations(ctx context.Context) (int, error) {
+	n := 0
+	err := o.Store.Update(ctx, func(w ports.Writer) error {
+		items, err := readOutbox(w)
+		if err != nil {
+			return err
+		}
+		for i := range items {
+			if items[i].Type == string(party.TypeRotation) && items[i].Delivered && items[i].Expires >= o.Clock.Now().Unix() {
+				items[i].Sent, items[i].Delivered = false, false
+				n++
+			}
+		}
+		if n == 0 {
+			return nil
+		}
+		return writeJSON(w, outboxRef, items)
+	})
+	return n, err
 }
 
 // rearm clears Sent on the undelivered SigningRequests, of one recipient when

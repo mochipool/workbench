@@ -682,10 +682,10 @@ func TestCapabilities(t *testing.T) {
 	if m := regexp.MustCompile(`(?m)^  protocol-parameters\s+(.*)$`).FindStringSubmatch(out); m == nil || strings.Contains(m[1], "koios") {
 		t.Errorf("light-mode parameters should not come from Koios:\n%s", out)
 	}
-	// Online: names the missing adapter.
+	// Online with no node configured: says what to configure.
 	os.WriteFile(filepath.Join(dir, "spo.toml"), []byte("network = \"preview\"\nmode = \"online\"\n"), 0o600)
 	out, _ = exec(t, nil, "-C", dir, "capabilities")
-	if !strings.Contains(out, "cardano-node socket adapter") {
+	if !strings.Contains(out, "no node address is configured") || !strings.Contains(out, "spo provider set node") {
 		t.Errorf("online mode:\n%s", out)
 	}
 }

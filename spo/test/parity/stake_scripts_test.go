@@ -290,7 +290,7 @@ func TestCertificateFilesMatchUpstream(t *testing.T) {
 				t.Fatalf("upstream exited %d", code)
 			}
 			k := e.newKit(t, port, 0, "")
-			uc := stake.GenerateDeregistrationCertificate{Store: k.store, Addresses: k.led, Certs: k.led, Account: k.file, Sources: stake.SingleSourceAcknowledged, NetworkID: ports.NetworkTestnet}
+			uc := stake.GenerateDeregistrationCertificate{Store: k.store, Addresses: k.led, Certs: k.led, Account: k.file, Sources: stake.SingleSourceAcknowledged, OnSingle: noopSingle, NetworkID: ports.NetworkTestnet}
 			res, err := uc.Run(bg, "w.staking")
 			if err != nil {
 				t.Fatal(err)
@@ -311,7 +311,7 @@ func TestCertificateFilesMatchUpstream(t *testing.T) {
 			up, port := twoWorkspaces(t, b, s)
 			upCode := e.upstream(t, up, "exec", "08a_genStakingAddrRetireCert.sh", "w")
 			k := e.newKit(t, port, 0, "")
-			uc := stake.GenerateDeregistrationCertificate{Store: k.store, Addresses: k.led, Certs: k.led, Account: k.file, Sources: stake.SingleSourceAcknowledged, NetworkID: ports.NetworkTestnet}
+			uc := stake.GenerateDeregistrationCertificate{Store: k.store, Addresses: k.led, Certs: k.led, Account: k.file, Sources: stake.SingleSourceAcknowledged, OnSingle: noopSingle, NetworkID: ports.NetworkTestnet}
 			_, err := uc.Run(bg, "w")
 			if upCode != 1 || err == nil {
 				t.Errorf("%s: upstream exit %d, port %v", name, upCode, err)
@@ -329,7 +329,7 @@ func TestCertificateFilesMatchUpstream(t *testing.T) {
 			t.Errorf("upstream exited %d", code)
 		}
 		k := e.newKit(t, port, 0, "")
-		uc := stake.GenerateDeregistrationCertificate{Store: k.store, Addresses: k.led, Certs: k.led, Account: k.file, Sources: stake.SingleSourceAcknowledged, NetworkID: ports.NetworkTestnet}
+		uc := stake.GenerateDeregistrationCertificate{Store: k.store, Addresses: k.led, Certs: k.led, Account: k.file, Sources: stake.SingleSourceAcknowledged, OnSingle: noopSingle, NetworkID: ports.NetworkTestnet}
 		if _, err := uc.Run(bg, "w"); !errors.Is(err, stk.ErrUnknown) {
 			t.Errorf("%v", err)
 		}
@@ -471,7 +471,7 @@ func TestStakeTransactionsMatchUpstream(t *testing.T) {
 		return res.Result, err
 	}
 	dereg := func(t *testing.T, k kit) (txflow.Result, error) {
-		res, err := stake.DeregisterStakeAddress{Base: k.base, Certs: k.led, Account: k.file, Sources: stake.SingleSourceAcknowledged}.Run(bg, stake.RegisterRequest{Stake: "w.staking", Payer: "w.payment"})
+		res, err := stake.DeregisterStakeAddress{Base: k.base, Certs: k.led, Account: k.file, Sources: stake.SingleSourceAcknowledged, OnSingle: noopSingle}.Run(bg, stake.RegisterRequest{Stake: "w.staking", Payer: "w.payment"})
 		return res.Result, err
 	}
 	vote := func(t *testing.T, k kit) (txflow.Result, error) {
@@ -565,7 +565,7 @@ func TestStakeDivergencesFromUpstream(t *testing.T) {
 		}
 		code := e.upstreamTTY(t, up, "08b_deregStakingAddrCert.sh", "w", "w.payment")
 		k := e.newKit(t, port, 1000, cli.Version)
-		_, err := stake.DeregisterStakeAddress{Base: k.base, Certs: k.led, Account: k.file, Sources: stake.SingleSourceAcknowledged}.Run(bg, stake.RegisterRequest{Stake: "w", Payer: "w.payment"})
+		_, err := stake.DeregisterStakeAddress{Base: k.base, Certs: k.led, Account: k.file, Sources: stake.SingleSourceAcknowledged, OnSingle: noopSingle}.Run(bg, stake.RegisterRequest{Stake: "w", Payer: "w.payment"})
 		if code != 0 || queueLen(up) != 1 || !errors.Is(err, stk.ErrHasRewards) || queueLen(port) != 0 {
 			t.Errorf("upstream exit %d queued %d, port %v", code, queueLen(up), err)
 		}
@@ -587,7 +587,7 @@ func TestStakeDivergencesFromUpstream(t *testing.T) {
 		}
 		code := e.upstreamTTY(t, up, "08b_deregStakingAddrCert.sh", "w", "w.payment")
 		k := e.newKit(t, port, 1000, cli.Version)
-		_, err := stake.DeregisterStakeAddress{Base: k.base, Certs: k.led, Account: k.file, Sources: stake.SingleSourceAcknowledged}.Run(bg, stake.RegisterRequest{Stake: "w", Payer: "w.payment"})
+		_, err := stake.DeregisterStakeAddress{Base: k.base, Certs: k.led, Account: k.file, Sources: stake.SingleSourceAcknowledged, OnSingle: noopSingle}.Run(bg, stake.RegisterRequest{Stake: "w", Payer: "w.payment"})
 		if code != 0 || queueLen(up) != 1 || !errors.Is(err, stk.ErrHasGovDeposits) || queueLen(port) != 0 {
 			t.Errorf("upstream exit %d queued %d, port %v", code, queueLen(up), err)
 		}

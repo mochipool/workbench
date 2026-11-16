@@ -2,6 +2,7 @@ package ports
 
 import (
 	"context"
+	"time"
 
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 )
@@ -21,6 +22,14 @@ type TipReader interface {
 	Tip(ctx context.Context) (chain.Tip, error)
 }
 
+// TipTimeReader gives the time of the block at a provider's tip, as the
+// provider states it. A web provider can serve a stale database, so a
+// cross-check asks how old that is against the local clock (ADR 0006).
+type TipTimeReader interface {
+	ChainSource
+	TipTime(ctx context.Context) (time.Time, error)
+}
+
 // SyncChecker reports whether the provider has caught up with the chain.
 type SyncChecker interface {
 	ChainSource
@@ -34,6 +43,15 @@ type SyncChecker interface {
 type OpCertCounterReader interface {
 	ChainSource
 	OpCertCounter(ctx context.Context, pool chain.PoolID) (chain.Reading[uint64], error)
+}
+
+// OpCertCounterEnforcer is implemented by an OpCertCounterReader whose number
+// is the counter the node enforces (its consensus state) and not the counter of
+// the pool's last block. A reader without it is read as the last block's. The
+// cross-check of the counter needs to know which it holds (see
+// chain.CompareOpCertCounters).
+type OpCertCounterEnforcer interface {
+	OpCertCounterEnforced() bool
 }
 
 // GenesisReader gives the genesis values of the configured network.

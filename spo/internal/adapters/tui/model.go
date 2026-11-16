@@ -46,6 +46,11 @@ type Options struct {
 	Globals []string
 	// Status reads the header; nil shows none.
 	Status func() Status
+	// Names lists the names of the workspace's objects for completion in the
+	// form; nil turns completion off. See NameLister.
+	Names NameLister
+	// StartDir is where the file picker starts: the workspace directory.
+	StartDir string
 	// Input and Output replace the terminal (tests).
 	Input  io.Reader
 	Output io.Writer
@@ -134,6 +139,10 @@ type model struct {
 	form   *form
 	notice string
 
+	names  nameState
+	unlock *promptState // the passphrase modal that lets the names be listed
+	picker *picker      // the file picker, when open
+
 	run    *runState
 	runSeq int
 
@@ -175,8 +184,18 @@ func (m *model) Init() tea.Cmd { return nil }
 // characters, newlines included, are dropped.
 func (m *model) paste(s string) {
 	switch {
+	case m.unlock != nil:
+		m.unlock.mask.insert(s)
+	case m.picker != nil:
+		if m.picker.typing() {
+			m.picker.name.insert(strings.NewReplacer("/", "").Replace(s))
+		}
 	case m.screen == scForm && m.form.cursor < len(m.form.fields):
 		f := m.form.fields[m.form.cursor]
+		if m.form.blockedBy(f) != "" {
+			return
+		}
+		f.cyc = nil
 		switch f.kind {
 		case kindSecret:
 			f.secret.insert(s)
@@ -282,6 +301,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			r.follow = true
 			m.closeFDs(r)
 		}
+	case namesMsg:
+		m.namesDone(msg)
 	case tea.KeyPressMsg:
 		return m.key(keyOf(msg))
 	case tea.PasteMsg:
@@ -298,6 +319,12 @@ func (m *model) quit() (tea.Model, tea.Cmd) {
 // Wipe clears everything secret the model holds: typed secrets, the output
 // of the run and any prompt. It runs when the program ends.
 func (m *model) Wipe() {
+	if m.unlock != nil {
+		m.unlock.mask.clear()
+		m.unlock = nil
+	}
+	m.names.reset()
+	m.picker = nil
 	if m.form != nil {
 		m.form.wipe()
 	}
@@ -310,6 +337,14 @@ func (m *model) Wipe() {
 }
 
 func (m *model) key(k keyInput) (tea.Model, tea.Cmd) {
+	switch {
+	case m.unlock != nil:
+		m.unlockKey(k)
+		return m, nil
+	case m.picker != nil:
+		m.pickerKey(k)
+		return m, nil
+	}
 	switch m.screen {
 	case scForm:
 		return m.formKey(k)
@@ -427,6 +462,7 @@ func (m *model) open(e entry) {
 	}
 	m.form = newForm(e.n)
 	m.screen = scForm
+	m.loadNames()
 }
 
 func (m *model) formKey(k keyInput) (tea.Model, tea.Cmd) {
@@ -439,8 +475,24 @@ func (m *model) formKey(k keyInput) (tea.Model, tea.Cmd) {
 		m.screen = scMenu
 		m.notice = ""
 		return m, nil
-	case "tab", "down":
+	case "tab":
+		if fm.cursor < last && m.complete(fm.fields[fm.cursor]) {
+			return m, nil
+		}
 		fm.cursor = (fm.cursor + 1) % (last + 1)
+		return m, nil
+	case "down":
+		fm.cursor = (fm.cursor + 1) % (last + 1)
+		return m, nil
+	case "ctrl+n":
+		m.askUnlock()
+		return m, nil
+	case "ctrl+o":
+		if fm.cursor < last {
+			if f := fm.fields[fm.cursor]; f.hint != nil && f.hint.Kind != uihint.KindName && fm.blockedBy(f) == "" {
+				m.picker = newPicker(f, m.opts.StartDir)
+			}
+		}
 		return m, nil
 	case "shift+tab", "up":
 		fm.cursor = (fm.cursor + last) % (last + 1)
@@ -460,7 +512,14 @@ func (m *model) formKey(k keyInput) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if fm.cursor < last {
-		fm.fields[fm.cursor].handleKey(k)
+		f := fm.fields[fm.cursor]
+		if by := fm.blockedBy(f); by != "" {
+			m.notice = f.label + " cannot be used with " + by
+			return m, nil
+		}
+		m.notice = ""
+		f.cyc = nil
+		f.handleKey(k)
 	}
 	return m, nil
 }
@@ -472,6 +531,7 @@ func (m *model) startRun() (tea.Model, tea.Cmd) {
 		m.notice = p
 		return m, nil
 	}
+	m.names.reset() // the command may change the workspace's names
 	flags, pos, secrets := fm.build()
 	var fds []int
 	closeAll := func() {

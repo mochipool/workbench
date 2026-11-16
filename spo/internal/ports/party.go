@@ -162,6 +162,11 @@ type PartyWriter interface {
 	Put(w Writer, p party.Party) error
 	// Revoke sets a party to revoked (SPO-Xparty-IF-003).
 	Revoke(w Writer, name string) (party.Party, error)
+	// Rotate replaces the record of the party with fingerprint old by retired
+	// (the same party, revoked and renamed) and adds next, in one write
+	// (SPO-Xparty-INV-032). It refuses a next whose fingerprint, name or node
+	// key is already held by another record, and an old that is not there.
+	Rotate(w Writer, old party.Fingerprint, retired, next party.Party) error
 }
 
 // PartyRegistry is the registry backed by ports.Store records.
@@ -261,6 +266,42 @@ type IdentityKit interface {
 	// Local loads the workspace's own identity from the store and vault. The
 	// caller destroys it.
 	Local(ctx context.Context) (LocalIdentity, error)
+	// ParseRotation decodes a rotation statement strictly. It does not verify
+	// the signatures: party.Rotation.Verify does (SPO-Xparty-INV-030).
+	ParseRotation(b []byte) (party.Rotation, error)
+	// Rotate makes the new identity that replaces the workspace's own, the
+	// statement signed by both and one announcement per peer sealed by the old
+	// identity (SPO-Xparty-IF-008). It stores nothing.
+	Rotate(ctx context.Context, req RotateRequest) (GeneratedRotation, error)
+}
+
+// RotateRequest is what a rotation needs from the caller: the new label ("" keeps
+// the old one), the time, and the parties that get an announcement.
+type RotateRequest struct {
+	Label string
+	Peers []party.Party
+	Now   time.Time
+}
+
+// SealedAnnouncement is a Rotation envelope sealed to one peer.
+type SealedAnnouncement struct {
+	To       party.Fingerprint
+	ID       party.MessageID
+	Envelope []byte
+	Expires  time.Time
+}
+
+// GeneratedRotation is the result of IdentityKit.Rotate: the private keys of
+// the new identity (for PutSecret under Ref{"local", PartyKeys}, replacing the
+// old ones in the same transaction), its signed document, the statement, and
+// the announcements.
+type GeneratedRotation struct {
+	Keys          *Secret
+	Document      []byte
+	Identity      party.Identity
+	Old           party.Fingerprint
+	Statement     []byte
+	Announcements []SealedAnnouncement
 }
 
 // Multi-party records. All are one JSON blob each, so a change commits
@@ -277,13 +318,17 @@ const (
 	MultisigOutbox Kind = "multisig.outbox"
 	// MultisigEvents is the log of audit events of OUT-004 and INV-006.
 	MultisigEvents Kind = "multisig.events"
+	// MultisigSubmitted holds, per pool, the id of the registration transaction
+	// `spo pool register` last submitted (hex text). The coordinator tells a
+	// submitted collection from a discarded one by it (SPO-Xparty-INV-035).
+	MultisigSubmitted Kind = "multisig.submitted"
 	// MultisigCollection holds a witness collection of a transaction that is
 	// not a pool registration (the pool's own is in its descriptor).
 	MultisigCollection Kind = "multisig.collection"
 )
 
 func init() {
-	for _, k := range []Kind{MultisigCoordinator, MultisigSigner, MultisigOutbox, MultisigEvents, MultisigCollection} {
+	for _, k := range []Kind{MultisigCoordinator, MultisigSigner, MultisigOutbox, MultisigEvents, MultisigCollection, MultisigSubmitted} {
 		kinds[k] = kindInfo{}
 	}
 }
@@ -296,4 +341,15 @@ func init() {
 // to approve.
 type ApprovalGate interface {
 	Reauthenticate(ctx context.Context, key custody.KeyRef, bodyHash [32]byte) error
+}
+
+// WALCheckpointer is an optional capability of a Store whose files keep earlier
+// versions of a record after a commit (a write-ahead log): CheckpointWAL folds
+// the log into the database file and truncates it, so a record that a
+// transaction replaced does not linger in the log. A rotation of the party
+// identity calls it after its transaction; a store that has no such log does not
+// implement it. It is best-effort: an error is reported to the operator and does
+// not undo the commit.
+type WALCheckpointer interface {
+	CheckpointWAL(ctx context.Context) error
 }

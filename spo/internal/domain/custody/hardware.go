@@ -105,7 +105,7 @@ var HardwareTable = []HardwareRow{
 		Source:  "SPO-04a-EXT-003, SPO-04d-EXT-004, SPO-15-EXT-004, SPO-21a-PRE-011, SPO-23a-PRE-008, SPO-23b-PRE-007, SPO-Chw-PRE-003",
 		Vendors: ledgerKeystone,
 		Grants: []HardwareGrant{
-			{Role: RolePoolCold, Ops: []Operation{OpExportVKey, OpIssueOpCert, OpSignMessage}},
+			{Role: RolePoolCold, Ops: []Operation{OpExportVKey, OpIssueOpCert, OpSignMessage, OpSignCip88}},
 			{Role: RoleDRep, Ops: exportOnly},
 			{Role: RoleCommitteeCold, Ops: exportOnly},
 			{Role: RoleCommitteeHot, Ops: exportOnly},

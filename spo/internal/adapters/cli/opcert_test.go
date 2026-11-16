@@ -215,7 +215,7 @@ func TestOpcertIssueLightMode(t *testing.T) {
 	if err := runWith(t, d, "-C", dir, "pool", "opcert", "new-counter", "p"); err != nil {
 		t.Fatal(err)
 	}
-	if err := runWith(t, d, "-C", dir, "pool", "opcert", "issue", "p"); err != nil {
+	if err := runWith(t, d, "-C", dir, "pool", "opcert", "issue", "p", "--single-source"); err != nil {
 		t.Fatal(err)
 	}
 	if w.got.Mode != ModeLight || w.got.Genesis.Shelley != "/bundled/shelley.json" || w.got.Config.Network != "preview" {

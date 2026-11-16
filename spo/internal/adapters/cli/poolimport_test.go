@@ -34,6 +34,16 @@ func (c *chainPool) LatestPoolUpdate(context.Context, chain.PoolID) (chain.Readi
 	return c.update, nil
 }
 
+// secondChain is a second provider that states the same pool, so the import
+// corroborates (ADR 0006); the tests that exercise the single source set
+// their own.
+type secondChain struct{ c *chainPool }
+
+func (secondChain) Source() chain.Source { return "fake blockfrost" }
+func (s secondChain) PoolInfo(context.Context, chain.PoolID) (chain.Reading[chain.PoolInfo], error) {
+	return s.c.info, nil
+}
+
 type metaFetch struct{ body []byte }
 
 func (m metaFetch) Fetch(context.Context, string) ([]byte, error) { return m.body, nil }
@@ -155,6 +165,7 @@ func withPoolImport(f *sendFixture, k *keyed, fetch ports.MetadataFetcher) {
 		env.Sinks = func(dir string) (ports.FileSink, error) { return transferfile.DirSink{Dir: dir}, nil }
 		if k != nil {
 			env.PoolInfos, env.PoolUpdates, env.Metadata = k.chain, k.chain, fetch
+			env.PoolInfoCross = secondChain{k.chain}
 		} else {
 			const why = "offline mode cannot read a pool from the chain"
 			env.Absent(CapPoolInfo, why)
@@ -175,7 +186,7 @@ func TestPoolImportNeedsAreCheckedBeforeAnyPrompt(t *testing.T) {
 	withPoolImport(f, nil, nil)
 	before := listing(t, f.dir)
 	term := &scriptTerm{t: t}
-	err := f.run(t, term, "pool", "import", "mypool", "pool1a7h89sr6ymj9g2a9tm6e6dddghl64tp39pj78f6cah5ewgd4px0")
+	err := f.run(t, term, "pool", "import", "--yes", "mypool", "pool1a7h89sr6ymj9g2a9tm6e6dddghl64tp39pj78f6cah5ewgd4px0")
 	if err == nil {
 		t.Fatal("offline import by pool id")
 	}
@@ -198,17 +209,17 @@ func TestPoolImportNeedsAreCheckedBeforeAnyPrompt(t *testing.T) {
 		return env, err
 	}
 	info := writeFile(t, g.dir, "info.json", `{}`)
-	err = g.run(t, &scriptTerm{t: t}, "pool", "import", "mypool", info, "--account", "a:p.skey:s.skey")
+	err = g.run(t, &scriptTerm{t: t}, "pool", "import", "--yes", "mypool", info, "--account", "a:p.skey:s.skey")
 	if err == nil || !strings.Contains(err.Error(), "protocol-parameters") {
 		t.Errorf("deposit need: %v", err)
 	}
 	// Malformed flags are refused before the workspace is opened.
 	for _, a := range []string{"x", "x:", ":p", "a:b:c:d"} {
-		if err := g.run(t, &scriptTerm{t: t}, "pool", "import", "mypool", info, "--account", a); err == nil || !strings.Contains(err.Error(), "--account") {
+		if err := g.run(t, &scriptTerm{t: t}, "pool", "import", "--yes", "mypool", info, "--account", a); err == nil || !strings.Contains(err.Error(), "--account") {
 			t.Errorf("--account %q: %v", a, err)
 		}
 	}
-	if err := g.run(t, &scriptTerm{t: t}, "pool", "import", "...", info); err == nil || !strings.Contains(err.Error(), "letter or digit") {
+	if err := g.run(t, &scriptTerm{t: t}, "pool", "import", "--yes", "...", info); err == nil || !strings.Contains(err.Error(), "letter or digit") {
 		t.Errorf("empty name: %v", err)
 	}
 }
@@ -221,7 +232,7 @@ func TestPoolImportFlagsWriteTheKeysAndShowNoKeyMaterial(t *testing.T) {
 	f := newSendFixture(t)
 	withPoolImport(f, k, metaFetch{body: k.meta})
 	term := &scriptTerm{t: t}
-	if err := f.run(t, term, "pool", "import", "mypool.pool.json", k.poolID.Bech32(),
+	if err := f.run(t, term, "pool", "import", "--yes", "mypool.pool.json", k.poolID.Bech32(),
 		"--cold", k.path("cold"), "--vrf", k.path("vrf"), "--account", "owner:"+k.path("pay")+":"+k.path("stk")); err != nil {
 		t.Fatalf("%v\n%s", err, f.out.String())
 	}
@@ -246,7 +257,7 @@ func TestPoolImportFlagsWriteTheKeysAndShowNoKeyMaterial(t *testing.T) {
 		})
 	}
 	// The pool exists now: importing it again is refused (the descriptor is never replaced).
-	if err := f.run(t, &scriptTerm{t: t}, "pool", "import", "mypool", k.poolID.Bech32(), "--continue"); err == nil || !strings.Contains(err.Error(), "descriptor") {
+	if err := f.run(t, &scriptTerm{t: t}, "pool", "import", "--yes", "mypool", k.poolID.Bech32(), "--continue"); err == nil || !strings.Contains(err.Error(), "descriptor") {
 		t.Errorf("a second import: %v", err)
 	}
 }
@@ -257,7 +268,7 @@ func TestPoolImportDryRunWritesNothing(t *testing.T) {
 	f := newSendFixture(t)
 	withPoolImport(f, k, metaFetch{body: k.meta})
 	before := listing(t, f.dir)
-	if err := f.run(t, &scriptTerm{t: t}, "pool", "import", "mypool", k.poolID.Bech32(), "--dry-run",
+	if err := f.run(t, &scriptTerm{t: t}, "pool", "import", "--yes", "mypool", k.poolID.Bech32(), "--dry-run",
 		"--cold", k.path("cold"), "--vrf", k.path("vrf"), "--account", "owner:"+k.path("pay")+":"+k.path("stk")); err != nil {
 		t.Fatalf("%v\n%s", err, f.out.String())
 	}
@@ -267,7 +278,7 @@ func TestPoolImportDryRunWritesNothing(t *testing.T) {
 	}
 	// A key that is not the pool's is refused by a dry run just as by a real one.
 	other := newKeyed(t, true)
-	if err := f.run(t, &scriptTerm{t: t}, "pool", "import", "mypool", k.poolID.Bech32(), "--dry-run", "--cold", other.path("cold")); err == nil || !strings.Contains(err.Error(), "does not belong") {
+	if err := f.run(t, &scriptTerm{t: t}, "pool", "import", "--yes", "mypool", k.poolID.Bech32(), "--dry-run", "--cold", other.path("cold")); err == nil || !strings.Contains(err.Error(), "does not belong") {
 		t.Errorf("another pool's cold key: %v", err)
 	}
 }
@@ -285,7 +296,7 @@ func TestPoolImportAsksForARewardsAccount(t *testing.T) {
 	// Yes by default, then the account is asked for as PR-005 and PR-006 say.
 	f, term := fixture()
 	term.lines = []string{"", "owner_andor_rewards", k.path("pay"), k.path("stk"), ""}
-	if err := f.runT(t, term, "pool", "import", "mypool", k.poolID.Bech32(), "--cold", k.path("cold"), "--vrf", k.path("vrf")); err != nil {
+	if err := f.runT(t, term, "pool", "import", "--yes", "mypool", k.poolID.Bech32(), "--cold", k.path("cold"), "--vrf", k.path("vrf")); err != nil {
 		t.Fatalf("%v\n%s", err, f.out.String())
 	}
 	if !strings.Contains(term.asked[0], "Currently there is no rewards account included, do you wanna go back and add a payment/staking keypair for the rewards account? [Y/n]") {
@@ -298,13 +309,13 @@ func TestPoolImportAsksForARewardsAccount(t *testing.T) {
 	// No: imported without a rewards account, and the notice says so.
 	f, term = fixture()
 	term.lines = []string{"n"}
-	if err := f.runT(t, term, "pool", "import", "mypool", k.poolID.Bech32()); err != nil {
+	if err := f.runT(t, term, "pool", "import", "--yes", "mypool", k.poolID.Bech32()); err != nil {
 		t.Fatalf("%v\n%s", err, f.out.String())
 	}
 	mustContain(t, f.out.String(), "no imported account is the pool's rewards account")
 	// No terminal and flags given: nothing is asked, the import goes ahead.
 	f, term = fixture()
-	if err := f.runT(t, term, "pool", "import", "mypool", k.poolID.Bech32(), "--cold", k.path("cold")); err != nil {
+	if err := f.runT(t, term, "pool", "import", "--yes", "mypool", k.poolID.Bech32(), "--cold", k.path("cold")); err != nil {
 		t.Fatalf("%v\n%s", err, f.out.String())
 	}
 }
@@ -317,7 +328,7 @@ func TestPoolImportAsksForKeyPaths(t *testing.T) {
 	f := newSendFixture(t)
 	withPoolImport(f, k, metaFetch{body: k.meta})
 	term := &recTerm{lines: []string{filepath.Join(k.dir, "missing.skey"), k.path("cold"), k.path("vrf"), "owner", k.path("pay"), k.path("stk"), ""}}
-	if err := f.runT(t, term, "pool", "import", "mypool", k.poolID.Bech32()); err != nil {
+	if err := f.runT(t, term, "pool", "import", "--yes", "mypool", k.poolID.Bech32()); err != nil {
 		t.Fatalf("%v\n%s", err, f.out.String())
 	}
 	mustContain(t, f.out.String(), "missing.skey", "cannot be opened", "as mypool", "account owner: an owner and the rewards account")
@@ -332,7 +343,7 @@ func TestPoolImportAsksForKeyPaths(t *testing.T) {
 	// Blank answers skip everything: the pool is imported with a descriptor only.
 	g := newSendFixture(t)
 	withPoolImport(g, k, metaFetch{body: k.meta})
-	if err := g.runT(t, &recTerm{lines: []string{"", "", "", "n"}}, "pool", "import", "plain", k.poolID.Bech32()); err != nil {
+	if err := g.runT(t, &recTerm{lines: []string{"", "", "", "n"}}, "pool", "import", "--yes", "plain", k.poolID.Bech32()); err != nil {
 		t.Fatalf("%v\n%s", err, g.out.String())
 	}
 	if _, err := os.Stat(filepath.Join(g.dir, "plain.node.skey")); err == nil {
@@ -347,7 +358,7 @@ func TestPoolImportMetadataMismatchAsksWithBothHashes(t *testing.T) {
 	changed := append(append([]byte(nil), k.meta...), '\n')
 	info, _ := k.chain.info.Get()
 	h, _ := native.Ledger{}.MetadataHash(changed)
-	args := []string{"pool", "import", "mypool", k.poolID.Bech32(), "--vrf", k.path("vrf")}
+	args := []string{"pool", "import", "--yes", "mypool", k.poolID.Bech32(), "--vrf", k.path("vrf")}
 
 	f := newSendFixture(t)
 	withPoolImport(f, k, metaFetch{body: changed})
@@ -390,23 +401,23 @@ func TestPoolImportKeyFileHandling(t *testing.T) {
 	if err := os.Symlink(k.path("cold"), link); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.run(t, &scriptTerm{t: t}, "pool", "import", "mypool", k.poolID.Bech32(), "--cold", link); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+	if err := f.run(t, &scriptTerm{t: t}, "pool", "import", "--yes", "mypool", k.poolID.Bech32(), "--cold", link); err == nil || !strings.Contains(err.Error(), "symbolic link") {
 		t.Errorf("a link: %v", err)
 	}
 	big := writeFile(t, k.dir, "big.skey", strings.Repeat("x", maxKeyFile+1))
-	if err := f.run(t, &scriptTerm{t: t}, "pool", "import", "mypool", k.poolID.Bech32(), "--cold", big); err == nil || !strings.Contains(err.Error(), "larger than a key") {
+	if err := f.run(t, &scriptTerm{t: t}, "pool", "import", "--yes", "mypool", k.poolID.Bech32(), "--cold", big); err == nil || !strings.Contains(err.Error(), "larger than a key") {
 		t.Errorf("an oversized file: %v", err)
 	}
 	// The import has to be given a signing key envelope: a verification key is refused.
 	notKey := writeFile(t, k.dir, "vk.skey", `{"type":"StakePoolVerificationKey_ed25519","description":"","cborHex":"5820`+strings.Repeat("00", 32)+`"}`)
-	if err := f.run(t, &scriptTerm{t: t}, "pool", "import", "mypool", k.poolID.Bech32(), "--cold", notKey); err == nil || !strings.Contains(err.Error(), "signing key") {
+	if err := f.run(t, &scriptTerm{t: t}, "pool", "import", "--yes", "mypool", k.poolID.Bech32(), "--cold", notKey); err == nil || !strings.Contains(err.Error(), "signing key") {
 		t.Errorf("a verification key: %v", err)
 	}
 	if err := os.Chmod(k.path("cold"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	f.out.Reset()
-	if err := f.run(t, &scriptTerm{t: t}, "pool", "import", "mypool", k.poolID.Bech32(), "--cold", k.path("cold")); err != nil {
+	if err := f.run(t, &scriptTerm{t: t}, "pool", "import", "--yes", "mypool", k.poolID.Bech32(), "--cold", k.path("cold")); err != nil {
 		t.Fatalf("%v\n%s", err, f.out.String())
 	}
 	mustContain(t, f.out.String(), "readable by others")
@@ -442,7 +453,7 @@ func TestPoolExportInfoThenOfflineImport(t *testing.T) {
 	g := newSendFixture(t)
 	withPoolImport(g, nil, nil)
 	calls := k.chain.asked
-	if err := g.run(t, &scriptTerm{t: t}, "pool", "import", "mypool", file, "--cold", k.path("cold"), "--account", "owner:"+k.path("pay")+":"+k.path("stk")); err != nil {
+	if err := g.run(t, &scriptTerm{t: t}, "pool", "import", "--yes", "mypool", file, "--cold", k.path("cold"), "--account", "owner:"+k.path("pay")+":"+k.path("stk")); err != nil {
 		t.Fatalf("%v\n%s", err, g.out.String())
 	}
 	if k.chain.asked != calls {
@@ -481,4 +492,65 @@ func (r *recTerm) ReadLine(_ context.Context, prompt string) (string, error) {
 func (f *sendFixture) runT(t *testing.T, term Terminal, args ...string) error {
 	t.Helper()
 	return f.run(t, term, args...)
+}
+
+// The import shows the registration data (reward address, owners, margin,
+// cost, pledge, relays) and asks before anything is written (default No);
+// strings a provider chose are made safe to print; a single source needs
+// --single-source and is recorded (ADR 0006, F3 and F4).
+//
+// spec: SPO-0x-SEC-003 (ADR 0006)
+func TestPoolImportConfirmsTheDataAndRecordsASingleSource(t *testing.T) {
+	k := newKeyed(t, true)
+	info, _ := k.chain.info.Get()
+	info.RewardAddr = "stake_test1\x1b[2Jevil‮"
+	k.chain.info = chain.Value(info)
+	newFix := func(cross bool) (*sendFixture, *recAuditor) {
+		f := newSendFixture(t)
+		rec := &recAuditor{}
+		f.deps = rec.deps(f.deps)
+		withPoolImport(f, k, metaFetch{body: k.meta})
+		if !cross {
+			old := f.deps.Wire
+			f.deps.Wire = func(st ports.Store, o WireOptions) (*Env, error) {
+				env, err := old(st, o)
+				env.PoolInfoCross = nil
+				return env, err
+			}
+		}
+		return f, rec
+	}
+
+	// Declined at the prompt (the default): nothing written, nothing recorded,
+	// and the hostile text is shown as escapes.
+	f, rec := newFix(true)
+	err := f.runT(t, &recTerm{lines: []string{"", "", "", "n", ""}}, "pool", "import", "mypool", k.poolID.Bech32())
+	if err == nil || !strings.Contains(err.Error(), "not confirmed") {
+		t.Fatalf("%v\n%s", err, f.out.String())
+	}
+	out := f.out.String()
+	mustContain(t, out, "reward address", "owner", "margin", "cost", "pledge", `\u{1b}`, `\u{202e}`)
+	if strings.Contains(out, "\x1b") || strings.Contains(out, "‮") {
+		t.Errorf("an active character was printed: %q", out)
+	}
+	if _, err := os.Stat(filepath.Join(f.dir, "mypool.pool.json")); err == nil {
+		t.Error("written without confirmation")
+	}
+	rec.singles(t, 0)
+
+	// One provider: refused without the flag; with it, recorded and warned.
+	g, rec2 := newFix(false)
+	err = g.runT(t, &recTerm{}, "pool", "import", "--yes", "mypool", k.poolID.Bech32())
+	if err == nil || !strings.Contains(err.Error(), "--single-source") {
+		t.Fatalf("%v", err)
+	}
+	rec2.singles(t, 0)
+	g.out.Reset()
+	if err := g.runT(t, &recTerm{}, "pool", "import", "--yes", "--single-source", "mypool", k.poolID.Bech32()); err != nil {
+		t.Fatalf("%v\n%s", err, g.out.String())
+	}
+	if ev := rec2.singles(t, 1)[0]; ev.Command != "spo pool import" || ev.Source != "fake koios" {
+		t.Errorf("record %+v", ev)
+	}
+	mustContain(t, g.out.String(), "WARNING", "ONE source (fake koios)")
 }

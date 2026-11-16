@@ -58,7 +58,7 @@ var (
 	ErrNameTaken         = errors.New("party: that local name is already in use")
 	ErrAlreadyEnrolled   = errors.New("party: that identity is already enrolled")
 	ErrAlreadyRevoked    = errors.New("party: already revoked")
-	// ErrNodeKeyInUse: another enrolled party already has that tailcat node
+	// ErrNodeKeyInUse: another ACTIVE enrolled party already has that tailcat node
 	// key (SPO-Xparty-INV-018). A node key names one machine's connection;
 	// two parties sharing it could be taken for each other.
 	ErrNodeKeyInUse = errors.New("party: another enrolled party already has that node key")
@@ -126,7 +126,7 @@ func Enroll(e Enrollment, existing []Party, now time.Time) (Party, error) {
 		if q.Name == e.Name {
 			return Party{}, ErrNameTaken
 		}
-		if id.Node != nil && q.Identity.Node != nil && *id.Node == *q.Identity.Node {
+		if q.Active() && id.Node != nil && q.Identity.Node != nil && *id.Node == *q.Identity.Node {
 			return Party{}, fmt.Errorf("%w: %s", ErrNodeKeyInUse, q.Name)
 		}
 	}
@@ -169,6 +169,7 @@ type Concern struct {
 //     sender is the signer assigned to the slot.
 //   - Hello needs the signer role (SPO-Xparty-INV-021).
 //   - Bundle needs the machine role.
+//   - Rotation needs only that the sender is active (SPO-Xparty-INV-031).
 //
 // An inactive sender is never authorised.
 func Authorise(sender Party, t Type, c Concern) error {
@@ -191,6 +192,10 @@ func Authorise(sender Party, t Type, c Concern) error {
 		if !sender.HasRole(RoleSigner) {
 			return fmt.Errorf("%w: not a signer", ErrNotAuthorised)
 		}
+	case TypeRotation:
+		// Any enrolled, active party may announce that it changed its own
+		// identity; what the announcement causes is only a pending record
+		// (SPO-Xparty-INV-031), never a registry change.
 	case TypeBundle:
 		if !sender.HasRole(RoleMachine) {
 			return fmt.Errorf("%w: not a machine party", ErrNotAuthorised)
@@ -210,6 +215,19 @@ func AllowedNodeKeys(ps []Party) []NodeKey {
 	for _, p := range ps {
 		if p.Active() && p.Identity.Node != nil && (p.HasRole(RoleSigner) || p.HasRole(RoleMachine)) && !slices.Contains(out, *p.Identity.Node) {
 			out = append(out, *p.Identity.Node)
+		}
+	}
+	return out
+}
+
+// AllowedOwners is AllowedNodeKeys with the fingerprint of the active party that
+// holds each key, so a server that follows the registry sees a key change hands
+// (one party revoked and another enrolled with the same node key).
+func AllowedOwners(ps []Party) map[NodeKey]Fingerprint {
+	out := map[NodeKey]Fingerprint{}
+	for _, p := range ps {
+		if p.Active() && p.Identity.Node != nil && (p.HasRole(RoleSigner) || p.HasRole(RoleMachine)) {
+			out[*p.Identity.Node] = p.Fingerprint
 		}
 	}
 	return out

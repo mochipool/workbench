@@ -52,6 +52,12 @@ type Event struct {
 	Protected     bool      `json:"protected"`
 	Acknowledged  bool      `json:"acknowledged"`
 	Reason        string    `json:"reason,omitempty"`
+
+	// Set for a read that rested on one source (Operation "single-source-read").
+	Command      string `json:"command,omitempty"`
+	Read         string `json:"read,omitempty"`
+	Source       string `json:"source,omitempty"`
+	SingleSource bool   `json:"single_source,omitempty"`
 }
 
 type logFile struct {
@@ -84,7 +90,7 @@ func (a *Auditor) Record(ctx context.Context, e ports.AuditEvent) error {
 	ev := Event{
 		Time: now().UTC().Truncate(time.Second), Operation: e.Operation, Owners: append([]string(nil), e.Owners...),
 		PlaintextKeys: e.PlaintextKeys, ProtectedKeys: e.ProtectedKeys, Protected: e.Protected, Acknowledged: e.Acknowledged,
-		Reason: a.Reason,
+		Reason: a.Reason, Command: e.Command, Read: e.Read, Source: e.Source, SingleSource: e.SingleSource,
 	}
 	err := a.Store.Update(ctx, func(w ports.Writer) error {
 		var lf logFile

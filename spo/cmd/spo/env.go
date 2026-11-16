@@ -14,6 +14,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/adapters/koios"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/adapters/offline"
+	"github.com/mochipool/workbench/spo/internal/adapters/qrcode"
 	"github.com/mochipool/workbench/spo/internal/adapters/systemclock"
 	"github.com/mochipool/workbench/spo/internal/adapters/transferfile"
 	"github.com/mochipool/workbench/spo/internal/app/handles"
@@ -24,13 +25,13 @@ import (
 )
 
 // chainCaps are the capabilities that depend on the mode.
-var chainCaps = []cli.Cap{cli.CapTip, cli.CapSync, cli.CapOpCertCount, cli.CapParams, cli.CapUtxos, cli.CapRewards, cli.CapPools, cli.CapDReps, cli.CapCrossCheck, cli.CapSubmit, cli.CapQueue, cli.CapCalidusRead, cli.CapAdaHandle, cli.CapPollQuestion, cli.CapTokenRegistry, cli.CapPoolInfo, cli.CapPoolUpdates}
+var chainCaps = []cli.Cap{cli.CapTip, cli.CapSync, cli.CapOpCertCount, cli.CapParams, cli.CapUtxos, cli.CapRewards, cli.CapPools, cli.CapDReps, cli.CapCrossCheck, cli.CapPoolCross, cli.CapOpCertCross, cli.CapSubmit, cli.CapQueue, cli.CapCalidusRead, cli.CapAdaHandle, cli.CapPollQuestion, cli.CapTokenRegistry, cli.CapPoolInfo, cli.CapPoolUpdates}
 
 func init() { chainCaps = append(chainCaps, cli.GovernanceChainCaps...) }
 
-// noCalidusReader is why `pool calidus status` is unavailable: no provider
-// adapter reads CIP-88 registrations yet.
-const noCalidusReader = "no chain provider reads the Calidus keys registered on chain (CIP-88) yet; the Koios adapter has no reader for them"
+// noCalidusReader is why `pool calidus status` is unavailable outside light
+// mode, where the Koios adapter reads the registrations.
+const noCalidusReader = "the Calidus keys registered on chain (CIP-88) are read through Koios in light mode (SPO-15-MODE-002); this mode has no such provider"
 
 // signatureDirectory hands out the vault signer with the signature
 // capabilities, and the token-registry attestation, for a key held in the
@@ -79,19 +80,34 @@ func governanceReaders(env *cli.Env, src any, why string) {
 	if r, ok := src.(ports.VotingSummaryReader); ok {
 		env.Summaries = r
 	}
+	if r, ok := src.(ports.TxEvaluator); ok {
+		env.TxEvaluator = r
+	}
 	for _, c := range cli.GovernanceChainCaps {
 		if c == cli.CapDRepCross {
 			continue // has its own reason, set in wire
+		}
+		if c == cli.CapTxEvaluator {
+			env.Absent(c, noEvaluator)
+			continue
 		}
 		env.Absent(c, why)
 	}
 }
 
+// noEvaluator is why a transaction that carries a Plutus script (a treasury
+// withdrawal or a parameter change under a constitution with a guardrails
+// script) cannot be built: this build runs no Plutus script itself, upstream's
+// offline calculator is cardano-cli, and only Koios' Ogmios-compatible endpoint
+// is wired to evaluate one. Upstream takes the execution units from no input of
+// the operator (SPO-25b-EXT-002, SPO-25b-EXT-003), so there is none to give.
+const noEvaluator = "no provider evaluates Plutus scripts here: the execution units of the guardrails script come from Koios' Ogmios-compatible endpoint (light mode with Koios); offline mode and a Blockfrost-only light mode cannot evaluate, and this build runs no Plutus itself"
+
 // noDRepCross is why there is no second DRep-state source: no adapter pair
 // gives two independent answers about a DRep today, so a read of the "harmful
 // if false" class (the deposit a DRep refund rests on) rests on the one
 // source, and the operator acknowledges that with --single-source (ADR 0006).
-const noDRepCross = "there is no second independent DRep-state source besides the provider, so a DRep retirement is refused unless the command is given --single-source"
+const noDRepCross = "there is no second independent DRep-state source besides the provider, so a DRep retirement is refused unless the command is given --single-source; name a second provider with: spo provider set blockfrost"
 
 // wire builds the Env of a command: the local capabilities every mode has,
 // then the chain capabilities the mode and provider can supply. What a mode
@@ -105,7 +121,7 @@ func wire(store ports.Store, o cli.WireOptions) (*cli.Env, error) {
 
 // wireTo is wire with the writer the hardware wallet's progress lines go to.
 func wireTo(errw io.Writer, store ports.Store, o cli.WireOptions) (*cli.Env, error) {
-	env := &cli.Env{Mode: o.Mode, Endpoints: map[string]string{}}
+	env := &cli.Env{Mode: o.Mode, Endpoints: map[string]string{}, SameHostOK: o.Config.SameHostOK}
 	hw := wireHardware(env, store, o, errw)
 
 	var vault ports.Vault
@@ -136,9 +152,14 @@ func wireTo(errw io.Writer, store ports.Store, o cli.WireOptions) (*cli.Env, err
 		}
 		env.SignatureSigner = vs
 		env.RegistrySigner = vr
+		// The voting key's QR code: the vault builds the PIN-encrypted payload,
+		// the qrcode adapter draws it (spec: SPO-09a-EXT-005).
+		env.VotingQR = native.VotingKeyQR{Vault: vault}
+		env.QRCodes = qrcode.Renderer{}
 		env.Signers = signatureDirectory{vault: vault, other: native.Signers{Vault: vault, Hardware: hw}}
 	} else {
 		env.Absent(cli.CapSignatures, "the store cannot release signing keys to a signer")
+		env.Absent(cli.CapVotingQR, "the store cannot release signing keys to a signer")
 		env.Absent(cli.CapRegistrySigning, "the store cannot release signing keys to a signer")
 	}
 
@@ -147,7 +168,9 @@ func wireTo(errw io.Writer, store ports.Store, o cli.WireOptions) (*cli.Env, err
 	env.ColdKeys, env.PaymentKeys, env.StakeKeys = soft, soft, soft
 	env.Mnemonics, env.WalletDeriver = soft, soft
 	env.CalidusKeys, env.VotingKeys = soft, soft
-	env.Absent(cli.CapCalidusRead, noCalidusReader)
+	if o.Mode != cli.ModeOnline { // online mode says why itself (wireNodeFirst)
+		env.Absent(cli.CapCalidusRead, noCalidusReader)
+	}
 	clock := systemclock.Clock{}
 	env.Clock = clock
 	led := native.Ledger{}
@@ -190,16 +213,10 @@ func wireTo(errw io.Writer, store ports.Store, o cli.WireOptions) (*cli.Env, err
 		// No mode: every chain capability keeps the generic reason.
 	case cli.ModeOffline:
 		wireOffline(env, o, tf, clock, genesis)
-	case cli.ModeLight:
-		if o.Config.Koios == nil {
-			none("no chain provider is configured: spo provider set koios")
-			break
-		}
-		if err := wireLight(env, o); err != nil {
+	case cli.ModeLight, cli.ModeOnline:
+		if err := wireChain(env, o, errw); err != nil {
 			return nil, err
 		}
-	case cli.ModeOnline:
-		none("online mode needs a cardano-node socket adapter, which is not built yet; use mode light (Koios), or pass --offline")
 	default:
 		none(fmt.Sprintf("mode %q is not one of online, light, offline", o.Mode))
 	}
@@ -309,7 +326,7 @@ const noGovernanceReader = "no configured chain provider reads this governance s
 // if false" class rests on the one source, and the operator acknowledges that
 // with --single-source (ADR 0006).
 func noCrossCheck(primary string) string {
-	return "there is no second independent reward-account source besides " + primary + ", so reads that need corroboration are refused unless the command is given --single-source"
+	return "there is no second independent reward-account source besides " + primary + ", so reads that need corroboration are refused unless the command is given --single-source; name a second provider with: spo provider set blockfrost"
 }
 
 func wireLight(env *cli.Env, o cli.WireOptions) error {
@@ -362,6 +379,7 @@ func wireLight(env *cli.Env, o cli.WireOptions) error {
 	}
 	env.Polls, _ = any(k).(ports.PollQuestionReader)
 	env.PoolInfos, _ = any(k).(ports.PoolInfoReader)
+	env.CalidusReader, _ = any(k).(ports.CalidusKeyReader)
 	env.PoolUpdates, _ = any(k).(ports.PoolUpdateReader)
 	wireRegistry(env, o)
 	wireHandles(env, o, k, native.Ledger{})

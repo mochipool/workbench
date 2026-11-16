@@ -5,10 +5,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sys/unix"
 
 	"github.com/mochipool/workbench/spo/internal/app/catalyst"
 	"github.com/mochipool/workbench/spo/internal/app/poolkey"
@@ -20,8 +23,8 @@ import (
 // (CIP-36, upstream 09a_catalystVote). Neither command submits anything: the
 // registration is stored in the workspace and attached to an ordinary payment
 // with `spo wallet send ... --metadata-record NAME`. No command prints a
-// signing key or a mnemonic. The QR code of the Catalyst mobile app is not
-// built.
+// signing key or a mnemonic. `catalyst key qrcode` writes the PIN-protected QR
+// code of a voting key, the one command whose output is as secret as the key.
 
 // derivedKeyOptions are the flags of the two key commands.
 type derivedKeyOptions struct {
@@ -76,12 +79,13 @@ func checkNonce(cmd *cobra.Command, n uint64) error {
 
 func (a *app) poolCalidusCommand() *cobra.Command {
 	c := &cobra.Command{Use: "calidus", Short: "The Calidus pool key (CIP-151): generate it, register it, look it up"}
-	c.AddCommand(a.calidusNewCommand(), a.calidusRegisterCommand(), a.calidusStatusCommand())
+	c.AddCommand(a.calidusNewCommand(), a.calidusRegisterCommand(), a.calidusStatusCommand(), a.calidusSignCommand())
 	return c
 }
 
 func (a *app) calidusNewCommand() *cobra.Command {
 	var o derivedKeyOptions
+	var hw hardwareFlags
 	var cf chainFlags
 	cmd := &cobra.Command{
 		Use:   "new <name> [--mnemonic-in-fd N] [--account N] [--index N]",
@@ -90,9 +94,17 @@ func (a *app) calidusNewCommand() *cobra.Command {
 24-word phrase and store <name>.calidus.vkey, .skey, .mnemonics and .id sealed in
 the workspace. --mnemonic-in-fd N reads the phrase from file descriptor N;
 without it a fresh phrase is generated and stored, never shown. The signing
-key and the phrase are never printed; the Calidus id and the public key are.`,
+key and the phrase are never printed; the Calidus id and the public key are.
+
+A Calidus key cannot be made on a hardware wallet: upstream suspends it until
+CIP-151 has a dedicated derivation path (SPO-15-PRE-002), and --hardware says
+so and does nothing. The pool cold key on a hardware wallet can still sign the
+registration of a Calidus key kept in the workspace.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if hw.on {
+				return poolkey.ErrHardwareCalidusSuspended
+			}
 			fdSet := cmd.Flags().Changed("mnemonic-in-fd")
 			if err := o.validate(fdSet, a.passFD); err != nil {
 				return err
@@ -119,6 +131,7 @@ key and the phrase are never printed; the Calidus id and the public key are.`,
 		},
 	}
 	o.add(cmd)
+	hw.add(cmd, 0)
 	addChainFlags(cmd, &cf, false)
 	return cmd
 }
@@ -126,16 +139,23 @@ key and the phrase are never printed; the Calidus id and the public key are.`,
 func (a *app) calidusRegisterCommand() *cobra.Command {
 	var (
 		nonce uint64
+		yes   bool
 		cf    chainFlags
 	)
 	cmd := &cobra.Command{
-		Use:   "register-metadata <calidus-name> <pool> [--nonce N]",
+		Use:   "register-metadata <calidus-name> <pool> [--nonce N] [--yes]",
 		Short: "Sign the Calidus registration with the pool cold key and store the metadata",
 		Long: `Build the CIP-88 (version 2) registration of the Calidus key <calidus-name> for
 <pool> and sign it with the pool's cold key. The metadata is stored in the
-workspace as <pool>_<time>.calidus-registration.json; nothing is submitted. The
-cold key must be in the workspace: a cold key on a hardware wallet cannot sign
-this and is refused before anything is built.
+workspace as <pool>_<time>.calidus-registration.json; nothing is submitted.
+
+A pool cold key on a hardware wallet (Ledger or Keystone; a Trezor is refused
+before anything is built) signs it on the device with a CIP-8 message over the
+hash of the payload. You are shown the hash the device will display and asked to
+continue first; --yes answers that. The device's signature is checked against
+the payload, the pool id and the cold key before anything is stored. When both a
+cold signing key and a hardware signing file exist for the pool, the hardware
+one is used (SPO-15-INV-002). ` + hardwareUntested + `
 
 --nonce N sets the registration nonce; by default it is the current slot of the
 work mode (the Shelley genesis is needed offline). Attach the stored metadata
@@ -153,6 +173,18 @@ to a payment of yours to put it on the chain:
 					return errors.New("this mode has no current slot to take the nonce from, and the default nonce is the mainnet slot: give --nonce N")
 				}
 				uc := poolkey.GenerateCalidusRegistration{Store: s.Store, Signers: env.Signers, Clock: env.Clock}
+				uc.BeforeDevice = func(ctx context.Context, d poolkey.DeviceSigning) error {
+					fmt.Fprintf(a.d.Out, "The pool cold key on the hardware wallet will sign this registration.\n  pool id        %s\n  Calidus id     %s\n  nonce          %d\n  hash on device %s\n", d.PoolBech, d.CalidusID, d.Nonce, d.DeviceHash)
+					ok, err := a.confirm(ctx, "Sign the message with the pool cold key on the hardware wallet?", yes)
+					if err != nil {
+						return err
+					}
+					if !ok {
+						return errors.New("declined: nothing was signed or stored")
+					}
+					a.noteDevice()
+					return nil
+				}
 				if env.Tip != nil {
 					uc.Tip = env.Tip
 				}
@@ -169,6 +201,7 @@ to a payment of yours to put it on the chain:
 		},
 	}
 	cmd.Flags().Uint64Var(&nonce, "nonce", 0, "registration nonce (default: the current slot)")
+	cmd.Flags().BoolVar(&yes, "yes", false, "continue to the hardware wallet without asking (only when the cold key is on a device)")
 	addChainFlags(cmd, &cf, true)
 	return cmd
 }
@@ -202,7 +235,7 @@ all. This needs a provider that reads CIP-88 registrations; see spo capabilities
 					if !e.BlockTime.IsZero() {
 						when = e.BlockTime.UTC().Format(time.RFC3339)
 					}
-					fmt.Fprintf(w, "  pool %s\n    calidus id  %s\n    public key  %s\n    registered  %s\n", e.PoolBech, e.IDBech, e.PubKeyHex, when)
+					fmt.Fprintf(w, "  pool %s\n    calidus id  %s\n    public key  %s\n    registered  %s\n", shown(e.PoolBech), shown(e.IDBech), shown(e.PubKeyHex), when)
 					if e.HasNonce {
 						fmt.Fprintf(w, "    nonce       %d\n", e.Nonce)
 					}
@@ -210,9 +243,35 @@ all. This needs a provider that reads CIP-88 registrations; see spo capabilities
 						fmt.Fprintf(w, "    epoch       %d\n", e.Epoch)
 					}
 					if e.TxHash != "" {
-						fmt.Fprintf(w, "    transaction %s\n", e.TxHash)
+						fmt.Fprintf(w, "    transaction %s\n", shown(e.TxHash))
 					}
 				}
+				return nil
+			})
+		},
+	}
+	addChainFlags(cmd, &cf, false)
+	return cmd
+}
+
+func (a *app) calidusSignCommand() *cobra.Command {
+	var cf chainFlags
+	cmd := &cobra.Command{
+		Use:   "sign <calidus-name> <text>",
+		Short: "Sign a text with the Calidus key",
+		Long: `Sign <text> with the Calidus signing key <calidus-name> from the workspace and
+print the Calidus id, the public key and the signature in hex. The signature is
+a plain Ed25519 signature over the bytes of the text, not a CIP-8 message. A
+Calidus key on a hardware wallet does not exist (see calidus new), so there is no
+device variant. Nothing is written.`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.withEnv(cmd, envSpec{flags: &cf, needs: []Need{CapSigners, CapSignatures}}, func(ctx context.Context, s *session, env *Env, _ WireOptions) error {
+				res, err := poolkey.SignWithCalidusKey{Store: s.Store, Signers: env.Signers}.Run(ctx, args[0], "", []byte(args[1]))
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(a.d.Out, "Calidus id   %s\npublic key   %s\nsignature    %s\n", res.CalidusID, hex.EncodeToString(res.PublicKey[:]), res.SignatureHex)
 				return nil
 			})
 		},
@@ -226,13 +285,14 @@ all. This needs a provider that reads CIP-88 registrations; see spo capabilities
 func (a *app) catalystCommand() *cobra.Command {
 	c := &cobra.Command{Use: "catalyst", Short: "Project Catalyst voting keys and CIP-36 registration"}
 	key := &cobra.Command{Use: "key", Short: "Catalyst voting keys"}
-	key.AddCommand(a.catalystKeyNewCommand())
+	key.AddCommand(a.catalystKeyNewCommand(), a.catalystKeyQRCommand())
 	c.AddCommand(key, a.catalystRegisterCommand())
 	return c
 }
 
 func (a *app) catalystKeyNewCommand() *cobra.Command {
 	var o derivedKeyOptions
+	var hw hardwareFlags
 	var cf chainFlags
 	cmd := &cobra.Command{
 		Use:   "new <name> [--mnemonic-in-fd N] [--account N] [--index N]",
@@ -241,14 +301,44 @@ func (a *app) catalystKeyNewCommand() *cobra.Command {
 <name>.voting.vkey, .skey, .pkey and .mnemonics sealed in the workspace.
 --mnemonic-in-fd N reads the phrase from file descriptor N; without it a fresh
 phrase is generated and stored, never shown. The signing key and the phrase are
-never printed; the public key (cvote_vk) is.`,
+never printed; the public key (cvote_vk) is.
+
+--hardware makes the key on a Ledger at the same path (the device's Cardano app
+must be 6.0.3 or newer for it; Keystone and Trezor are refused before the device
+is contacted) and stores only its public key and path: no signing key and no
+phrase exist, so it has no QR code. ` + hardwareUntested,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			fdSet := cmd.Flags().Changed("mnemonic-in-fd")
-			if err := o.validate(fdSet, a.passFD); err != nil {
+			if err := hw.validate(cmd); err != nil {
 				return err
 			}
-			return a.withEnv(cmd, envSpec{flags: &cf, needs: derivedNeeds(fdSet, CapVotingKeys)}, func(ctx context.Context, s *session, env *Env, _ WireOptions) error {
+			if hw.on {
+				if fdSet {
+					return errors.New("--hardware cannot be combined with --mnemonic-in-fd: a hardware key has no mnemonic")
+				}
+				if o.account > catalyst.MaxDerivationIndex || o.index > catalyst.MaxDerivationIndex {
+					return catalyst.ErrDerivationRange
+				}
+			} else if err := o.validate(fdSet, a.passFD); err != nil {
+				return err
+			}
+			needs := derivedNeeds(fdSet, CapVotingKeys)
+			if hw.on {
+				needs = []Need{CapHardware}
+			}
+			return a.withEnv(cmd, envSpec{flags: &cf, needs: needs}, func(ctx context.Context, s *session, env *Env, _ WireOptions) error {
+				if hw.on {
+					a.noteDevice()
+					res, err := catalyst.GenerateVotingKey{Store: s.Store, Hardware: env.Hardware}.Run(ctx, catalyst.GenerateVotingKeyRequest{
+						Name: args[0], Holder: hw.holder(), Account: o.account, Index: o.index})
+					if err != nil {
+						return err
+					}
+					fmt.Fprintf(a.d.Out, "Generated the voting key %s on the hardware wallet.\n  public key   %s\n", res.Name, res.PKey)
+					fmt.Fprintf(a.d.Out, "Delegate to it with: spo catalyst register <stake> <rewards> --vote-key %s\n", res.Name)
+					return nil
+				}
 				phrase, err := o.phrase(fdSet)
 				if err != nil {
 					return err
@@ -270,8 +360,104 @@ never printed; the public key (cvote_vk) is.`,
 		},
 	}
 	o.add(cmd)
+	hw.add(cmd, 0)
 	addChainFlags(cmd, &cf, false)
 	return cmd
+}
+
+func (a *app) catalystKeyQRCommand() *cobra.Command {
+	var (
+		pinFD int
+		out   string
+		show  bool
+		cf    chainFlags
+	)
+	cmd := &cobra.Command{
+		Use:   "qrcode <name> [--pin-fd N] [--out FILE] [--show]",
+		Short: "Write the PIN-protected QR code of a voting key for the Catalyst mobile app",
+		Long: `Encrypt the voting signing key <name> with a four-digit PIN and write it as the
+QR code the Catalyst mobile app scans to import the key: the PNG file
+<name>.catalyst-qrcode.png in the current directory (or --out FILE), created with
+mode 0600 and never over an existing file. The code is drawn in the terminal
+only with --show, and only when standard output is a terminal. The PIN is read from a prompt, or from file
+descriptor N with --pin-fd; it is never an argument.
+
+The payload is the key encrypted with the PIN alone (PBKDF2-HMAC-SHA512,
+ChaCha20-Poly1305, the format of the Catalyst toolbox, implemented from its
+public source). Four digits do not resist an offline guess: the PNG and the
+terminal drawing are exactly as sensitive as the key. The drawing stays in the
+terminal's scrollback, in any terminal log or recording, and on a shared
+screen; that is why it is drawn only on request. Delete the PNG once the
+app has the key and do not keep it beside the key's backup.
+
+NOT VERIFIED against the mobile app: the format is built from the toolbox
+source and checked against independently computed values and a round trip, but
+no QR code made here has been scanned by the app. Scan one for a throw-away key
+first. A voting key on a hardware wallet has no signing key and no QR code.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			pinSet := cmd.Flags().Changed("pin-fd")
+			if pinSet && pinFD < 0 {
+				return errors.New("--pin-fd needs a file descriptor number")
+			}
+			if pinSet && a.passFD >= 0 && pinFD == a.passFD {
+				return errors.New("--pin-fd and --passphrase-fd name the same descriptor")
+			}
+			return a.withEnv(cmd, envSpec{flags: &cf, needs: []Need{CapVotingQR}}, func(ctx context.Context, s *session, env *Env, _ WireOptions) error {
+				var pin *secret.Buffer
+				var err error
+				if pinSet {
+					pin, err = readFDSecret(pinFD, "the PIN")
+				} else {
+					pin, err = a.term.ReadSecret(ctx, "PIN for the QR code (four digits): ")
+					if errors.Is(err, ErrNoTerminal) {
+						return errors.New("no terminal to ask for the PIN on; give it on a file descriptor with --pin-fd N")
+					}
+				}
+				if err != nil {
+					return err
+				}
+				defer pin.Destroy()
+				path := out
+				if path == "" {
+					path = args[0] + ".catalyst-qrcode.png"
+				}
+				var res catalyst.QRExported
+				err = pin.Use(func(b []byte) error {
+					var rerr error
+					res, rerr = catalyst.ExportVotingKeyQR{Store: s.Store, Source: env.VotingQR, Renderer: env.QRCodes}.Run(ctx, catalyst.QRRequest{Name: args[0], PIN: b, Path: path})
+					return rerr
+				})
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(a.d.Out, "Wrote the QR code of the voting key %s to %s (mode 0600).\nThe PNG and a drawing of the code are key-equivalent: a four-digit PIN protects them, and four digits do not resist an offline guess. Delete the PNG once the app has the key.\n", res.Name, res.Path)
+				switch {
+				case show && stdoutIsTerminal(a.d.Out):
+					fmt.Fprintf(a.d.Out, "\nThe drawing below is the key, protected by the four-digit PIN only. It stays in this terminal's scrollback, in any terminal log or recording and on a shared screen: clear them afterwards.\n\n%s", res.Terminal)
+				case show:
+					fmt.Fprintln(a.d.Out, "Not drawn: --show draws the code only when standard output is a terminal; the PNG was written.")
+				}
+				return nil
+			})
+		},
+	}
+	cmd.Flags().IntVar(&pinFD, "pin-fd", -1, "read the four-digit PIN from this file descriptor (never from the command line)")
+	cmd.Flags().StringVar(&out, "out", "", "the PNG file to create (default: <name>.catalyst-qrcode.png in the current directory); it must not exist")
+	cmd.Flags().BoolVar(&show, "show", false, "also draw the QR code in the terminal (only when standard output is a terminal): the drawing stays in scrollback, terminal logs and on shared screens, and is as sensitive as the key")
+	addChainFlags(cmd, &cf, false)
+	return cmd
+}
+
+// stdoutIsTerminal reports whether w is a terminal. It is a variable so a test
+// can stand in for one.
+var stdoutIsTerminal = func(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	_, err := unix.IoctlGetTermios(int(f.Fd()), unix.TCGETS)
+	return err == nil
 }
 
 // delegationWords turns `NAME[:WEIGHT]` flags into the delegation text of
@@ -315,14 +501,18 @@ cvote_vk text; WEIGHT defaults to 1. <rewards> is the payment address (or the
 name of a stored address) that receives the Catalyst rewards.
 
 The registration is stored in the workspace as <stake>_<time>.vote-registration.cbor
-and nothing is submitted. A stake key on a hardware wallet is refused before
-anything is built. --nonce defaults to the current slot of the work mode;
---purpose defaults to 0 (Catalyst). Put the registration on the chain with a
-payment of yours:
+and nothing is submitted. A stake key on a Ledger (app 6.0.3 or newer; Keystone
+and Trezor are refused before anything is built) signs on the device; when the
+rewards address is the payment address of the same wallet, that key is handed to
+the device too, so it does not warn of an unusual request. The device's
+signature is checked against the registration before it is stored. --nonce
+defaults to the current slot of the work mode; --purpose defaults to 0
+(Catalyst). Put the registration on the chain with a payment of yours:
 
   spo wallet send <payer> <payer> MIN --metadata-record <name printed here>
 
-The QR code of the Catalyst mobile app is not built.`,
+The QR code of a voting key is made by spo catalyst key qrcode. ` + hardwareUntested + `
+`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := checkNonce(cmd, nonce); err != nil {
@@ -353,7 +543,7 @@ The QR code of the Catalyst mobile app is not built.`,
 				name := recordFileName(res.Ref)
 				fmt.Fprintf(w, "Signed the Catalyst registration.\n  nonce        %d\n  rewards to   %s\n", res.Nonce, res.Rewards)
 				for _, k := range res.Keys {
-					fmt.Fprintf(w, "  vote key     %s  weight %d  (%s)\n", hex.EncodeToString(k.PublicKey[:]), k.Weight, k.Source)
+					fmt.Fprintf(w, "  vote key     %s  weight %d  (%s)\n", hex.EncodeToString(k.PublicKey[:]), k.Weight, shown(fmt.Sprint(k.Source)))
 				}
 				fmt.Fprintf(w, "  stored as    %s\nPut it on the chain with a payment of yours:\n  spo wallet send <payer> <payer> MIN --metadata-record %s\n", name, name)
 				return nil

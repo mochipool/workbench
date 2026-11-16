@@ -21,12 +21,14 @@ const (
 	TypeInvite           Type = "Invite"
 	TypeHello            Type = "Hello"
 	TypeBundle           Type = "Bundle"
+	// TypeRotation announces a new identity (SPO-Xparty-INV-031).
+	TypeRotation Type = "Rotation"
 )
 
 // Types lists every message type.
 func Types() []Type {
 	return []Type{TypeSigningRequest, TypeSigningResponse, TypeSigningRefusal,
-		TypeCollectionClosed, TypeInvite, TypeHello, TypeBundle}
+		TypeCollectionClosed, TypeInvite, TypeHello, TypeBundle, TypeRotation}
 }
 
 // Valid reports whether t is a known type.
@@ -242,6 +244,9 @@ type Outcome string
 
 const (
 	OutcomeSubmitted Outcome = "submitted"
+	// OutcomeQueued: the transaction was only queued offline, with no proof that
+	// it was sent. It names the transaction id like a submission.
+	OutcomeQueued    Outcome = "queued"
 	OutcomeDiscarded Outcome = "discarded"
 	OutcomeExpired   Outcome = "expired"
 )
@@ -260,9 +265,9 @@ func (CollectionClosed) Type() Type { return TypeCollectionClosed }
 
 func (m CollectionClosed) Validate() error {
 	switch m.Outcome {
-	case OutcomeSubmitted:
+	case OutcomeSubmitted, OutcomeQueued:
 		if len(m.TxID) != 32 {
-			return bad("submitted needs a 32-byte transaction id")
+			return bad("submitted or queued needs a 32-byte transaction id")
 		}
 	case OutcomeDiscarded, OutcomeExpired:
 		if len(m.TxID) != 0 {

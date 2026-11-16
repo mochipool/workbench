@@ -119,7 +119,7 @@ func TestWorkspaceImportThenExportRoundTrip(t *testing.T) {
 	// Export: a protection choice is required, and the directory must be new or empty.
 	target := filepath.Join(t.TempDir(), "out")
 	out, err = withPass(t, dir, testPass, "workspace", "export", target)
-	if err == nil || !strings.Contains(err.Error(), "--password-fd") || !strings.Contains(err.Error(), "--plaintext") {
+	if err == nil || !strings.Contains(err.Error(), "password-fd") || !strings.Contains(err.Error(), "plaintext") {
 		t.Fatalf("an export with no protection choice: %v\n%s", err, out)
 	}
 	if _, serr := os.Stat(target); serr == nil {

@@ -182,7 +182,7 @@ func TestWalletNewRefusesBadFlagsBeforeAnything(t *testing.T) {
 		args []string
 		want string
 	}{
-		"both mnemonic sources":    {[]string{"--mnemonic", "--mnemonic-in-fd", fd}, "exclusive"},
+		"both mnemonic sources":    {[]string{"--mnemonic", "--mnemonic-in-fd", fd}, "none of the others can be"},
 		"account without mnemonic": {[]string{"--account", "1"}, "--mnemonic"},
 		"index with stake only":    {[]string{"--stake", "--index", "1"}, "--mnemonic"},
 		"account out of range":     {[]string{"--mnemonic", "--account", "2147483648"}, "0 to 2147483647"},

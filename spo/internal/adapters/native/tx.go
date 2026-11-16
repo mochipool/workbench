@@ -239,6 +239,20 @@ func (Ledger) BuildBody(spec txbuild.BodySpec) (txbuild.TxBody, error) {
 	if len(signers) > 0 {
 		n++
 	}
+	var plutus plutusParts
+	if spec.Plutus != nil {
+		if len(spec.Mint) > 0 {
+			return txbuild.TxBody{}, errPlutusAndMint
+		}
+		var err error
+		if err = spec.Plutus.ValidateBody(); err != nil {
+			return txbuild.TxBody{}, err
+		}
+		if plutus, err = encodePlutus(spec.Plutus); err != nil {
+			return txbuild.TxBody{}, err
+		}
+		n += 4 // keys 13 collateral, 16 return, 17 total collateral, 11 script-data hash
+	}
 	var body []byte
 	body = cborMap(body, n)
 	body = cborUint(body, 0)
@@ -249,6 +263,12 @@ func (Ledger) BuildBody(spec txbuild.BodySpec) (txbuild.TxBody, error) {
 		body = cborBytes(body, in.TxID[:])
 		body = cborUint(body, uint64(in.Index))
 	}
+	if spec.Plutus != nil {
+		// Key 13: the collateral inputs, written right after the inputs as
+		// the ledger's encoder does.
+		body = cborUint(body, 13)
+		body = append(body, plutus.collateral...)
+	}
 	body = cborUint(body, 1)
 	body = cborArray(body, len(spec.Outputs))
 	for _, o := range spec.Outputs {
@@ -256,6 +276,17 @@ func (Ledger) BuildBody(spec txbuild.BodySpec) (txbuild.TxBody, error) {
 		if body, err = encodeOutput(body, o); err != nil {
 			return txbuild.TxBody{}, err
 		}
+	}
+	if spec.Plutus != nil {
+		// Keys 16 and 17: the collateral return and the total collateral, after
+		// the outputs as the ledger's encoder writes them.
+		var err error
+		body = cborUint(body, 16)
+		if body, err = encodeOutput(body, *spec.Plutus.CollateralReturn); err != nil {
+			return txbuild.TxBody{}, err
+		}
+		body = cborUint(body, 17)
+		body = cborUint(body, uint64(spec.Plutus.TotalCollateral))
 	}
 	body = cborUint(body, 2)
 	body = cborUint(body, uint64(spec.Fee))
@@ -324,6 +355,12 @@ func (Ledger) BuildBody(spec txbuild.BodySpec) (txbuild.TxBody, error) {
 		body = cborUint(body, 9)
 		body = append(body, mint...)
 	}
+	if spec.Plutus != nil {
+		// Key 11: the script-data hash, after the mint field and before the
+		// auxiliary data hash.
+		body = cborUint(body, 11)
+		body = cborBytes(body, plutus.dataHash[:])
+	}
 	if aux != nil {
 		h := blake256(aux)
 		body = cborUint(body, 7)
@@ -349,7 +386,10 @@ func (Ledger) BuildBody(spec txbuild.BodySpec) (txbuild.TxBody, error) {
 
 	tx := cborArray(nil, 4)
 	tx = append(tx, body...)
-	if scripts != nil {
+	if spec.Plutus != nil {
+		tx = append(tx, plutus.witnessSet...)
+		tx = append(tx, 0xf5)
+	} else if scripts != nil {
 		// The native scripts the mint field refers to travel in the witness
 		// set (key 1), as cardano-cli writes them into the body file; the
 		// signers add key 0.
@@ -373,7 +413,22 @@ func (Ledger) BuildBody(spec txbuild.BodySpec) (txbuild.TxBody, error) {
 	} else if libID != hex.EncodeToString(id[:]) {
 		return txbuild.TxBody{}, errors.New("the built body's id differs from the library's")
 	}
-	return txbuild.TxBody{CBOR: tx, ID: chain.TxID(id)}, nil
+	out := txbuild.TxBody{CBOR: tx, ID: chain.TxID(id)}
+	if spec.Plutus != nil {
+		// Read the collateral back from the bytes that will be signed and
+		// require what the body says to be what was asked for.
+		view, err := TxViewer{}.View(body)
+		if err != nil {
+			return txbuild.TxBody{}, fmt.Errorf("the built body cannot be read back: %w", err)
+		}
+		if view.TotalCollateral == nil || chain.Lovelace(*view.TotalCollateral) != spec.Plutus.TotalCollateral || view.CollateralReturn == nil ||
+			chain.Lovelace(view.CollateralReturn.Lovelace) != spec.Plutus.CollateralReturn.Lovelace || view.CollateralReturn.Address != string(spec.Plutus.CollateralReturn.Address) || len(view.CollateralInputs) != len(spec.Plutus.Collateral) {
+			return txbuild.TxBody{}, errors.New("the collateral read back from the built body differs from the one asked for")
+		}
+		risk := chain.Lovelace(*view.TotalCollateral)
+		out.CollateralAtRisk = &risk
+	}
+	return out, nil
 }
 
 // ---- fees and minimum values ---------------------------------------------

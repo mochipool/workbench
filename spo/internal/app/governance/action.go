@@ -53,10 +53,9 @@ func stakeCredential(a string) (governance.Credential, uint8, error) {
 // previous action id of its purpose. The deposit is always the chain's current
 // `govActionDeposit` (SPO-25a-INV-003).
 //
-// The parameter-change file is not built yet (the adapter returns
-// ErrParameterChangeUnsupported) and an action that needs the guardrails
-// script still gets its file, with the script hash from the constitution: the
-// script is evaluated when the transaction is built (RegisterAction).
+// An action that needs the guardrails script gets its file with the script hash
+// from the constitution: the script is a witness of the transaction that
+// proposes it (RegisterAction).
 type GenerateAction struct {
 	Store   ports.Store
 	Actions ports.ActionFileBuilder
@@ -103,8 +102,11 @@ type GenerateActionRequest struct {
 	Epoch               uint64
 	// NewConstitution: the document URL and hash.
 	ConstitutionURL, ConstitutionHash string
-	// ParameterChange: the parameters as `--name value` pairs.
+	// ParameterChange: the parameters, name and value as typed.
 	Params []governance.ParamChange
+	// AllowCostModelLengthChange lets a cost model have another number of values
+	// than the current one in the provider's parameters.
+	AllowCostModelLengthChange bool
 }
 
 type lovelace = chain.Lovelace
@@ -117,6 +119,9 @@ type ActionGenerated struct {
 	Decisions []string
 	// NeedsGuardrails: the kind needs the guardrails script when it is proposed.
 	NeedsGuardrails bool
+	// ParamDiffs lists every parameter of a ParameterChange with its new value
+	// and, when the parameters document of the source gives it, the old one.
+	ParamDiffs []governance.ParamDiff
 }
 
 // Run validates, builds and stores the action file.
@@ -365,7 +370,20 @@ func (uc GenerateAction) kindFields(ctx context.Context, a *governance.Action, r
 			}
 		}
 	case governance.ParameterChange:
-		a.Params = req.Params
+		// The set in canonical form (SPO-25a-IF-021 to SPO-25a-IF-023).
+		set, err := governance.CheckParams(req.Params)
+		if err != nil {
+			return err
+		}
+		a.Params = set
+		if !req.AllowCostModelLengthChange {
+			if err := governance.CheckCostModelLengths(set, params.Raw); err != nil {
+				return err
+			}
+		} else if note := costModelNote(set, params.Raw); note != "" {
+			res.Decisions = append(res.Decisions, note)
+		}
+		res.ParamDiffs = governance.DescribeParams(set, params.Raw)
 	}
 	return nil
 }
@@ -404,11 +422,11 @@ func (uc GenerateAction) committeeEpoch(ctx context.Context, req GenerateActionR
 // key. The validity is tip + 25000 slots.
 //
 // A TreasuryWithdrawals or ParameterChange proposal must carry the
-// constitution's guardrails Plutus script, with a collateral UTxO and the
-// execution units of the script evaluated (conway.EvaluatePlutusScripts was
-// only read, never run). This use case checks everything that does not need the
-// evaluation and then returns ErrGuardrailsUnsupported (a *GuardrailsError)
-// naming what is missing. It does not fake execution units. Upstream decides the
+// constitution's guardrails Plutus script when the constitution names one: the
+// script is a witness with a `proposing` redeemer, the payer sets aside a
+// collateral UTxO, and the fee covers the script's execution units. This build
+// runs no Plutus: Evaluator is a provider that does, and the command refuses
+// before any prompt when none is wired (see guardrails.go). Upstream decides the
 // variant from the last file only (SPO-25b-INV-006); here any such action
 // takes this path.
 type RegisterAction struct {
@@ -419,6 +437,12 @@ type RegisterAction struct {
 	// (offline), and the check is listed in Result.Unchecked.
 	Rewards         ports.RewardAccountReader
 	AllowUnverified bool
+	// Constitution reads the constitution's guardrails script hash and
+	// Evaluator the execution units of the script: both are needed exactly when
+	// a file is a treasury withdrawal or a parameter change. The script file is
+	// read through Base.Files.
+	Constitution ports.ConstitutionReader
+	Evaluator    ports.TxEvaluator
 }
 
 // RegisterActionRequest names the paying address and the action files by name
@@ -431,6 +455,13 @@ type RegisterActionRequest struct {
 	// txparam.ForCertificate); Passphrase is the `pass:` of Extras. Optional.
 	Extras     *txparam.Extras
 	Passphrase *ports.Secret
+	// GuardrailsScript is the path of the constitution's guardrails script
+	// (upstream's `guardrailsScriptFile`, SPO-25b-IN-004); empty means
+	// DefaultGuardrailsScriptFile. It is read only when a proposal needs it.
+	GuardrailsScript string
+	// AllowCostModelLengthChange lets a parameter change give a cost model another
+	// number of values than the current one.
+	AllowCostModelLengthChange bool
 }
 
 // ActionRegistered is the result: the transaction and the ids the actions will have.
@@ -439,28 +470,18 @@ type ActionRegistered struct {
 	// IDs are the action ids in file order: the transaction id and the index of
 	// each proposal (SPO-25b-OUT-002), in the hex and CIP-129 forms.
 	IDs []ActionIDs
+	// Guardrails is set when the transaction carried the guardrails script.
+	Guardrails *GuardrailReport
 }
 
 // ActionIDs are the two spellings of an action id.
 type ActionIDs struct{ Hex, CIP129 string }
 
-// GuardrailsError is ErrGuardrailsUnsupported with the list of what is missing.
-type GuardrailsError struct {
-	Kinds   []governance.ActionKind
-	Missing []string
-}
-
-func (e *GuardrailsError) Error() string {
-	return fmt.Sprintf("%v: %v need %s", ErrGuardrailsUnsupported, e.Kinds, strings.Join(e.Missing, "; "))
-}
-
-// Unwrap makes errors.Is(err, ErrGuardrailsUnsupported) true.
-func (e *GuardrailsError) Unwrap() error { return ErrGuardrailsUnsupported }
-
 // Run registers the actions.
 //
 // spec: SPO-25b-IF-001, SPO-25b-IF-002, SPO-25b-IF-003, SPO-25b-IF-004, SPO-25b-IF-005, SPO-25b-IF-006, SPO-25b-IN-001, SPO-25b-IN-002, SPO-25b-IN-003,
-// spec: SPO-25b-IN-005, SPO-25b-PRE-002, SPO-25b-PRE-003, SPO-25b-PRE-004, SPO-25b-PRE-005, SPO-25b-PRE-006, SPO-25b-PRE-007, SPO-25b-PRE-008,
+// spec: SPO-25b-IN-004, SPO-25b-IN-005, SPO-25b-INV-005, SPO-25b-INV-007, SPO-25b-INV-008, SPO-25b-EXT-001, SPO-25b-EXT-002, SPO-25b-EXT-003, SPO-25b-EXT-004, SPO-25b-EXT-005,
+// spec: SPO-25b-PRE-012, SPO-25b-PRE-013, SPO-25b-PRE-014, SPO-25b-INV-013, SPO-25b-INV-015, SPO-25b-INV-016, SPO-25b-INV-017, SPO-25b-SEC-001, SPO-25b-PRE-002, SPO-25b-PRE-003, SPO-25b-PRE-004, SPO-25b-PRE-005, SPO-25b-PRE-006, SPO-25b-PRE-007, SPO-25b-PRE-008,
 // spec: SPO-25b-PRE-009, SPO-25b-PRE-010, SPO-25b-PRE-015, SPO-25b-INV-001, SPO-25b-INV-003, SPO-25b-INV-004, SPO-25b-INV-006, SPO-25b-EXT-006,
 // spec: SPO-25b-EXT-007, SPO-25b-EXT-008, SPO-25b-EXT-009, SPO-25b-INV-009, SPO-25b-PR-001, SPO-25b-OUT-001, SPO-25b-OUT-002, SPO-25b-OUT-006
 func (uc RegisterAction) Run(ctx context.Context, req RegisterActionRequest) (ActionRegistered, error) {
@@ -531,24 +552,33 @@ func (uc RegisterAction) Run(ctx context.Context, req RegisterActionRequest) (Ac
 	if err != nil {
 		return out, err
 	}
-	// The guardrails variant: everything that needs no script evaluation is done.
-	var gk []governance.ActionKind
-	for _, p := range props {
-		if p.Action.Kind == governance.TreasuryWithdrawals || p.Action.Kind == governance.ParameterChange {
-			gk = append(gk, p.Action.Kind)
+	var lengthNotes []string
+	for i, p := range props {
+		if p.Action.Kind != governance.ParameterChange {
+			continue
+		}
+		if !req.AllowCostModelLengthChange {
+			if err := governance.CheckCostModelLengths(p.Action.Params, params.Raw); err != nil {
+				return out, fmt.Errorf("proposal %d: %w", i+1, err)
+			}
+		} else if note := costModelNote(p.Action.Params, params.Raw); note != "" {
+			lengthNotes = append(lengthNotes, fmt.Sprintf("proposal %d: %s", i+1, note))
 		}
 	}
-	if len(gk) > 0 {
-		return out, &GuardrailsError{Kinds: gk, Missing: []string{
-			"a collateral UTxO (no assets, 5 to 10 ADA) set as --tx-in-collateral and left out of the inputs",
-			"the guardrails script witness for each proposal (script, redeemer {}) in the body",
-			"the execution units of the script (conway.EvaluatePlutusScripts or `calculate-plutus-script-cost`), which this port has never run",
-			"the script hash compared with the constitution's",
-		}}
+	// The guardrails variant: the constitution, the script and the order of the
+	// proposals are checked before anything else is read.
+	run.plutus, err = uc.guardrails(ctx, props, params, req.GuardrailsScript)
+	if err != nil {
+		return out, err
+	}
+	if run.plutus != nil {
+		if err := uc.early(run); err != nil {
+			return out, err
+		}
 	}
 
 	// The deposit-return stake address must be registered (online and light).
-	var unchecked []string
+	unchecked := append([]string(nil), lengthNotes...)
 	var sources []chain.Source
 	seenRet := map[chain.StakeAddress]bool{}
 	for _, p := range props {
@@ -591,6 +621,14 @@ func (uc RegisterAction) Run(ctx context.Context, req RegisterActionRequest) (Ac
 		return out, err
 	}
 	out.Result = Result{Result: res, Summary: sum, Sources: sources, Unchecked: unchecked}
+	if run.plutus != nil {
+		rep := *run.plutus.report
+		out.Guardrails = &rep
+		// What the operator was told about the evaluation is part of the result
+		// too: a run that skipped the confirmation prints it from here.
+		out.Result.Sources = append(append([]chain.Source(nil), sources...), rep.Evaluator)
+		out.Result.Unchecked = append(append([]string(nil), unchecked...), rep.Notes()...)
+	}
 	for i := range props {
 		id := governance.ActionID{TxID: res.TxID, Index: uint32(i)}
 		c, err := id.CIP129()
@@ -600,4 +638,15 @@ func (uc RegisterAction) Run(ctx context.Context, req RegisterActionRequest) (Ac
 		out.IDs = append(out.IDs, ActionIDs{Hex: id.Hex(), CIP129: c})
 	}
 	return out, nil
+}
+
+// costModelNote is the line a summary carries when a cost model update was let
+// through with --allow-cost-model-length-change and the current model could not
+// be read as an array, so its length was not compared: empty when it was.
+func costModelNote(changes []governance.ParamChange, raw json.RawMessage) string {
+	un := governance.CostModelUnchecked(changes, raw)
+	if len(un) == 0 {
+		return ""
+	}
+	return "cost model length not checked: the current " + strings.Join(un, ", ") + " model cannot be read from the protocol parameters as an array of values"
 }

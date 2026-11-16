@@ -248,6 +248,17 @@ func (n Node) AllowList(ctx context.Context) ([]party.NodeKey, error) {
 	return keys, err
 }
 
+// AllowOwners is AllowList with the fingerprint of the party that holds each key.
+func (n Node) AllowOwners(ctx context.Context) (map[party.NodeKey]party.Fingerprint, error) {
+	var out map[party.NodeKey]party.Fingerprint
+	err := n.Store.View(ctx, func(r ports.Reader) error {
+		ps, err := n.Parties.List(r)
+		out = party.AllowedOwners(ps)
+		return err
+	})
+	return out, err
+}
+
 // Admit is the first-frame check of a network transport (SPO-Xparty-INV-018).
 // The envelope must pass steps 1 to 6 of SPO-Xparty-PRE-002 against the
 // enrolled parties (so its sender is active and its signature verified); its

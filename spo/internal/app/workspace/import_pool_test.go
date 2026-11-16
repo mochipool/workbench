@@ -38,6 +38,15 @@ func (f *fakePools) LatestPoolUpdate(context.Context, chain.PoolID) (chain.Readi
 	return f.update, f.err
 }
 
+// secondPools is an independent second provider that states what the first
+// does (it follows the first's info and says nothing of its own).
+type secondPools struct{ f *fakePools }
+
+func (secondPools) Source() chain.Source { return "second fake" }
+func (s secondPools) PoolInfo(context.Context, chain.PoolID) (chain.Reading[chain.PoolInfo], error) {
+	return s.f.info, nil
+}
+
 type fakeFetcher struct {
 	body  []byte
 	err   error
@@ -100,6 +109,7 @@ func (f *fakePools) uc(m *fakeFetcher, st *memStore) ImportPoolFromChain {
 		PoolInfoAcquirer: PoolInfoAcquirer{Pools: f, Updates: f, Metadata: m, Hasher: led},
 		Store:            st, VKeys: native.VKeyDeriver{}, VRF: native.VRFDeriver{},
 		Addresses: led, Certs: led, Params: fakeParams{deposit: 2_000_000}, NetworkID: ports.NetworkTestnet,
+		Cross: secondPools{f},
 	}
 }
 
@@ -808,5 +818,79 @@ func TestRegistrationRecordOnlyWhenRegistered(t *testing.T) {
 		if hasEpoch != want || hasWhen != want {
 			t.Errorf("%s: regEpoch %v regSubmitted %v", status, hasEpoch, hasWhen)
 		}
+	}
+}
+
+// varying is a second provider that states a pool different from the first in
+// one field, or is silent.
+type varying struct {
+	src  chain.Source
+	info chain.Reading[chain.PoolInfo]
+}
+
+func (v varying) Source() chain.Source { return v.src }
+func (v varying) PoolInfo(context.Context, chain.PoolID) (chain.Reading[chain.PoolInfo], error) {
+	return v.info, nil
+}
+
+// The registration data (reward address, owners, counter) is corroborated by a
+// second provider, or the single source is acknowledged; a disagreement is
+// refused whatever the flag says and names both providers (ADR 0006, F3).
+//
+// spec: SPO-0x-EXT-001 (ADR 0006)
+func TestImportCorroboratesWithTheSecondProvider(t *testing.T) {
+	pools, meta := recordedApex(t)
+	info, _ := pools.info.Get()
+	req := ImportPoolRequest{Name: "apex", Source: PoolInfoSource{PoolID: apexBech}, DryRun: true}
+
+	// Agreement: both named, not single.
+	res, err := pools.uc(meta, newMem()).Run(context.Background(), req)
+	if err != nil || res.SingleSource || len(res.Sources) != 2 {
+		t.Fatalf("%+v %v", res, err)
+	}
+
+	run := func(cross ports.PoolInfoReader, single bool) (PoolImported, error) {
+		uc := pools.uc(meta, newMem())
+		uc.Cross = cross
+		r := req
+		r.SingleSource = single
+		return uc.Run(context.Background(), r)
+	}
+	// No second provider: refused, then accepted when acknowledged.
+	if _, err := run(nil, false); !errors.Is(err, ErrImportSingleSource) {
+		t.Fatalf("%v", err)
+	}
+	if res, err := run(nil, true); err != nil || !res.SingleSource || len(res.Sources) != 1 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	// A second provider that does not answer is the same.
+	silent := varying{"web", chain.Unknown[chain.PoolInfo]("HTTP 503")}
+	if _, err := run(silent, false); !errors.Is(err, ErrImportSingleSource) || !strings.Contains(err.Error(), "web did not answer") {
+		t.Fatalf("%v", err)
+	}
+	if res, err := run(silent, true); err != nil || !res.SingleSource {
+		t.Fatalf("%+v %v", res, err)
+	}
+	// A different reward address or owner set: refused, both named, flag or not.
+	for name, mod := range map[string]func(*chain.PoolInfo){
+		"reward": func(i *chain.PoolInfo) { i.RewardAddr = "stake_test1uqevil" },
+		"owners": func(i *chain.PoolInfo) { i.Owners = []string{"stake_test1uqother"} },
+		"margin": func(i *chain.PoolInfo) { i.Margin = "0.2" },
+	} {
+		o := info
+		mod(&o)
+		for _, single := range []bool{false, true} {
+			_, err := run(varying{"web", chain.Value(o)}, single)
+			if !errors.Is(err, ErrImportSourcesDisagree) || !strings.Contains(err.Error(), "fake says") || !strings.Contains(err.Error(), "web says") {
+				t.Errorf("%s (single=%v): %v", name, single, err)
+			}
+		}
+	}
+	// Counters one apart are not agreement.
+	a, b := info, info
+	a.OpCertCounter, b.OpCertCounter = chain.Value(uint64(5)), chain.Value(uint64(6))
+	pools.info = chain.Value(a)
+	if _, err := run(varying{"web", chain.Value(b)}, true); !errors.Is(err, ErrImportSourcesDisagree) {
+		t.Fatalf("%v", err)
 	}
 }

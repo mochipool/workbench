@@ -44,6 +44,7 @@ func TestFirstRegistrationAllLocal(t *testing.T) {
 	res, err := r.run(r.register(false, func(uc *RegisterPool) {
 		uc.Pools = &ppools{c: r.calls, src: "koios", r: chain.None[chain.PoolState]()}
 		uc.Sources = SingleSourceAcknowledged
+		uc.OnSingle = noopHook
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -903,5 +904,58 @@ func TestStageMapOfTheRegistration(t *testing.T) {
 	_, err = r3.run(r3.register(false))
 	if err == nil || !strings.Contains(err.Error(), "rejected") || !r3.exists("mypool.pool.cert") || r3.collection() == nil || r3.descriptor().Has("regSubmitted") {
 		t.Errorf("%v", err)
+	}
+}
+
+// The second source's refusal to answer names both sources and the answer of
+// the first; the single source is accepted only when acknowledged.
+//
+// spec: SPO-05c-MODE-001, SPO-05c-MODE-002
+func TestRegistrationTypeSecondSourceDownOrDisagreeing(t *testing.T) {
+	r := ready(t)
+	_, err := r.run(r.register(false, func(uc *RegisterPool) {
+		uc.Pools = &ppools{c: r.calls, src: "koios", r: registered(chain.PoolRegistered)}
+		uc.CrossCheck = &ppools{c: r.calls, src: "blockfrost", r: chain.Unknown[chain.PoolState]("HTTP 503")}
+	}))
+	if !errors.Is(err, ErrSingleSource) || !strings.Contains(err.Error(), "koios says registered, but blockfrost did not answer: HTTP 503") {
+		t.Fatalf("%v", err)
+	}
+	r = ready(t)
+	_, err = r.run(r.register(false, func(uc *RegisterPool) {
+		uc.Pools = &ppools{c: r.calls, src: "koios", r: registered(chain.PoolRegistered)}
+		uc.CrossCheck = &ppools{c: r.calls, src: "blockfrost", r: chain.None[chain.PoolState]()}
+	}))
+	if !errors.Is(err, ErrSourcesDisagree) || !strings.Contains(err.Error(), "koios says registered, blockfrost says not registered") {
+		t.Fatalf("%v", err)
+	}
+}
+
+// A retiring pool that both sources state as retiring is agreement; the
+// status the web provider does not state is not a disagreement; a real
+// difference names the field.
+//
+// spec: SPO-05c-MODE-001 (ADR 0006, F1)
+func TestRegistrationTypeRetiringPoolAcrossSources(t *testing.T) {
+	ret := chain.Value(chain.PoolState{Status: chain.PoolRetiring, RetiringEpoch: 9})
+	for _, c := range []struct {
+		name  string
+		other chain.Reading[chain.PoolState]
+		diff  string
+	}{
+		{"both retiring", ret, ""},
+		{"unstated", chain.Value(chain.PoolState{Status: chain.PoolStatusUnstated}), ""},
+		{"status differs", registered(chain.PoolRegistered), "differ on the pool's status"},
+	} {
+		r := ready(t)
+		_, err := r.run(r.register(true, func(uc *RegisterPool) {
+			uc.Pools = &ppools{c: r.calls, src: "node", r: ret}
+			uc.CrossCheck = &ppools{c: r.calls, src: "koios", r: c.other}
+		}))
+		if c.diff == "" && errors.Is(err, ErrSourcesDisagree) {
+			t.Errorf("%s: %v", c.name, err)
+		}
+		if c.diff != "" && (!errors.Is(err, ErrSourcesDisagree) || !strings.Contains(err.Error(), c.diff)) {
+			t.Errorf("%s: %v", c.name, err)
+		}
 	}
 }

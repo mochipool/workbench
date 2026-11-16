@@ -71,7 +71,7 @@ func TestReviewShowsTheWholeRequestVerbatim(t *testing.T) {
 		`for (its claim only; nothing below comes from it): "register mypool"`,
 		"Whose money moves", party.NotCheckedText, "NET", "value to others", "fee", "withdrawals", "refunds", "deposits",
 		"pools named      " + s.bech, "parts naming no pool",
-		"certificate  pool-registration", "pledge", "relay        dns relay.example.org:3001", "metadata     https://example.org/p.json",
+		"certificate  pool-registration", "pledge", "relay        dns \"relay.example.org\":3001", "metadata     \"https://example.org/p.json\"",
 		"valid until",
 	} {
 		if !strings.Contains(out, want) {

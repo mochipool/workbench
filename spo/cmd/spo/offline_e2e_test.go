@@ -158,7 +158,7 @@ func (k *koiosStandIn) RoundTrip(req *http.Request) (*http.Response, error) {
 		case "GET /api/v1/tip":
 			start, _ := time.Parse(time.RFC3339, "2022-10-25T00:00:00Z")
 			slot := uint64(time.Since(start).Seconds())
-			return k.respond(200, []byte(fmt.Sprintf(`[{"hash":"%s","epoch_no":%d,"era":"Conway","abs_slot":%d}]`, strings.Repeat("ab", 32), slot/86400, slot)), req), nil
+			return k.respond(200, []byte(fmt.Sprintf(`[{"hash":"%s","epoch_no":%d,"era":"Conway","abs_slot":%d,"block_time":%d}]`, strings.Repeat("ab", 32), slot/86400, slot, time.Now().Unix())), req), nil
 		case "POST /api/v1/address_utxos":
 			return k.respond(200, []byte(`[{"tx_hash":"`+strings.Repeat("6b", 32)+`","tx_index":0,"value":"40000000","asset_list":[],"datum_hash":null,"inline_datum":null,"reference_script":null}]`), req), nil
 		case "POST /api/v1/pool_info": // a pool Koios does not know

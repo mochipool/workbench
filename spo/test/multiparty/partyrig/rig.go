@@ -187,6 +187,26 @@ func (w *Workspace) Node() multisig.Node {
 		Chain: multisig.Chain{Tip: w.Chain, Genesis: w.Chain}}
 }
 
+// Rotate replaces this workspace's identity (SPO-Xparty-IF-008) and updates
+// Identity to the new one, so that Seal and the other helpers that name a
+// workspace by its identity find the current one.
+func (w *Workspace) Rotate(label string) multisig.RotationDone {
+	w.T.Helper()
+	done, err := w.Node().RotateIdentity(context.Background(), label)
+	if err != nil {
+		w.T.Fatal(err)
+	}
+	w.Identity = parties.InitResult{Fingerprint: done.New, Document: done.Document}
+	return done
+}
+
+// SealTo seals body from this workspace's identity to the identity it has
+// enrolled as to, valid for an hour: for tests of what a peer may send.
+func (w *Workspace) SealTo(t *testing.T, to *Workspace, body party.Body) []byte {
+	t.Helper()
+	return Seal(t, w, to, body, time.Hour)
+}
+
 // Coordinator is the coordinator role of this workspace.
 func (w *Workspace) Coordinator() multisig.Coordinator {
 	return multisig.Coordinator{Node: w.Node(), TxIDs: native.Ledger{}, NetworkMagic: Magic}
@@ -203,7 +223,7 @@ func (w *Workspace) Signer() multisig.Signer {
 }
 
 // Outbox is this workspace's outbox.
-func (w *Workspace) Outbox() multisig.Outbox { return multisig.Outbox{Store: w.Store, Clock: w.Clock} }
+func (w *Workspace) Outbox() multisig.Outbox { return w.Node().Outbox() }
 
 // FindKey implements multisig.KeyFinder over the keys added with AddKey.
 func (w *Workspace) FindKey(_ context.Context, role custody.Role, hash [28]byte) (custody.KeyRef, bool, error) {

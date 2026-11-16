@@ -264,7 +264,7 @@ func (a *app) storeSlots() *cobra.Command {
 				return err
 			}
 			for _, x := range sl {
-				fmt.Fprintf(a.d.Out, "%-10s %s  %s\n", x.Kind, hex.EncodeToString(x.ID), x.Detail)
+				fmt.Fprintf(a.d.Out, "%-10s %s  %s\n", x.Kind, hex.EncodeToString(x.ID), shown(x.Detail))
 			}
 			return nil
 		},

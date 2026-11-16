@@ -113,7 +113,8 @@ func newHarness(t *testing.T) *harness {
 }
 
 var specialKeys = map[string]bool{"enter": true, "esc": true, "tab": true, "down": true, "up": true, "ctrl+c": true,
-	"ctrl+r": true, "pgup": true, "pgdown": true, "backspace": true, "right": true, "left": true, "space": true, "shift+tab": true}
+	"ctrl+r": true, "pgup": true, "pgdown": true, "backspace": true, "right": true, "left": true, "space": true, "shift+tab": true,
+	"ctrl+n": true, "ctrl+o": true, "ctrl+a": true, "home": true, "end": true}
 
 func (h *harness) press(keys ...string) {
 	for _, k := range keys {
@@ -221,7 +222,10 @@ func TestParseUse(t *testing.T) {
 		"export <dir> [--owner NAME]... (--password-fd N | --plaintext) [--yes]": "dir",
 		"vote <txhash> [index]":                                 "txhash [index]",
 		"init --network <mainnet|preprod|preview> [--mode a|b]": "",
-		"show":                 "",
+		"show": "",
+		"enroll FILE --as NAME --role ROLE... [--key-role R]... [--pool P]... [--unscoped]": "FILE",
+		"import FILE|DIR... [--as coordinator|signer]":                                      "FILE|DIR...",
+		"request export POOL [--out DIR] [--purpose TEXT]":                                  "POOL",
 		"add <name> <file>...": "name file...",
 		"restore <backup> [--force] [--allow-older] [--network N]": "backup",
 	} {
@@ -610,4 +614,74 @@ func TestPromptPaneHoldsABlockLaidOutForTheWrappedQuestion(t *testing.T) {
 			h.press("esc")
 		}
 	}
+}
+
+// A drawing printed by a command (the QR code of a voting key) is wiped on
+// every way out of the run view: Esc, Enter, Backspace, Left, h, e (edit and
+// run again), opening another command through the driver, and the end of the
+// session. A command not marked sensitive is wiped too.
+func TestRunOutputIsWipedOnEveryWayOut(t *testing.T) {
+	wiped := func(t *testing.T, how string, segs []seg) {
+		t.Helper()
+		if len(segs) == 0 {
+			t.Fatalf("%s: no output was captured", how)
+		}
+		for _, s := range segs {
+			if strings.Trim(string(s.data), "\x00") != "" {
+				t.Errorf("%s: segment not wiped: %q", how, s.data)
+			}
+		}
+	}
+	for _, key := range []string{"esc", "enter", "backspace", "left", "h", "e"} {
+		h := newHarness(t)
+		h.open("reveal")
+		h.m.form.node.cmd.Annotations = nil // not marked sensitive: wiped all the same
+		h.press("ctrl+r")
+		h.until("done", h.done)
+		segs := h.m.run.segs
+		if !strings.Contains(h.m.render(), "RECOVERY-KEY-1234") {
+			t.Fatal("not shown")
+		}
+		h.press(key)
+		wiped(t, key, segs)
+		if h.m.run != nil || strings.Contains(h.m.render(), "RECOVERY-KEY-1234") {
+			t.Errorf("%s: the run or its output is still there", key)
+		}
+	}
+	h := newHarness(t)
+	h.open("reveal")
+	h.m.form.node.cmd.Annotations = nil // not marked sensitive: wiped all the same
+	h.press("ctrl+r")
+	h.until("done", h.done)
+	segs := h.m.run.segs
+	h.m.Wipe()
+	wiped(t, "the end of the session", segs)
+
+	// The scripted driver: opening another command with a finished run on
+	// screen drops that run wiped.
+	d, err := NewDriver(Options{Factory: testFactory, Globals: []string{"-C", "/ws"},
+		Status: func() Status { return Status{Workspace: "/ws", Network: "preview", Mode: "offline", State: "sealed"} }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Open("reveal"); err != nil {
+		t.Fatal(err)
+	}
+	d.m.form.node.cmd.Annotations = nil
+	d.key("ctrl+r")
+	for i := 0; i < 200 && d.m.run != nil && !d.m.run.done; i++ {
+		select {
+		case msg := <-d.ch:
+			d.m.Update(msg)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	if d.m.run == nil || !d.m.run.done {
+		t.Fatal("the run did not finish")
+	}
+	segs = d.m.run.segs
+	if err := d.Open("greet"); err != nil {
+		t.Fatal(err)
+	}
+	wiped(t, "Driver.Open", segs)
 }

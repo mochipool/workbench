@@ -56,11 +56,12 @@ type Action struct {
 	Threshold chain.Rational
 	Add       []CommitteeAdd
 	Remove    []Credential
-	// ParameterChange: the parameters changed, in order, as `--name value` pairs.
+	// ParameterChange: the parameters changed, in canonical form (see CheckParams).
 	Params []ParamChange
 }
 
-// ParamChange is one proposed protocol parameter, by its cardano-cli name.
+// ParamChange is one proposed protocol parameter, by its cardano-cli name. The
+// value is in the canonical text of NormalizeParam.
 type ParamChange struct{ Name, Value string }
 
 // Refusals of an action.
@@ -68,9 +69,6 @@ var (
 	ErrActionKind      = errors.New("not a governance action kind")
 	ErrActionBootstrap = errors.New("this action cannot be proposed while the protocol major version is below 10 (bootstrap phase)")
 	ErrActionField     = errors.New("invalid governance action")
-	// ErrGuardrailsUnsupported: the action needs the guardrails Plutus script
-	// (collateral and execution units), which this port cannot evaluate.
-	ErrGuardrailsUnsupported = errors.New("the constitution has a guardrails script: a proposal of this kind needs it evaluated (collateral and execution units), which this port does not do")
 )
 
 // MinMajorFor is the protocol major version from which an action may be
@@ -189,8 +187,8 @@ func (a Action) Validate() error {
 			seen[m] = true
 		}
 	case ParameterChange:
-		if len(a.Params) == 0 {
-			return bad("a parameter change needs at least one parameter")
+		if _, err := CheckParams(a.Params); err != nil {
+			return err
 		}
 	}
 	return nil

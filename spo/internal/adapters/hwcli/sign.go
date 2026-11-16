@@ -115,35 +115,67 @@ func (s *Session) Witness(ctx context.Context, key custody.KeyRef, body txbuild.
 //
 // spec: SPO-Ptx-EXT-005, SPO-Ptx-INV-009, SPO-Ptx-PRE-005, SPO-01sendLovelaces-EXT-002, SPO-21b-PRE-009, SPO-21b-SEC-003
 func (s *Session) WitnessWith(ctx context.Context, key custody.KeyRef, body txbuild.TxBody, opt ports.HardwareTxOptions) (txbuild.Witness, error) {
-	if err := s.has(key.Role, custody.OpWitnessTx); err != nil {
+	ws, err := s.WitnessMany(ctx, []custody.KeyRef{key}, body, opt)
+	if err != nil {
 		return txbuild.Witness{}, err
 	}
+	return ws[0], nil
+}
+
+// WitnessMany implements ports.HardwareMultiWitnesser: one `transaction
+// witness` call with one `--hw-signing-file` and one `--out-file` per key, the
+// combined witness of 05c (SPO-05c-EXT-004). Every witness is verified against
+// the body id and the public key of ITS signing file, in the order of the keys,
+// so a tool that swaps or repeats a witness is refused. The same key twice is
+// refused up front: the device would be asked to sign twice for nothing.
+//
+// spec: SPO-05c-EXT-004, SPO-Ptx-EXT-005
+func (s *Session) WitnessMany(ctx context.Context, keys []custody.KeyRef, body txbuild.TxBody, opt ports.HardwareTxOptions) ([]txbuild.Witness, error) {
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("no key to witness with")
+	}
+	seen := map[custody.KeyRef]bool{}
+	for _, key := range keys {
+		if seen[key] {
+			return nil, fmt.Errorf("%s is named twice in one witness call", key)
+		}
+		seen[key] = true
+		if err := s.has(key.Role, custody.OpWitnessTx); err != nil {
+			return nil, err
+		}
+	}
+	return s.witnessKeys(ctx, keys, body, opt)
+}
+
+func (s *Session) witnessKeys(ctx context.Context, keys []custody.KeyRef, body txbuild.TxBody, opt ports.HardwareTxOptions) ([]txbuild.Witness, error) {
 	if opt.Unrestricted {
-		if why := s.profile.Check(custody.Demand{Role: key.Role, Operation: custody.OpWitnessTx, Features: custody.NewFeatures(custody.FeatUnrestricted)}); why != "" {
-			return txbuild.Witness{}, fmt.Errorf("%w: %s", ErrNotSupported, why)
+		for _, key := range keys {
+			if why := s.profile.Check(custody.Demand{Role: key.Role, Operation: custody.OpWitnessTx, Features: custody.NewFeatures(custody.FeatUnrestricted)}); why != "" {
+				return nil, fmt.Errorf("%w: %s", ErrNotSupported, why)
+			}
 		}
 	}
 	net, err := s.cfg.Network.args()
 	if err != nil {
-		return txbuild.Witness{}, err
+		return nil, err
 	}
 	if s.cfg.TxID != nil {
 		id, err := s.cfg.TxID(body.CBOR)
 		if err != nil {
-			return txbuild.Witness{}, fmt.Errorf("read the transaction body: %w", err)
+			return nil, fmt.Errorf("read the transaction body: %w", err)
 		}
 		if id != body.ID {
-			return txbuild.Witness{}, fmt.Errorf("the body's id %s is not the id of its bytes (%s)", body.ID, id)
+			return nil, fmt.Errorf("the body's id %s is not the id of its bytes (%s)", body.ID, id)
 		}
 	}
 	sc, err := s.scratch()
 	if err != nil {
-		return txbuild.Witness{}, err
+		return nil, err
 	}
 	defer sc.done()
 	txFile, err := sc.put("body.tx", pool.TxEnvelope(body.CBOR))
 	if err != nil {
-		return txbuild.Witness{}, err
+		return nil, err
 	}
 	// Conversion is checked once per body per session: the same body witnessed
 	// by a payment and a stake key asks the tool to transform it once. Only a
@@ -152,49 +184,64 @@ func (s *Session) WitnessWith(ctx context.Context, key custody.KeyRef, body txbu
 	if !s.knownCanonical(ck) {
 		canon, err := s.transform(ctx, sc, txFile, opt.Unrestricted)
 		if err != nil {
-			return txbuild.Witness{}, err
+			return nil, err
 		}
 		if !bytes.Equal(canon, body.CBOR) {
-			return txbuild.Witness{}, &ports.ErrNotHardwareCanonical{Canonical: canon}
+			return nil, &ports.ErrNotHardwareCanonical{Canonical: canon}
 		}
 		s.markCanonical(ck)
 	}
-	hws, hwsContent, err := s.signingFile(ctx, sc, key)
-	if err != nil {
-		return txbuild.Witness{}, err
+	args := []string{"transaction", "witness", "--tx-file", txFile}
+	contents := make([][]byte, len(keys))
+	for i, key := range keys {
+		hws, content, err := s.signingFile(ctx, sc, key)
+		if err != nil {
+			return nil, err
+		}
+		contents[i] = content
+		args = append(args, "--hw-signing-file", hws)
 	}
-	args := []string{"transaction", "witness", "--tx-file", txFile, "--hw-signing-file", hws}
 	for _, ck := range opt.ChangeKeys {
 		p, _, err := s.signingFile(ctx, sc, ck)
 		if err != nil {
-			return txbuild.Witness{}, err
+			return nil, err
 		}
 		args = append(args, "--change-output-key-file", p)
 	}
 	if opt.Unrestricted {
 		args = append(args, "--allow-unrestricted-mode")
 	}
-	out := sc.path("body.witness")
-	args = append(append(args, net...), "--out-file", out)
+	outs := make([]string, len(keys))
+	for i := range keys {
+		outs[i] = sc.path(fmt.Sprintf("body%d.witness", i))
+	}
+	args = append(args, net...)
+	for _, o := range outs {
+		args = append(args, "--out-file", o)
+	}
 	if _, err := s.run(ctx, args...); err != nil {
-		return txbuild.Witness{}, err
+		return nil, err
 	}
-	raw, err := os.ReadFile(out)
-	if err != nil {
-		return txbuild.Witness{}, fmt.Errorf("%w: no witness was written", ErrBadDeviceOutput)
-	}
-	w, err := pool.ParseWitnessEnvelope(raw)
-	if err != nil {
-		return txbuild.Witness{}, fmt.Errorf("%w: %v", ErrBadDeviceOutput, err)
-	}
-	if pub, ok := hwsfilePubKey(hwsContent); ok {
-		if err := txbuild.VerifyWitness(body, w, txbuild.HashKey(pub)); err != nil {
-			return txbuild.Witness{}, fmt.Errorf("%w: %v", ErrBadDeviceOutput, err)
+	ws := make([]txbuild.Witness, len(keys))
+	for i := range keys {
+		raw, err := os.ReadFile(outs[i])
+		if err != nil {
+			return nil, fmt.Errorf("%w: no witness was written for the %s", ErrBadDeviceOutput, keys[i])
 		}
-	} else if !ed25519.Verify(w.VKey[:], body.ID[:], w.Signature[:]) {
-		return txbuild.Witness{}, fmt.Errorf("%w: %v", ErrBadDeviceOutput, txbuild.ErrWitnessSignature)
+		w, err := pool.ParseWitnessEnvelope(raw)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrBadDeviceOutput, err)
+		}
+		if pub, ok := hwsfilePubKey(contents[i]); ok {
+			if err := txbuild.VerifyWitness(body, w, txbuild.HashKey(pub)); err != nil {
+				return nil, fmt.Errorf("%w: %s: %v", ErrBadDeviceOutput, keys[i], err)
+			}
+		} else if !ed25519.Verify(w.VKey[:], body.ID[:], w.Signature[:]) {
+			return nil, fmt.Errorf("%w: %v", ErrBadDeviceOutput, txbuild.ErrWitnessSignature)
+		}
+		ws[i] = w
 	}
-	return w, nil
+	return ws, nil
 }
 
 func (s *Session) knownCanonical(k canonKey) bool {
@@ -337,9 +384,10 @@ func (s *Session) PolicyID(ctx context.Context, key custody.Key[custody.Policy],
 }
 
 var (
-	_ ports.HardwareKeyExporter   = (*Session)(nil)
-	_ ports.OpCertIssuer          = (*Session)(nil)
-	_ ports.HardwareWitnesser     = (*Session)(nil)
-	_ ports.HardwareCanonicalizer = (*Session)(nil)
-	_ ports.HardwarePolicyIDer    = (*Session)(nil)
+	_ ports.HardwareKeyExporter    = (*Session)(nil)
+	_ ports.OpCertIssuer           = (*Session)(nil)
+	_ ports.HardwareWitnesser      = (*Session)(nil)
+	_ ports.HardwareMultiWitnesser = (*Session)(nil)
+	_ ports.HardwareCanonicalizer  = (*Session)(nil)
+	_ ports.HardwarePolicyIDer     = (*Session)(nil)
 )

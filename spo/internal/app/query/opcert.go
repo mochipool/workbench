@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/mochipool/workbench/spo/internal/app/opcounter"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/domain/stake"
@@ -117,6 +118,9 @@ type OpCertVerdict struct {
 	Window  pool.KesWindow
 	TipSlot uint64
 	Source  chain.Source
+	// Single is true when the counter rests on one provider although a second
+	// is wired, because the operator acknowledged it (--single-source).
+	Single bool
 }
 
 // CheckOpCert checks an operational certificate against the chain (upstream
@@ -128,6 +132,15 @@ type CheckOpCert struct {
 	Tip      ports.TipReader
 	Genesis  ports.GenesisReader
 	Counters ports.OpCertCounterReader
+	// Cross is an optional second, independent source of the counter; the
+	// counter is then the corroborated one (opcounter.Corroborate), and a
+	// disagreement or a silent second source is an UNKNOWN verdict that says
+	// so. SingleSource acknowledges a second source that does not answer.
+	Cross        ports.OpCertCounterReader
+	SingleSource bool
+	// OnSingle records an accepted single source (ADR 0006); required when
+	// SingleSource is true.
+	OnSingle ports.SingleSourceHook
 	// Sync is optional: full online mode checks it (SPO-04e-PRE-002); the
 	// light mode has no sync check.
 	Sync ports.SyncChecker
@@ -183,9 +196,16 @@ func (uc CheckOpCert) Run(ctx context.Context, req OpCertCheck) (OpCertVerdict, 
 	if err != nil {
 		onChain = chain.Unknown[uint64](err.Error())
 	}
+	rd := opcounter.Corroborate(ctx, uc.Counters, uc.Cross, id, onChain, uc.SingleSource)
+	if rd.Single {
+		if err := uc.OnSingle.Accept(ctx, "the operational certificate counter", rd.Source); err != nil {
+			return OpCertVerdict{}, err
+		}
+	}
+	onChain = rd.Reading
 
 	v := OpCertVerdict{PoolID: id, Number: num, OnDisk: oc.Counter, OnChain: onChain, Window: win, TipSlot: tip.Slot,
-		Source: uc.Counters.Source(), KES: StatusOK, Counter: StatusUnknown}
+		Source: rd.Source, Single: rd.Single, KES: StatusOK, Counter: StatusUnknown}
 	if !win.InRange {
 		v.KES = StatusFalse
 		v.Reasons = append(v.Reasons, ReasonKesOutOfRange)
@@ -308,6 +328,12 @@ type QueryOpCertCounter struct {
 	Counters ports.OpCertCounterReader
 	// Pools adds the pool's name and ticker; optional.
 	Pools ports.PoolStateReader
+	// Cross and SingleSource are as in CheckOpCert.
+	Cross        ports.OpCertCounterReader
+	SingleSource bool
+	// OnSingle records an accepted single source (ADR 0006); required when
+	// SingleSource is true.
+	OnSingle ports.SingleSourceHook
 }
 
 // CounterReport is the answer.
@@ -323,6 +349,8 @@ type CounterReport struct {
 	Name   string
 	Ticker string
 	Source chain.Source
+	// Single: see OpCertVerdict.Single.
+	Single bool
 }
 
 // Run resolves the reference in the order of SPO-04e-IF-005 (56 hex digits,
@@ -346,6 +374,13 @@ func (uc QueryOpCertCounter) Run(ctx context.Context, ref string) (CounterReport
 	if err != nil {
 		rep.Counter = chain.Unknown[uint64](err.Error())
 	}
+	rd := opcounter.Corroborate(ctx, uc.Counters, uc.Cross, id, rep.Counter, uc.SingleSource)
+	if rd.Single {
+		if err := uc.OnSingle.Accept(ctx, "the operational certificate counter", rd.Source); err != nil {
+			return CounterReport{}, err
+		}
+	}
+	rep.Counter, rep.Source, rep.Single = rd.Reading, rd.Source, rd.Single
 	switch c, ok := rep.Counter.Get(); {
 	case ok:
 		n := c + 1

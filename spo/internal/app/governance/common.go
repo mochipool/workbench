@@ -65,17 +65,10 @@ var (
 	ErrSingleSource = errors.New("this read rests on a single chain source: give a second independent source, or acknowledge the single source explicitly")
 	// ErrSourcesDisagree: two independent sources gave different answers.
 	ErrSourcesDisagree = errors.New("the chain sources disagree")
-	// ErrGuardrailsUnsupported is domain/governance's: a proposal that needs the
-	// guardrails script. It names what is missing; see RegisterAction.
-	ErrGuardrailsUnsupported = governance.ErrGuardrailsUnsupported
-	// ErrParameterChangeUnsupported: the action-file adapter does not build a
-	// parameter-change file yet. An adapter wraps ports.ErrParameterChangeUnsupported.
-	ErrParameterChangeUnsupported = ports.ErrParameterChangeUnsupported
-
-	ErrDeclined      = txflow.ErrDeclined
-	ErrNoConfirmer   = txflow.ErrNoConfirmer
-	ErrNoSigner      = txflow.ErrNoSigner
-	ErrMisconfigured = txflow.ErrMisconfigured
+	ErrDeclined        = txflow.ErrDeclined
+	ErrNoConfirmer     = txflow.ErrNoConfirmer
+	ErrNoSigner        = txflow.ErrNoSigner
+	ErrMisconfigured   = txflow.ErrMisconfigured
 )
 
 // ApprovalPolicy and its values are those of txflow.
@@ -312,6 +305,9 @@ type txRun struct {
 	// unrestricted is the operator's consent to the device's unrestricted mode
 	// (SPO-21b-PR-001, SPO-24b-PR-001), set by the use case from its request.
 	unrestricted bool
+	// plutus is set for a proposal transaction that carries the constitution's
+	// guardrails script (see guardrails.go); nil for every other transaction.
+	plutus *plutusRun
 }
 
 // ErrUnrestrictedNeeded: the transaction needs the device's unrestricted mode
@@ -352,7 +348,13 @@ func (b Base) slots(r txRun) []txflow.Slot {
 // early refuses what the signing plan refuses (a hardware holder) before any
 // chain read, with a draft that has the features of the attachments.
 func (b Base) early(r txRun) error {
-	_, err := b.Pipeline.PrepareWith(txbuild.Draft{Certificates: r.certs, Votes: r.votes, Proposals: r.props, Message: r.message}, b.slots(r), uint(1+len(r.signers)), r.prepareOptions())
+	d := txbuild.Draft{Certificates: r.certs, Votes: r.votes, Proposals: r.props, Message: r.message}
+	if r.plutus != nil {
+		// Only the features matter here: a signer is asked whether it can
+		// witness a body with a script, before anything is read.
+		d.Plutus = &txbuild.PlutusAttachment{}
+	}
+	_, err := b.Pipeline.PrepareWith(d, b.slots(r), uint(1+len(r.signers)), r.prepareOptions())
 	return err
 }
 
@@ -388,6 +390,16 @@ func (b Base) execute(ctx context.Context, r txRun) (txflow.Result, ports.TxSumm
 	if err != nil {
 		return txflow.Result{}, ports.TxSummary{}, fmt.Errorf("the UTxOs of %s: %w", r.payer.name, err)
 	}
+	var collateral []chain.Utxo
+	if r.plutus != nil {
+		// The collateral is one of the payer's UTxOs and is not an input
+		// (SPO-25b-INV-005, SPO-25b-INV-007).
+		col, rest, err := txbuild.PickCollateral(utxos)
+		if err != nil {
+			return txflow.Result{}, ports.TxSummary{}, fmt.Errorf("%s: %w (send 5 to 10 ADA, with no tokens, to the paying address)", r.payer.name, err)
+		}
+		collateral, utxos = []chain.Utxo{col}, rest
+	}
 	strategy := b.Selection
 	if strategy == "" {
 		strategy = txbuild.SelectAll
@@ -413,6 +425,11 @@ func (b Base) execute(ctx context.Context, r txRun) (txflow.Result, ports.TxSumm
 			return txflow.Result{}, ports.TxSummary{}, err
 		}
 	}
+	if r.plutus != nil {
+		if draft, err = r.plutus.attach(draft, collateral); err != nil {
+			return txflow.Result{}, ports.TxSummary{}, err
+		}
+	}
 	witnesses := uint(1 + len(r.signers))
 	prep, err := b.Pipeline.PrepareWith(draft, b.slots(r), witnesses, r.prepareOptions())
 	if err != nil {
@@ -427,8 +444,17 @@ func (b Base) execute(ctx context.Context, r txRun) (txflow.Result, ports.TxSumm
 	if sum.Refund, err = draft.Refunds(); err != nil {
 		return txflow.Result{}, ports.TxSummary{}, err
 	}
-	res, err := b.Pipeline.Execute(ctx, txflow.Input{Draft: draft, Params: r.params, TTL: ttl, Prepared: prep, Witnesses: witnesses,
-		Summary: sum, Queued: r.queued, HardwareChangeKeys: b.changeKeys(ctx, r)})
+	in := txflow.Input{Draft: draft, Params: r.params, TTL: ttl, Prepared: prep, Witnesses: witnesses,
+		Summary: sum, Queued: r.queued, HardwareChangeKeys: b.changeKeys(ctx, r)}
+	if r.plutus != nil {
+		res, err := b.executeScripted(ctx, in, r.plutus)
+		if err == nil {
+			// The same lines the confirmation showed, for a run that skipped it.
+			sum.Attachments = append(append([]string(nil), sum.Attachments...), r.plutus.report.Lines()...)
+		}
+		return res, sum, err
+	}
+	res, err := b.Pipeline.Execute(ctx, in)
 	return res, sum, err
 }
 

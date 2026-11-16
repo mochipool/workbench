@@ -1,6 +1,6 @@
 # ADR 0005: Party envelope and remote-signing policy
 
-Status: accepted, 2026-11-16, amended by the second and third security reviews (see the sections on ownership, scopes, reconnecting, approval and the transport kind). Closes T3, E7 and M6; sets the basis for M7. The message catalogue and state machines are specified separately (M1, T6).
+Status: accepted, 2026-11-16, amended by the second and third security reviews (see the sections on ownership, scopes, reconnecting, approval and the transport kind) and by the identity rotation and closing notice (the section on message kinds added after the ninth review; it has had no review pass). Closes T3, E7 and M6; sets the basis for M7. The message catalogue and state machines are specified separately (M1, T6).
 
 ## Context
 
@@ -82,6 +82,22 @@ The refusal is enforced twice: the coordinator does not send a cold-key request 
 
 The Go bundle between an operator's own online and offline machines is an envelope too, so both machines are enrolled with each other. The upstream `offlineTransfer.json` format is still read and written for compatibility. Importing one never writes outside the bundle's own directory (SPO-Ptransfer-SEC-001), and what was imported from an unauthenticated file is marked as such in the audit log.
 
+### Two message kinds that cause no signature: `Rotation` and `CollectionClosed`
+
+Neither can make a signer sign anything, and each is meant to be dropped on any doubt.
+
+**`CollectionClosed`** (coordinator to signer, advisory). It marks the signer's requests of one collection closed, with the outcome (submitted with the transaction id, discarded, expired). It is accepted only from the coordinator that sent a request of that collection, for a collection the signer was asked about, with a transaction id that is the requests' body hash when it says submitted, and not as a replay; the first outcome stays. A closed request is not listed as waiting, and `review`, `approve` and the claim of an approval refuse it by name of the outcome. A signer that never receives the notice behaves as before. A forged one changes nothing but the refusal event.
+
+**`Rotation`** (any active enrolled party to its peers). An operator replaces their party identity. The statement is signed by the old and the new key under two different domain strings, names the old fingerprint and carries the new identity document, and is valid for 30 days at most. The message is sealed by the old identity, so the receiver already knows whose it is, and it is refused unless the statement is that sender's own: a statement about another identity, one never enrolled included, is refused on receipt. Receiving it, whichever transport carried it, **only stores it as pending**. The registry changes only when the receiving operator types the first four groups of the new fingerprint, read out over a separate channel (the rule of enrollment, PR-001, for the same reason: a thief of the old key can announce a new key of their own, and the old key's signature proves nothing about who is announcing), and says whether the scope carries over. Then, in one store transaction, the old identity is revoked and kept (renamed, so it can never be enrolled again and a replayed statement finds it revoked) and the new one is enrolled under the old name and roles, so no state of the store has both identities accepted. The stored statement is checked again inside that transaction against the registry as it is then. **In-flight requests are not carried over**: the requests sent to the old identity are voided at the peer, and the rotating machine drops its outbox, closes its waiting requests and voids its outstanding ones, and its old private keys are replaced in the store with the commit; whatever was in flight is requested again. A rotated party's first frame over tailcat is sealed by the new identity, which the peer does not know until it accepts, so announcements travel by file. If the old key is lost there is no rotation: the statement cannot be made, and the way forward is a new identity enrolled from scratch. Accepted risks: an announcement by a thief of the old key can replace the genuine pending one of the same sender, which the operator's typed confirmation catches; and a backup of the workspace made before the rotation still holds the old private keys.
+
+**Amendment, key rotation and the approval's last write (2026-11-16, security review of the rotation and closed-collection code).**
+
+* The signature is claimed, then the operator authenticates (minutes may pass), then the answer is stored. The store step re-reads whether the request is closed, whether its sender is still an active enrolled party with the same fingerprint, and whether this machine's identity is the one loaded before the prompt, and drops the answer otherwise (SPO-Xparty-INV-038). The outbox is a second line: it only lists and sends items for an active enrolled party sealed by the current identity, except a `Rotation`, which the replaced identity seals by design.
+* A tailcat node key is held by active records only; a revoked record keeps it, so a party can rotate repeatedly and the key can be enrolled again after a revocation. The node key is not rotated: a statement that changes it is refused.
+* `party rotate` is refused while an earlier rotation's announcements are undelivered, because the identity that sealed them is replaced and the old key is gone. The announcement is valid for 7 days and is kept sealed for that time; after it a peer that missed it enrolls the new identity from scratch. The tool cannot tell which peers accepted.
+* A store with a write-ahead log is asked to fold it after a rotation. Backups made earlier still contain the old keys.
+* `party approve` reads the terminal size after the answer and refuses when it shrank; a resize and a resize back during the question is not detected (SPO-Xparty-INV-039).
+
 ## Obligations on whatever wires a signer
 
 The fifth security review (2026-11-16) cleared the stack on these assumptions about the code that constructs a `multisig.Signer`. A command or TUI screen that breaks one of them voids the review.
@@ -93,3 +109,4 @@ The fifth security review (2026-11-16) cleared the stack on these assumptions ab
 5. The file inbox is a local directory the operator controls.
 6. There is no approve-without-review path. The approval gate is real: it asks for the passphrase again for pool cold, payment and owner stake keys.
 7. The review screen shows how the request arrived and the "inputs not checked" text word for word.
+8. A `multisig.Outbox` is made with `Node.Outbox()` (it needs the registry and the identity kit to check what it carries; one built without them refuses to list or send). A store handed to the multi-party commands keeps the optional `ports.WALCheckpointer` of the store it wraps.

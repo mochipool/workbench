@@ -67,6 +67,7 @@ already has one outstanding; the old request's answer is then refused as stale.`
 				if err != nil {
 					return err
 				}
+				r.sweepNotices(ctx)
 				d := r.dirs("", out)
 				if out != "" {
 					d.outbox = out
@@ -79,7 +80,7 @@ already has one outstanding; the old request's answer is then refused as stale.`
 					return err
 				}
 				defer bag.Close()
-				ob := multisig.Outbox{Store: r.s.Store, Clock: r.env.Clock, Offline: r.o.Mode == ModeOffline}
+				ob := r.node().Outbox()
 				bag.SetNamer(outboxNamer(ctx, ob))
 				// Only the requests of this pool's collection are written: the
 				// outbox may hold responses, invitations and the requests of
@@ -150,6 +151,7 @@ by file only (request export). Not available in offline mode.`,
 				if err != nil {
 					return err
 				}
+				r.sweepNotices(ctx)
 				// A transport with no sender seals and stores; its unknown kind
 				// is a network for the cold-key rule.
 				res, err := c.RequestSignatures(ctx, multisig.RequestInput{Ref: multisig.CollectionRef{Kind: multisig.KindPool, Name: name}, Purpose: qpurpose, Renew: qrenew}, ports.Transport{})
@@ -262,9 +264,10 @@ func (r *partyRun) collectionWireID(ctx context.Context, poolName string) (party
 
 func (a *app) partyOutboxCommand() *cobra.Command {
 	c := &cobra.Command{Use: "outbox", Short: "Envelopes waiting to be carried to another party"}
-	var yes bool
+	var yes, again bool
+	var cf chainFlags
 	cmd := &cobra.Command{
-		Use:   "export DIR [--yes]",
+		Use:   "export DIR [--yes] [--resend-rotation]",
 		Short: "Write EVERY waiting envelope as a file in DIR",
 		Long: `Write every envelope this machine has sealed and not yet handed to a transport
 (a signer's responses and refusals, invitations, closing notices, requests
@@ -277,12 +280,31 @@ to the party it is for: the file names say what it is, not who it is for, and
 only that party can open it. DIR may be a mounted stick; it is not read as an
 inbox.
 
+Before it lists them it announces the collections of this machine that ended
+without a notice (a cleared one, a submitted one, an expired one: the last needs
+the chain time, from the usual genesis options): a closing notice for each
+signer that was asked is among what it writes.
+
+A rotation announcement (spo party rotate) is kept for its 7 days after it was
+written, sealed and signed: --resend-rotation writes the ones already written
+again, for a file that was lost on the way. After the 7 days it cannot be made
+again (the old private key is gone) and a peer that never got it must enroll
+this identity from scratch.
+
 To write only the requests of one pool's collection, use
 spo party request export POOL --out DIR.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return a.party(cmd, nil, []Need{CapClock}, func(ctx context.Context, r *partyRun) error {
-				ob := multisig.Outbox{Store: r.s.Store, Clock: r.env.Clock}
+			return a.party(cmd, &cf, []Need{CapClock}, func(ctx context.Context, r *partyRun) error {
+				r.sweepNotices(ctx)
+				ob := r.node().Outbox()
+				if again {
+					n, err := ob.RearmRotations(ctx)
+					if err != nil {
+						return err
+					}
+					fmt.Fprintf(a.d.Out, "%d rotation announcement(s) already written are waiting again.\n", n)
+				}
 				items, err := ob.Pending(ctx)
 				if err != nil {
 					return err
@@ -352,8 +374,33 @@ spo party request export POOL --out DIR.`,
 		},
 	}
 	cmd.Flags().BoolVar(&yes, "yes", false, "write the envelopes of several recipients to one directory without asking")
+	cmd.Flags().BoolVar(&again, "resend-rotation", false, "write the rotation announcements that were already written again (valid for 7 days after the rotation)")
+	addChainFlags(cmd, &cf, false)
 	c.AddCommand(cmd)
 	return c
+}
+
+// sweepNotices announces to the signers that were asked the collections that
+// ended without the coordinator saying so: one whose witness collection was
+// cleared (discarded), one whose registration was submitted, one whose TTL slot
+// has passed (SPO-Xparty-INV-035). The notices are queued in the outbox with
+// everything else. It is bookkeeping for the signers, never a reason to fail
+// the command it runs in: an error is a note on stderr.
+func (r *partyRun) sweepNotices(ctx context.Context) {
+	if r.env.TxIDs == nil {
+		return
+	}
+	co, err := r.coordinator()
+	if err != nil {
+		return
+	}
+	done, err := co.Sweep(ctx)
+	for _, ref := range done {
+		fmt.Fprintf(r.a.d.Out, "The collection of %s ended: a closing notice for the signers that were asked is queued in the outbox.\n", safeText(ref.Name))
+	}
+	if err != nil && !errors.Is(err, multisig.ErrNoChainTime) && ctx.Err() == nil {
+		fmt.Fprintf(r.a.d.Err, "note: could not announce the collections that ended: %v\n", err)
+	}
 }
 
 // recipientLabels maps a recipient fingerprint (hex) to the local name of the
@@ -610,6 +657,10 @@ func printHandled(w io.Writer, h multisig.Handled) {
 		fmt.Fprintf(w, "request %x%s is pending. Read it with: spo party review %.8x\n", h.Request[:], who, h.Request[:])
 	case h.Effect == "refused":
 		fmt.Fprintf(w, "request %x%s was refused: %s (recorded in spo party events%s)\n", h.Request[:], who, safeText(h.Reason), "; not sent when it depends on what this machine holds")
+	case h.Effect == "rotation-pending":
+		fmt.Fprintf(w, "a rotation announcement%s is waiting for your confirmation; nothing about the enrollment changed. See: spo party rotation list\n", who)
+	case h.Effect == "closed":
+		fmt.Fprintf(w, "collection closed by its coordinator%s: its requests here are closed and no longer wait for you (spo party requests)\n", who)
 	case h.Complete:
 		fmt.Fprintf(w, "%s%s: %s. The collection is complete: finish it with spo pool register POOL PAYER\n", h.Type, who, h.Effect)
 	default:

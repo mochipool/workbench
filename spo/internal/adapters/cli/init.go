@@ -91,7 +91,7 @@ you to confirm that first. Mode offline configures no provider.`,
 		},
 	}
 	cmd.Flags().StringVar(&network, "network", "", "mainnet, preprod or preview")
-	cmd.Flags().StringVar(&mode, "mode", ModeOffline, "online (node socket; not built yet), light (Koios) or offline")
+	cmd.Flags().StringVar(&mode, "mode", ModeOffline, "online (a node socket: spo provider set node), light (Koios) or offline")
 	cmd.Flags().IntVar(&rkFD, "recovery-key-fd", -1, "write the recovery key to this file descriptor instead of showing it (needs --passphrase-fd)")
 	cmd.Flags().BoolVar(&yes, "yes", false, "answer yes to the provider confirmation (the statement is still printed)")
 	return cmd

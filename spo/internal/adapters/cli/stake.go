@@ -108,6 +108,9 @@ func (a *app) pipeline(s *session, env *Env, yes bool) txflow.Pipeline {
 		Assembler: env.TxAssembler, Confirmer: terminalConfirmer{a}, Submitter: env.Submitter, Queue: env.Queue,
 		Canonicalizer: env.Canonicalizer,
 	}
+	if n := env.SharedHostNote(); n != "" {
+		p.SourceNotes = []string{n}
+	}
 	if p.Submitter != nil && p.Queue != nil {
 		p.Queue = nil
 	}
@@ -149,11 +152,15 @@ func artefact(r ports.Ref) string { return r.Name + "." + string(r.Kind) }
 func (a *app) report(o outcome, f *stakeFlags, env *Env, wo WireOptions) {
 	w := a.d.Out
 	if o.ApprovalSkipped {
-		printStakeSummary(w, ports.TxSummary{
+		sum := ports.TxSummary{
 			Kind: o.kind, Account: o.account, Source: o.payer, Inputs: o.Inputs, Outputs: o.Outputs, Fee: o.Fee, TTL: o.TTL, Message: f.messages,
 			Size: o.Size, TxID: o.TxID, Route: routeName(o.Queued), Deposit: o.Deposit, Refund: o.Refund,
 			Sources: o.Sources, SingleSource: o.SingleSource, Unchecked: o.Unchecked,
-		})
+		}
+		if n := env.SharedHostNote(); n != "" && len(o.Sources) >= 2 {
+			sum.Notes = []string{n}
+		}
+		printStakeSummary(w, sum)
 	}
 	switch {
 	case o.Submitted:
@@ -183,30 +190,30 @@ func printStakeSummary(w io.Writer, s ports.TxSummary) {
 	}
 	fmt.Fprintf(w, "\n%s\n", title)
 	if s.Account != "" {
-		fmt.Fprintf(w, "  account      %s\n", s.Account)
+		fmt.Fprintf(w, "  account      %s\n", shownAny(s.Account))
 	}
 	if s.StakeAddr != "" {
-		fmt.Fprintf(w, "  stake addr   %s\n", s.StakeAddr)
+		fmt.Fprintf(w, "  stake addr   %s\n", shownAny(s.StakeAddr))
 	}
 	if s.Source != "" {
 		if s.SourceAddr != "" {
-			fmt.Fprintf(w, "  paid by      %s (%s)\n", s.Source, s.SourceAddr)
+			fmt.Fprintf(w, "  paid by      %s (%s)\n", shownAny(s.Source), shownAny(s.SourceAddr))
 		} else {
-			fmt.Fprintf(w, "  paid by      %s\n", s.Source)
+			fmt.Fprintf(w, "  paid by      %s\n", shownAny(s.Source))
 		}
 	}
 	if s.Destination != "" {
 		if s.DestAddr != "" {
-			fmt.Fprintf(w, "  to           %s (%s)\n", s.Destination, s.DestAddr)
+			fmt.Fprintf(w, "  to           %s (%s)\n", shownAny(s.Destination), shownAny(s.DestAddr))
 		} else {
-			fmt.Fprintf(w, "  to           %s\n", s.Destination)
+			fmt.Fprintf(w, "  to           %s\n", shownAny(s.Destination))
 		}
 	}
 	if s.Amount != "" {
-		fmt.Fprintf(w, "  amount       %s\n", s.Amount)
+		fmt.Fprintf(w, "  amount       %s\n", shownAny(s.Amount))
 	}
 	for _, at := range s.Attachments {
-		fmt.Fprintf(w, "  attaches     %s\n", at)
+		fmt.Fprintf(w, "  attaches     %s\n", shown(at))
 	}
 	if s.Withdrawal > 0 {
 		fmt.Fprintf(w, "  withdrawal   %s\n", lovelaceText(s.Withdrawal))
@@ -225,7 +232,7 @@ func printStakeSummary(w io.Writer, s ports.TxSummary) {
 		if i == len(s.Outputs)-1 {
 			label = "change"
 		}
-		fmt.Fprintf(w, "  %-12s %s  %s\n", label, o.Address, lovelaceText(o.Lovelace))
+		fmt.Fprintf(w, "  %-12s %s  %s\n", label, shownAny(o.Address), lovelaceText(o.Lovelace))
 		for _, as := range o.Assets {
 			fmt.Fprintf(w, "  %-12s   + %d %s\n", "", as.Quantity, assetText(as.Asset))
 		}
@@ -235,19 +242,19 @@ func printStakeSummary(w io.Writer, s ports.TxSummary) {
 		fmt.Fprintf(w, "  valid until  slot %d\n", s.TTL)
 	}
 	for _, m := range s.Message {
-		fmt.Fprintf(w, "  message      %s\n", m)
+		fmt.Fprintf(w, "  message      %s\n", shown(shownAny(m)))
 	}
 	if s.Size > 0 {
 		fmt.Fprintf(w, "  size         %d bytes\n", s.Size)
 	}
-	fmt.Fprintf(w, "  tx id        %s\n", s.TxID)
+	fmt.Fprintf(w, "  tx id        %s\n", shownAny(s.TxID))
 	if s.Route != "" {
-		fmt.Fprintf(w, "  route        %s\n", s.Route)
+		fmt.Fprintf(w, "  route        %s\n", shownAny(s.Route))
 	}
 	if len(s.Sources) > 0 {
 		names := make([]string, len(s.Sources))
 		for i, src := range s.Sources {
-			names[i] = string(src)
+			names[i] = shown(string(src))
 		}
 		fmt.Fprintf(w, "  checked via  %s\n", strings.Join(names, ", "))
 	}
@@ -255,7 +262,10 @@ func printStakeSummary(w io.Writer, s ports.TxSummary) {
 		fmt.Fprintf(w, "  WARNING      a read this transaction rests on came from ONE source, acknowledged with --single-source; a false answer can cost the deposit or the rewards\n")
 	}
 	for _, u := range s.Unchecked {
-		fmt.Fprintf(w, "  NOT CHECKED  %s\n", u)
+		fmt.Fprintf(w, "  NOT CHECKED  %s\n", shown(u))
+	}
+	for _, n := range s.Notes {
+		fmt.Fprintf(w, "  NOTE         %s\n", shown(n))
 	}
 	fmt.Fprintln(w)
 }
@@ -374,7 +384,7 @@ second source or --single-source; a mode that cannot read pools at all needs
 				}
 				uc := stake.RegisterPoolDelegation{
 					Base: a.stakeBase(s, env, f.yes), Certs: env.CertDecoder, Builder: env.Addresses,
-					Pools: env.Pools, Rewards: env.Rewards, Sources: f.policy(), AllowUnverified: f.allowUnverified,
+					Pools: env.Pools, PoolCross: env.PoolCross, Rewards: env.Rewards, Sources: f.policy(), OnSingle: a.singleSourceHook(s, "spo stake delegate"), AllowUnverified: f.allowUnverified,
 				}
 				res, err := uc.Run(ctx, stake.DelegationRegisterRequest{Delegator: args[0], Payer: payerOr(f.payer, args[0]), Message: f.messages, Extras: f.extra.ex, Passphrase: f.extra.pass})
 				if err != nil {
@@ -499,21 +509,23 @@ deposit open.
 
 The reward balance and the refund rest on one read of the account, where a
 false answer can cost the deposit or the rewards. It needs a second
-independent source to agree, or --single-source to go on with one. The summary
-names the sources and says when it was one.`,
+independent provider to agree (spo provider set blockfrost), or --single-source
+to go on with one. Providers that disagree are refused whatever the flag. The
+summary names the sources and says when it was one.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			spec := envSpec{flags: &f.chain, config: true, needs: stakeTxNeeds(CapCerts, CapCertDecode, CapRewards), extras: &f.extra}
 			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, wo WireOptions) error {
 				gen, err := stake.GenerateDeregistrationCertificate{
 					Store: s.Store, Addresses: env.AddressInspector, Certs: env.Certs, Account: env.Rewards, CrossCheck: env.CrossCheck,
-					Sources: f.policy(), NetworkID: env.NetworkID,
+					Sources: f.policy(), OnSingle: a.singleSourceHook(s, "spo stake deregister"), NetworkID: env.NetworkID,
 				}.Run(ctx, args[0])
 				if err != nil {
 					return f.hint(err)
 				}
 				uc := stake.DeregisterStakeAddress{
 					Base: a.stakeBase(s, env, f.yes), Certs: env.CertDecoder, Account: env.Rewards, CrossCheck: env.CrossCheck, Sources: f.policy(),
+					OnSingle: a.singleSourceHook(s, "spo stake deregister"),
 				}
 				res, err := uc.Run(ctx, stake.RegisterRequest{Stake: args[0], Payer: args[1], Message: f.messages, Extras: f.extra.ex, Passphrase: f.extra.pass})
 				if err != nil {
@@ -568,13 +580,13 @@ command then fails, as upstream's 03c does.`,
 
 func readingText[T any](r chain.Reading[T], none string, show func(T) string) string {
 	if v, ok := r.Get(); ok {
-		return show(v)
+		return shown(show(v))
 	}
 	if r.IsNone() {
 		return none
 	}
 	if r.IsUnknown() && r.Why() != "" {
-		return "not stated (" + r.Why() + ")"
+		return "not stated (" + shown(r.Why()) + ")"
 	}
 	return "not stated by the source"
 }
@@ -596,10 +608,10 @@ func printStakeStatus(w io.Writer, st stake.StakeStatus, poolSource string) {
 			if poolSource == "" {
 				poolSource = "pool provider"
 			}
-			fmt.Fprintf(w, "  pool name     %s [%s]\n", name, poolSource)
+			fmt.Fprintf(w, "  pool name     %s [%s]\n", shown(name), shown(poolSource))
 		}
 	}
-	fmt.Fprintf(w, "  vote          %s %s\n", readingText(st.VoteDelegation, "none", func(s string) string { return s }), src)
+	fmt.Fprintf(w, "  vote          %s %s\n", readingText(st.VoteDelegation, "none", shown), src)
 	fmt.Fprintf(w, "  gov deposits  %s %s\n", readingText(st.GovDeposits, "none", func(d []chain.GovActionDeposit) string {
 		if len(d) == 0 {
 			return "none"

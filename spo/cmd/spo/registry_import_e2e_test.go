@@ -321,7 +321,7 @@ func TestPoolImportFromTheChainThenIssueAnOpcert(t *testing.T) {
 		}
 		return out
 	}
-	imp := []string{"pool", "import", "mypool", p.poolID.Bech32(), "--cold", p.path("cold"), "--vrf", p.path("vrf"), "--account", "owner:" + p.path("pay") + ":" + p.path("stk")}
+	imp := []string{"pool", "import", "--yes", "--single-source", "mypool", p.poolID.Bech32(), "--cold", p.path("cold"), "--vrf", p.path("vrf"), "--account", "owner:" + p.path("pay") + ":" + p.path("stk")}
 
 	// A dry run prints the plan and writes nothing.
 	before, _ := os.ReadFile(filepath.Join(dir, cli.WorkspaceFile))
@@ -361,9 +361,13 @@ func TestPoolImportFromTheChainThenIssueAnOpcert(t *testing.T) {
 
 	// The imported cold key issues an operational certificate at the chain's counter plus one.
 	step("pool", "kes", "generate", "mypool")
-	out = step("pool", "opcert", "issue", "mypool", "--shelley-genesis", genesis)
+	out = step("pool", "opcert", "issue", "mypool", "--shelley-genesis", genesis, "--single-source")
 	mustHave(t, out, "Issued operational certificate mypool.node-000.opcert with counter 18", "The counter was checked against the chain (koios preview)")
 	step("store", "verify")
+	// Both single-source acknowledgements are in the sealed audit log, and the
+	// opcert summary says so.
+	mustHave(t, out, "WARNING: the operational certificate counter rests on ONE source")
+	wantSingleSource(t, dir, "spo pool import", "spo pool opcert issue")
 
 	// Importing the same pool again is refused, and says why.
 	if out, err := withPass(t, dir, testPass, imp[0], imp[1], "mypool", p.poolID.Bech32()); err == nil {
@@ -377,7 +381,7 @@ func TestPoolImportFromTheChainThenIssueAnOpcert(t *testing.T) {
 		t.Fatalf("%v %s", err, b)
 	}
 	off := copyWorkspace(t)
-	if out, err := withPass(t, off, testPass, "pool", "import", "offpool", info, "--cold", p.path("cold"), "--vrf", p.path("vrf")); err != nil {
+	if out, err := withPass(t, off, testPass, "pool", "import", "--yes", "offpool", info, "--cold", p.path("cold"), "--vrf", p.path("vrf")); err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
 	if !storeHas(t, off, ports.Ref{Name: "offpool", Kind: ports.NodeSKey}) {

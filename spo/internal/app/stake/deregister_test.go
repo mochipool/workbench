@@ -14,7 +14,7 @@ import (
 func (r *rig) dereg(deposit chain.Lovelace) DeregisterStakeAddress {
 	r.putCert(&testing.T{}, ports.StakingDeregCert, stk.Spec{Kind: stk.CertDeregistration, Deposit: deposit})
 	r.rewards.r = registered(nil)
-	return DeregisterStakeAddress{Base: r.base, Certs: r.certs, Account: r.rewards, Sources: SingleSourceAcknowledged}
+	return DeregisterStakeAddress{Base: r.base, Certs: r.certs, Account: r.rewards, Sources: SingleSourceAcknowledged, OnSingle: noopHook}
 }
 
 var deregReq = RegisterRequest{Stake: "w", Payer: "w.payment"}
@@ -175,6 +175,7 @@ func TestDeregisterSourcePolicy(t *testing.T) {
 		t.Errorf("%v", err)
 	}
 	uc.Sources = SingleSourceAcknowledged
+	uc.OnSingle = noopHook
 	if res, err := uc.Run(bg, deregReq); err != nil || !res.SingleSource {
 		t.Errorf("%+v %v", res, err)
 	}
@@ -184,7 +185,7 @@ func TestDeregisterSourcePolicy(t *testing.T) {
 
 func (r *rig) gen08a() GenerateDeregistrationCertificate {
 	r.rewards.r = registered(func(a *chain.RewardAccount) { a.Deposit = chain.Value(chain.Lovelace(2_500_000)) })
-	return GenerateDeregistrationCertificate{Store: r.store, Addresses: r.insp, Certs: r.certs, Account: r.rewards, Sources: SingleSourceAcknowledged,
+	return GenerateDeregistrationCertificate{Store: r.store, Addresses: r.insp, Certs: r.certs, Account: r.rewards, Sources: SingleSourceAcknowledged, OnSingle: noopHook,
 		NetworkID: ports.NetworkTestnet}
 }
 

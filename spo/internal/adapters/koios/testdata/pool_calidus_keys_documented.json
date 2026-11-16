@@ -1,0 +1,4 @@
+[
+ {"pool_id_bech32":"pool1a7h89sr6zf0v49fqzr8yg0t3dp9y5cp87r8u3qw0mm3tgrxl0jq","pool_status":"registered","calidus_nonce":86388349,"calidus_pub_key":"63c5d695ef34d8dc3de7b7ba9a1d4b5a43d9ea5a2e1c2cd5f9b3d6c0a8d02179","calidus_id_bech32":"calidus15yqt0pru382hy9vjlsxv3ye02z50sfvt8xunscg5pgden7czfjdjq","tx_hash":"6b028c5a1e3a8bf8c1a0c8a9e2b9e6d7f1b1d0b5c7a3f1e2d4c6b8a09182736a","epoch_no":1480,"block_height":3900000,"block_time":1794000000},
+ {"pool_id_bech32":"pool1a7h89sr6zf0v49fqzr8yg0t3dp9y5cp87r8u3qw0mm3tgrxl0jq","pool_status":"registered","calidus_nonce":86999999,"calidus_pub_key":"63c5d695ef34d8dc3de7b7ba9a1d4b5a43d9ea5a2e1c2cd5f9b3d6c0a8d02179","calidus_id_bech32":"calidus15yqt0pru382hy9vjlsxv3ye02z50sfvt8xunscg5pgden7czfjdjq","tx_hash":"7c028c5a1e3a8bf8c1a0c8a9e2b9e6d7f1b1d0b5c7a3f1e2d4c6b8a09182736b","epoch_no":1482,"block_height":3910000,"block_time":1794400000}
+]

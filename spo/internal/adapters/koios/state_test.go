@@ -466,3 +466,33 @@ func TestGovActionDepositsTimeoutKeepsAccount(t *testing.T) {
 		t.Fatalf("%+v %v", r, err)
 	}
 }
+
+// spec: ADR 0006 (F1): a retiring pool reports its status and epoch, so a
+// cross-check against the node does not see two different answers.
+func TestPoolStateRetiringIsStated(t *testing.T) {
+	f := newFake().on("POST /api/v1/pool_info", ok(fixture(t, "pool_info_retiring.json")))
+	r, err := f.client(t).PoolState(context.Background(), poolID(t, poolRetiring))
+	ps, has := r.Get()
+	if err != nil || !has || ps.Status != chain.PoolRetiring || ps.RetiringEpoch != 1484 {
+		t.Fatalf("%+v %v", r, err)
+	}
+	f = newFake().on("POST /api/v1/pool_info", ok(fixture(t, "pool_info_registered.json")))
+	r, _ = f.client(t).PoolState(context.Background(), poolID(t, poolRegistered))
+	if ps, _ := r.Get(); ps.Status != chain.PoolRegistered {
+		t.Fatalf("%+v", r)
+	}
+}
+
+// F6: the tip's block_time, from the recorded /tip answer; an answer without
+// it is an error.
+func TestTipTimeRecorded(t *testing.T) {
+	f := newFake().on("GET /api/v1/tip", ok(fixture(t, "tip.json")))
+	got, err := f.client(t).TipTime(context.Background())
+	if err != nil || got.Unix() != 1794819362 {
+		t.Fatalf("%v %v", got, err)
+	}
+	f = newFake().on("GET /api/v1/tip", ok(`[{"epoch_no":1,"abs_slot":2}]`))
+	if _, err := f.client(t).TipTime(context.Background()); err == nil {
+		t.Fatal("no block_time was accepted")
+	}
+}

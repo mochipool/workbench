@@ -20,6 +20,7 @@ require (
 	golang.org/x/crypto v0.59.0
 	golang.org/x/sys v0.50.0
 	modernc.org/sqlite v1.62.0
+	rsc.io/qr v0.2.0
 	tailscale.com v1.103.0-pre.0.20260916030321-a2263542f260
 )
 

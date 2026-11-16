@@ -353,3 +353,112 @@ func TestRegistryNodeKeyAndScope(t *testing.T) {
 		t.Fatalf("unknown party: %v", err)
 	}
 }
+
+// Rotate replaces a record by its revoked, renamed self and adds the new one in
+// one write: after it, exactly one of the two is active, and a refused rotation
+// writes nothing.
+//
+// spec: SPO-Xparty-INV-032
+func TestRegistryRotateIsOneWrite(t *testing.T) {
+	ctx := context.Background()
+	s, reg := newMem(), Registry{}
+	a, b, c := mkParty(1, "alice"), mkParty(3, "bob"), mkParty(5, "carol")
+	if err := s.Update(ctx, func(w ports.Writer) error {
+		for _, p := range []party.Party{a, b} {
+			if err := reg.Put(w, p); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	retired := a
+	retired.State, retired.Name = party.StateRevoked, party.RetiredName("alice", a.Fingerprint)
+	next := c
+	next.Name = "alice"
+	// a refusal (the new identity's name is bob's) writes nothing
+	clash := next
+	clash.Name = "bob"
+	if err := s.Update(ctx, func(w ports.Writer) error { return reg.Rotate(w, a.Fingerprint, retired, clash) }); !errors.Is(err, party.ErrNameTaken) {
+		t.Fatalf("a name in use: %v", err)
+	}
+	if err := s.Update(ctx, func(w ports.Writer) error { return reg.Rotate(w, party.Fingerprint{9}, retired, next) }); !errors.Is(err, ports.ErrNotFound) {
+		t.Fatalf("an old identity that is not there: %v", err)
+	}
+	if err := s.Update(ctx, func(w ports.Writer) error { return reg.Rotate(w, a.Fingerprint, a, next) }); err == nil {
+		t.Fatal("an old record that is still active was accepted as retired")
+	}
+	s.View(ctx, func(r ports.Reader) error {
+		got, _ := reg.ByName(r, "alice")
+		if got.Fingerprint != a.Fingerprint || !got.Active() {
+			t.Fatalf("a refused rotation changed the registry: %+v", got)
+		}
+		return nil
+	})
+	if err := s.Update(ctx, func(w ports.Writer) error { return reg.Rotate(w, a.Fingerprint, retired, next) }); err != nil {
+		t.Fatal(err)
+	}
+	s.View(ctx, func(r ports.Reader) error {
+		got, err := reg.ByName(r, "alice")
+		if err != nil || got.Fingerprint != c.Fingerprint || !got.Active() {
+			t.Fatalf("alice is %+v, %v", got, err)
+		}
+		old, err := reg.ByFingerprint(r, a.Fingerprint)
+		if err != nil || old.Active() || old.Name != retired.Name {
+			t.Fatalf("the old record is %+v, %v", old, err)
+		}
+		return nil
+	})
+}
+
+// A party that keeps its tailcat node key through two rotations (A to B to C):
+// the revoked records still carry the key and do not hold it. A second ACTIVE
+// party with the key is still refused, and the key can be enrolled again once
+// every record that has it is revoked.
+//
+// spec: SPO-Xparty-INV-032, SPO-Xparty-IF-002
+func TestRegistryNodeKeyIsHeldByActiveRecordsOnly(t *testing.T) {
+	ctx := context.Background()
+	s, reg := newMem(), Registry{}
+	n := party.NodeKey{9, 9}
+	mk := func(seed byte, name string) party.Party {
+		p := mkParty(seed, name)
+		p.Identity.Node = &n
+		p.Fingerprint = p.Identity.Fingerprint()
+		return p
+	}
+	a, b, c, d := mk(1, "alice"), mk(3, "alice"), mk(5, "alice"), mk(7, "alice2")
+	if err := s.Update(ctx, func(w ports.Writer) error { return reg.Put(w, a) }); err != nil {
+		t.Fatal(err)
+	}
+	rotate := func(from, to party.Party) error {
+		retired := from
+		retired.State, retired.Name = party.StateRevoked, party.RetiredName("alice", from.Fingerprint)
+		return s.Update(ctx, func(w ports.Writer) error { return reg.Rotate(w, from.Fingerprint, retired, to) })
+	}
+	if err := rotate(a, b); err != nil {
+		t.Fatalf("A to B: %v", err)
+	}
+	if err := rotate(b, c); err != nil {
+		t.Fatalf("B to C: %v", err)
+	}
+	// another active party with the same node key is refused
+	if err := s.Update(ctx, func(w ports.Writer) error { return reg.Put(w, d) }); !errors.Is(err, party.ErrNodeKeyInUse) {
+		t.Fatalf("a node key held by the active C: %v", err)
+	}
+	// revoke C: the key is free for a new enrollment
+	if err := s.Update(ctx, func(w ports.Writer) error { _, err := reg.Revoke(w, "alice"); return err }); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Update(ctx, func(w ports.Writer) error { return reg.Put(w, d) }); err != nil {
+		t.Fatalf("re-enrolling the node key after every record with it was revoked: %v", err)
+	}
+	s.View(ctx, func(r ports.Reader) error {
+		ps, _ := reg.List(r)
+		if keys := party.AllowedNodeKeys(ps); len(keys) != 1 || keys[0] != n {
+			t.Errorf("allow-list %v", keys)
+		}
+		return nil
+	})
+}

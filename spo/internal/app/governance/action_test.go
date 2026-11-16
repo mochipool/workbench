@@ -16,9 +16,6 @@ import (
 type fakeActionFiles struct{ unsupported bool }
 
 func (f fakeActionFiles) BuildActionFile(a governance.Action) (ports.ActionFile, error) {
-	if a.Kind == governance.ParameterChange {
-		return ports.ActionFile{}, errors.New("a ParameterChange action file is not built by this adapter yet")
-	}
 	b, _ := json.Marshal(a)
 	return ports.ActionFile{Action: a, CBOR: b, Envelope: append([]byte("action:"), b...)}, nil
 }
@@ -351,33 +348,6 @@ func TestRegisterAction(t *testing.T) {
 	if got := res.Outputs[0].Lovelace; got != 500_000_000_000-res.Fee-200_000_000_000 {
 		t.Errorf("the change is inputs - fee - the two deposits: %d (fee %d)", got, res.Fee)
 	}
-}
-
-// The guardrails kinds return the typed error naming what is missing, before
-// any chain read and with nothing written or built.
-//
-// spec: SPO-25b-INV-002, SPO-25b-INV-006, SPO-25b-EXT-001, SPO-25b-EXT-002, SPO-25b-EXT-003, SPO-25b-INV-005, SPO-25b-INV-007, SPO-25b-EXT-004, SPO-25b-INV-008, SPO-25b-PRE-014, SPO-25b-PRE-012, SPO-25b-PRE-013, SPO-25b-EXT-005
-func TestRegisterActionGuardrailsUnsupported(t *testing.T) {
-	r := newRig(t)
-	r.online()
-	f1, f2 := r.actionFile("a_1", governance.TreasuryWithdrawals), r.actionFile("a_2", governance.InfoAction)
-	_, err := RegisterAction{Base: r.base, Actions: fakeActionFiles{}, Rewards: fakeRewards{registeredStake()}}.Run(context.Background(), RegisterActionRequest{Payer: "w.payment", Files: []string{f2, f1}})
-	var ge *GuardrailsError
-	if !errors.Is(err, ErrGuardrailsUnsupported) || !errors.As(err, &ge) || len(ge.Missing) < 3 || ge.Kinds[0] != governance.TreasuryWithdrawals {
-		t.Fatalf("got %v", err)
-	}
-	if r.l.count("utxos") != 0 || r.l.count("build") != 0 {
-		t.Errorf("built something: %v", r.l.calls)
-	}
-	r.nothingWritten(t)
-	// Upstream decides the variant by the last file only: a treasury withdrawal
-	// followed by an info action would get no guardrails script. Any such action
-	// takes the unsupported path here.
-	_, err = RegisterAction{Base: r.base, Actions: fakeActionFiles{}, Rewards: fakeRewards{registeredStake()}}.Run(context.Background(), RegisterActionRequest{Payer: "w.payment", Files: []string{f1, f2}})
-	if !errors.Is(err, ErrGuardrailsUnsupported) {
-		t.Fatalf("treasury then info: %v", err)
-	}
-	r.nothingWritten(t)
 }
 
 // Refusals write nothing: no files, the same file twice, a file that is no

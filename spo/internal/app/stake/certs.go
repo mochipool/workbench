@@ -207,7 +207,10 @@ type GenerateDeregistrationCertificate struct {
 	Account    ports.RewardAccountReader
 	CrossCheck ports.RewardAccountReader
 	// Sources decides what happens when only one source answers.
-	Sources   SourcePolicy
+	Sources SourcePolicy
+	// OnSingle records an acknowledged single source before the certificate
+	// is stored; required when Sources is SingleSourceAcknowledged.
+	OnSingle  ports.SingleSourceHook
 	NetworkID uint8
 }
 
@@ -253,7 +256,7 @@ func (uc GenerateDeregistrationCertificate) Run(ctx context.Context, name string
 	if err != nil {
 		return DeregistrationCertificateResult{}, err
 	}
-	ans, err := accountReads{Primary: uc.Account, CrossCheck: uc.CrossCheck, Policy: uc.Sources}.read(ctx, addr, true)
+	ans, err := accountReads{Primary: uc.Account, CrossCheck: uc.CrossCheck, Policy: uc.Sources, OnSingle: uc.OnSingle}.read(ctx, addr, true)
 	if err != nil {
 		return DeregistrationCertificateResult{}, err
 	}

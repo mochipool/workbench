@@ -162,6 +162,9 @@ type storedRequest struct {
 
 type signerState struct {
 	Requests []storedRequest `json:"requests"`
+	// Rotations are the identity announcements that wait for the operator
+	// (SPO-Xparty-INV-031).
+	Rotations []pendingRotation `json:"rotations,omitempty"`
 }
 
 func readSigner(r ports.Reader) (signerState, error) {
@@ -280,6 +283,8 @@ func (s Signer) authorise(st signerState, slotTime func(uint64) (time.Time, erro
 		return nil
 	case party.CollectionClosed:
 		return nil
+	case party.RotationAnnouncement:
+		return s.authoriseRotation(s.Clock.Now(), sender, m)
 	case party.Invite:
 		if sender.Identity.Node == nil || *sender.Identity.Node != m.Node {
 			return fmt.Errorf("%w: the invitation's node key is not the coordinator's enrolled one", party.ErrNotAuthorised)
@@ -369,7 +374,7 @@ func (s Signer) Handle(ctx context.Context, rcv ports.Received) (Handled, error)
 				return Handled{Type: party.TypeSigningRequest, Sender: o.Sender().Fingerprint, HasSender: true, Request: o.ID(), Effect: "duplicate",
 					Reason: "the request first arrived over the " + again.Via + " transport; it is answered there only"}, nil
 			}
-			return s.resend(ctx, o, again, now)
+			return s.resend(ctx, local.Identity().Fingerprint(), o, again, now)
 		}
 		if again != nil { // waiting, signing or refused in silence: nothing to answer, nothing to record
 			return Handled{Type: party.TypeSigningRequest, Sender: o.Sender().Fingerprint, HasSender: true, Request: o.ID(), Effect: "duplicate"}, nil
@@ -389,20 +394,21 @@ func (s Signer) Handle(ctx context.Context, rcv ports.Received) (Handled, error)
 			for _, q := range st.Requests {
 				if q.Collection == coll && q.From == from {
 					known = true
-					named = named || (m.Outcome == party.OutcomeSubmitted && q.BodyHash == hex.EncodeToString(m.TxID))
+					named = named || ((m.Outcome == party.OutcomeSubmitted || m.Outcome == party.OutcomeQueued) && q.BodyHash == hex.EncodeToString(m.TxID))
 				}
 			}
 			if !known {
 				return &refusal{errors.New("no request of that coordinator is for that collection")}
 			}
-			if m.Outcome == party.OutcomeSubmitted && !named {
+			if (m.Outcome == party.OutcomeSubmitted || m.Outcome == party.OutcomeQueued) && !named {
 				return &refusal{errors.New("the submitted transaction id is not the body hash of any request of that collection")}
 			}
 			if err := s.Replay.Record(w, o.Sender().Fingerprint, o.ID(), o.Expires(), now); err != nil {
 				return err
 			}
 			for i := range st.Requests {
-				if st.Requests[i].Collection == coll && st.Requests[i].From == from {
+				// The first outcome stays (SPO-Xparty-INV-036).
+				if st.Requests[i].Collection == coll && st.Requests[i].From == from && st.Requests[i].Closed == "" {
 					st.Requests[i].Closed = string(m.Outcome)
 				}
 			}
@@ -417,6 +423,12 @@ func (s Signer) Handle(ctx context.Context, rcv ports.Received) (Handled, error)
 			return appendEvent(w, ev)
 		})
 		h.Effect = "closed"
+	case party.RotationAnnouncement:
+		err = s.Store.Update(ctx, func(w ports.Writer) error {
+			var err error
+			h, err = s.onRotation(w, o, m, via, now)
+			return err
+		})
 	case party.Invite:
 		if s.OnInvite == nil {
 			return s.rejectEffect(ctx, o, errors.New("this signer takes no invitations"), now)
@@ -458,13 +470,13 @@ func (s Signer) rejectEffect(ctx context.Context, o ports.OpenedEnvelope, why er
 
 // resend queues the stored response of an answered request again
 // (SPO-Xparty-INV-017).
-func (s Signer) resend(ctx context.Context, o ports.OpenedEnvelope, q *storedRequest, now time.Time) (Handled, error) {
+func (s Signer) resend(ctx context.Context, sealer party.Fingerprint, o ports.OpenedEnvelope, q *storedRequest, now time.Time) (Handled, error) {
 	id, err := msgOfHex(q.ID)
 	if err != nil {
 		return Handled{}, err
 	}
 	err = s.Store.Update(ctx, func(w ports.Writer) error {
-		if err := enqueue(w, now, OutItem{ID: q.ResponseID, To: q.From, Type: responseType(*q), Collection: q.Collection, Slot: q.Slot,
+		if err := s.enqueue(w, now, sealer, OutItem{ID: q.ResponseID, To: q.From, Type: responseType(*q), Collection: q.Collection, Slot: q.Slot,
 			Expires: q.Expires, Envelope: q.Response}); err != nil {
 			return err
 		}
@@ -745,7 +757,7 @@ func (s Signer) onRequest(ctx context.Context, local ports.LocalIdentity, o port
 		if q.Silent {
 			return nil
 		}
-		return enqueue(w, now, OutItem{ID: q.ResponseID, To: q.From, Type: string(party.TypeSigningRefusal), Collection: q.Collection,
+		return s.enqueue(w, now, local.Identity().Fingerprint(), OutItem{ID: q.ResponseID, To: q.From, Type: string(party.TypeSigningRefusal), Collection: q.Collection,
 			Slot: q.Slot, Expires: q.Expires, Envelope: env})
 	})
 	if errors.Is(err, ports.ErrReplay) || errors.Is(err, ports.ErrReplayFull) {
@@ -766,6 +778,36 @@ func (s Signer) Pending(ctx context.Context) ([]PendingRequest, error) {
 				id, _ := msgOfHex(q.ID)
 				out = append(out, PendingRequest{ID: id, From: q.FromName, Collection: q.Collection, Slot: q.Slot, Role: custody.Role(q.Role), Via: q.Via,
 					Expires: time.Unix(q.Expires, 0).UTC()})
+			}
+		}
+		return err
+	})
+	return out, err
+}
+
+// ClosedRequest is a request that was closed before the operator decided it:
+// by its coordinator's notice (Outcome is the collection's) or by a rotation
+// (SPO-Xparty-INV-036).
+type ClosedRequest struct {
+	ID         party.MessageID
+	From       string // the local name of the coordinator
+	Collection string
+	Slot       int
+	Role       custody.Role
+	Outcome    string
+}
+
+// Closed lists the requests that were closed while they waited for a decision
+// and have not expired, so that an operator who saw one in the list can see
+// what became of it.
+func (s Signer) Closed(ctx context.Context) ([]ClosedRequest, error) {
+	var out []ClosedRequest
+	err := s.Store.View(ctx, func(r ports.Reader) error {
+		st, err := readSigner(r)
+		for _, q := range st.Requests {
+			if q.Closed != "" && (q.State == reqPending || q.State == reqSigning) && q.Expires >= s.Clock.Now().Unix() {
+				id, _ := msgOfHex(q.ID)
+				out = append(out, ClosedRequest{ID: id, From: q.FromName, Collection: q.Collection, Slot: q.Slot, Role: custody.Role(q.Role), Outcome: q.Closed})
 			}
 		}
 		return err
@@ -867,7 +909,26 @@ func (r Review) Approval() (Approval, error) {
 var (
 	ErrUnknownRequest = errors.New("there is no such request")
 	ErrNotPending     = errors.New("the request is not waiting for a decision")
+	// ErrRequestClosed: the request was closed by a notice (SPO-Xparty-INV-036).
+	ErrRequestClosed = errors.New("the request was closed")
 )
+
+// ClosedError is the refusal of a request that was closed: by its
+// coordinator's CollectionClosed notice (the outcome of the collection), or by
+// a rotation of the coordinator's or of this machine's identity
+// (SPO-Xparty-INV-033, INV-036). It is also ErrNotPending.
+type ClosedError struct{ Outcome string }
+
+func (e ClosedError) Error() string {
+	if e.Outcome == ClosedRotated {
+		return "the identity that sent this request, or this machine's own, was replaced by a rotation after the request was made: it is closed and nothing was signed. If the signature is still wanted it must be requested again"
+	}
+	return fmt.Sprintf("the coordinator closed this collection (%s): the request is closed and nothing was signed. If the coordinator still wants your signature it must ask again", e.Outcome)
+}
+
+func (e ClosedError) Is(target error) bool {
+	return target == ErrRequestClosed || target == ErrNotPending
+}
 
 // ReviewRequest decodes the stored request from its own bytes and returns what
 // the operator must read. It recomputes the body hash from the bytes and
@@ -895,6 +956,9 @@ func (s Signer) ReviewRequest(ctx context.Context, id party.MessageID) (Review, 
 	})
 	if err != nil {
 		return Review{}, err
+	}
+	if q.Closed != "" && (q.State == reqPending || q.State == reqSigning) {
+		return Review{}, ClosedError{q.Closed}
 	}
 	if !q.claimable(now, s.gateTimeout()) {
 		return Review{}, fmt.Errorf("%w: it is %s", ErrNotPending, q.State)
@@ -944,6 +1008,9 @@ func (s Signer) ReviewRequest(ctx context.Context, id party.MessageID) (Review, 
 			return err
 		}
 		p := st.byID(hexMsg(id))
+		if p != nil && p.Closed != "" {
+			return ClosedError{p.Closed}
+		}
 		if p == nil || !p.claimable(now, s.gateTimeout()) || p.BodyHash != q.BodyHash {
 			return ErrNotPending
 		}
@@ -981,6 +1048,7 @@ func (s Signer) Approve(ctx context.Context, a Approval) (Handled, error) {
 		return Handled{}, err
 	}
 	defer local.Destroy()
+	sealedBy := local.Identity().Fingerprint()
 	now := s.Clock.Now()
 	slotNow, err := s.Chain.Slot(ctx, now)
 	if err != nil {
@@ -1031,10 +1099,13 @@ func (s Signer) Approve(ctx context.Context, a Approval) (Handled, error) {
 		if !p.claimable(now, s.gateTimeout()) {
 			return fmt.Errorf("%w: it is %s", ErrNotPending, p.State)
 		}
+		if p.Closed != "" {
+			return ClosedError{p.Closed}
+		}
 		if p.Reviewed != hexHash(a.tok.hash) || p.BodyHash != hexHash(a.tok.hash) {
 			return ErrNoReview
 		}
-		if p.Closed != "" || p.Expires < now.Unix() || slotNow >= p.TTL {
+		if p.Expires < now.Unix() || slotNow >= p.TTL {
 			return fmt.Errorf("%w: the request is closed or expired", ErrNotPending)
 		}
 		fp, err := fpOfHex(p.From)
@@ -1087,6 +1158,14 @@ func (s Signer) Approve(ctx context.Context, a Approval) (Handled, error) {
 		})
 		return Handled{}, serr
 	}
+	// The operator may have been at the passphrase prompt for a long time. What
+	// the claim saw is checked again here, in the transaction that stores the
+	// answer: the request must still be open, its sender still an active
+	// enrolled party with the identity it came from, and this machine's own
+	// identity the one the response was sealed with. Anything else drops the
+	// envelope: nothing is stored or queued, an event says why
+	// (SPO-Xparty-INV-038).
+	var dropped error
 	err = s.Store.Update(ctx, func(w ports.Writer) error {
 		st, err := readSigner(w)
 		if err != nil {
@@ -1100,6 +1179,16 @@ func (s Signer) Approve(ctx context.Context, a Approval) (Handled, error) {
 			// Another approval took over a stale claim: its answer stands.
 			return fmt.Errorf("%w: it is %s", ErrNotPending, p.State)
 		}
+		if why := s.approvalStale(w, p, sealedBy); why != nil {
+			p.State, p.SigningSince = reqPending, 0
+			if err := writeJSON(w, signerRef, st); err != nil {
+				return err
+			}
+			ev := eventOf(now, "approval-dropped", q.Collection, q.Slot, a.tok.hash)
+			ev.Peer, ev.Reason = q.From, why.Error()
+			dropped = why
+			return appendEvent(w, ev)
+		}
 		p.State, p.SigningSince, p.ResponseID, p.Response = reqApproved, 0, hexMsg(rid), env
 		if err := writeJSON(w, signerRef, st); err != nil {
 			return err
@@ -1109,13 +1198,46 @@ func (s Signer) Approve(ctx context.Context, a Approval) (Handled, error) {
 		if err := appendEvent(w, ev); err != nil {
 			return err
 		}
-		return enqueue(w, now, OutItem{ID: hexMsg(rid), To: q.From, Type: string(party.TypeSigningResponse), Collection: q.Collection,
+		return s.enqueue(w, now, sealedBy, OutItem{ID: hexMsg(rid), To: q.From, Type: string(party.TypeSigningResponse), Collection: q.Collection,
 			Slot: q.Slot, Expires: q.Expires, Envelope: env})
 	})
 	if err != nil {
 		return Handled{}, err
 	}
+	if dropped != nil {
+		return Handled{}, dropped
+	}
 	return Handled{Type: party.TypeSigningRequest, Sender: coord.Fingerprint, HasSender: true, Effect: "approved", Request: a.tok.id}, nil
+}
+
+// approvalStale re-reads, inside the transaction that would store an answer,
+// what the answer depends on. It returns the reason the answer must be dropped,
+// or nil: the request is closed; its sender is not an active enrolled party
+// with the fingerprint the request came from; or this machine's identity is not
+// the one that sealed the response.
+func (s Signer) approvalStale(w ports.Writer, p *storedRequest, sealedBy party.Fingerprint) error {
+	if p.Closed != "" {
+		return ClosedError{p.Closed}
+	}
+	from, err := fpOfHex(p.From)
+	if err != nil {
+		return err
+	}
+	_, ps, err := s.loadParties(w)
+	if err != nil {
+		return err
+	}
+	if i := slices.IndexFunc(ps, func(c party.Party) bool { return c.Fingerprint == from }); i < 0 || !ps[i].Active() {
+		return fmt.Errorf("%w: the party the request came from is no longer an active enrolled party", ErrReviewStale)
+	}
+	now, err := s.localFingerprint(w)
+	if err != nil {
+		return err
+	}
+	if now != sealedBy {
+		return fmt.Errorf("%w: this machine's identity was replaced while the operator was authenticating", ErrReviewStale)
+	}
+	return nil
 }
 
 // sign makes the witness with the signer that holds the key, verifies it
@@ -1202,6 +1324,9 @@ func (s Signer) Refuse(ctx context.Context, id party.MessageID) (Handled, error)
 		if q == nil {
 			return ErrUnknownRequest
 		}
+		if q.Closed != "" {
+			return ClosedError{q.Closed}
+		}
 		if !q.claimable(now, s.gateTimeout()) {
 			return fmt.Errorf("%w: it is %s", ErrNotPending, q.State)
 		}
@@ -1241,7 +1366,7 @@ func (s Signer) Refuse(ctx context.Context, id party.MessageID) (Handled, error)
 			return err
 		}
 		out = Handled{Type: party.TypeSigningRequest, Sender: coord.Fingerprint, HasSender: true, Effect: "declined", Request: id}
-		return enqueue(w, now, OutItem{ID: q.ResponseID, To: q.From, Type: string(party.TypeSigningRefusal), Collection: q.Collection,
+		return s.enqueue(w, now, local.Identity().Fingerprint(), OutItem{ID: q.ResponseID, To: q.From, Type: string(party.TypeSigningRefusal), Collection: q.Collection,
 			Slot: q.Slot, Expires: q.Expires, Envelope: env})
 	})
 	return out, err

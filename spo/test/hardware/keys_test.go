@@ -251,7 +251,7 @@ func TestOpCertWithHardwareColdKey(t *testing.T) {
 	if _, err := (poolops.GenerateKesKey{Store: w.Store, KeyGen: native.KeyGen{}}).Run(ctx, "pool"); err != nil {
 		t.Fatal(err)
 	}
-	uc := poolops.IssueOperationalCertificate{Store: w.Store, Signers: w.Signers(), Tip: w.Chain, Genesis: genesis{}, Counters: noCounter{}, Clock: fixedClock{}}
+	uc := poolops.IssueOperationalCertificate{Store: w.Store, Signers: w.Signers(), Tip: w.Chain, Genesis: genesis{}, Counters: noCounter{}, Clock: fixedClock{}, SingleSource: true, OnSingle: noopSingle} // upstream 04d takes the counter from one provider in light and online mode; the port needs that acknowledged (ADR 0006, N7)
 	res, err := uc.Run(ctx, "pool", poolops.IssueOptions{})
 	if err != nil {
 		t.Fatal(err)

@@ -79,3 +79,4 @@ Pool import (recorded 2026-11-16, preview): `pool_updates_registered.json` is
 nine registration updates, newest first. The `PoolInfo` tests reuse `pool_info_registered.json`,
 `pool_info_retiring.json`, `pool_info_retired.json` and `pool_info_unknown.json`; every other
 case (null or absent `op_cert_counter`, malformed rows) is hand-edited in `poolimport_test.go`.
+| `pool_calidus_keys_documented.json` | **Not recorded.** Written by hand from the shape the Koios API documentation gives for `GET /pool_calidus_keys` (members `pool_id_bech32`, `pool_status`, `calidus_nonce`, `calidus_pub_key`, `calidus_id_bech32`, `tx_hash`, `epoch_no`, `block_height`, `block_time`); the values are invented. Replace it with a live answer when one is recorded; `calidus_test.go` and the reader's doc comment say the shape is unconfirmed |

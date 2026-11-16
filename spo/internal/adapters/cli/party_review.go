@@ -94,6 +94,14 @@ func netText(fl party.Flow) string {
 //
 // spec: SPO-Xparty-PR-002, SPO-Xparty-PR-003, SPO-Xparty-PR-004
 func printReview(w io.Writer, rv multisig.Review, full bool) (folded int) {
+	folded, _ = printReviewSections(w, rv, full)
+	return folded
+}
+
+// printReviewSections is printReview and also names the authority categories
+// (authorityCategories) that lost a line to the fold or the clip, in table
+// order, so that a review can say which ones at its end.
+func printReviewSections(w io.Writer, rv multisig.Review, full bool) (folded int, sections []string) {
 	fmt.Fprintf(w, "Signing request %x\n", rv.RequestID[:])
 	fmt.Fprintf(w, "  arrived by    the %s transport\n", rv.Via)
 	fmt.Fprintf(w, "  from          %s (an enrolled coordinator)\n", safeText(rv.Coordinator))
@@ -176,18 +184,34 @@ func printReview(w io.Writer, rv multisig.Review, full bool) (folded int) {
 	// The parts that decide a signature come first, so the fold of the long
 	// tail (outputs, inputs, metadata) cannot hide them; and when it still
 	// folds or clips any line of them, that is reported to the caller.
-	lines, authority := txViewLines(rv.View, true)
+	// Text a peer chose (a relay host, a metadata or anchor URL) is quoted
+	// here, with the helper the summary uses (SPO-Xparty-PR-002).
+	shown := quotedView(rv.View)
+	lines, authority := txViewLines(shown, true)
 	lines = append(lines, "")
+	owner := authorityOwners(shown, authority)
+	hit := map[string]bool{}
 	for i, l := range lines {
 		if !full && i >= foldBodyLines {
 			more(w, "  ", len(lines)-i)
 			folded += max(authority-i, 0)
+			for j := i; j < authority && j < len(owner); j++ {
+				hit[owner[j]] = true
+			}
 			break
 		}
 		if !full && i < authority && len([]rune(l)) > foldLineRunes {
 			folded++
+			if i < len(owner) {
+				hit[owner[i]] = true
+			}
 		}
 		fmt.Fprintln(w, clip(l, full))
+	}
+	for _, c := range authorityCategories {
+		if hit[c.name] {
+			sections = append(sections, c.name)
+		}
 	}
 	if rv.Aux != nil {
 		fmt.Fprintf(w, "Metadata  (%d label(s))\n", len(rv.Aux.Labels))
@@ -207,7 +231,105 @@ func printReview(w io.Writer, rv multisig.Review, full bool) (folded int) {
 		}
 		fmt.Fprintln(w)
 	}
-	return folded
+	return folded, sections
+}
+
+// authorityCategory is one part of a body that decides a signature and is
+// printed before the long tail of the review. The table is the single list:
+// the refusal that names what can be folded, the review's closing warning and
+// the attribution of a folded line to its part are all read from it, and a
+// test fails when a line of the authority region belongs to no row, so a new
+// category cannot be added to the display and forgotten here.
+type authorityCategory struct {
+	name string
+	// only is a view that holds this category of v and nothing else.
+	only func(v party.TxView) party.TxView
+}
+
+// authorityCategories is in the order txViewLines prints them.
+var authorityCategories = []authorityCategory{
+	{"certificates", func(v party.TxView) party.TxView { return party.TxView{Certificates: v.Certificates} }},
+	{"votes", func(v party.TxView) party.TxView { return party.TxView{Votes: v.Votes} }},
+	{"withdrawals", func(v party.TxView) party.TxView { return party.TxView{Withdrawals: v.Withdrawals} }},
+	{"mint", func(v party.TxView) party.TxView { return party.TxView{Mint: v.Mint} }},
+	{"required signers", func(v party.TxView) party.TxView { return party.TxView{RequiredSigners: v.RequiredSigners} }},
+	{"treasury", func(v party.TxView) party.TxView { return party.TxView{TreasuryValue: v.TreasuryValue} }},
+	{"donation", func(v party.TxView) party.TxView { return party.TxView{Donation: v.Donation} }},
+}
+
+// authorityNames is the categories as prose: "a, b and c".
+func authorityNames() string {
+	var n []string
+	for _, c := range authorityCategories {
+		n = append(n, c.name)
+	}
+	return strings.Join(n[:len(n)-1], ", ") + " and " + n[len(n)-1]
+}
+
+// authorityCounts is the number of lines of the head (what precedes the first
+// category) and of each category, measured by rendering the view with only
+// that category, so the counts follow the renderer.
+func authorityCounts(v party.TxView) (head int, counts []int) {
+	nv := party.TxView{NetworkID: v.NetworkID}
+	_, head = txViewLines(nv, true)
+	for _, c := range authorityCategories {
+		o := c.only(v)
+		o.NetworkID = v.NetworkID
+		_, n := txViewLines(o, true)
+		counts = append(counts, n-head)
+	}
+	return head, counts
+}
+
+// authorityOwners names, for each line of the authority region, the category
+// it belongs to ("" for the head).
+func authorityOwners(v party.TxView, authority int) []string {
+	head, counts := authorityCounts(v)
+	owner := make([]string, 0, authority)
+	for i := 0; i < head; i++ {
+		owner = append(owner, "")
+	}
+	for i, c := range authorityCategories {
+		for j := 0; j < counts[i]; j++ {
+			owner = append(owner, c.name)
+		}
+	}
+	return owner
+}
+
+// quotedView is v with the text a peer chose and the decoder does not limit
+// (relay hosts, the pool metadata URL, anchor URLs) replaced by its quoted
+// form, so that the review body shows it as the summary does: one word, with
+// no control character, escape sequence, bidirectional override, line
+// separator or newline left raw. The input is not changed.
+func quotedView(v party.TxView) party.TxView {
+	anchor := func(a *party.ViewAnchor) *party.ViewAnchor {
+		if a == nil {
+			return nil
+		}
+		c := *a
+		c.URL = quoted(c.URL)
+		return &c
+	}
+	v.Certificates = slices.Clone(v.Certificates)
+	for i := range v.Certificates {
+		c := &v.Certificates[i]
+		c.Anchor = anchor(c.Anchor)
+		if c.PoolReg != nil {
+			r := *c.PoolReg
+			r.Relays = slices.Clone(r.Relays)
+			for j := range r.Relays {
+				r.Relays[j].Host = quoted(r.Relays[j].Host)
+			}
+			r.MetaURL = quoted(r.MetaURL)
+			c.PoolReg = &r
+		}
+	}
+	v.Votes = slices.Clone(v.Votes)
+	for i := range v.Votes {
+		v.Votes[i].Anchor = anchor(v.Votes[i].Anchor)
+	}
+	return v
 }
 
 const paymentElsewhereText = "THIS BODY SPENDS YOUR OWN PAYMENT UTXOs, and the key you are asked for is not a payment key: this witness does not authorise that. The payment witness must come from elsewhere."
@@ -357,16 +479,29 @@ not listed: it is in spo party events.`,
 				if err != nil {
 					return err
 				}
+				closed, err := sg.Closed(ctx)
+				if err != nil {
+					return err
+				}
 				w := a.d.Out
 				if len(pending) == 0 {
 					fmt.Fprintln(w, "No request is waiting for you.")
-					return nil
 				}
 				for _, p := range pending {
 					fmt.Fprintf(w, "%x  from %s  %s key  collection %.8s slot %d  arrived by %s  expires %s\n", p.ID[:], safeText(p.From), p.Role,
 						p.Collection, p.Slot, p.Via, p.Expires.UTC().Format("2006-01-02 15:04 MST"))
 				}
-				fmt.Fprintln(w, "Read one with: spo party review ID")
+				if len(pending) > 0 {
+					fmt.Fprintln(w, "Read one with: spo party review ID")
+				}
+				// Requests the coordinator closed with a notice, or that a rotation
+				// closed, are not waiting for you (SPO-Xparty-INV-036).
+				if len(closed) > 0 {
+					fmt.Fprintln(w, "Closed before you decided, so not waiting for you (the coordinator must ask again if it still wants the signature):")
+					for _, c := range closed {
+						fmt.Fprintf(w, "  closed (%s)  %x  from %s  %s key  collection %.8s slot %d\n", c.Outcome, c.ID[:], safeText(c.From), c.Role, c.Collection, c.Slot)
+					}
+				}
 				return nil
 			})
 		},
@@ -406,13 +541,19 @@ spo party approve then needs --full.`,
 				if err != nil {
 					return reviewErr(err, args[0])
 				}
-				printReview(a.d.Out, rv, f.full)
+				_, folded := printReviewSections(a.d.Out, rv, f.full)
 				n, err := r.reviewCount(ctx, rv.BodyHash)
 				if err != nil {
 					return err
 				}
 				cols, _ := geometry(a.term)
 				printSummary(a.d.Out, rv, n <= 1, summaryOpts{cols: cols, full: f.full, label: fmt.Sprintf("%.8x", rv.RequestID[:]), owned: sg.Owned})
+				// Last, where it cannot scroll away above the summary: what the
+				// fold hid, and that approve will not ask until it was read.
+				if len(folded) > 0 {
+					fmt.Fprintf(a.d.Out, "!! The review above FOLDED lines of: %s. `spo party approve %.8x` refuses to ask until you give --full. Read them whole with: spo party review %.8x --full\n",
+						strings.Join(folded, ", "), rv.RequestID[:], rv.RequestID[:])
+				}
 				fmt.Fprintf(a.d.Out, "To sign: spo party approve %.8x     To decline: spo party refuse %.8x\n", rv.RequestID[:], rv.RequestID[:])
 				return nil
 			})
@@ -427,6 +568,8 @@ spo party approve then needs --full.`,
 // approval.
 func reviewErr(err error, id string) error {
 	switch {
+	case errors.Is(err, multisig.ErrRequestClosed):
+		return fmt.Errorf("%w. See: spo party requests", err)
 	case errors.Is(err, multisig.ErrCannotReview):
 		return fmt.Errorf("%w. You can still decline it: spo party refuse %s", err, id)
 	case errors.Is(err, multisig.ErrNotPending), errors.Is(err, multisig.ErrUnknownRequest):
@@ -513,6 +656,13 @@ func (a *app) reviewAndApprove(ctx context.Context, r *partyRun, sg multisig.Sig
 	}
 	r.gateNote = fmt.Sprintf("request %x, NET %s", rv.RequestID[:4], netText(rv.Flow))
 	flushTypedAhead(a.term)
+	// The terminal can be resized between the check above and the question:
+	// the size is read again immediately before asking, and a block that no
+	// longer fits is refused with nothing asked (SPO-Xparty-PR-002).
+	atQuestion := geometryOf(a.term)
+	if err := sum.stillFits(atQuestion, cols, rv, full, short); err != nil {
+		return err
+	}
 	ok, err := a.askYes(ctx, approvePrompt(rv))
 	if err != nil {
 		return err
@@ -520,6 +670,14 @@ func (a *app) reviewAndApprove(ctx context.Context, r *partyRun, sg multisig.Sig
 	if !ok {
 		fmt.Fprintf(a.d.Out, "Not signed. The request is still waiting; decline it with: spo party refuse %x\n", rv.RequestID[:])
 		return nil
+	}
+	// The operator took time to answer. The size is read again: a terminal that
+	// is narrower or shorter than it was at the question may have wrapped or
+	// scrolled what the answer was given on, so nothing is signed. A terminal
+	// made smaller and back to its size during the question cannot be told
+	// from one never touched (SPO-Xparty-PR-002).
+	if now := geometryOf(a.term); now.cols < atQuestion.cols || now.rows < atQuestion.rows {
+		return fmt.Errorf("the terminal was made smaller while you were answering (%dx%d at the question, %dx%d now), so what you answered on may have wrapped or scrolled. Nothing was signed. Run spo party approve %s again", atQuestion.cols, atQuestion.rows, now.cols, now.rows, short)
 	}
 	ap, err := rv.Approval()
 	if err != nil {
@@ -539,7 +697,7 @@ func (a *app) reviewAndApprove(ctx context.Context, r *partyRun, sg multisig.Sig
 // any line of the sections that decide a signature: the operator is only ever
 // asked after seeing them whole, in the review above or with --full.
 func foldedError(folded int, short string) error {
-	return fmt.Errorf("the default review folded %d line(s) of the certificates, votes, withdrawals or required signers: read them whole with `spo party review %s --full`, then approve with `spo party approve %s --full`. Nothing was signed", folded, short, short)
+	return fmt.Errorf("the default review folded %d line(s) of the %s: read them whole with `spo party review %s --full`, then approve with `spo party approve %s --full`. Nothing was signed", folded, authorityNames(), short, short)
 }
 
 func (a *app) partyRefuseCommand() *cobra.Command {
