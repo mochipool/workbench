@@ -18,7 +18,8 @@ spo/
     app/<context>/         use cases; depend on domain and ports only
     ports/                 the port interfaces of spec/domain/ports.md, and their shared types
     adapters/
-      cardanocli/ hwcli/ signercli/ gpg/      external tools (Ledger, KeyGen, Signer)
+      native/                                 Blink Labs libraries (KeyGen, Signer, Ledger); ADR 0007
+      hwcli/ gpg/                             external tools that remain
       fsstore/                                upstream file layout (Store, Vault)
       sqlitestore/                            sealed single-file store (Store, Vault)
       koios/ utxorpc/ nodesocket/ snapshot/   ChainQuery, Submitter
@@ -52,6 +53,7 @@ spo/
 | `github.com/awnumar/memguard` | locked, guarded buffers | `platform/secret` |
 | `modernc.org/sqlite` | pure-Go SQLite, no CGO | `adapters/sqlitestore` |
 | `github.com/fxamacker/cbor/v2` | CBOR for envelopes and for reading transaction bodies | `platform/seal`, `adapters`, witness verification |
+| `github.com/blinklabs-io/bursa`, `github.com/blinklabs-io/gouroboros` | key generation, envelopes, signing, certificates, ledger types ([ADR 0007](./0007-native-first-with-blink-labs.md)) | `adapters/native` |
 | `github.com/tailscale/tailcat` v0.7.0 | first network transport | `adapters/tailcat` |
 | `github.com/utxorpc/go-sdk` | UTxO RPC client | `adapters/utxorpc` |
 | `github.com/spf13/cobra` | command tree | `adapters/cli`, `cmd/spo` |
@@ -62,4 +64,4 @@ Adding a module is a change to this table. Tailcat requires Go 1.27, so the whol
 ## Consequences
 
 * The binary is built without CGO and is statically linked.
-* Native Go is used for checks on public data: hashing a transaction body and verifying an Ed25519 witness over it. Building, decoding for display and signing stay with the pinned external tools (D2).
+* Superseded by [ADR 0007](./0007-native-first-with-blink-labs.md): operations on keys and ledger data run in process where Blink Labs' libraries cover them, and cardano-cli is the test oracle.

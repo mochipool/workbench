@@ -22,8 +22,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/cardanocli"
 	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
+	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/adapters/toolchain"
 	"github.com/mochipool/workbench/spo/internal/app/poolops"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
@@ -98,11 +98,12 @@ func snapshot(t *testing.T, dir, prefix string) state {
 		}
 		desc := "mode=" + info.Mode().Perm().String() + " "
 		var envl struct {
-			Type    string `json:"type"`
-			CborHex string `json:"cborHex"`
+			Type        string `json:"type"`
+			Description string `json:"description"`
+			CborHex     string `json:"cborHex"`
 		}
 		if json.Unmarshal(raw, &envl) == nil && envl.Type != "" {
-			desc += "envelope=" + envl.Type + " cborHexLen=" + itoa(len(envl.CborHex))
+			desc += "envelope=" + envl.Type + " description=" + envl.Description + " cborHexLen=" + itoa(len(envl.CborHex)) + " bytes=" + itoa(len(raw))
 		} else {
 			desc += "content=" + string(raw)
 		}
@@ -148,7 +149,7 @@ func TestKesKeyGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	uc := poolops.GenerateKesKey{Store: store, KeyGen: cardanocli.KeyGen{Toolchain: e.tc, Run: execx.OS{}}}
+	uc := poolops.GenerateKesKey{Store: store, KeyGen: native.KeyGen{}}
 
 	// 1. First key of a fresh pool.
 	if code := e.upstream(t, upDir, "exec", "04c_genKESKeys.sh", "mypool", "cli"); code != 0 {

@@ -10,3 +10,4 @@ Decisions for the Go reference implementation (`spo/`). Each record closes conce
 | [0004](./0004-data-classification.md) | What is sealed and how each class is handled | E5 |
 | [0005](./0005-party-envelope-and-signing-policy.md) | One signed and encrypted envelope for every transport; which keys may sign remotely | T3, E7, M6, M7 (part) |
 | [0006](./0006-chain-access-providers.md) | Chain access over HTTP and gRPC providers, and trust in their answers | N1, N2, N4 |
+| [0007](./0007-native-first-with-blink-labs.md) | Native first with Blink Labs' Go libraries; cardano-cli becomes the test oracle | X2 finding; amends D2 |

@@ -51,7 +51,7 @@ State: milestone M0 (decisions and skeleton) is done, and M1 (parity harness) ha
 | Ports defined so far: `Toolchain`, `Store`, `Vault`, `KeyGen` | `spo/internal/ports` |
 | KES rotation state and the `GenerateKesKey` use case | `spo/internal/domain/pool`, `spo/internal/app/poolops` |
 | Upstream-layout store (plain files, keys unsealed) | `spo/internal/adapters/fsstore` |
-| cardano-cli key generation for KES and VRF | `spo/internal/adapters/cardanocli` |
+| Native key generation for KES and VRF (Blink Labs `bursa`), checked against cardano-cli | `spo/internal/adapters/native`, `spo/test/parity/keygen_test.go` |
 | Differential tests against the pinned upstream scripts | `spo/test/parity` |
 | Which specs are implemented, and the waived ids with reasons | `spo/spec-coverage.toml` |
 
@@ -70,7 +70,7 @@ Things that will bite:
 * **Nix does not see files jj has not told git about.** After creating files, run `git add -N <paths>` before `nix build`, or the flake fails with "not tracked by Git".
 * **`vendorHash`.** After any change to `spo/go.mod` or `spo/go.sum`, set `vendorHash` in `tools/spo.nix` to the all-`A` placeholder, build, and paste the hash Nix reports.
 * **Go version.** `spo` needs Go 1.27 (tailcat). It is built with the `nixpkgs-go` flake input, which is locked separately from the release set's `nixpkgs`.
-* **KES and VRF key generation cannot use a pipe** with cardano-cli 11.2.3.0. See the finding in the concerns page before writing the `KeyGen` adapter.
+* **Native first (ADR 0007).** New key, signing and ledger operations go in `spo/internal/adapters/native` on Blink Labs' libraries, each with a parity test against the pinned cardano-cli in `spo/test/parity`. Do not add a cardano-cli adapter for something `bursa` or `gouroboros` covers. cardano-cli 11.2.3.0 cannot write KES or VRF keys to a pipe, which is one reason.
 
 How to port a use case (the pattern `GenerateKesKey` sets):
 
