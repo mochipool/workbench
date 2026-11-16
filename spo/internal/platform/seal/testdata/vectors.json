@@ -1,0 +1,58 @@
+{
+  "_comment": "Pins the seal format. Regenerate only for a deliberate format change: go test ./internal/platform/seal -run TestVectors -update",
+  "format_version": 1,
+  "inputs": {
+    "master_key": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+    "workspace_id": "202122232425262728292a2b2c2d2e2f",
+    "slot_id": "303132333435363738393a3b3c3d3e3f",
+    "recovery_slot_id": "404142434445464748494a4b4c4d4e4f",
+    "recovery_key": "505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f",
+    "passphrase": "correct horse battery staple",
+    "kdf_memory_kib": 65536,
+    "kdf_passes": 3,
+    "kdf_lanes": 1,
+    "salt": "707172737475767778797a7b7c7d7e7f",
+    "slot_nonce": "808182838485868788898a8b8c8d8e8f9091929394959697",
+    "recovery_slot_nonce": "909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7",
+    "record_id": "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+    "kind": "kes.skey",
+    "owner": "mypool#7",
+    "class": "secret",
+    "record_version": 3,
+    "data_key": "b0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecf",
+    "payload_nonce": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7",
+    "wrap_nonce": "d0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+    "plaintext": "7b2274797065223a224b65735369676e696e674b65795f656432353531395f6b65735f325e36227d",
+    "tag_namespace": "record-ref",
+    "tag_parts": [
+      "6d79706f6f6c",
+      "6b65732e736b6579",
+      "37"
+    ],
+    "audit_prev_mac": "0000000000000000000000000000000000000000000000000000000000000000",
+    "audit_row": [
+      1,
+      5,
+      "update",
+      "x"
+    ]
+  },
+  "outputs": {
+    "hkdf_record_wrap_key": "58957f61723ac3acfb33ea24e35d10930911d810af6a1510b929cda12ea210c2",
+    "hkdf_index_key": "e44af212147c52c766cd28d8eec73fc662996b95d61384514fbf3fc07b77bcd7",
+    "hkdf_audit_key": "66c57e5fab740d855075cb7da8513a8e7c0638a1f0b453f39ce063935fde4ef2",
+    "hkdf_recovery_slot_key": "4b0b20b71fac9e03d7c2ed37c356099ddf5d93e53f434163eeb4951daee4fcce",
+    "passphrase_slot_ad": "850150202122232425262728292a2b2c2d2e2f50303132333435363738393a3b3c3d3e3f6a7061737370687261736585686172676f6e3269641a00010000030150707172737475767778797a7b7c7d7e7f",
+    "passphrase_slot_wrapped": "dcd08d1344b9877cb924b098e12229fcfd1ab06e607d079d621840360511650b356ca7ab51b28fcb462f20895ff66e26",
+    "recovery_slot_ad": "850150202122232425262728292a2b2c2d2e2f50404142434445464748494a4b4c4d4e4f687265636f76657279826b686b64662d736861323536782773706f2d776f726b62656e63682f7365616c2f76312f736c6f742d6b65792f7265636f76657279",
+    "recovery_slot_wrapped": "e1b601977592cd83efe762e14e3b1e125751e5484a1baf4b5f455b875f2ab9d969ae3ac873f3ba43db60c7aada0e3986",
+    "recovery_key_text": "KBIV-EU2U-KVLF-OWCZ-LJNV-YXK6-L5QG-CYTD-MRSW-MZ3I-NFVG-W3DN-NZX6-ZLIY",
+    "record_ad": "870150202122232425262728292a2b2c2d2e2f50a0a1a2a3a4a5a6a7a8a9aaabacadaeaf686b65732e736b6579686d79706f6f6c23376673656372657403",
+    "record_nonce": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7",
+    "record_wrapped_key": "d0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e791efad1d024cca5a5c1cfd2ba0ff192bde5f316b07ecceda2360d9954138444312e118504f62c16b67b0ef1135fb3911",
+    "record_ciphertext": "e93ef1134dca032f7354c937c24afdaa8aa56b41d14662565cab96812bb2f0a3d6857c80b88abe31e0d51cf7819197bb7ce17930a4fbc429",
+    "index_tag": "824393ec68a4edd9842c4ebbd9d6a765864997552d23630a02404fee4fad506b",
+    "audit_row_cbor": "840105667570646174656178",
+    "audit_mac": "23fe7427177cd8ad6cf39502e024a760f17f6ec21d5bb6d3fc317ba21e33ff04"
+  }
+}

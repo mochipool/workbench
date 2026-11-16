@@ -50,6 +50,12 @@ State: milestone M0 (decisions and skeleton) is done, and M1 (parity harness) ha
 | Dependency rule and import confinement, enforced as a test | `spo/internal/archtest` |
 | Ports defined so far: `Toolchain`, `Store`, `Vault`, `KesKeyGenerator`, `VrfKeyGenerator` | `spo/internal/ports` |
 | Key roles, signer profiles, demands and signing plans (ADR 0008) | `spo/internal/domain/custody` |
+| Opcert issue (`04d`), byte-equal to cardano-cli; vault signer and signer directory | `spo/internal/app/poolops/issue_opcert.go`, `spo/internal/adapters/native/opcert.go` |
+| Chain vocabulary: three-valued readings, tip, genesis, protocol parameters, UTxOs, bech32 | `spo/internal/domain/chain` |
+| Koios adapter with recorded preview responses | `spo/internal/adapters/koios` |
+| Offline tip from the clock, genesis file reader, system clock | `spo/internal/adapters/offline`, `genesisfile`, `systemclock` |
+| Sealing primitives with committed test vectors (ADR 0003) | `spo/internal/platform/seal` |
+| Sealed single-file store: `Store` and `Vault` over SQLite, audit chain, backup and restore. **Not yet wired into a command and not yet reviewed** | `spo/internal/adapters/sqlitestore` |
 | KES rotation state and the `GenerateKesKey` use case | `spo/internal/domain/pool`, `spo/internal/app/poolops` |
 | Upstream-layout store (plain files, keys unsealed) | `spo/internal/adapters/fsstore` |
 | Native key generation for KES and VRF (Blink Labs `bursa`), checked against cardano-cli | `spo/internal/adapters/native`, `spo/test/parity/keygen_test.go` |

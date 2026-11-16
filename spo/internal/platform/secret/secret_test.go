@@ -54,3 +54,20 @@ func TestHardenProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestFillWritesInPlace(t *testing.T) {
+	s, err := Fill(4, func(b []byte) error { copy(b, "abcd"); return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Destroy()
+	s.Use(func(b []byte) error {
+		if string(b) != "abcd" {
+			t.Errorf("content %q", b)
+		}
+		return nil
+	})
+	if _, err := Fill(4, func([]byte) error { return ErrDestroyed }); err != ErrDestroyed {
+		t.Fatalf("err = %v", err)
+	}
+}

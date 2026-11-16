@@ -184,5 +184,5 @@ Use case `IssueOperationalCertificate(pool, counterOverride?)` on aggregate `Sta
 
 ## Open questions
 
-* Whether cardano-cli also rewrites the counter file's `description` on `issue-op-cert`, or only the `cborHex` counter: settle by diffing the file before and after on the pinned release. The script itself patches the description only after `new-counter` (SPO-04d-EXT-001).
+* ~~Whether cardano-cli also rewrites the counter file's `description` on `issue-op-cert`~~ Resolved 2026-11-16 on cardano-cli 11.2.3.0 (differential test `spo/test/parity/opcert_test.go`): `node issue-op-cert` itself writes `Next certificate issue number: <n+1>` into the counter file, and `node new-counter` writes an **empty** description, which is why the script patches it afterwards (SPO-04d-EXT-001). The counter file's `cborHex` is the CBOR array `[counter, bytes(32-byte cold vkey)]`, e.g. `820058204b83...` for counter 0. The opcert envelope has an empty `description`. With no counter argument and no terminal the script runs without a prompt (it prints a `/dev/tty` warning from `ask` and continues) and exits 0 in offline mode.
 * An empty `qKesOnDiskOperationalCertificateNumber` or non-numeric genesis values (`null`) would give a shell arithmetic error; the resulting exit code depends on bash and is not specified here.

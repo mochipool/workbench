@@ -35,6 +35,7 @@ var layout = map[ports.Kind]func(r ports.Ref) string{
 	ports.NodeVKey:       func(r ports.Ref) string { return r.Name + ".node.vkey" },
 	ports.NodeSKey:       func(r ports.Ref) string { return r.Name + ".node.skey" },
 	ports.NodeCounter:    func(r ports.Ref) string { return r.Name + ".node.counter" },
+	ports.NodeHwsFile:    func(r ports.Ref) string { return r.Name + ".node.hwsfile" },
 	ports.VrfVKey:        func(r ports.Ref) string { return r.Name + ".vrf.vkey" },
 	ports.VrfSKey:        func(r ports.Ref) string { return r.Name + ".vrf.skey" },
 	ports.KesVKey:        func(r ports.Ref) string { return fmt.Sprintf("%s.kes-%03d.vkey", r.Name, r.Num) },

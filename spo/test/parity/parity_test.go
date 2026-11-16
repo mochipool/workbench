@@ -53,7 +53,9 @@ func setup(t *testing.T) env {
 func (e env) upstream(t *testing.T, dir string, args ...string) int {
 	t.Helper()
 	cmd := exec.Command(e.workbench, append([]string{"-C", dir}, args...)...)
-	cmd.Env = append(os.Environ(), "HOME="+t.TempDir())
+	// LC_ALL=C: upstream prints dates with `date`, whose format follows the
+	// locale. The port always writes the C-locale form.
+	cmd.Env = append(os.Environ(), "HOME="+t.TempDir(), "LC_ALL=C")
 	err := cmd.Run()
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {
