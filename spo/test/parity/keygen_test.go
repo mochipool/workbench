@@ -29,17 +29,18 @@ func TestNativeKeysMatchCardanoCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := []struct {
-		kind         ports.KeyKind
+		name         string
+		generate     func(context.Context) (ports.KeyPair, error)
 		vType, sType string
 		vDesc, sDesc string
 	}{
-		{ports.KeyKES, "KesVerificationKey_ed25519_kes_2^6", "KesSigningKey_ed25519_kes_2^6", "KES Verification Key", "KES Signing Key"},
-		{ports.KeyVRF, "VrfVerificationKey_PraosVRF", "VrfSigningKey_PraosVRF", "VRF Verification Key", "VRF Signing Key"},
+		{"kes", native.KeyGen{}.GenerateKES, "KesVerificationKey_ed25519_kes_2^6", "KesSigningKey_ed25519_kes_2^6", "KES Verification Key", "KES Signing Key"},
+		{"vrf", native.KeyGen{}.GenerateVRF, "VrfVerificationKey_PraosVRF", "VrfSigningKey_PraosVRF", "VRF Verification Key", "VRF Signing Key"},
 	}
 	for _, c := range cases {
-		t.Run(string(c.kind), func(t *testing.T) {
+		t.Run(c.name, func(t *testing.T) {
 			for i := 0; i < 5; i++ {
-				pair, err := native.KeyGen{}.Generate(ctx, c.kind)
+				pair, err := c.generate(ctx)
 				if err != nil {
 					t.Fatal(err)
 				}

@@ -17,7 +17,7 @@ var ErrKesKeyExists = errors.New("a KES key with the next number already exists"
 // certificate (upstream 04c_genKESKeys).
 type GenerateKesKey struct {
 	Store  ports.Store
-	KeyGen ports.KeyGen
+	KeyGen ports.KesKeyGenerator
 }
 
 // KesKeyGenerated is the result: the new key's number and its verification
@@ -41,7 +41,7 @@ func (uc GenerateKesKey) Run(ctx context.Context, poolName string) (KesKeyGenera
 		return KesKeyGenerated{}, err
 	}
 
-	pair, err := uc.KeyGen.Generate(ctx, ports.KeyKES)
+	pair, err := uc.KeyGen.GenerateKES(ctx)
 	if err != nil {
 		return KesKeyGenerated{}, fmt.Errorf("generate KES key: %w", err)
 	}

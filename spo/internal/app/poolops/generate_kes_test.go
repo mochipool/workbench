@@ -22,7 +22,7 @@ type fakeKeyGen struct {
 	err   error
 }
 
-func (f *fakeKeyGen) Generate(context.Context, ports.KeyKind) (ports.KeyPair, error) {
+func (f *fakeKeyGen) GenerateKES(context.Context) (ports.KeyPair, error) {
 	f.calls++
 	if f.err != nil {
 		return ports.KeyPair{}, f.err

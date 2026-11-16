@@ -19,9 +19,12 @@ Last updated: 2026-11-16.
 | D9 | **The TUI is in scope**, as a second `UI` adapter. PostgreSQL, Kubernetes and a server API are deferred; their ports stay ready. Catalyst, SPO polls, token registry and minting are ported last. | Concerns U1–U2. |
 | D10 | **Chain access must not require a node socket.** HTTP and gRPC providers (for example UTxO RPC as served by TxPipe's Dolos and Blink Labs' tooling, Blockfrost-compatible APIs, Koios) are `ChainQuery` and `Submitter` adapters beside the socket adapter. | Concerns N1–N5; [ADR 0006](../explanation/adr/0006-chain-access-providers.md). The user has no preview node; settling spec open questions (C3) and acceptance runs use a remote provider. |
 | D12 | **Native first.** Key and ledger operations run in process through Blink Labs' Go libraries (`bursa`, `gouroboros`) where they cover the operation; the pinned cardano-cli becomes the test oracle. Pre-1.0 libraries and less than full conformance are accepted, with parity tests where it matters most. | Amends D2: [ADR 0007](../explanation/adr/0007-native-first-with-blink-labs.md). Hardware wallets (cardano-hw-cli) and gpg stay external. Concerns X2, X3 and M2 are read in that light: the signer decodes a body natively, and the adapters under contract test are the native ones against the oracle. |
+| D13 | **One workflow, capability-typed adapters.** A use case is written once against key references and narrow ports. Signers and chain providers declare what they can do in types; an unsupported combination is refused by the compiler where possible and otherwise before any effect, never from inside a signing call. | [ADR 0008](../explanation/adr/0008-capability-typed-ports.md). Hardware wallets stay on cardano-hw-cli as one signer adapter, because no Go library drives the devices. |
 | D11 | **Tailcat is pinned at v0.7.0**, the latest tag on 2026-11-16. Manual runs use the public DERP relays; sandboxed tests use an in-process relay if a spike shows that works. | T1, T5. |
 
 ## How to use this page
+
+Which library covers which need, and what we must write ourselves, is in [Go library coverage](./go-library-coverage.md).
 
 Decisions are recorded in [`docs/explanation/adr/`](../explanation/adr/README.md); its index lists which concerns each record closes.
 

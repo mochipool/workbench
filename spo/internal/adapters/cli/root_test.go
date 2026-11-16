@@ -15,7 +15,7 @@ const skeyHex = "5902c0f00dfeedfacecafebeef"
 
 type fakeKeyGen struct{}
 
-func (fakeKeyGen) Generate(context.Context, ports.KeyKind) (ports.KeyPair, error) {
+func (fakeKeyGen) GenerateKES(context.Context) (ports.KeyPair, error) {
 	return ports.KeyPair{
 		VKey: []byte(`{"type":"KesVerificationKey_ed25519_kes_2^6","cborHex":"5820aa"}`),
 		SKey: secret.Take([]byte(`{"type":"KesSigningKey_ed25519_kes_2^6","cborHex":"` + skeyHex + `"}`)),
