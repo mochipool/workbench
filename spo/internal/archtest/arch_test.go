@@ -93,6 +93,7 @@ func TestConfinedImports(t *testing.T) {
 	confined := map[string]string{
 		"os/exec":                      module + "/internal/platform/execx",
 		"github.com/tailscale/tailcat": module + "/internal/adapters/tailcat",
+		"github.com/blinklabs-io":     module + "/internal/adapters/native",
 		"github.com/awnumar/memguard":  module + "/internal/platform/secret",
 		"modernc.org/sqlite":           module + "/internal/adapters/sqlitestore",
 	}

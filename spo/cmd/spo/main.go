@@ -10,9 +10,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/cardanocli"
 	"github.com/mochipool/workbench/spo/internal/adapters/cli"
 	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
+	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/adapters/toolchain"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
@@ -48,7 +48,7 @@ func run() int {
 		return 1
 	}
 
-	deps.KeyGen = cardanocli.KeyGen{Toolchain: deps.Toolchain, Run: execx.OS{}}
+	deps.KeyGen = native.KeyGen{}
 	deps.OpenStore = func(dir string, upstreamLayout bool) (ports.Store, error) {
 		if !upstreamLayout {
 			return nil, errors.New("the sealed store is not built yet; pass --upstream-layout to work on a directory in the upstream file layout (keys unsealed)")

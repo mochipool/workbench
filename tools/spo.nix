@@ -60,7 +60,7 @@ let
     pname = "spo-unwrapped";
     inherit version;
     src = lib.cleanSource ../spo;
-    vendorHash = "sha256-L3GVdLHm53ZsghDjAub+Z2Ch889pHQBYmUc/3ZQ67bk=";
+    vendorHash = "sha256-3s9zAc9XYmaZAOrVMe+t/EFc+OaekT20+riJYwN0c+A=";
     env.CGO_ENABLED = 0;
     subPackages = [ "cmd/spo" ];
     ldflags = [ "-s" "-w" "-X main.version=${version}" ];

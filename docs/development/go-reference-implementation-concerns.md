@@ -18,6 +18,7 @@ Last updated: 2026-11-16.
 | D8 | **Pool cold keys sign only through the file transport.** There is no override in the first version. Payment, stake, owner, DRep and hardware-wallet keys may sign remotely. | Settles M6: [ADR 0005](../explanation/adr/0005-party-envelope-and-signing-policy.md). |
 | D9 | **The TUI is in scope**, as a second `UI` adapter. PostgreSQL, Kubernetes and a server API are deferred; their ports stay ready. Catalyst, SPO polls, token registry and minting are ported last. | Concerns U1–U2. |
 | D10 | **Chain access must not require a node socket.** HTTP and gRPC providers (for example UTxO RPC as served by TxPipe's Dolos and Blink Labs' tooling, Blockfrost-compatible APIs, Koios) are `ChainQuery` and `Submitter` adapters beside the socket adapter. | Concerns N1–N5; [ADR 0006](../explanation/adr/0006-chain-access-providers.md). The user has no preview node; settling spec open questions (C3) and acceptance runs use a remote provider. |
+| D12 | **Native first.** Key and ledger operations run in process through Blink Labs' Go libraries (`bursa`, `gouroboros`) where they cover the operation; the pinned cardano-cli becomes the test oracle. Pre-1.0 libraries and less than full conformance are accepted, with parity tests where it matters most. | Amends D2: [ADR 0007](../explanation/adr/0007-native-first-with-blink-labs.md). Hardware wallets (cardano-hw-cli) and gpg stay external. Concerns X2, X3 and M2 are read in that light: the signer decodes a body natively, and the adapters under contract test are the native ones against the oracle. |
 | D11 | **Tailcat is pinned at v0.7.0**, the latest tag on 2026-11-16. Manual runs use the public DERP relays; sandboxed tests use an in-process relay if a spike shows that works. | T1, T5. |
 
 ## How to use this page
@@ -39,7 +40,7 @@ Updated as concerns close. A concern not listed here is open.
 | C7 | closed | `spo/NOTICE` |
 | X1 | closed | `tools/spo.nix` bakes the manifest; `spo/internal/adapters/toolchain` applies upstream's gates and requires the pinned version exactly; `spo toolchain check` passes against the real release set |
 | X4 | closed for the runner | `spo/internal/platform/execx` takes an argument vector only and refuses shells; `spo/internal/archtest` confines `os/exec` to it. Input validation is per use case |
-| X2 | partly closed, one waiver pending | `execx` passes and captures secrets through inherited pipes, with tests on argv and environment. See the finding below |
+| X2 | closed for what exists | `execx` passes and captures secrets through inherited pipes, with tests on argv and environment. Native operations (D12) involve no process at all. No waiver is needed |
 | P1 | partly closed | `packages.<sys>.spo` and `checks.<sys>.spo-tests` build on x86_64-linux; other systems and the parity harness are not yet exercised |
 | P2 | partly closed | CI runs `spec-lint`, `workbench-tests`, `spo-tests` and `govulncheck`; contract tests (X3) do not exist yet |
 | C4 | partly closed | `spo/test/parity` runs the pinned upstream script and the Go use case on separate workspaces and compares names, modes, counters and envelope types (`checks.<sys>.spo-parity`). `specctl coverage` with `spo/spec-coverage.toml` fails the build when an id of an implemented spec is neither cited by a test nor waived (`checks.<sys>.spo-spec-coverage`). Still missing: fixed-tip fixtures and recorded Koios responses |
@@ -49,12 +50,14 @@ Updated as concerns close. A concern not listed here is open.
 | C2 | in use | First use case at parity: `GenerateKesKey` (04c), 12 ids cited, 8 waived with reasons |
 | T1 | partly closed | Tailcat pinned at v0.7.0 (D11); confinement to its adapter is enforced by `archtest` |
 
-### Finding under X2: cardano-cli cannot write KES or VRF keys to a pipe
+### Finding under X2 (resolved by D12): cardano-cli cannot write KES or VRF keys to a pipe
 
 Run against the pinned cardano-cli 11.2.3.0 on 2026-11-16:
 
 * `address key-gen` and `node key-gen` (cold key and counter) write their outputs to `/dev/fd/N` pipes. No file is needed.
 * `node key-gen-KES` and `node key-gen-VRF` fail on a pipe: they create a temporary file beside the destination and rename it (`/dev/fd/: openTempFile: does not exist`).
+
+**Resolved 2026-11-16:** KES and VRF keys are generated in process (`spo/internal/adapters/native`), with no file, pipe or child process. `TestNativeKeysMatchCardanoCLI` shows that the pinned cardano-cli accepts those keys and derives the same verification keys. The handling below was the plan before D12 and is kept for the record.
 
 So X2's "never a temp file" cannot hold for KES and VRF generation through cardano-cli. Planned handling, to be confirmed in an ADR when key generation is implemented:
 
