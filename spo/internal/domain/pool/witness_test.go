@@ -9,6 +9,7 @@ import (
 
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 )
 
@@ -43,9 +44,9 @@ func newRig(t *testing.T) rig {
 	r.body = txbuild.TxBody{CBOR: cbor, ID: sha256.Sum256(cbor)}
 	c, err := OpenCollection(Collection{ID: 1700000000, Type: PoolRegistration, TTL: 1000, PayName: "pay", PayAmount: 505_000_000, PayReturn: 100,
 		Body: r.body, Slots: []Slot{
-			{Name: "mypool.node", Role: custody.RolePoolCold, KeyHash: r.cold.hash(), Holder: custody.HolderVault},
-			{Name: "pay", Role: custody.RolePayment, KeyHash: r.pay.hash(), Holder: custody.HolderVault},
-			{Name: "alice.staking", Role: custody.RoleStake, KeyHash: r.owner.hash(), Holder: custody.HolderRemote, Party: "external"},
+			{Name: "mypool.node", Role: custody.RolePoolCold, KeyHash: r.cold.hash()},
+			{Name: "pay", Role: custody.RolePayment, KeyHash: r.pay.hash()},
+			{Name: "alice.staking", Role: custody.RoleStake, KeyHash: r.owner.hash(), PartyFingerprint: party.Fingerprint{9, 9}},
 		}})
 	if err != nil {
 		t.Fatal(err)
@@ -86,7 +87,7 @@ func TestOpeningACollection(t *testing.T) {
 	}
 }
 
-// spec: SPO-05d-INV-006, SPO-05d-SEC-003, SPO-Xparty-PRE-005
+// spec: SPO-05d-INV-006, SPO-05d-SEC-003, SPO-Xparty-PRE-005, SPO-Xidentity-SEC-001
 func TestFillVerifiesBeforeTouchingTheSlot(t *testing.T) {
 	r := newRig(t)
 	other := newSigner()
@@ -114,6 +115,13 @@ func TestFillVerifiesBeforeTouchingTheSlot(t *testing.T) {
 		if got.Version != 1 || len(got.Missing()) != 3 {
 			t.Errorf("%s: the collection changed", c.name)
 		}
+	}
+	// The refusals are custody's: Fill holds no check of its own.
+	if _, err := r.c.Fill(cases[0].fill, 10); !errors.Is(err, custody.ErrWitnessKey) {
+		t.Errorf("a wrong key is refused by another check than custody's: %v", err)
+	}
+	if _, err := r.c.Fill(cases[2].fill, 10); !errors.Is(err, custody.ErrWitnessSignature) {
+		t.Errorf("a wrong signature is refused by another check than custody's: %v", err)
 	}
 	// The input is never mutated: a fill returns a new collection.
 	next, err := r.fill(t, r.c, "pay", r.pay, 10)
@@ -209,7 +217,7 @@ func TestCollectionRoundTripsThroughTheDescriptor(t *testing.T) {
 		t.Errorf("%+v", got)
 	}
 	if len(got.Slots) != 3 || got.Slots[0].Name != "mypool.node" || got.Slots[1].Witness == nil || *got.Slots[1].Witness != *c.Slots[1].Witness ||
-		got.Slots[2].Witness != nil || got.Slots[2].Party != "external" || got.Slots[2].KeyHash != r.owner.hash() || got.Slots[2].Role != custody.RoleStake {
+		got.Slots[2].Witness != nil || got.Slots[2].PartyFingerprint != (party.Fingerprint{9, 9}) || got.Slots[2].KeyHash != r.owner.hash() || got.Slots[2].Role != custody.RoleStake {
 		t.Errorf("%+v", got.Slots)
 	}
 	// The keys of upstream's collection come first, in the order its updates leave them.
@@ -319,5 +327,42 @@ func TestWitnessEnvelopeIsCardanoCLIs(t *testing.T) {
 		if _, err := ParseWitnessEnvelope([]byte(bad)); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
+	}
+}
+
+// The persisted slot (ADR 0010 decision 4): no holder is written, the party is
+// its fingerprint under `partyFingerprint`, and the old `holder` and `party`
+// keys are read only (the name is resolved to a fingerprint, never written).
+//
+// spec: SPO-Xidentity-INV-015
+func TestSlotWritesFingerprintAndReadsLegacyKeys(t *testing.T) {
+	r := newRig(t)
+	d := parse(t, goodDescriptor)
+	d.SetCollection(r.c)
+	out := string(d.Render())
+	if strings.Contains(out, `"holder"`) || strings.Contains(out, `"party"`) || !strings.Contains(out, `"partyFingerprint": "0909`) && !strings.Contains(out, `"partyFingerprint":"0909`) {
+		t.Fatalf("slot JSON:\n%s", out)
+	}
+	idOf := func(cbor []byte) (chain.TxID, error) { return sha256.Sum256(cbor), nil }
+	legacy := strings.Replace(out, `"partyFingerprint":"0909`, `"holder":"remote","party":"external","x":"0909`, 1)
+	legacy = strings.Replace(legacy, `"partyFingerprint": "0909`, `"holder": "remote", "party": "external", "x": "0909`, 1)
+	got, err := parse(t, legacy).Collection(idOf)
+	if err != nil || got == nil {
+		t.Fatal(err)
+	}
+	if got.Slots[2].LegacyParty != "external" || got.Slots[2].Assigned() {
+		t.Fatalf("legacy read: %+v", got.Slots[2])
+	}
+	lost := got.ResolveLegacyParties(func(n string) (party.Fingerprint, bool) { return party.Fingerprint{7}, n == "external" })
+	if len(lost) != 0 || got.Slots[2].PartyFingerprint != (party.Fingerprint{7}) || got.Slots[2].LegacyParty != "" {
+		t.Fatalf("resolved: %v %+v", lost, got.Slots[2])
+	}
+	back := string(func() []byte { d2 := parse(t, goodDescriptor); d2.SetCollection(*got); return d2.Render() }())
+	if strings.Contains(back, `"party"`) || strings.Contains(back, `"holder"`) {
+		t.Fatalf("a legacy key was written back:\n%s", back)
+	}
+	got2, _ := parse(t, legacy).Collection(idOf)
+	if lost := got2.ResolveLegacyParties(func(string) (party.Fingerprint, bool) { return party.Fingerprint{}, false }); len(lost) != 1 || lost[0] != "external" || got2.Slots[2].Assigned() {
+		t.Fatalf("an unresolvable name leaves the slot unassigned and is reported: %v", lost)
 	}
 }

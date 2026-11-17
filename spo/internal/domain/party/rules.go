@@ -2,12 +2,12 @@ package party
 
 import (
 	"bytes"
-	"crypto/ed25519"
 	"errors"
 
 	"golang.org/x/crypto/blake2b"
 
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 )
 
 // Witness refusals (SPO-Xparty-PRE-005).
@@ -27,15 +27,21 @@ func keyHash(vkey [32]byte) (out [28]byte) {
 // signature is a valid Ed25519 signature over bodyHash under witnessVKey, and
 // BLAKE2b-224 of witnessVKey equals slotKeyHash. Both must hold: a valid
 // signature of the wrong key, or the right key's hash with a bad signature,
-// is refused.
+// is refused. It is custody.VerifyTxWitness, the one verifier of a
+// transaction witness.
 func VerifyWitness(bodyHash [32]byte, witnessVKey [32]byte, signature [64]byte, slotKeyHash [28]byte) error {
-	if keyHash(witnessVKey) != slotKeyHash {
+	want, err := identity.NewRef(identity.KindKeyHash, slotKeyHash[:])
+	if err != nil {
+		return err
+	}
+	switch err := custody.VerifyTxWitness(bodyHash, witnessVKey, signature, want); {
+	case errors.Is(err, custody.ErrWitnessKey):
 		return ErrWitnessKeyHash
-	}
-	if !ed25519.Verify(ed25519.PublicKey(witnessVKey[:]), bodyHash[:], signature[:]) {
+	case errors.Is(err, custody.ErrWitnessSignature):
 		return ErrWitnessSignature
+	default:
+		return err
 	}
-	return nil
 }
 
 // Response-acceptance refusals (SPO-Xparty-PRE-005, INV-014).

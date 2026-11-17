@@ -252,7 +252,7 @@ func newWorldOpt(t *testing.T, o worldOpt) *world {
 func (w *world) registerPool() poolops.RegisterPool {
 	return poolops.RegisterPool{Store: w.C.Store, Addresses: w.led, Params: w.chain, Tip: w.chain, Utxos: w.chain,
 		Pipeline:  txflow.Pipeline{Signers: native.Signers{Vault: w.C.Store}, Min: w.led, Fees: w.led, Bodies: w.led, Assembler: w.led, Confirmer: w.conf, Submitter: w.sub},
-		PoolCerts: w.led, StakeCerts: w.led, TxIDs: w.led, Hasher: w.led, Clock: w.clock, AllowPending: true}
+		PoolCerts: w.led, StakeCerts: w.led, TxIDs: w.led, Hasher: w.led, Clock: w.clock, AllowPending: true, Parties: w.C.Registry}
 }
 
 // open registers the pool with the remote owner's slot pending.
@@ -311,7 +311,7 @@ func (w *world) snapshot() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "v%d %s ", c.Version, c.Body.ID)
 	for _, s := range c.Slots {
-		fmt.Fprintf(&b, "[%s %s filled=%v unauth=%v]", s.Name, s.Party, s.Filled(), s.Unauthenticated)
+		fmt.Fprintf(&b, "[%s %s filled=%v unauth=%v]", s.Name, s.PartyFingerprint, s.Filled(), s.Unauthenticated)
 	}
 	return b.String()
 }

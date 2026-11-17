@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mochipool/workbench/spo/internal/app/keyring"
 	"github.com/mochipool/workbench/spo/internal/app/txflow"
 	"github.com/mochipool/workbench/spo/internal/domain/assets"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
@@ -121,10 +122,10 @@ func (uc BurnAsset) Run(ctx context.Context, req Request) (Result, error) {
 }
 
 type payerInfo struct {
-	name   string
-	addr   chain.Address
-	holder custody.Holder
-	hash   txbuild.KeyHash
+	name string
+	addr chain.Address
+	key  custody.KeyRef
+	hash txbuild.KeyHash
 }
 
 func (b Base) run(ctx context.Context, req Request, burn bool) (Result, error) {
@@ -174,7 +175,7 @@ func (b Base) run(ctx context.Context, req Request, burn bool) (Result, error) {
 	var script []byte
 	var idHex string
 	var polHash txbuild.KeyHash
-	var polHolder custody.Holder
+	var polKey custody.KeyRef
 	var payer payerInfo
 	if err := b.Store.View(ctx, func(r ports.Reader) error {
 		// spec: SPO-11a-IN-001, SPO-11a-IN-002, SPO-11b-IN-001
@@ -193,24 +194,14 @@ func (b Base) run(ctx context.Context, req Request, burn bool) (Result, error) {
 		if script, err = get(ports.PolicyScript); err != nil {
 			return err
 		}
-		hws, err := r.Exists(ports.Ref{Name: policyName, Kind: ports.PolicyHwsFile})
-		if err != nil {
+		// The signing plan decides whether the signer connected for the key can
+		// sign a mint (the policy row of custody.HardwareTable).
+		var held bool
+		if polKey, held, err = keyring.ResolveHeld(r, custody.RolePolicy, policyName); err != nil {
 			return err
 		}
-		// The signing plan decides whether the device can sign a mint (the
-		// policy row of custody.HardwareTable); the hardware file wins when both
-		// exist (SPO-Pfiles-INV-002).
-		polHolder = custody.HolderVault
-		if hws {
-			polHolder = custody.HolderHardware
-		} else {
-			skey, err := r.Exists(ports.Ref{Name: policyName, Kind: ports.PolicySKey})
-			if err != nil {
-				return err
-			}
-			if !skey {
-				return fmt.Errorf("%w: %s.policy.skey is missing", ErrPolicyFiles, policyName)
-			}
+		if !held {
+			return fmt.Errorf("%w: %s.policy.skey is missing", ErrPolicyFiles, policyName)
 		}
 		vk, err := get(ports.PolicyVKey)
 		if err != nil {
@@ -235,22 +226,14 @@ func (b Base) run(ctx context.Context, req Request, burn bool) (Result, error) {
 		}
 		line, _, _ := strings.Cut(string(ab), "\n")
 		payer = payerInfo{name: payerName, addr: chain.Address(strings.TrimSpace(line))}
-		pskey, err := r.Exists(ports.Ref{Name: payerName, Kind: ports.AddrSKey})
+		pk, held, err := keyring.ResolveHeld(r, custody.RolePayment, payerName)
 		if err != nil {
 			return err
 		}
-		phws, err := r.Exists(ports.Ref{Name: payerName, Kind: ports.AddrHwsFile})
-		if err != nil {
-			return err
-		}
-		switch {
-		case phws:
-			payer.holder = custody.HolderHardware
-		case pskey:
-			payer.holder = custody.HolderVault
-		default:
+		if !held {
 			return fmt.Errorf("%w: %s has no .skey or .hwsfile", ErrNoPayer, payerName)
 		}
+		payer.key = pk
 		return nil
 	}); err != nil {
 		return Result{}, err
@@ -354,8 +337,8 @@ func (b Base) run(ctx context.Context, req Request, burn bool) (Result, error) {
 	// The policy witness first, then the payment witness (SPO-11a-EXT-003); two
 	// signatures, the fee's witness count (SPO-11a-INV-003).
 	prep, err := pipe.Prepare(draft, []txflow.Slot{
-		{Label: "policy", Key: custody.KeyRef{Role: custody.RolePolicy, Holder: polHolder, Owner: policyName}, Hash: polHash},
-		{Label: "payment", Key: custody.KeyRef{Role: custody.RolePayment, Holder: payer.holder, Owner: payer.name}, Hash: payer.hash},
+		{Label: "policy", Key: polKey, Hash: polHash},
+		{Label: "payment", Key: payer.key, Hash: payer.hash},
 	}, txbuild.MintWitnesses)
 	if err != nil {
 		return Result{}, err
@@ -385,7 +368,7 @@ func (b Base) run(ctx context.Context, req Request, burn bool) (Result, error) {
 	var ws []txbuild.Witness
 	for _, sw := range sws {
 		if err := txbuild.VerifyWitness(bal.Body, sw.Witness, sw.Slot.Hash); err != nil {
-			return Result{}, fmt.Errorf("witness for the %s key of %s: %w", sw.Slot.Key.Role, sw.Slot.Key.Owner, err)
+			return Result{}, fmt.Errorf("witness for the %s key of %s: %w", sw.Slot.Key.Role, sw.Slot.Key.Identity, err)
 		}
 		ws = append(ws, sw.Witness)
 	}

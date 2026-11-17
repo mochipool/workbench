@@ -28,9 +28,10 @@ import (
 
 // Arg is one element of an argument vector.
 type Arg struct {
-	lit string
-	in  io.WriterTo
-	out *Captured
+	lit    string
+	in     io.WriterTo
+	out    *Captured
+	outMax int // bytes; 0 means unbounded
 }
 
 // Lit is a literal argument.
@@ -53,6 +54,69 @@ func SecretIn(src io.WriterTo) Arg { return Arg{in: src} }
 // to that path is captured into guarded memory and never touches a disk.
 func SecretOut(dst *Captured) Arg { return Arg{out: dst} }
 
+// SecretOutMax is SecretOut with a bound: a tool that writes more than max
+// bytes gets the write refused (the pipe is closed) and the call fails with
+// ErrOutputTooLarge, so a hostile tool cannot make the caller allocate without
+// limit.
+func SecretOutMax(dst *Captured, max int) Arg { return Arg{out: dst, outMax: max} }
+
+// Defaults for the bounds, used when a caller sets none: no tool of the release
+// set writes more, and a runaway one cannot make this process allocate without
+// limit (secret.Read doubles its locked buffer as it grows).
+const (
+	DefaultMaxOutput    = 128 << 20 // captured stdout and stderr, each
+	DefaultMaxSecretOut = 16 << 20  // one SecretOut pipe
+)
+
+// ErrOutputTooLarge is returned when a tool writes more than the bound given.
+var ErrOutputTooLarge = errors.New("execx: tool output exceeds its bound")
+
+// limitedReader reads at most max bytes and fails when there is more.
+type limitedReader struct {
+	r io.Reader
+	n int
+}
+
+func (l *limitedReader) Read(p []byte) (int, error) {
+	if l.n < 0 {
+		return 0, ErrOutputTooLarge
+	}
+	if len(p) > l.n+1 {
+		p = p[:l.n+1]
+	}
+	n, err := l.r.Read(p)
+	l.n -= n
+	if l.n < 0 {
+		return n, ErrOutputTooLarge
+	}
+	return n, err
+}
+
+// limitedBuffer is a bytes.Buffer that refuses to grow past max.
+// The buffer is a field, not embedded: an embedded bytes.Buffer promotes
+// ReadFrom, which io.Copy prefers over Write and which has no bound.
+type limitedBuffer struct {
+	buf  bytes.Buffer
+	max  int
+	over bool
+	// stop ends the tool: a writer that refuses does not stop a tool that
+	// keeps writing, it only leaves it blocked on a full pipe.
+	stop func()
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	if b.max > 0 && b.buf.Len()+len(p) > b.max {
+		b.over = true
+		if b.stop != nil {
+			b.stop()
+		}
+		return 0, ErrOutputTooLarge
+	}
+	return b.buf.Write(p)
+}
+
+func (b *limitedBuffer) Bytes() []byte { return b.buf.Bytes() }
+
 // Captured receives what a tool wrote to a SecretOut argument.
 type Captured struct {
 	buf *secret.Buffer
@@ -69,6 +133,18 @@ type Cmd struct {
 	Env   []string // the complete environment, KEY=VALUE; nothing is inherited
 	Dir   string   // working directory; empty means the caller's
 	Stdin []byte   // non-secret standard input
+	// StdinSecret is standard input that is a secret (a PIN a tool reads
+	// from its stdin). It is delivered through an inherited pipe, never
+	// copied into a Go slice here. It excludes Stdin.
+	StdinSecret io.WriterTo
+	// NoTerminal starts the child in a new session, so it has no controlling
+	// terminal and cannot open /dev/tty. A tool that prefers the terminal for
+	// a prompt (readpassphrase) then reads its stdin, which is how a secret
+	// reaches it through StdinSecret.
+	NoTerminal bool
+	// MaxOutput, when positive, bounds each of the captured standard output and
+	// standard error, in bytes; more fails the call with ErrOutputTooLarge.
+	MaxOutput int
 }
 
 // Result is what a finished process produced.
@@ -132,6 +208,9 @@ func validate(c Cmd) error {
 			return fmt.Errorf("%w: malformed environment entry", ErrInvalid)
 		}
 	}
+	if c.StdinSecret != nil && c.Stdin != nil {
+		return fmt.Errorf("%w: both Stdin and StdinSecret are set", ErrInvalid)
+	}
 	return nil
 }
 
@@ -141,6 +220,9 @@ func (o OS) Run(ctx context.Context, c Cmd) (Result, error) {
 	if err := validate(c); err != nil {
 		return Result{}, err
 	}
+	// stop kills the tool when it writes more than a bound allows.
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
 
 	var (
 		argv       = make([]string, 0, len(c.Args))
@@ -196,12 +278,20 @@ func (o OS) Run(ctx context.Context, c Cmd) (Result, error) {
 			argv = append(argv, fmt.Sprintf("/dev/fd/%d", 3+len(childEnds)))
 			childEnds = append(childEnds, w)
 			parentEnds = append(parentEnds, r)
-			dst := a.out
+			dst, max := a.out, a.outMax
 			jobs = append(jobs, func() {
 				defer wg.Done()
 				defer r.Close()
-				buf, err := secret.Read(r)
+				var src io.Reader = r
+				if max <= 0 {
+					max = DefaultMaxSecretOut
+				}
+				src = &limitedReader{r: r, n: max}
+				buf, err := secret.Read(src)
 				if err != nil {
+					if errors.Is(err, ErrOutputTooLarge) {
+						stop() // the tool would otherwise block on the full pipe
+					}
 					setErr(err)
 					return
 				}
@@ -221,16 +311,50 @@ func (o OS) Run(ctx context.Context, c Cmd) (Result, error) {
 	cmd.Env = env
 	cmd.Dir = c.Dir
 	cmd.ExtraFiles = childEnds
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	maxOut := c.MaxOutput
+	if maxOut <= 0 {
+		maxOut = DefaultMaxOutput
+	}
+	stdout, stderr := &limitedBuffer{max: maxOut, stop: stop}, &limitedBuffer{max: maxOut, stop: stop}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
 	if c.Stdin != nil {
 		cmd.Stdin = bytes.NewReader(c.Stdin)
+	}
+	var stdinR, stdinW *os.File
+	if c.StdinSecret != nil {
+		r, w, err := os.Pipe()
+		if err != nil {
+			closeAll(childEnds)
+			closeAll(parentEnds)
+			return Result{}, err
+		}
+		cmd.Stdin = r // an *os.File: handed to the child as is, no copying goroutine
+		stdinR, stdinW = r, w
+	}
+	if c.NoTerminal {
+		detach(cmd)
 	}
 
 	if err := cmd.Start(); err != nil {
 		closeAll(childEnds)
 		closeAll(parentEnds)
+		if stdinW != nil {
+			stdinR.Close()
+			stdinW.Close()
+		}
 		return Result{}, fmt.Errorf("start %s: %w", filepath.Base(c.Path), err)
+	}
+	if stdinW != nil {
+		stdinR.Close() // the child holds its own copy
+		src := c.StdinSecret
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer stdinW.Close()
+			if _, err := src.WriteTo(stdinW); err != nil && !errors.Is(err, os.ErrClosed) && !isBrokenPipe(err) {
+				setErr(err)
+			}
+		}()
 	}
 	// The child holds its own copies now. Closing ours lets a pipe end when
 	// the child exits, whether or not it ever opened the path.
@@ -244,6 +368,9 @@ func (o OS) Run(ctx context.Context, c Cmd) (Result, error) {
 	wg.Wait()
 
 	res := Result{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: cmd.ProcessState.ExitCode()}
+	if stdout.over || stderr.over || errors.Is(pipeErr, ErrOutputTooLarge) {
+		return Result{ExitCode: res.ExitCode}, ErrOutputTooLarge
+	}
 	if waitErr != nil {
 		var ee *exec.ExitError
 		if errors.As(waitErr, &ee) {

@@ -13,6 +13,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/adapters/hwcli"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
@@ -144,7 +145,7 @@ func TestPlansAreRefusedOrAcceptedByTheDevicesProfile(t *testing.T) {
 		{"Trezor", "2.7.2", slot(custody.RolePayment, W, custody.FeatDRepRegistration), false},
 	} {
 		r := newRig(t, c.vendor, c.app)
-		dir := native.Signers{Hardware: lazyFor(r)}
+		dir := native.Signers{Keys: hwIndex{}, Hardware: lazyFor(r)}
 		_, err := ports.PlanSignatures(dir, []custody.Slot{c.slot})
 		var ue *custody.UnsupportedError
 		switch {
@@ -160,11 +161,12 @@ func TestPlansAreRefusedOrAcceptedByTheDevicesProfile(t *testing.T) {
 func TestTheDirectoryOpensTheSessionOnceAtPlanTimeAndNeverForSoftwareKeys(t *testing.T) {
 	r := newRig(t, "Ledger", "8.0.8")
 	lazy := lazyFor(r)
-	dir := native.Signers{Hardware: lazy}
+	dir := native.Signers{Keys: hwIndex{}, Hardware: lazy}
 
-	// A software-only run never touches the device.
-	if _, err := dir.SignerFor(custody.KeyRef{Role: custody.RolePayment, Holder: custody.HolderVault, Owner: "w"}); err != nil {
-		t.Fatal(err)
+	// A key no device holds has no signer, and asking never touches the device.
+	nobody, _ := identity.KeyHashOf(make([]byte, 32))
+	if _, err := dir.SignerFor(custody.KeyRef{Role: custody.RolePayment, Identity: nobody}); !errors.Is(err, ports.ErrNoSignerFor) {
+		t.Fatalf("a key no device holds: %v", err)
 	}
 	if r.called("device", "version") != 0 {
 		t.Error("the device was probed for a vault key")
@@ -190,7 +192,7 @@ func TestTheDirectoryOpensTheSessionOnceAtPlanTimeAndNeverForSoftwareKeys(t *tes
 	}
 
 	// Without a hardware signer wired the error names what is missing.
-	_, err = native.Signers{}.SignerFor(hwKey(custody.RolePayment, "w"))
+	_, err = native.Signers{Keys: hwIndex{}}.SignerFor(hwKey(custody.RolePayment, "w"))
 	if !errors.Is(err, ports.ErrNoHardwareSigner) || !strings.Contains(err.Error(), "cardano-hw-cli") || !strings.Contains(err.Error(), "device") {
 		t.Errorf("%v", err)
 	}
@@ -198,7 +200,7 @@ func TestTheDirectoryOpensTheSessionOnceAtPlanTimeAndNeverForSoftwareKeys(t *tes
 	// With no device the plan says why.
 	nr := newRig(t, "Ledger", "8.0.8", func(f *fakeCfg, c *hwcli.Config) { f.Device = "nodevice"; c.Timeout = 100 * time.Millisecond })
 	nl := lazyFor(nr)
-	_, err = ports.PlanSignatures(native.Signers{Hardware: nl}, []custody.Slot{{Label: "witness", Key: hwKey(custody.RolePayment, "w"),
+	_, err = ports.PlanSignatures(native.Signers{Keys: hwIndex{}, Hardware: nl}, []custody.Slot{{Label: "witness", Key: hwKey(custody.RolePayment, "w"),
 		Demand: custody.Demand{Role: custody.RolePayment, Operation: custody.OpWitnessTx}}})
 	if err == nil || !strings.Contains(err.Error(), "unavailable") || !errors.Is(nl.Err(), hwcli.ErrNoDevice) {
 		t.Errorf("%v / %v", err, nl.Err())
@@ -207,39 +209,24 @@ func TestTheDirectoryOpensTheSessionOnceAtPlanTimeAndNeverForSoftwareKeys(t *tes
 	if _, err := nl.ExportHardwareKey(context.Background(), hwKey(custody.RolePayment, "w"), "1852H/1815H/0H/0/0"); !errors.Is(err, hwcli.ErrNoDevice) {
 		t.Errorf("%v", err)
 	}
-	// The lazy signer holds only hardware keys.
-	if _, err := nl.SignerFor(custody.KeyRef{Role: custody.RolePayment, Holder: custody.HolderVault}); err == nil {
-		t.Error("a vault key was accepted")
-	}
 }
 
 // Exercised, still waived until a use case enables the hardware path: SPO-02-EXT-003, SPO-03a-EXT-002, SPO-04a-EXT-003
 func TestGenerationPlansAcceptHardwareKeysOnlyWithAHardwareSigner(t *testing.T) {
-	keys := []custody.KeyRef{hwKey(custody.RolePoolCold, "p")}
-	if _, err := custody.PlanGeneration(keys...); err == nil {
+	if _, err := custody.PlanGeneration(custody.PlaceHardware, custody.RolePoolCold); err == nil {
 		t.Fatal("PlanGeneration (software only) accepted a hardware key")
 	}
-	dir := native.Signers{Hardware: lazyFor(newRig(t, "Keystone", "1.7.7"))}
-	profileOf := func(k custody.KeyRef) (custody.Profile, error) {
-		s, err := dir.SignerFor(k)
-		if err != nil {
-			return custody.Profile{}, err
-		}
-		return s.Profile(), nil
+	profile := func(l *hwcli.Lazy) func(custody.Placement) (custody.Profile, error) {
+		return func(custody.Placement) (custody.Profile, error) { return l.Profile(), nil }
 	}
-	if _, err := custody.PlanGenerationWith(profileOf, keys...); err != nil {
+	if _, err := custody.PlanGenerationWith(profile(lazyFor(newRig(t, "Keystone", "1.7.7"))), custody.PlaceHardware, custody.RolePoolCold); err != nil {
 		t.Errorf("Keystone cold key: %v", err)
 	}
-	if _, err := custody.PlanGenerationWith(profileOf, hwKey(custody.RoleDRep, "d"), custody.KeyRef{Role: custody.RoleKES, Holder: custody.HolderVault, Owner: "p"}); err != nil {
-		t.Errorf("mixed holders: %v", err)
-	}
-	trezor := native.Signers{Hardware: lazyFor(newRig(t, "Trezor", "2.7.2"))}
-	tp := func(k custody.KeyRef) (custody.Profile, error) { s, _ := trezor.SignerFor(k); return s.Profile(), nil }
 	var ue *custody.UnsupportedError
-	if _, err := custody.PlanGenerationWith(tp, keys...); !errors.As(err, &ue) {
+	if _, err := custody.PlanGenerationWith(profile(lazyFor(newRig(t, "Trezor", "2.7.2"))), custody.PlaceHardware, custody.RolePoolCold); !errors.As(err, &ue) {
 		t.Errorf("Trezor cold key: %v", err)
 	}
-	if _, err := custody.PlanGenerationWith(nil, keys...); err == nil {
+	if _, err := custody.PlanGenerationWith(nil, custody.PlaceHardware, custody.RolePoolCold); err == nil {
 		t.Error("no hardware signer, accepted")
 	}
 }

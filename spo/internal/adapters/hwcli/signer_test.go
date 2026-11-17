@@ -191,7 +191,7 @@ func TestIssueOpCertMatchesTheVaultSigner(t *testing.T) {
 	}
 	vault := vaultWithSeed(t, "mypool.node.skey", "StakePoolSigningKey_ed25519", fakeSeed(path))
 	want, err := native.VaultSigner{Vault: vault}.IssueOpCert(context.Background(),
-		mustAs[custody.PoolCold](t, custody.KeyRef{Role: custody.RolePoolCold, Holder: custody.HolderVault, Owner: "mypool"}),
+		cold,
 		ports.OpCertRequest{KesVKey: kes, Counter: 7, KesPeriod: 300})
 	if err != nil {
 		t.Fatal(err)
@@ -259,7 +259,7 @@ func TestWitnessMatchesTheVaultSignerAndDeclaresTheChangeKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	vault := vaultWithSeed(t, "w.skey", "PaymentSigningKeyShelley_ed25519", fakeSeed(payPath))
-	want, err := native.VaultSigner{Vault: vault}.Witness(context.Background(), custody.KeyRef{Role: custody.RolePayment, Holder: custody.HolderVault, Owner: "w"}, body)
+	want, err := native.VaultSigner{Vault: vault}.Witness(context.Background(), pay, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -489,7 +489,7 @@ func TestUnrestrictedModeIsNeverImplied(t *testing.T) {
 	}
 }
 
-// spec: SPO-15-EXT-005
+// spec: SPO-15-EXT-005, SPO-Xidentity-SEC-003
 // Exercised, still waived until a use case enables the hardware path: SPO-15-EXT-004, SPO-15-PR-001, SPO-10-EXT-005
 func TestMessageSigningAndPolicyIDThroughTheDevice(t *testing.T) {
 	r := newRig(t, "Keystone", "1.7.7")
@@ -584,6 +584,10 @@ func TestSigningFilesComeFromTheStoreNotFromAnOperatorPath(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "mypool.node.hwsfile"), hk.SigningFile, 0o400); err != nil {
 		t.Fatal(err)
 	}
+	// the verification key beside it: the file is found by the key's identity
+	if err := os.WriteFile(filepath.Join(dir, "mypool.node.vkey"), hk.VKey, 0o400); err != nil {
+		t.Fatal(err)
+	}
 	st, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -657,7 +661,7 @@ func TestCip88RegistrationSignedOnTheDevice(t *testing.T) {
 	}
 }
 
-// spec: SPO-15-EXT-005
+// spec: SPO-15-EXT-005, SPO-Xidentity-SEC-003
 // A tool that signs another payload, signs with another key, writes a bad
 // signature, names another address or truncates its output is refused.
 func TestCip88MisbehavingToolIsRefused(t *testing.T) {
@@ -731,7 +735,7 @@ func TestCip36RewardsKeyOnTheSameDevice(t *testing.T) {
 	}
 }
 
-// spec: SPO-09a-EXT-004
+// spec: SPO-09a-EXT-004, SPO-Xidentity-SEC-003
 func TestCip36MisbehavingToolIsRefused(t *testing.T) {
 	const stakePath = "1852H/1815H/0H/2/0"
 	for _, m := range []string{"votewrongkey", "votebadsig", "votewrongaddr", "votetruncated"} {
@@ -783,5 +787,24 @@ func TestWitnessManyIsOneCallWithOneWitnessPerKey(t *testing.T) {
 		if _, err := s.WitnessMany(context.Background(), keys, body, ports.HardwareTxOptions{}); err == nil {
 			t.Errorf("%s: accepted", m)
 		}
+	}
+}
+
+// A signing file that holds another account's key is refused before the tool is
+// asked anything: no transform, no witness, no prompt.
+//
+// spec: SPO-Xidentity-SEC-005
+func TestAWrongFileIsRefusedBeforeTheDeviceIsAsked(t *testing.T) {
+	r := newRig(t, "Ledger", "8.0.8")
+	s := r.open()
+	r.export(s, custody.RolePayment, "w", "1852H/1815H/0H/0/0")
+	r.export(s, custody.RolePayment, "o", "1852H/1815H/1H/0/0")
+	r.files["payment/w"] = r.files["payment/o"] // the file stored for w is o's
+	_, err := s.Witness(context.Background(), hwKey(custody.RolePayment, "w"), realBody(t, "a body"))
+	if !errors.Is(err, hwcli.ErrWrongKey) {
+		t.Fatalf("%v", err)
+	}
+	if n := r.called("transaction"); n != 0 {
+		t.Errorf("the tool ran `transaction` %d times before the wrong file was refused", n)
 	}
 }

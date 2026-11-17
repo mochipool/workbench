@@ -18,6 +18,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/porttest"
 	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
@@ -215,7 +216,7 @@ func TestTxMatchesCardanoCLI(t *testing.T) {
 			t.Fatal(err)
 		}
 		signer := native.VaultSigner{Vault: store}
-		payKey := custody.KeyRef{Role: custody.RolePayment, Holder: custody.HolderVault, Owner: "w"}
+		payKey := porttest.Key(t, store, custody.RolePayment, "w")
 		p := func(n string) string { return filepath.Join(keys.dir, n) }
 
 		for _, base := range []bool{false, true} {

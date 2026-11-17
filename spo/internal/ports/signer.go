@@ -16,10 +16,20 @@ type Signer interface {
 	Profile() custody.Profile
 }
 
-// SignerDirectory finds the signer that holds a key.
+// SignerDirectory maps a key identity to the signers connected now that can
+// answer for it: the local vault (keys it holds, found by identity), each
+// attached hardware device (keys it has exported verification keys for) and
+// each remote co-signer party reachable through the envelope (the keys ADR
+// 0005's slot assignment gives it). It is local to the client and is not
+// stored (ADR 0010 decision 3). A use case never sees which kind answers.
 type SignerDirectory interface {
-	// SignerFor returns the signer for the key, or an error that says why
-	// none is configured.
+	// Connected lists the connected signers that report holding the key, in
+	// the order the directory prefers them (see the directory's Prefer hook).
+	// A demand that may not travel over a network transport has those signers
+	// left out already. An empty list is not an error here.
+	Connected(key custody.KeyRef) ([]ConnectedSigner, error)
+	// SignerFor returns the preferred connected signer, or an error that says
+	// why there is none (the same error users see for an unavailable key).
 	SignerFor(key custody.KeyRef) (Signer, error)
 }
 
@@ -76,8 +86,9 @@ func CheckSigner(s Signer) error {
 // PlanSignatures builds the plan for a workflow's signature slots against
 // the signers in a directory. It is the only way use cases obtain a Plan.
 func PlanSignatures(dir SignerDirectory, slots []custody.Slot) (custody.Plan, error) {
-	return custody.NewPlan(slots, func(k custody.KeyRef) (custody.Profile, error) {
-		s, err := dir.SignerFor(k)
+	dir = ForPlan(dir)
+	return custody.NewPlanFor(slots, func(sl custody.Slot) (custody.Profile, error) {
+		s, err := SignerForOperation(dir, sl.Key, sl.Demand.Operation)
 		if err != nil {
 			return custody.Profile{}, err
 		}

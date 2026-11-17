@@ -54,7 +54,7 @@ func TestApproveNeedsTheGate(t *testing.T) {
 	if _, err := s.B.Signer().Approve(ctx, a); err != nil {
 		t.Fatal(err)
 	}
-	if got := s.B.Gate.Calls; len(got) != 2 || got[1].Role != custody.RoleStake || got[1].Owner != "bob" {
+	if got := s.B.Gate.Calls; len(got) != 2 || got[1].Role != custody.RoleStake || got[1].Identity.IsZero() {
 		t.Fatalf("the gate was told %+v", got)
 	}
 }
@@ -317,7 +317,7 @@ func TestCoordinatorDoesNotUseTheSignersScope(t *testing.T) {
 	s.C.EnrollScoped(poolless, "otherpool", []party.Role{party.RoleSigner}, party.Scope{KeyRoles: []custody.Role{custody.RoleStake}, Pools: []string{chain.PoolID{0xee}.Bech32()}})
 	for name, partyName := range map[string]string{"a key role it is not asked for": "payonly", "a pool the body does not concern": "otherpool"} {
 		req := multisig.OpenRequest{Name: "m" + strings.ReplaceAll(name, " ", ""), Body: s.body, TTL: s.ttl,
-			Slots: []pool.Slot{{Name: "bob.staking", Role: custody.RoleStake, KeyHash: s.bobHash, Holder: custody.HolderRemote, Party: partyName}}}
+			Slots: []pool.Slot{{Name: "bob.staking", Role: custody.RoleStake, KeyHash: s.bobHash, PartyFingerprint: s.fp(partyName)}}}
 		if _, err := s.C.Coordinator().Open(ctx, req); err != nil {
 			t.Errorf("%s: %v", name, err)
 		}

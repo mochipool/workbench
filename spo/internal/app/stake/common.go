@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/mochipool/workbench/spo/internal/app/keyring"
 	"github.com/mochipool/workbench/spo/internal/app/txflow"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
@@ -177,26 +178,6 @@ func get(r ports.Reader, ref ports.Ref) ([]byte, error) {
 	return b, err
 }
 
-// holderOf says who holds the signing key of an artefact pair: the
-// hardware file wins when both exist (SPO-Pfiles-INV-002).
-func holderOf(r ports.Reader, skey, hws ports.Ref) (custody.Holder, error) {
-	h, err := r.Exists(hws)
-	if err != nil {
-		return "", err
-	}
-	if h {
-		return custody.HolderHardware, nil
-	}
-	s, err := r.Exists(skey)
-	if err != nil {
-		return "", err
-	}
-	if s {
-		return custody.HolderVault, nil
-	}
-	return "", fmt.Errorf("%w: %s", ErrNoSigningKey, skey)
-}
-
 // vkeyHash reads the key hash of a verification key envelope.
 func vkeyHash(env []byte) (txbuild.KeyHash, error) {
 	e, err := pool.ParseEnvelope(env)
@@ -210,12 +191,12 @@ func vkeyHash(env []byte) (txbuild.KeyHash, error) {
 	return txbuild.HashKey(raw), nil
 }
 
-// payer is the paying address of a transaction with its signing holder.
+// payer is the paying address of a transaction with its payment key.
 type payer struct {
-	name   string
-	addr   chain.Address
-	hash   txbuild.KeyHash
-	holder custody.Holder
+	name string
+	addr chain.Address
+	hash txbuild.KeyHash
+	key  custody.KeyRef
 }
 
 // readPayer reads and checks the paying address (SPO-Ptx-IN-001, SPO-Ptx-IN-002).
@@ -224,11 +205,11 @@ func (b Base) readPayer(r ports.Reader, name string) (payer, error) {
 	if err != nil {
 		return payer{}, err
 	}
-	holder, err := holderOf(r, ports.Ref{Name: name, Kind: ports.AddrSKey}, ports.Ref{Name: name, Kind: ports.AddrHwsFile})
+	key, err := keyring.Held(r, custody.RolePayment, name, ErrNoSigningKey)
 	if err != nil {
 		return payer{}, err
 	}
-	p := payer{name: name, addr: chain.Address(firstLine(ab)), holder: holder}
+	p := payer{name: name, addr: chain.Address(firstLine(ab)), key: key}
 	info, err := b.Addresses.InspectAddress(p.addr)
 	if err != nil {
 		return payer{}, fmt.Errorf("paying address: %w", err)

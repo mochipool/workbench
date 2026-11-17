@@ -407,7 +407,7 @@ func TestAnOwnerWhoSignsElsewhereLeavesAnOpenSlot(t *testing.T) {
 			t.Errorf("slot %+v", s)
 		}
 	}
-	if bob := c.Slots[3]; bob.Holder != custody.HolderRemote || bob.Party != "external" || bob.KeyHash != r.hashOf("bob.staking.vkey") {
+	if bob := c.Slots[3]; !bob.Assigned() || bob.KeyHash != r.hashOf("bob.staking.vkey") {
 		t.Errorf("%+v", bob)
 	}
 	// The transfer file is the upstream request: the whole body, the slot's verification key, no witness yet.
@@ -882,7 +882,7 @@ func TestPayerAndColdKeySlotsCanBePendingToo(t *testing.T) {
 		t.Fatalf("%+v", res)
 	}
 	c := r.collection()
-	if c.Slots[1].Holder != custody.HolderHardware || c.Slots[1].Role != custody.RolePayment || c.Slots[0].Filled() == false {
+	if c.Slots[1].Role != custody.RolePayment || c.Slots[0].Filled() == false {
 		t.Errorf("%+v", c.Slots)
 	}
 	if tf := r.transferFile(res.TransferFiles[0]); tf.SigningName != "pay" || !strings.Contains(string(tf.SigningVKey), "PaymentVerificationKeyShelley_ed25519") {

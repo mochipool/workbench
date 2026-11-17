@@ -238,7 +238,7 @@ func TestGeneratePolicy(t *testing.T) {
 		t.Errorf("%v", err)
 	}
 	// a hardware policy key is refused up front; a directory part is not a name
-	for _, req := range []GeneratePolicyRequest{{Name: "hw", Holder: custody.HolderHardware}, {Name: "dir/p"}, {Name: ""}, {Name: ".hidden"}} {
+	for _, req := range []GeneratePolicyRequest{{Name: "hw", Place: custody.PlaceHardware}, {Name: "dir/p"}, {Name: ""}, {Name: ".hidden"}} {
 		if _, err := (GeneratePolicy{Store: w.store, KeyGen: native.SoftwareKeys{}, Policies: native.Ledger{}}).Run(context.Background(), req); err == nil {
 			t.Errorf("%+v accepted", req)
 		}

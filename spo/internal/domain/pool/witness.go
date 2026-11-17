@@ -9,6 +9,8 @@ import (
 
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
+	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 )
 
@@ -58,25 +60,56 @@ var (
 )
 
 // Slot is one signature the transaction needs: which key (a role and a key
-// hash), who signs (the holder and, for a remote holder, the party), and the
+// hash), who signs (the co-signer it is assigned to, if any), and the
 // witness once it is in. A slot is the unit of the multi-party protocol
 // (SPO-Xparty-PRE-005): a response fills it only after the witness verifies
 // against the stored body and the slot's key hash.
 type Slot struct {
 	// Name is the slot name upstream uses as the key of `witnesses`:
 	// `<pool>.node`, the payer's name, `<owner>.staking` (SPO-05c-INV-005).
+	// Name is for display and export only: the stored slot names the key
+	// identity it needs (Role and KeyHash), never a holder (ADR 0010 decision 4).
 	Name    string
 	Role    custody.Role
 	KeyHash txbuild.KeyHash
-	Holder  custody.Holder
-	// Party names the remote holder; empty otherwise.
-	Party string
+	// PartyFingerprint is the ADR 0005 fingerprint of the co-signer the slot
+	// is assigned to: a routing instruction, not a holder. The zero value is
+	// an unassigned slot. It survives a rename of the party.
+	PartyFingerprint party.Fingerprint
+	// LegacyParty is the party NAME an older descriptor stored under `party`.
+	// It is read only so that ResolveLegacyParties can turn it into a
+	// fingerprint when an existing collection is opened; it is never written.
+	LegacyParty string
 	// Witness is nil while the slot is empty.
 	Witness *txbuild.Witness
 	// Unauthenticated records that the witness arrived in an upstream
 	// transfer file, with no party identity behind it (SPO-Xparty-IF-007).
 	// It is verified all the same.
 	Unauthenticated bool
+}
+
+// Assigned reports a slot assigned to a co-signer.
+func (s Slot) Assigned() bool { return s.PartyFingerprint != (party.Fingerprint{}) }
+
+// ResolveLegacyParties resolves the party names that an older descriptor
+// stored (slotJSON `party`) to fingerprints through byName, and clears them.
+// It returns the names that no longer resolve: their slots stay unassigned
+// and the caller reports them.
+func (c *Collection) ResolveLegacyParties(byName func(string) (party.Fingerprint, bool)) []string {
+	var lost []string
+	for i := range c.Slots {
+		n := c.Slots[i].LegacyParty
+		if n == "" {
+			continue
+		}
+		c.Slots[i].LegacyParty = ""
+		if fp, ok := byName(n); ok && !c.Slots[i].Assigned() {
+			c.Slots[i].PartyFingerprint = fp
+		} else if !ok {
+			lost = append(lost, n)
+		}
+	}
+	return lost
 }
 
 // Filled reports a slot with a witness.
@@ -242,7 +275,11 @@ func (c Collection) Fill(f Fill, tipSlot uint64) (Collection, error) {
 	if c.Slots[i].Filled() && !f.Overwrite {
 		return c, fmt.Errorf("%w: %q", ErrSlotFilled, f.Slot)
 	}
-	if err := txbuild.VerifyWitness(c.Body, f.Witness, c.Slots[i].KeyHash); err != nil {
+	want, err := identity.NewRef(identity.KindKeyHash, c.Slots[i].KeyHash[:])
+	if err != nil {
+		return c, err
+	}
+	if err := custody.VerifyTxWitness(c.Body.ID, f.Witness.VKey, f.Witness.Signature, want); err != nil {
 		return c, fmt.Errorf("the witness for slot %q: %w", f.Slot, err)
 	}
 	out := c
@@ -267,11 +304,31 @@ func (c Collection) Unassign(name string) (Collection, error) {
 		}
 		out := c
 		out.Slots = append([]Slot(nil), c.Slots...)
-		out.Slots[i].Party = ""
+		out.Slots[i].PartyFingerprint = party.Fingerprint{}
 		out.Version++
 		return out, nil
 	}
 	return c, fmt.Errorf("%w: %q", ErrUnknownSlot, name)
+}
+
+// Reassign moves every unfilled slot assigned to the party with fingerprint
+// from to the party with fingerprint to (a rotation of the co-signer's
+// identity, SPO-Xparty-INV-032): a filled slot keeps its verified witness and
+// its party. It reports how many slots moved; the version advances only then.
+func (c Collection) Reassign(from, to party.Fingerprint) (Collection, int) {
+	out := c
+	out.Slots = append([]Slot(nil), c.Slots...)
+	n := 0
+	for i, s := range out.Slots {
+		if s.Assigned() && s.PartyFingerprint == from && !s.Filled() {
+			out.Slots[i].PartyFingerprint = to
+			n++
+		}
+	}
+	if n > 0 {
+		out.Version++
+	}
+	return out, n
 }
 
 // Close ends the collection as Submitted or Discarded.
@@ -337,17 +394,20 @@ func ParseTxEnvelope(b []byte) ([]byte, error) {
 }
 
 type slotJSON struct {
-	Witness         json.RawMessage `json:"witness"`
-	Role            string          `json:"role,omitempty"`
-	KeyHash         string          `json:"keyHash,omitempty"`
-	Holder          string          `json:"holder,omitempty"`
-	Party           string          `json:"party,omitempty"`
-	Unauthenticated bool            `json:"unauthenticated,omitempty"`
+	Witness json.RawMessage `json:"witness"`
+	Role    string          `json:"role,omitempty"`
+	KeyHash string          `json:"keyHash,omitempty"`
+	// Holder is read and ignored: who signs is decided at planning time.
+	Holder string `json:"holder,omitempty"`
+	// Party is the legacy party name: read only, never written.
+	Party            string `json:"party,omitempty"`
+	PartyFingerprint string `json:"partyFingerprint,omitempty"`
+	Unauthenticated  bool   `json:"unauthenticated,omitempty"`
 }
 
 // MarshalDescriptor renders the collection as the value of `regWitness`.
 // The keys of SPO-05c-OUT-002 come first, in upstream's names; `version`,
-// `bodyHash` and the per-slot role, key hash and holder are this port's
+// `bodyHash` and the per-slot role, key hash and party fingerprint are this port's
 // additions, which the upstream scripts read past.
 func (c Collection) MarshalDescriptor() json.RawMessage {
 	// The order is the one upstream's `jq` updates leave: the keys of the
@@ -363,7 +423,10 @@ func (c Collection) MarshalDescriptor() json.RawMessage {
 	ws := newODoc()
 	for _, s := range c.Slots {
 		sj := slotJSON{Witness: json.RawMessage("{}"), Role: string(s.Role), KeyHash: hex.EncodeToString(s.KeyHash[:]),
-			Holder: string(s.Holder), Party: s.Party, Unauthenticated: s.Unauthenticated}
+			Unauthenticated: s.Unauthenticated}
+		if s.Assigned() {
+			sj.PartyFingerprint = hex.EncodeToString(s.PartyFingerprint[:])
+		}
 		if s.Witness != nil {
 			e, _ := parseODoc(WitnessEnvelope(*s.Witness))
 			sj.Witness = e.renderCompact()
@@ -456,7 +519,14 @@ func (d *Descriptor) Collection(idOf func(cbor []byte) (chain.TxID, error)) (*Co
 		if err := json.Unmarshal(ws.vals[name], &sj); err != nil {
 			return nil, fmt.Errorf("%w: slot %q", ErrBadCollection, name)
 		}
-		s := Slot{Name: name, Role: custody.Role(sj.Role), Holder: custody.Holder(sj.Holder), Party: sj.Party, Unauthenticated: sj.Unauthenticated}
+		s := Slot{Name: name, Role: custody.Role(sj.Role), LegacyParty: sj.Party, Unauthenticated: sj.Unauthenticated}
+		if sj.PartyFingerprint != "" {
+			fp, err := hex.DecodeString(sj.PartyFingerprint)
+			if err != nil || len(fp) != len(s.PartyFingerprint) {
+				return nil, fmt.Errorf("%w: slot %q partyFingerprint", ErrBadCollection, name)
+			}
+			copy(s.PartyFingerprint[:], fp)
+		}
 		if kh, err := hex.DecodeString(sj.KeyHash); err == nil && len(kh) == 28 {
 			copy(s.KeyHash[:], kh)
 		} else if sj.KeyHash != "" {

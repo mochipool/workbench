@@ -32,8 +32,8 @@ type GenerateBLSKeys struct {
 
 // GenerateBLSKeysRequest names the pool and who holds the signing key.
 type GenerateBLSKeysRequest struct {
-	Pool   string
-	Holder custody.Holder // empty or the vault
+	Pool  string
+	Place custody.Placement // empty or the vault
 }
 
 // BLSKeysGenerated is the result. It carries no signing key.
@@ -44,8 +44,8 @@ type BLSKeysGenerated struct {
 
 // Run generates the pair. Both files are written together or not at all.
 func (uc GenerateBLSKeys) Run(ctx context.Context, req GenerateBLSKeysRequest) (BLSKeysGenerated, error) {
-	if req.Holder != "" && req.Holder != custody.HolderVault {
-		return BLSKeysGenerated{}, fmt.Errorf("%w (asked for %s)", ErrBLSHolder, req.Holder)
+	if req.Place != "" && req.Place != custody.PlaceVault {
+		return BLSKeysGenerated{}, fmt.Errorf("%w (asked for %s)", ErrBLSHolder, req.Place)
 	}
 	if err := uc.Store.View(ctx, func(r ports.Reader) error { return blsPlan(r, req.Pool) }); err != nil {
 		return BLSKeysGenerated{}, err

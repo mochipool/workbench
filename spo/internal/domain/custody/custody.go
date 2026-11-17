@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 )
 
 // Role is what a key is for. It decides which operations make sense for it.
@@ -41,27 +43,25 @@ func Roles() []Role {
 		RoleCommitteeHot, RolePolicy, RoleCalidus, RoleCatalystVote}
 }
 
-// Holder is where a key lives.
-type Holder string
+// Placement says where a NEW key is generated. It is a command option and
+// no property of a key reference: once a key exists, which signer answers for
+// it is decided by the signer directory at planning time (ADR 0010 decision 3).
+type Placement string
 
 const (
-	HolderVault    Holder = "vault"    // sealed in the local store
-	HolderHardware Holder = "hardware" // on a hardware wallet; never leaves it
-	HolderRemote   Holder = "remote"   // with another enrolled party
+	PlaceVault    Placement = "vault"    // generated in process, sealed in the local store
+	PlaceHardware Placement = "hardware" // generated on a hardware wallet; the secret never leaves it
 )
 
-// KeyRef refers to a key without holding it.
+// KeyRef refers to a key without holding it: what it is for and its identity
+// (ADR 0010 decision 3). It names no holder, no owner and no device. A name
+// for display is resolved at the adapter edge.
 type KeyRef struct {
-	Role   Role
-	Holder Holder
-	Owner  string // the operator's name for the owner: a pool, a wallet, a DRep
-	// Device narrows a hardware key to a vendor profile once a session is
-	// open; Party names the remote holder. Both are empty otherwise.
-	Device string
-	Party  string
+	Role     Role
+	Identity identity.Ref
 }
 
-func (k KeyRef) String() string { return fmt.Sprintf("%s key of %s (%s)", k.Role, k.Owner, k.Holder) }
+func (k KeyRef) String() string { return fmt.Sprintf("%s key %s", k.Role, k.Identity) }
 
 // RoleMarker ties a Go type to a Role, so a function can demand a key of one
 // role in its signature.
@@ -321,6 +321,12 @@ func (p Plan) Empty() bool { return len(p.slots) == 0 }
 // key. profileOf returns that profile, or an error when no signer is
 // configured for the key.
 func NewPlan(slots []Slot, profileOf func(KeyRef) (Profile, error)) (Plan, error) {
+	return NewPlanFor(slots, func(s Slot) (Profile, error) { return profileOf(s.Key) })
+}
+
+// NewPlanFor is NewPlan with a profile chosen per slot, so the signer for a key
+// may depend on the operation demanded of it.
+func NewPlanFor(slots []Slot, profileOf func(Slot) (Profile, error)) (Plan, error) {
 	if len(slots) == 0 {
 		return Plan{}, errors.New("custody: a plan needs at least one signature")
 	}
@@ -330,7 +336,7 @@ func NewPlan(slots []Slot, profileOf func(KeyRef) (Profile, error)) (Plan, error
 			problems = append(problems, Problem{s, fmt.Sprintf("the slot needs a %s key", s.Demand.Role)})
 			continue
 		}
-		profile, err := profileOf(s.Key)
+		profile, err := profileOf(s)
 		if err != nil {
 			problems = append(problems, Problem{s, err.Error()})
 			continue

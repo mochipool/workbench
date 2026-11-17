@@ -3,14 +3,18 @@ package poolops
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
+	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
+	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 )
 
 type witnessApprover struct {
@@ -42,7 +46,7 @@ func pendingWitness(t *testing.T) (*prig, pool.TransferFile) {
 func (r *prig) witnessSigner(ok bool) (SignWitnessFile, *witnessApprover) {
 	a := &witnessApprover{answer: ok}
 	return SignWitnessFile{Store: r.store, Tip: r.chain, Clock: r.clock, Viewer: native.TxViewer{}, TxIDs: r.led,
-		Signers: pdir{native.VaultSigner{Vault: r.store}}, Approver: a}, a
+		Signers: pdir{native.VaultSigner{Vault: r.store}, r.store}, Approver: a}, a
 }
 
 // spec: SPO-05d-IF-003, SPO-05d-IF-004
@@ -287,5 +291,33 @@ func TestClearWitnesses(t *testing.T) {
 	r2.chain.tip.Slot = 1000 + 100000 + 10
 	if res, err := (ClearWitnesses{Store: r2.store, TxIDs: r2.led}).Run(ctx, ClearRequest{Pool: "mypool", Confirmed: true}); err != nil || !res.Cleared {
 		t.Errorf("expired: %+v %v", res, err)
+	}
+}
+
+type liarWitnesser struct{}
+
+func (liarWitnesser) Profile() custody.Profile {
+	return custody.NewProfile("liar").Allow(custody.RoleStake, custody.OpWitnessTx)
+}
+
+// Witness answers with a valid witness of a key of its own.
+func (liarWitnesser) Witness(_ context.Context, _ custody.KeyRef, body txbuild.TxBody) (txbuild.Witness, error) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	var w txbuild.Witness
+	copy(w.VKey[:], pub)
+	copy(w.Signature[:], ed25519.Sign(priv, body.ID[:]))
+	return w, nil
+}
+
+// A witness made by another key than the demanded one is refused before it is
+// written into the file.
+//
+// spec: SPO-Xidentity-SEC-006
+func TestSignedWitnessFromAnotherKeyIsRefused(t *testing.T) {
+	r, tf := pendingWitness(t)
+	uc, _ := r.witnessSigner(true)
+	uc.Signers = pdir{liarWitnesser{}, r.store}
+	if _, err := uc.Run(ctx, SignRequest{File: tf.Render(), Key: "bob"}); err == nil || !strings.Contains(err.Error(), "does not verify") {
+		t.Errorf("a witness by another key: %v", err)
 	}
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -113,7 +114,8 @@ func (s stubToolchain) Tool(_ context.Context, n ports.ToolName) (ports.Tool, er
 type mapFiles map[string][]byte
 
 func (m mapFiles) HardwareSigningFile(_ context.Context, k custody.KeyRef) ([]byte, error) {
-	b, ok := m[string(k.Role)+"/"+k.Owner]
+	name, _ := hwNames.Load(k)
+	b, ok := m[string(k.Role)+"/"+fmt.Sprint(name)]
 	if !ok {
 		return nil, fmt.Errorf("no signing file for %s", k)
 	}
@@ -226,16 +228,51 @@ func flagValues(argv []string, flag string) []string {
 // export makes a hardware key at a path with the session and stores its signing file.
 func (r *rig) export(s *hwcli.Session, role custody.Role, owner, path string) ports.HardwareKey {
 	r.t.Helper()
-	hk, err := s.ExportHardwareKey(context.Background(), custody.KeyRef{Role: role, Holder: custody.HolderHardware, Owner: owner}, path)
+	hk, err := s.ExportHardwareKey(context.Background(), custody.KeyRef{Role: role}, path)
 	if err != nil {
 		r.t.Fatal(err)
 	}
 	r.files[string(role)+"/"+owner] = hk.SigningFile
+	// From here on the key of this name has the identity of the key the device
+	// made, so what the device answers is verified against it.
+	if id, err := ports.IdentityOfVKey(role, hk.VKey); err == nil {
+		hwIDs.Store(string(role)+"/"+owner, id)
+		hwNames.Store(custody.KeyRef{Role: role, Identity: id}, owner)
+	}
 	return hk
 }
 
+// hwIndex is the key index of the tests: the keys exported under a name by
+// export have a hardware signing file, and nothing else is held.
+type hwIndex struct{}
+
+func (hwIndex) Homes(_ context.Context, id identity.Ref) ([]ports.KeyHome, error) {
+	var out []ports.KeyHome
+	for _, role := range custody.Roles() {
+		if _, ok := hwNames.Load(custody.KeyRef{Role: role, Identity: id}); ok {
+			out = append(out, ports.KeyHome{Role: role, Identity: id, Name: "hw", HasHardware: true})
+		}
+	}
+	return out, nil
+}
+
+// hwIDs and hwNames map a test's key name to the identity of the key the
+// device made under it (set by export) and back. A name never exported has a
+// synthetic identity, which no signing file answers for.
+var hwIDs, hwNames sync.Map
+
 func hwKey(role custody.Role, owner string) custody.KeyRef {
-	return custody.KeyRef{Role: role, Holder: custody.HolderHardware, Owner: owner}
+	if id, ok := hwIDs.Load(string(role) + "/" + owner); ok {
+		return custody.KeyRef{Role: role, Identity: id.(identity.Ref)}
+	}
+	sum := sha256.Sum256([]byte(string(role) + "/" + owner))
+	id, err := identity.NewRef(identity.KindKeyHash, sum[:28])
+	if err != nil {
+		panic(err)
+	}
+	k := custody.KeyRef{Role: role, Identity: id}
+	hwNames.Store(k, owner)
+	return k
 }
 
 func bodyID(cbor []byte) (chain.TxID, error) { return native.Ledger{}.TransactionID(cbor) }
@@ -290,6 +327,12 @@ func vaultWithSeed(t *testing.T, file string, envType string, seed []byte) *plai
 	dir := t.TempDir()
 	env := fmt.Sprintf(`{"type":%q,"description":"","cborHex":"5820%s"}`, envType, hex.EncodeToString(seed))
 	if err := os.WriteFile(filepath.Join(dir, file), []byte(env), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	// the verification key beside it: a key is found in the vault by identity
+	pub := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
+	vk := fmt.Sprintf(`{"type":"VerificationKey_ed25519","description":"","cborHex":"5820%s"}`, hex.EncodeToString(pub))
+	if err := os.WriteFile(filepath.Join(dir, strings.TrimSuffix(file, ".skey")+".vkey"), []byte(vk), 0o400); err != nil {
 		t.Fatal(err)
 	}
 	st, err := plainstore.OpenTestnet(dir)

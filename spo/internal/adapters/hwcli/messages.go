@@ -3,7 +3,6 @@ package hwcli
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -159,9 +158,12 @@ func (s *Session) SignCip36With(ctx context.Context, key custody.Key[custody.Sta
 		return ports.Registration{}, fmt.Errorf("%w: no registration metadata was written", ErrBadDeviceOutput)
 	}
 	sig := cbor[len(cbor)-64:]
-	h := reg.SigningHash()
-	if !ed25519.Verify(reg.StakePub[:], h[:], sig) {
-		return ports.Registration{}, fmt.Errorf("%w: the registration signature does not verify under the stake key", ErrBadDeviceOutput)
+	stakeID, err := wantID(key.Ref(), reg.StakePub[:])
+	if err != nil {
+		return ports.Registration{}, err
+	}
+	if _, err := custody.VerifyCip36(cbor, stakeID); err != nil {
+		return ports.Registration{}, fmt.Errorf("%w: the registration does not verify under the stake key: %v", ErrBadDeviceOutput, err)
 	}
 	if !bytes.Equal(reg.Metadata(sig), cbor) {
 		return ports.Registration{}, fmt.Errorf("%w: the registration the device signed differs from the one asked for", ErrBadDeviceOutput)
@@ -224,11 +226,15 @@ func (s *Session) SignCip88(ctx context.Context, key custody.Key[custody.PoolCol
 	if !bytes.Equal(p.Address, reg.PoolID[:]) {
 		return ports.Registration{}, fmt.Errorf("%w: the protected header's address is not the pool id", ErrBadDeviceOutput)
 	}
-	if !ed25519.Verify(pub, cose.SigStructure(p.Protected, p.Payload), p.Signature) {
-		return ports.Registration{}, fmt.Errorf("%w: the signature does not verify under the pool's cold key", ErrBadDeviceOutput)
+	coldID, err := wantID(key.Ref(), pub)
+	if err != nil {
+		return ports.Registration{}, err
+	}
+	if _, err := custody.VerifyMessage(msg.Sign1, msg.Key, nil, false, coldID); err != nil {
+		return ports.Registration{}, fmt.Errorf("%w: the signature does not verify under the pool's cold key: %v", ErrBadDeviceOutput, err)
 	}
 	cbor := reg.MetadataFrom(pub, p.Sign1)
-	if _, err := cose.VerifyCip88(cbor); err != nil {
+	if _, err := custody.VerifyCip88(cbor, coldID); err != nil {
 		return ports.Registration{}, fmt.Errorf("%w: %v", ErrBadDeviceOutput, err)
 	}
 	return ports.Registration{CBOR: cbor, JSON: reg.MetadataJSONFrom(pub, p.Sign1)}, nil

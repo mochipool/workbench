@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/mochipool/workbench/spo/internal/app/keyring"
 	"github.com/mochipool/workbench/spo/internal/app/txflow"
 	"github.com/mochipool/workbench/spo/internal/domain/assets"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
@@ -111,7 +112,7 @@ func (uc SendAssets) Run(ctx context.Context, req SendAssetsRequest) (SendAssets
 		return SendAssetsResult{}, fmt.Errorf("source: %w", err)
 	}
 	var src, dst resolved
-	var holder custody.Holder
+	var payKey custody.KeyRef
 	sels := append([]assets.Selection(nil), req.Selections...)
 	if err := uc.Store.View(ctx, func(r ports.Reader) error {
 		// The source files are checked first, then the destination, both
@@ -124,20 +125,11 @@ func (uc SendAssets) Run(ctx context.Context, req SendAssetsRequest) (SendAssets
 			return fmt.Errorf("%w: %s.addr", ErrNoSourceAddress, srcName)
 		}
 		src = resolved{name: srcName, addr: addr}
-		skey, err := r.Exists(ports.Ref{Name: srcName, Kind: ports.AddrSKey})
-		if err != nil {
+		var held bool
+		if payKey, held, err = keyring.ResolveHeld(r, custody.RolePayment, srcName); err != nil {
 			return err
 		}
-		hws, err := r.Exists(ports.Ref{Name: srcName, Kind: ports.AddrHwsFile})
-		if err != nil {
-			return err
-		}
-		switch {
-		case hws:
-			holder = custody.HolderHardware
-		case skey:
-			holder = custody.HolderVault
-		default:
+		if !held {
 			return fmt.Errorf("%w: %s", ErrNoSigningKey, srcName)
 		}
 		if dst, err = (SendLovelaces{Addresses: uc.Addresses, Handles: uc.Handles}).resolveDestination(r, req.Destination); err != nil {
@@ -235,13 +227,13 @@ func (uc SendAssets) Run(ctx context.Context, req SendAssetsRequest) (SendAssets
 	}
 
 	prep, err := pipe.Prepare(draft, []txflow.Slot{{Label: "payment",
-		Key:  custody.KeyRef{Role: custody.RolePayment, Holder: holder, Owner: src.name},
+		Key:  payKey,
 		Hash: *srcInfo.PaymentKeyHash}}, txbuild.SendWitnesses)
 	if err != nil {
 		return SendAssetsResult{}, err
 	}
 	res, err := pipe.Execute(ctx, txflow.Input{Draft: draft, Params: params, TTL: ttl, Prepared: prep, Witnesses: txbuild.SendWitnesses,
-		HardwareChangeKeys: hardwareChangeKeys(ctx, uc.Store, custody.KeyRef{Role: custody.RolePayment, Holder: holder, Owner: src.name}),
+		HardwareChangeKeys: hardwareChangeKeys(ctx, uc.Store, src.name, payKey),
 		Summary: ports.TxSummary{Kind: "asset payment", Source: src.name, SourceAddr: src.addr, Destination: dst.name, DestAddr: dst.addr,
 			Amount: fmt.Sprintf("%d asset type(s)", len(plan.Send))},
 		Queued: ports.QueuedTx{Type: "Transaction", FromName: src.name, FromAddr: src.addr, ToName: dst.name, ToAddr: dst.addr,

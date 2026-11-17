@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mochipool/workbench/spo/internal/app/keyring"
 	"github.com/mochipool/workbench/spo/internal/app/txflow"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
@@ -181,7 +182,7 @@ type fakeSigner struct {
 
 func (s *fakeSigner) Profile() custody.Profile { return s.profile }
 func (s *fakeSigner) Witness(_ context.Context, key custody.KeyRef, body txbuild.TxBody) (txbuild.Witness, error) {
-	s.l.add("witness " + string(key.Role) + " " + key.Owner)
+	s.l.add("witness " + string(key.Role))
 	k := s.pay
 	if key.Role == custody.RoleStake && s.mode != "stake-with-payment-key" {
 		k = s.stake
@@ -192,13 +193,22 @@ func (s *fakeSigner) Witness(_ context.Context, key custody.KeyRef, body txbuild
 	return w, nil
 }
 
-type fakeDir struct{ signer ports.Signer }
+// fakeDir serves one signer for every key but those moved to a device.
+type fakeDir struct {
+	signer   ports.Signer
+	noSigner map[custody.KeyRef]bool
+}
 
 func (d fakeDir) SignerFor(k custody.KeyRef) (ports.Signer, error) {
-	if k.Holder == custody.HolderHardware {
+	if d.noSigner[k] {
 		return nil, errors.New("no hardware signer is configured")
 	}
 	return d.signer, nil
+}
+
+// Connected implements ports.SignerDirectory.
+func (d fakeDir) Connected(k custody.KeyRef) ([]ports.ConnectedSigner, error) {
+	return ports.ConnectedVia(d, k)
 }
 
 type fakeChain struct {
@@ -311,6 +321,7 @@ type rig struct {
 	insp    fakeInspector
 	base    Base
 	stakeID stk.KeyHash
+	dir     fakeDir
 }
 
 func registered(m func(*chain.RewardAccount)) chain.Reading[chain.RewardAccount] {
@@ -333,6 +344,7 @@ func newRig(t *testing.T) *rig {
 	r.store = &memStore{l: l, files: map[ports.Ref][]byte{
 		{Name: "w.payment", Kind: ports.AddrFile}: []byte("addr_test_pay\n"),
 		{Name: "w.payment", Kind: ports.AddrSKey}: nil,
+		{Name: "w.payment", Kind: ports.AddrVKey}: payVKeyEnvelope(payPub),
 		{Name: "w", Kind: ports.StakingAddr}:      []byte("stake_test_w\n"),
 		{Name: "w", Kind: ports.StakingSKey}:      nil,
 		{Name: "w", Kind: ports.StakingVKey}:      vkeyEnvelope(stkPub),
@@ -352,11 +364,12 @@ func newRig(t *testing.T) *rig {
 		AllowTx(custody.RoleStake, custody.FeatMultiAssetOutput, custody.FeatMetadata, custody.FeatStakeRegistration, custody.FeatStakeDeregistration,
 			custody.FeatStakeDelegation, custody.FeatVoteDelegation, custody.FeatWithdrawal),
 		pay: payPriv, stake: stkPriv}
+	r.dir = fakeDir{signer: r.signer, noSigner: map[custody.KeyRef]bool{}}
 	r.conf = &fakeConfirmer{l: l, yes: true}
 	r.queue = &fakeQueue{l: l}
 	r.rewards = &fakeRewards{l: l, src: "koios", r: chain.None[chain.RewardAccount]()}
 	r.base = Base{Store: r.store, Addresses: r.insp, Params: r.chain, Tip: r.chain, Utxos: r.chain, NetworkID: ports.NetworkTestnet,
-		Pipeline: txflow.Pipeline{Signers: fakeDir{r.signer}, Min: r.ledger, Fees: r.ledger, Bodies: r.ledger, Assembler: r.ledger,
+		Pipeline: txflow.Pipeline{Signers: r.dir, Min: r.ledger, Fees: r.ledger, Bodies: r.ledger, Assembler: r.ledger,
 			Confirmer: r.conf, Queue: r.queue}}
 	return r
 }
@@ -374,21 +387,29 @@ func (r *rig) nothingWritten(t *testing.T) {
 	}
 }
 
-func (r *rig) holder(t *testing.T, ref ports.Ref, h custody.Holder) {
+// device moves a signing key to a device: its signing key file becomes a
+// hardware file and the directory serves the key with no signer, as a build
+// with no hardware signer does.
+func (r *rig) device(t *testing.T, ref ports.Ref) {
 	t.Helper()
 	delete(r.store.files, ref)
-	if h == custody.HolderHardware {
-		hws := ref
-		switch ref.Kind {
-		case ports.AddrSKey:
-			hws.Kind = ports.AddrHwsFile
-		case ports.StakingSKey:
-			hws.Kind = ports.StakingHwsFile
-		}
-		r.store.files[hws] = []byte("hw")
-	} else {
-		r.store.files[ref] = nil
+	hws, role := ref, custody.RolePayment
+	switch ref.Kind {
+	case ports.AddrSKey:
+		hws.Kind = ports.AddrHwsFile
+	case ports.StakingSKey:
+		hws.Kind, role = ports.StakingHwsFile, custody.RoleStake
 	}
+	r.store.files[hws] = []byte("hw")
+	var k custody.KeyRef
+	if err := r.store.View(context.Background(), func(rd ports.Reader) error {
+		var err error
+		k, err = keyring.Resolve(rd, role, ref.Name)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r.dir.noSigner[k] = true
 }
 
 // signerPub is the public key the pool "mypool" is stored with.
@@ -396,4 +417,8 @@ func (r *rig) signerPub() []byte {
 	e, _ := pool.ParseEnvelope(r.store.files[ports.Ref{Name: "mypool", Kind: ports.NodeVKey}])
 	raw, _ := e.Key32()
 	return raw
+}
+
+func payVKeyEnvelope(pub ed25519.PublicKey) []byte {
+	return pool.MarshalEnvelope(pool.Envelope{Type: "PaymentVerificationKeyShelley_ed25519", Description: "Payment Verification Key", CborHex: "5820" + fmt.Sprintf("%x", []byte(pub))})
 }

@@ -7,6 +7,8 @@ import (
 
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
+	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/domain/stake"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -17,17 +19,41 @@ type poolSigner struct{ profile custody.Profile }
 func (s poolSigner) Profile() custody.Profile { return s.profile }
 func (s poolSigner) Witness(_ context.Context, k custody.KeyRef, b txbuild.TxBody) (txbuild.Witness, error) {
 	var w txbuild.Witness
-	w.VKey[0], w.Signature[0] = byte(len(k.Owner)), b.ID[0]
+	w.VKey[0], w.Signature[0] = k.Identity.Hash()[0], b.ID[0]
 	return w, nil
+}
+
+// tkey is a key reference whose identity says, in its first byte, which test
+// signer answers: unservedTag is a key no connected signer holds.
+func tkey(role custody.Role, tag byte) custody.KeyRef {
+	h := make([]byte, 28)
+	h[0] = tag
+	id, err := identity.NewRef(identity.KindKeyHash, h)
+	if err != nil {
+		panic(err)
+	}
+	return custody.KeyRef{Role: role, Identity: id}
+}
+
+const unservedTag = 0xee
+
+func unserved(k custody.KeyRef) bool {
+	h := k.Identity.Hash()
+	return len(h) > 0 && h[0] == unservedTag
 }
 
 type pdir struct{ s poolSigner }
 
 func (d pdir) SignerFor(k custody.KeyRef) (ports.Signer, error) {
-	if k.Holder != custody.HolderVault {
-		return nil, errors.New("no signer for " + string(k.Holder))
+	if unserved(k) {
+		return nil, errors.New("no signer for " + k.String())
 	}
 	return d.s, nil
+}
+
+// Connected implements ports.SignerDirectory.
+func (d pdir) Connected(k custody.KeyRef) ([]ports.ConnectedSigner, error) {
+	return ports.ConnectedVia(d, k)
 }
 
 func poolDraft() txbuild.Draft {
@@ -60,20 +86,20 @@ func TestPreparePartialLeavesRemoteSlotsPending(t *testing.T) {
 		t.Errorf("a pool certificate requires no stake key: %v", got)
 	}
 	slots := []Slot{
-		{Label: "cold", Key: custody.KeyRef{Role: custody.RolePoolCold, Holder: custody.HolderVault, Owner: "p"}},
-		{Label: "pay", Key: custody.KeyRef{Role: custody.RolePayment, Holder: custody.HolderVault, Owner: "pay"}},
-		{Label: "owner", Key: custody.KeyRef{Role: custody.RoleStake, Holder: custody.HolderRemote, Owner: "alice", Party: "external"}},
+		{Label: "cold", Key: tkey(custody.RolePoolCold, 1)},
+		{Label: "pay", Key: tkey(custody.RolePayment, 2)},
+		{Label: "owner", Key: tkey(custody.RoleStake, unservedTag), Party: party.Fingerprint{9}},
 	}
-	// A remote holder refuses up front without PreparePartial...
+	// A key no connected signer holds refuses up front without PreparePartial...
 	if _, err := p.Prepare(poolDraft(), slots, 3); err == nil {
-		t.Fatal("a remote holder was planned")
+		t.Fatal("a key with no signer was planned")
 	}
 	// ...and is pending with it. The witness count is the fee's, not the local count.
-	prep, err := p.PreparePartial(poolDraft(), slots, 3, func(s Slot) bool { return s.Key.Holder != custody.HolderVault })
+	prep, err := p.PreparePartial(poolDraft(), slots, 3, true)
 	if err != nil || len(prep.Pending) != 1 || prep.Pending[0].Label != "owner" {
 		t.Fatalf("%+v %v", prep, err)
 	}
-	if _, err := p.PreparePartial(poolDraft(), slots, 2, nil); !errors.Is(err, ErrMisconfigured) {
+	if _, err := p.PreparePartial(poolDraft(), slots, 2, false); !errors.Is(err, ErrMisconfigured) {
 		t.Errorf("the count must be the fee's: %v", err)
 	}
 	// Only the local slots are signed.
@@ -82,7 +108,7 @@ func TestPreparePartialLeavesRemoteSlotsPending(t *testing.T) {
 		t.Errorf("%v %v", sws, err)
 	}
 	// All remote: no plan, nothing to sign.
-	none, err := p.PreparePartial(poolDraft(), slots[2:], 1, func(Slot) bool { return true })
+	none, err := p.PreparePartial(poolDraft(), slots[2:], 1, true)
 	if err != nil || len(none.Pending) != 1 {
 		t.Fatalf("%v", err)
 	}
@@ -92,7 +118,7 @@ func TestPreparePartialLeavesRemoteSlotsPending(t *testing.T) {
 	// A slot's own features replace the draft's: a signer that can only do the owner mode serves the owner slot.
 	ownerOnly := custody.NewProfile("o").AllowTx(custody.RoleStake, custody.FeatPoolRegistrationOwner)
 	po := Pipeline{Signers: pdir{poolSigner{profile: ownerOnly}}}
-	s := []Slot{{Label: "owner", Key: custody.KeyRef{Role: custody.RoleStake, Holder: custody.HolderVault, Owner: "a"},
+	s := []Slot{{Label: "owner", Key: tkey(custody.RoleStake, 3),
 		Features: custody.NewFeatures(custody.FeatPoolRegistrationOwner)}}
 	if _, err := po.Prepare(poolDraft(), s, 1); err != nil {
 		t.Errorf("the owner slot asks for the owner mode only: %v", err)
@@ -121,4 +147,34 @@ func TestConfirmAndDeliverAreTheTwoHalvesOfExecute(t *testing.T) {
 		t.Errorf("an unwired pipeline: %v", err)
 	}
 	var _ ports.TxWitnesser = poolSigner{}
+}
+
+// A device witness is told only change keys that are on a device: a vault payer
+// key beside a device signer is not declared (it has no hardware file there).
+//
+// spec: SPO-Ptx-INV-009
+func TestDeviceChangeKeysSkipVaultKeys(t *testing.T) {
+	vaultKey, deviceKey := tkey(custody.RolePayment, 1), tkey(custody.RolePayment, 2)
+	dir := ports.SignerFunc(func(k custody.KeyRef) (ports.Signer, error) {
+		if k == deviceKey {
+			return hwStub{}, nil
+		}
+		return poolSigner{}, nil
+	})
+	p := Pipeline{Signers: dir}
+	in := Input{HardwareChangeKeys: []custody.KeyRef{vaultKey, deviceKey}}
+	two := txbuild.BodySpec{Outputs: make([]txbuild.Output, 2)}
+	if got := p.DeviceChangeKeys(in, two); len(got) != 1 || got[0] != deviceKey {
+		t.Errorf("change keys %v, want only the device key", got)
+	}
+	if got := p.DeviceChangeKeys(in, txbuild.BodySpec{Outputs: make([]txbuild.Output, 1)}); len(got) != 0 {
+		t.Errorf("one output declares none: %v", got)
+	}
+}
+
+// hwStub is a signer that takes the options of a device witness.
+type hwStub struct{ poolSigner }
+
+func (hwStub) WitnessWith(context.Context, custody.KeyRef, txbuild.TxBody, ports.HardwareTxOptions) (txbuild.Witness, error) {
+	return txbuild.Witness{}, nil
 }

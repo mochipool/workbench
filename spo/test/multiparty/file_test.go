@@ -14,7 +14,6 @@ import (
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/app/multisig"
 	"github.com/mochipool/workbench/spo/internal/app/poolops"
-	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
@@ -183,7 +182,7 @@ func TestFileTransportTwoOwnerPoolRegistration(t *testing.T) {
 		t.Fatalf("state %s, %d submitted before completion", c.State(1000), w.sub.count())
 	}
 	bobSlot, _ := c.Slot("bob.staking")
-	if bobSlot.Unauthenticated || bobSlot.Witness == nil || bobSlot.Party != "bobparty" || bobSlot.Holder != custody.HolderRemote {
+	if bobSlot.Unauthenticated || bobSlot.Witness == nil || bobSlot.PartyFingerprint != w.C.FingerprintOf("bobparty") {
 		t.Errorf("bob's slot %+v", bobSlot)
 	}
 	// The use case then assembles exactly the stored body with the stored witnesses and submits.

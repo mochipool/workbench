@@ -49,7 +49,7 @@ func (s *claimSigner) Profile() custody.Profile {
 		AllowTx(custody.RoleStake, custody.FeatMultiAssetOutput, custody.FeatMetadata, custody.FeatWithdrawal)
 }
 func (s *claimSigner) Witness(_ context.Context, key custody.KeyRef, body txbuild.TxBody) (txbuild.Witness, error) {
-	s.l.add("witness " + string(key.Role) + " " + key.Owner)
+	s.l.add("witness " + string(key.Role))
 	k := s.pay
 	if key.Role == custody.RoleStake {
 		k = s.stake
@@ -96,12 +96,16 @@ func newClaimRig(t *testing.T) *claimRig {
 	r.store = &memStore{files: memReader{
 		{Name: "w", Kind: ports.StakingAddr}:      []byte("stake_test_w\n"),
 		{Name: "w", Kind: ports.StakingSKey}:      nil,
+		{Name: "w", Kind: ports.StakingVKey}:      vkeyEnv("StakeVerificationKeyShelley_ed25519", stkPub),
 		{Name: "p", Kind: ports.AddrFile}:         []byte("addr_test_p\n"),
 		{Name: "p", Kind: ports.AddrSKey}:         nil,
+		{Name: "p", Kind: ports.AddrVKey}:         vkeyEnv("PaymentVerificationKeyShelley_ed25519", payPub),
 		{Name: "d", Kind: ports.AddrFile}:         []byte("addr_test_d\n"),
 		{Name: "d", Kind: ports.AddrSKey}:         nil,
+		{Name: "d", Kind: ports.AddrVKey}:         vkeyEnv("PaymentVerificationKeyShelley_ed25519", payPub),
 		{Name: "w.payment", Kind: ports.AddrFile}: []byte("addr_test_p\n"),
 		{Name: "w.payment", Kind: ports.AddrSKey}: nil,
+		{Name: "w.payment", Kind: ports.AddrVKey}: vkeyEnv("PaymentVerificationKeyShelley_ed25519", payPub),
 	}}
 	r.chain = &fakeChain{l: l, slot: 1000, utxos: []chain.Utxo{
 		{TxID: chain.TxID{1}, Lovelace: 30_000_000},
@@ -112,7 +116,7 @@ func newClaimRig(t *testing.T) *claimRig {
 	r.queue = &fakeQueue{l: l}
 	r.rewards = &fakeRewards{l: l, r: rewardsOf(5_000_000, chain.Value("alwaysAbstain"))}
 	signer := &claimSigner{l: l, pay: payPriv, stake: stkPriv}
-	r.uc = ClaimRewards{Store: r.store, Signers: fakeDir{signer: signer}, Utxos: r.chain, Params: r.chain, Tip: r.chain,
+	r.uc = ClaimRewards{Store: r.store, Signers: fakeDir(r.store, signer), Utxos: r.chain, Params: r.chain, Tip: r.chain,
 		Addresses: claimInspector{payHash: txbuild.HashKey(payPub), stakeHash: txbuild.HashKey(stkPub)},
 		Min:       r.ledger, Fees: r.ledger, Bodies: r.ledger, Assembler: r.ledger, Confirmer: r.conf, Rewards: r.rewards, Queue: r.queue,
 		NetworkID: ports.NetworkTestnet}

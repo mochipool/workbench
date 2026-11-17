@@ -2,6 +2,9 @@ package poolops
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -16,9 +19,13 @@ import (
 	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
+var (
+	coldPriv    = ed25519.NewKeyFromSeed([]byte("0123456789abcdef0123456789abcdef"))
+	coldVKeyHex = "5820" + hex.EncodeToString(coldPriv.Public().(ed25519.PublicKey))
+)
+
 const (
-	coldVKeyHex = "5820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
-	kesVKeyHex  = "5820a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
+	kesVKeyHex = "5820a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
 )
 
 // fakeIssuer is a signer: it records what it was asked and returns a marker
@@ -27,6 +34,8 @@ type fakeIssuer struct {
 	calls []ports.OpCertRequest
 	err   error
 	hook  func()
+	// wrong, when set, builds the answer instead of a correct certificate.
+	wrong func(ports.OpCertRequest) []byte
 }
 
 func (f *fakeIssuer) Profile() custody.Profile {
@@ -41,17 +50,64 @@ func (f *fakeIssuer) IssueOpCert(_ context.Context, _ custody.Key[custody.PoolCo
 	if f.err != nil {
 		return nil, f.err
 	}
-	return []byte("opcert-counter-" + string(rune('0'+req.Counter%10)) + "\n"), nil
+	if f.wrong != nil {
+		return f.wrong(req), nil
+	}
+	return signedOpCert(coldPriv, req.KesVKey, req.Counter, req.KesPeriod), nil
 }
 
-// directory has a signer for the vault only, like the real build.
-type directory struct{ vault ports.Signer }
+// cborHead writes the head of a CBOR item of a major type.
+func cborHead(major byte, n uint64) []byte {
+	switch {
+	case n < 24:
+		return []byte{major<<5 | byte(n)}
+	case n < 256:
+		return []byte{major<<5 | 24, byte(n)}
+	default:
+		return binary.BigEndian.AppendUint16([]byte{major<<5 | 25}, uint16(n))
+	}
+}
+
+// signedOpCert is a certificate in cardano-cli's text envelope, signed by priv.
+func signedOpCert(priv ed25519.PrivateKey, kes []byte, counter, period uint64) []byte {
+	m := append([]byte(nil), kes...)
+	m = binary.BigEndian.AppendUint64(m, counter)
+	m = binary.BigEndian.AppendUint64(m, period)
+	sig := ed25519.Sign(priv, m)
+	b := []byte{0x82, 0x84}
+	b = append(append(b, cborHead(2, 32)...), kes...)
+	b = append(b, cborHead(0, counter)...)
+	b = append(b, cborHead(0, period)...)
+	b = append(append(b, cborHead(2, 64)...), sig...)
+	b = append(append(b, cborHead(2, 32)...), priv.Public().(ed25519.PublicKey)...)
+	return pool.MarshalEnvelope(pool.Envelope{Type: pool.TypeOpCert, CborHex: hex.EncodeToString(b)})
+}
+
+// directory has a signer for the vault keys only, like the real build with no
+// device: a key with only a hardware file has no signer.
+type directory struct {
+	vault ports.Signer
+	store ports.Store
+}
 
 func (d directory) SignerFor(k custody.KeyRef) (ports.Signer, error) {
-	if k.Holder == custody.HolderVault {
+	idx, err := ports.NewStoreKeyIndex(d.store)
+	if err != nil {
+		return nil, err
+	}
+	homes, err := idx.Homes(context.Background(), k.Identity)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := ports.SecretHome(homes, k.Role); ok {
 		return d.vault, nil
 	}
 	return nil, errors.New("no hardware signer is configured")
+}
+
+// Connected implements ports.SignerDirectory.
+func (d directory) Connected(k custody.KeyRef) ([]ports.ConnectedSigner, error) {
+	return ports.ConnectedVia(d, k)
 }
 
 type fakeTip struct {
@@ -114,9 +170,7 @@ func newIssueEnv(t *testing.T, counter uint64, reading chain.Reading[uint64]) is
 	put(t, dir, "mypool.kes.counter-next", "000\n")
 	put(t, dir, "mypool.kes-000.vkey", envelopeOf("KesVerificationKey_ed25519_kes_2^6", kesVKeyHex))
 	var vk [32]byte
-	for i := range vk {
-		vk[i] = byte(i)
-	}
+	copy(vk[:], coldPriv.Public().(ed25519.PublicKey))
 	put(t, dir, "mypool.node.counter", string(pool.IssueCounter{Next: counter, ColdVKey: vk}.Envelope()))
 
 	st, err := plainstore.OpenTestnet(dir)
@@ -127,7 +181,7 @@ func newIssueEnv(t *testing.T, counter uint64, reading chain.Reading[uint64]) is
 	tip := &fakeTip{slot: 128_000_000}
 	return issueEnv{
 		uc: IssueOperationalCertificate{
-			Store: st, Signers: directory{vault: signer}, Tip: tip, Genesis: fakeGenesis{},
+			Store: st, Signers: directory{vault: signer, store: st}, Tip: tip, Genesis: fakeGenesis{},
 			Counters: fakeCounters{reading: reading}, SingleSource: true, OnSingle: noopHook, Clock: fixedClock{time.Date(2026, 11, 16, 8, 57, 1, 0, time.UTC)},
 		},
 		signer: signer, tip: tip, dir: dir,
@@ -177,7 +231,7 @@ func TestIssueCommitsEverythingTogether(t *testing.T) {
 		len(e.signer.calls[0].KesVKey) != 32 || e.signer.calls[0].KesVKey[0] != 0xa0 {
 		t.Fatalf("signer call %+v", e.signer.calls)
 	}
-	if got, _ := os.ReadFile(filepath.Join(e.dir, "mypool.node-000.opcert")); string(got) != "opcert-counter-5\n" {
+	if got, _ := os.ReadFile(filepath.Join(e.dir, "mypool.node-000.opcert")); mustOC(t, got).Counter != 5 {
 		t.Errorf("opcert %q", got)
 	}
 	if c := e.counterFile(t); c.Next != 6 {
@@ -395,7 +449,7 @@ func TestMissingCounter(t *testing.T) {
 	if err := create.Run(context.Background(), "mypool", 0); err != nil {
 		t.Fatal(err)
 	}
-	if c := e.counterFile(t); c.Next != 0 || c.ColdVKey[31] != 31 {
+	if c := e.counterFile(t); c.Next != 0 || c.ColdVKey[31] != coldPriv[63] {
 		t.Errorf("created counter %+v", c)
 	}
 	if err := create.Run(context.Background(), "mypool", 7); !errors.Is(err, ErrIssueCounterExists) {
@@ -481,5 +535,44 @@ func TestIssueFromOneProviderNeedsSingleSource(t *testing.T) {
 	res, err := e.uc.Run(context.Background(), "mypool", IssueOptions{CounterOverride: u64(5)})
 	if err != nil || !res.SingleSource || res.Source == "" {
 		t.Fatalf("%+v %v", res, err)
+	}
+}
+
+func mustOC(t *testing.T, b []byte) pool.OpCert {
+	t.Helper()
+	oc, err := pool.ParseOpCert(b)
+	if err != nil {
+		t.Fatalf("the stored certificate: %v", err)
+	}
+	return oc
+}
+
+// A signer that answers with another cold key's certificate, or with a
+// certificate over another KES key, counter or period than the ones demanded,
+// is refused and nothing is stored.
+//
+// spec: SPO-Xidentity-SEC-002
+func TestAnOpCertNotMadeByTheDemandedKeyOrNotOverTheDemandedFieldsIsRefused(t *testing.T) {
+	other := ed25519.NewKeyFromSeed([]byte("fedcba9876543210fedcba9876543210"))
+	for name, c := range map[string]struct {
+		build func(ports.OpCertRequest) []byte
+		want  error
+	}{
+		"another cold key": {func(r ports.OpCertRequest) []byte { return signedOpCert(other, r.KesVKey, r.Counter, r.KesPeriod) }, custody.ErrOpCertKey},
+		"another counter":  {func(r ports.OpCertRequest) []byte { return signedOpCert(coldPriv, r.KesVKey, r.Counter+1, r.KesPeriod) }, custody.ErrOpCertField},
+		"another period":   {func(r ports.OpCertRequest) []byte { return signedOpCert(coldPriv, r.KesVKey, r.Counter, r.KesPeriod+1) }, custody.ErrOpCertField},
+		"another KES key": {func(r ports.OpCertRequest) []byte {
+			return signedOpCert(coldPriv, append([]byte{0xff}, r.KesVKey[1:]...), r.Counter, r.KesPeriod)
+		}, custody.ErrOpCertField},
+		"not a certificate": {func(ports.OpCertRequest) []byte { return []byte("opcert") }, pool.ErrBadOpCert},
+	} {
+		e := newIssueEnv(t, 5, chain.Value[uint64](4))
+		e.signer.wrong = c.build
+		if _, err := e.uc.Run(context.Background(), "mypool", IssueOptions{}); !errors.Is(err, c.want) {
+			t.Errorf("%s: %v", name, err)
+		}
+		if _, err := os.Stat(filepath.Join(e.dir, "mypool.node-000.opcert")); err == nil {
+			t.Errorf("%s: a certificate was stored", name)
+		}
 	}
 }

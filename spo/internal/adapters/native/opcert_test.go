@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,15 +14,28 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/ports"
 	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
+// coldVKey is the verification key of the cold seed the tests use (100+i).
+func coldVKey() []byte {
+	seed := make([]byte, 32)
+	for i := range seed {
+		seed[i] = byte(100 + i)
+	}
+	return ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
+}
+
 func vaultWith(t *testing.T, skeyEnvelope string) *plainstore.Store {
 	t.Helper()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "mypool.node.skey"), []byte(skeyEnvelope), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "mypool.node.vkey"), []byte(`{"type":"StakePoolVerificationKey_ed25519","description":"x","cborHex":"5820`+hex.EncodeToString(coldVKey())+`"}`), 0o400); err != nil {
 		t.Fatal(err)
 	}
 	st, err := plainstore.OpenTestnet(dir)
@@ -33,7 +47,11 @@ func vaultWith(t *testing.T, skeyEnvelope string) *plainstore.Store {
 
 func coldKey(t *testing.T) custody.Key[custody.PoolCold] {
 	t.Helper()
-	k, err := custody.As[custody.PoolCold](custody.KeyRef{Role: custody.RolePoolCold, Holder: custody.HolderVault, Owner: "mypool"})
+	id, err := identity.KeyHashOf(coldVKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, err := custody.As[custody.PoolCold](custody.KeyRef{Role: custody.RolePoolCold, Identity: id})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,48 +120,59 @@ func TestVaultSignerRefusesWhatItCannotSign(t *testing.T) {
 }
 
 // The profile agrees with the interfaces (ADR 0008) and the directory gives
-// the vault signer for vault keys and a clear refusal for other holders.
+// the vault signer for the keys the vault holds, and nothing for any other.
+//
+// spec: SPO-Xidentity-IF-001
 func TestSignerConformanceAndDirectory(t *testing.T) {
-	st, _ := plainstore.OpenTestnet(t.TempDir())
+	st := vaultWith(t, `{"type":"StakePoolSigningKey_ed25519","description":"x","cborHex":"5820`+hex.EncodeToString(seedOf(100))+`"}`)
 	if err := ports.CheckSigner(VaultSigner{Vault: st}); err != nil {
 		t.Fatal(err)
 	}
 	d := Signers{Vault: st}
-	sg, err := d.SignerFor(custody.KeyRef{Role: custody.RolePoolCold, Holder: custody.HolderVault, Owner: "p"})
+	cold := coldKey(t).Ref()
+	sg, err := d.SignerFor(cold)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := ports.CheckSigner(sg); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.SignerFor(custody.KeyRef{Role: custody.RolePoolCold, Holder: custody.HolderHardware}); err == nil ||
-		!strings.Contains(err.Error(), "no hardware signer is configured") {
-		t.Errorf("hardware: %v", err)
+	// A key the vault does not hold, and the same key under a role it is not
+	// stored in, have no signer: the answer depends on the identity, not on a
+	// holder the reference does not carry.
+	other, _ := identity.KeyHashOf(make([]byte, 32))
+	if _, err := d.SignerFor(custody.KeyRef{Role: custody.RolePoolCold, Identity: other}); !errors.Is(err, ports.ErrNoSignerFor) {
+		t.Errorf("a key nobody holds: %v", err)
 	}
-	if _, err := d.SignerFor(custody.KeyRef{Holder: custody.HolderRemote}); err == nil {
-		t.Error("remote accepted")
+	if _, err := d.SignerFor(custody.KeyRef{Role: custody.RolePayment, Identity: cold.Identity}); !errors.Is(err, ports.ErrNoSignerFor) {
+		t.Errorf("the key under another role: %v", err)
 	}
-	// A plan for a pool cold key in the vault passes; payment and stake keys
-	// are witnessed by the same signer now (TxWitnesser); a VRF key is not offered.
+	if conn, err := d.Connected(cold); err != nil || len(conn) != 1 || conn[0].Kind != ports.SignerLocal || conn[0].Deferred {
+		t.Errorf("connected: %+v %v", conn, err)
+	}
+	// A plan for a pool cold key in the vault passes; a payment key that is not
+	// there is refused with the same error users see today for an unavailable
+	// holder; a VRF key is not offered.
 	_, err = ports.PlanSignatures(d, []custody.Slot{{
-		Label: "opcert", Key: custody.KeyRef{Role: custody.RolePoolCold, Holder: custody.HolderVault, Owner: "p"},
+		Label: "opcert", Key: cold,
 		Demand: custody.Demand{Role: custody.RolePoolCold, Operation: custody.OpIssueOpCert},
 	}})
 	if err != nil {
 		t.Errorf("plan: %v", err)
 	}
 	_, err = ports.PlanSignatures(d, []custody.Slot{{
-		Label: "tx", Key: custody.KeyRef{Role: custody.RolePayment, Holder: custody.HolderVault, Owner: "p"},
-		Demand: custody.Demand{Role: custody.RolePayment, Operation: custody.OpWitnessTx},
-	}})
-	if err != nil {
-		t.Errorf("a payment witness is planned for the vault: %v", err)
-	}
-	_, err = ports.PlanSignatures(d, []custody.Slot{{
-		Label: "tx", Key: custody.KeyRef{Role: custody.RoleVRF, Holder: custody.HolderVault, Owner: "p"},
+		Label: "tx", Key: custody.KeyRef{Role: custody.RoleVRF, Identity: cold.Identity},
 		Demand: custody.Demand{Role: custody.RoleVRF, Operation: custody.OpWitnessTx},
 	}})
 	if err == nil {
 		t.Error("the vault signer claims to witness with a VRF key")
 	}
+}
+
+func seedOf(base int) []byte {
+	seed := make([]byte, 32)
+	for i := range seed {
+		seed[i] = byte(base + i)
+	}
+	return seed
 }

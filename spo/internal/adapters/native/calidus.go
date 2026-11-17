@@ -170,7 +170,11 @@ func (v VaultSignatures) SignText(ctx context.Context, key custody.Key[custody.C
 	if v.Vault == nil {
 		return out, errors.New("the store cannot release signing keys")
 	}
-	env, err := v.Vault.Open(ctx, ports.Ref{Name: key.Ref().Owner, Kind: ports.CalidusSKey})
+	ref, err := v.secretRef(ctx, key.Ref())
+	if err != nil {
+		return out, err
+	}
+	env, err := v.Vault.Open(ctx, ref)
 	if err != nil {
 		return out, fmt.Errorf("open the Calidus signing key: %w", err)
 	}
@@ -180,6 +184,9 @@ func (v VaultSignatures) SignText(ctx context.Context, key custody.Key[custody.C
 		return out, err
 	}
 	defer wipe(lk.SKey)
+	if err := checkIdentity(key.Ref(), lk.VKey); err != nil {
+		return out, err
+	}
 	sig, err := signWith(lk, text)
 	if err != nil {
 		return out, err

@@ -21,7 +21,6 @@ import (
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/app/txflow"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
-	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -123,21 +122,12 @@ func (w *World) Fund(addr chain.Address, lovelace chain.Lovelace) {
 
 // Signers is the directory: vault keys to the vault signer, hardware keys to
 // the hardware signer when one is set up.
-func (w *World) Signers() ports.SignerDirectory { return directory{w} }
-
-type directory struct{ w *World }
-
-func (d directory) SignerFor(k custody.KeyRef) (ports.Signer, error) {
-	switch k.Holder {
-	case custody.HolderVault:
-		return native.VaultSignatures{VaultSigner: native.VaultSigner{Vault: d.w.Store}}, nil
-	case custody.HolderHardware:
-		if d.w.HW == nil {
-			return nil, ports.ErrNoHardwareSigner
-		}
-		return d.w.HW.Lazy, nil
+func (w *World) Signers() ports.SignerDirectory {
+	d := native.Signers{Vault: w.Store}
+	if w.HW != nil {
+		d.Hardware = w.HW.Lazy
 	}
-	return nil, fmt.Errorf("no signer for %s", k)
+	return d
 }
 
 // Pipeline is the shared transaction pipeline over this world. Canonicalizer is
@@ -215,6 +205,7 @@ type HW struct {
 	logPath string
 	cfgPath string
 	cfg     map[string]any
+	hwcfg   hwcli.Config
 }
 
 // Seed is the seed of the fake device; the key of a path is derived from it.
@@ -241,9 +232,17 @@ func (w *World) UseHardware(vendor, app string) *HW {
 		Timeout: 3 * time.Second, Poll: 20 * time.Millisecond, Attempt: 2 * time.Second, TempRoot: tmp,
 		Env: []string{"FAKEHW_CONFIG=" + h.cfgPath},
 	}
+	h.hwcfg = cfg
 	h.Lazy = hwcli.NewLazy(context.Background(), cfg)
 	w.HW = h
 	return h
+}
+
+// NewSession gives the world a new hardware session over the same device and
+// configuration, as the next command would open: a device unplugged since the
+// last session is found out when the plan asks for the signer's profile.
+func (w *World) NewSession() {
+	w.HW.Lazy = hwcli.NewLazy(context.Background(), w.HW.hwcfg)
 }
 
 func (h *HW) write() {

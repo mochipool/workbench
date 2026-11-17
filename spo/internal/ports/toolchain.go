@@ -14,6 +14,10 @@ const (
 	CardanoSigner ToolName = "cardano-signer"
 	Bech32        ToolName = "bech32"
 	GPG           ToolName = "gpg"
+	// The libfido2 command-line tools (ADR 0011, decision 8).
+	FIDO2Token  ToolName = "fido2-token"
+	FIDO2Cred   ToolName = "fido2-cred"
+	FIDO2Assert ToolName = "fido2-assert"
 )
 
 // Tool is a located and version-checked external tool.

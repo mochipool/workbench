@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mochipool/workbench/spo/internal/app/hwkeys"
+	"github.com/mochipool/workbench/spo/internal/app/keyring"
 	"github.com/mochipool/workbench/spo/internal/app/txflow"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/governance"
@@ -517,12 +519,12 @@ func (uc RegisterVote) Run(ctx context.Context, req RegisterVoteRequest) (Result
 					mismatch = stem
 					continue
 				}
-				holder, err := holderOf(r, ports.Ref{Name: stem, Kind: kd.skey}, ports.Ref{Name: stem, Kind: kd.hws})
+				vkey, err := keyring.Held(r, kd.custody, stem, ErrNoSigningKey)
 				if err != nil {
 					return err
 				}
 				vk = voterKeys{name: stem, role: kd.role, hash: h}
-				signer = txflow.Slot{Label: string(kd.role) + " key", Key: custody.KeyRef{Role: kd.custody, Holder: holder, Owner: stem}, Hash: h}
+				signer = txflow.Slot{Label: string(kd.role) + " key", Key: vkey, Hash: h}
 				return nil
 			}
 			switch {
@@ -544,11 +546,12 @@ func (uc RegisterVote) Run(ctx context.Context, req RegisterVoteRequest) (Result
 	// spec: SPO-24b-PRE-009 (payment hardware with a key-file voter is refused,
 	// SPO-Ptx-PRE-006; a key-file payer with a hardware voter is allowed),
 	// SPO-24b-PR-001 (unrestricted mode for several votes, never implied).
-	signerHW := signer.Key.Holder == custody.HolderHardware
-	if pay.holder == custody.HolderHardware && !signerHW {
+	signerHW := hwkeys.OnDevice(uc.Pipeline.Signers, signer.Key)
+	payHW := hwkeys.OnDevice(uc.Pipeline.Signers, pay.key)
+	if payHW && !signerHW {
 		return Result{}, txflow.ErrMixedHolders
 	}
-	if len(atts) > 1 && (pay.holder == custody.HolderHardware || signerHW) {
+	if len(atts) > 1 && (payHW || signerHW) {
 		if !req.Unrestricted {
 			return Result{}, ErrUnrestrictedNeeded
 		}

@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
-	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	stk "github.com/mochipool/workbench/spo/internal/domain/stake"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
@@ -107,7 +106,7 @@ func TestRegisterPoolDelegationRefusals(t *testing.T) {
 			delete(r.store.files, ports.Ref{Name: "w", Kind: ports.StakingSKey})
 		}, ErrNoSigningKey},
 		{"a hardware stake key", func(r *rig, _ *RegisterPoolDelegation) {
-			r.holder(t, ports.Ref{Name: "w", Kind: ports.StakingSKey}, custody.HolderHardware)
+			r.device(t, ports.Ref{Name: "w", Kind: ports.StakingSKey})
 		}, nil},
 		{"the stake key is not the certificate's", func(r *rig, _ *RegisterPoolDelegation) { r.signer.mode = "stake-with-payment-key" }, nil},
 		{"declined", func(r *rig, _ *RegisterPoolDelegation) { r.conf.yes = false }, ErrDeclined},

@@ -21,6 +21,9 @@ import (
 // and stake keys; a key is opened for the call and destroyed after it.
 type VaultSigner struct {
 	Vault ports.Vault
+	// Keys finds the signing keys of the vault by identity. When nil, the
+	// vault is used as the index if it is a store that can list its artefacts.
+	Keys ports.KeyIndex
 }
 
 // Profile implements ports.Signer.
@@ -75,7 +78,11 @@ func coldSeed(env *secret.Buffer) (*secret.Buffer, error) {
 //
 // spec: SPO-04d-EXT-003, SPO-04d-INV-005
 func (v VaultSigner) IssueOpCert(ctx context.Context, cold custody.Key[custody.PoolCold], req ports.OpCertRequest) ([]byte, error) {
-	env, err := v.Vault.Open(ctx, ports.Ref{Name: cold.Ref().Owner, Kind: ports.NodeSKey})
+	ref, err := v.secretRef(ctx, cold.Ref())
+	if err != nil {
+		return nil, err
+	}
+	env, err := v.Vault.Open(ctx, ref)
 	if err != nil {
 		return nil, fmt.Errorf("open the cold signing key: %w", err)
 	}
@@ -96,6 +103,11 @@ func (v VaultSigner) IssueOpCert(ctx context.Context, cold custody.Key[custody.P
 	}
 	if len(oc.ColdSignature) != ed25519.SignatureSize || len(oc.ColdVkey) != ed25519.PublicKeySize {
 		return nil, errors.New("operational certificate has unexpected sizes")
+	}
+	// The certificate is made from the demand's own fields; the cold key that
+	// signed it must be the one demanded.
+	if err := checkIdentity(cold.Ref(), oc.ColdVkey); err != nil {
+		return nil, err
 	}
 	return envelope(bursa.KeyFile{
 		Type:    pool.TypeOpCert,
@@ -135,34 +147,4 @@ func cborHead(b []byte, major byte, n uint64) []byte {
 	}
 }
 
-// Signers is the directory of the signers this build has. The vault signer
-// exists in process; a hardware signer is optional and is another adapter
-// (hwcli.Lazy), as are remote parties.
-type Signers struct {
-	Vault ports.Vault
-	// Hardware, when set, is the signer of every key held on a hardware wallet.
-	// It is opened lazily by its own Profile, so a software-only run never
-	// touches a device.
-	Hardware ports.Signer
-}
-
-// SignerFor implements ports.SignerDirectory.
-func (s Signers) SignerFor(key custody.KeyRef) (ports.Signer, error) {
-	switch key.Holder {
-	case custody.HolderVault:
-		return VaultSigner{Vault: s.Vault}, nil
-	case custody.HolderHardware:
-		if s.Hardware != nil {
-			return s.Hardware, nil
-		}
-		return nil, ports.ErrNoHardwareSigner
-	case custody.HolderRemote:
-		return nil, errors.New("no remote signer is configured")
-	}
-	return nil, fmt.Errorf("no signer is configured for holder %q", key.Holder)
-}
-
-var (
-	_ ports.OpCertIssuer    = VaultSigner{}
-	_ ports.SignerDirectory = Signers{}
-)
+var _ ports.OpCertIssuer = VaultSigner{}

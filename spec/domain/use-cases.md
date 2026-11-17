@@ -16,6 +16,7 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 | --- | --- | --- |
 | `ConvertKeptKey` | [`Xcustody`](../extensions/Xcustody.md) | 27 |
 | `DiscoverSources` | [`Xmulti`](../extensions/Xmulti.md) | 55 |
+| `EnrolFactor` | [`Xunlock`](../extensions/Xunlock.md) | 49 |
 | `EnrollParty` | [`Xparty`](../extensions/Xparty.md) | 69 |
 | `ExportWorkspace` | [`Xcustody`](../extensions/Xcustody.md) | 27 |
 | `ImportSigningResponse` | [`Xparty`](../extensions/Xparty.md) | 69 |
@@ -27,6 +28,7 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 | `RotateParty` | [`Xparty`](../extensions/Xparty.md) | 69 |
 | `SealKey` | [`Pfiles`](../upstream/patterns/Pfiles.md) | 51 |
 | `StoreArtefact` | [`Pfiles`](../upstream/patterns/Pfiles.md) | 51 |
+| `UnlockWorkspace` | [`Xunlock`](../extensions/Xunlock.md) | 49 |
 | `UnprotectSigningKey` | [`01protectKey`](../upstream/scripts/01_protectKey.md) | 29 |
 
 ## `transaction-construction`
@@ -226,4 +228,4 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 | [`25a_genAction`](../upstream/scripts/25a_genAction.md) | Generate a governance action file | governance | 75 | draft |
 | [`25b_regAction`](../upstream/scripts/25b_regAction.md) | Submit governance actions | governance, transaction-construction | 71 | draft |
 
-Totals: 71 specs, 2453 requirements, 90 use cases.
+Totals: 73 specs, 2533 requirements, 92 use cases.

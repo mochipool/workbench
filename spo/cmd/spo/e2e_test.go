@@ -102,6 +102,12 @@ func importWallet(t *testing.T, dir string) (seed []byte, addr string) {
 			secret.Take([]byte(`{"type":"PaymentSigningKeyShelley_ed25519","description":"","cborHex":"5820`+hex.EncodeToString(seed)+`"}`))); err != nil {
 			return err
 		}
+		// the verification key beside it: a key is found in the vault by identity
+		pub := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
+		if err := w.Put(ports.Ref{Name: walletName, Kind: ports.AddrVKey},
+			[]byte(`{"type":"PaymentVerificationKeyShelley_ed25519","description":"","cborHex":"5820`+hex.EncodeToString(pub)+`"}`)); err != nil {
+			return err
+		}
 		return w.Put(ports.Ref{Name: walletName, Kind: ports.AddrFile}, []byte(addr+"\n"))
 	})
 	if err != nil {

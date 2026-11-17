@@ -13,6 +13,7 @@ import (
 	"github.com/blinklabs-io/bursa/bip32"
 
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -39,27 +40,65 @@ var witnessKeyTypes = map[custody.Role]struct{ normal, extended string }{
 	custody.RoleCommitteeHot:  {"ConstitutionalCommitteeHotSigningKey_ed25519", "ConstitutionalCommitteeHotExtendedSigningKey_ed25519_bip32"},
 }
 
-// witnessRef maps a key reference to the secret artefact. For a payment key
-// the owner is the address name as upstream's scripts take it (`w` or
-// `w.payment`); for a stake key it is the wallet name.
-func witnessRef(key custody.KeyRef) (ports.Ref, error) {
-	switch key.Role {
-	case custody.RolePayment:
-		return ports.Ref{Name: key.Owner, Kind: ports.AddrSKey}, nil
-	case custody.RoleStake:
-		return ports.Ref{Name: key.Owner, Kind: ports.StakingSKey}, nil
-	case custody.RolePolicy:
-		return ports.Ref{Name: key.Owner, Kind: ports.PolicySKey}, nil
-	case custody.RolePoolCold:
-		return ports.Ref{Name: key.Owner, Kind: ports.NodeSKey}, nil
-	case custody.RoleDRep:
-		return ports.Ref{Name: key.Owner, Kind: ports.DRepSKey}, nil
-	case custody.RoleCommitteeCold:
-		return ports.Ref{Name: key.Owner, Kind: ports.CCColdSKey}, nil
-	case custody.RoleCommitteeHot:
-		return ports.Ref{Name: key.Owner, Kind: ports.CCHotSKey}, nil
+// index returns the key index of the vault signer: the one given, else the
+// store the vault is when that store can list its artefacts.
+func (v VaultSigner) index() (ports.KeyIndex, error) {
+	if v.Keys != nil {
+		return v.Keys, nil
 	}
-	return ports.Ref{}, fmt.Errorf("the vault signer cannot witness a transaction with a %s key", key.Role)
+	if st, ok := v.Vault.(ports.Store); ok {
+		return ports.NewStoreKeyIndex(st)
+	}
+	return nil, errors.New("the vault signer has no index to find keys by identity")
+}
+
+// ErrKeyNotInVault means the vault holds no signing key with the demanded
+// identity for the role.
+var ErrKeyNotInVault = errors.New("the vault holds no signing key with that identity")
+
+// secretRef finds, by identity, the store reference of the signing key a
+// demand names. The role of the demand must be a role the key is stored in.
+func (v VaultSigner) secretRef(ctx context.Context, key custody.KeyRef) (ports.Ref, error) {
+	if v.Vault == nil {
+		return ports.Ref{}, errors.New("the store cannot release signing keys")
+	}
+	switch key.Role {
+	case custody.RolePayment, custody.RoleStake, custody.RolePolicy, custody.RolePoolCold, custody.RoleDRep,
+		custody.RoleCommitteeCold, custody.RoleCommitteeHot, custody.RoleCalidus:
+	default:
+		return ports.Ref{}, fmt.Errorf("the vault signer cannot witness a transaction with a %s key", key.Role)
+	}
+	idx, err := v.index()
+	if err != nil {
+		return ports.Ref{}, err
+	}
+	homes, err := idx.Homes(ctx, key.Identity)
+	if err != nil {
+		return ports.Ref{}, err
+	}
+	h, ok := ports.SecretHome(homes, key.Role)
+	if !ok {
+		return ports.Ref{}, fmt.Errorf("%w: %s", ErrKeyNotInVault, key)
+	}
+	return h.SecretRef(), nil
+}
+
+// checkIdentity refuses a loaded key whose verification key is not the one
+// that was demanded: what the vault opened must be the key asked for.
+func checkIdentity(key custody.KeyRef, vkey []byte) error {
+	want := key.Identity
+	var got identity.Ref
+	var err error
+	switch want.Kind() {
+	case identity.KindCalidusKeyHash:
+		got, err = identity.CalidusKeyHashOf(vkey)
+	default:
+		got, err = identity.KeyHashOf(vkey)
+	}
+	if err != nil || got != want {
+		return fmt.Errorf("the vault key opened for the %s key %s is another key", key.Role, want)
+	}
+	return nil
 }
 
 // loadSigningKey reads a payment or stake signing key envelope held in
@@ -139,7 +178,17 @@ func loadSigningKey(role custody.Role, env *secret.Buffer) (*bursa.LoadedKey, er
 //
 // spec: SPO-Ptx-EXT-006, SPO-Ptx-SEC-001, SPO-Pfiles-INV-002
 func (v VaultSigner) Witness(ctx context.Context, key custody.KeyRef, body txbuild.TxBody) (txbuild.Witness, error) {
-	ref, err := witnessRef(key)
+	// The demand carries the body; what is signed is the id of ITS bytes,
+	// never a hash handed over (ADR 0010 decision 3).
+	txID, err := identity.TxIDOfTx(body.CBOR)
+	if err != nil {
+		return txbuild.Witness{}, fmt.Errorf("read the transaction body: %w", err)
+	}
+	signed := txID.Hash()
+	if [32]byte(body.ID) != [32]byte(signed) {
+		return txbuild.Witness{}, fmt.Errorf("the body's id %s is not the id of its bytes", body.ID)
+	}
+	ref, err := v.secretRef(ctx, key)
 	if err != nil {
 		return txbuild.Witness{}, err
 	}
@@ -153,7 +202,10 @@ func (v VaultSigner) Witness(ctx context.Context, key custody.KeyRef, body txbui
 		return txbuild.Witness{}, err
 	}
 	defer wipe(lk.SKey)
-	w, err := bursa.CreateWitness(body.ID[:], lk)
+	if err := checkIdentity(key, lk.VKey); err != nil {
+		return txbuild.Witness{}, err
+	}
+	w, err := bursa.CreateWitness(signed, lk)
 	if err != nil {
 		return txbuild.Witness{}, err
 	}

@@ -3,6 +3,7 @@ package registry
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/app/assets"
 	dassets "github.com/mochipool/workbench/spo/internal/domain/assets"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
+	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/tokenmeta"
 	"github.com/mochipool/workbench/spo/internal/ports"
 	"github.com/mochipool/workbench/spo/test/plainstore"
@@ -426,4 +428,50 @@ func TestSubjectAndSequenceAreTheRecords(t *testing.T) {
 	if _, err := w.gen().Run(context.Background(), GenerateRequest{Asset: "tok.A"}); err == nil {
 		t.Error("a bad subject was signed")
 	}
+}
+
+// A signer that attests with another key (a self-consistent signature) is
+// refused: the attestation must come from the policy's key.
+//
+// spec: SPO-Xidentity-SEC-001
+func TestAttestationFromAnotherKeyIsRefused(t *testing.T) {
+	w := newWorld(t)
+	w.policy("tok", 5000)
+	if _, err := w.gen().Run(context.Background(), GenerateRequest{Asset: "tok.MYTOKEN"}); err != nil {
+		t.Fatal(err)
+	}
+	w.fill("tok.MYTOKEN")
+	uc := w.gen()
+	uc.Signers = impostorDir{}
+	if _, err := uc.Run(context.Background(), GenerateRequest{Asset: "tok.MYTOKEN"}); !errors.Is(err, tokenmeta.ErrSigner) || !strings.Contains(err.Error(), custody.ErrMessageKey.Error()) {
+		t.Errorf("%v", err)
+	}
+	if w.record("tok.MYTOKEN").Get("sequenceNumber") != "0" {
+		t.Error("the record was counted up")
+	}
+}
+
+type impostorDir struct{}
+
+func (impostorDir) SignerFor(custody.KeyRef) (ports.Signer, error) { return impostor{}, nil }
+
+// Connected implements ports.SignerDirectory.
+func (d impostorDir) Connected(k custody.KeyRef) ([]ports.ConnectedSigner, error) {
+	return ports.ConnectedVia(d, k)
+}
+
+type impostor struct{}
+
+func (impostor) Profile() custody.Profile {
+	return custody.NewProfile("impostor").Allow(custody.RolePolicy, custody.OpSignRegistryEntry)
+}
+
+func (impostor) SignRegistryMessages(_ context.Context, _ custody.Key[custody.Policy], msgs [][32]byte) ([]ports.RegistryAttestation, error) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	out := make([]ports.RegistryAttestation, len(msgs))
+	for i, m := range msgs {
+		copy(out[i].PublicKey[:], pub)
+		copy(out[i].Signature[:], ed25519.Sign(priv, m[:]))
+	}
+	return out, nil
 }

@@ -61,9 +61,9 @@ func TestPoolRegistrationWithLedgerColdKeyPayerAndOwner(t *testing.T) {
 	w.UseHardware("Ledger", "8.0.8")
 	w.Bodies = world.LegacyInputs{Ledger: w.Ledger}
 	w.Chain.Params.StakePoolDeposit, w.Chain.Params.MinPoolCost, w.Chain.Params.PoolRetireMaxEpoch = 500_000_000, 170_000_000, 18
-	acc := account(t, w, "hw", custody.HolderHardware, 900_000_000)
+	acc := account(t, w, "hw", custody.PlaceHardware, 900_000_000)
 	cold, err := (poolops.GenerateColdKeys{Store: w.Store, KeyGen: native.SoftwareKeys{}, Hardware: w.Exporter()}).
-		Run(ctx, poolops.GenerateColdKeysRequest{Pool: "mypool", Holder: custody.HolderHardware})
+		Run(ctx, poolops.GenerateColdKeysRequest{Pool: "mypool", Place: custody.PlaceHardware})
 	if err != nil {
 		t.Fatal(err)
 	}

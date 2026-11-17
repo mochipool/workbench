@@ -59,14 +59,14 @@ func hwDeps(out *bytes.Buffer, g *genFake, hw ports.HardwareKeyExporter) Deps {
 	return d
 }
 
-func TestHardwareFlagsMapToHolderAndPath(t *testing.T) {
+func TestHardwareFlagsMapToPlacementAndPath(t *testing.T) {
 	var out bytes.Buffer
 	g, hw := &genFake{}, &fakeHW{vendor: custody.VendorLedger}
 	dir := t.TempDir()
 	if err := runGen(t, hwDeps(&out, g, hw), dir, "wallet", "new", "w", "--hardware", "--account", "3", "--index", "4", "--multisig"); err != nil {
 		t.Fatalf("%v\n%s", err, out.String())
 	}
-	if len(hw.keys) != 1 || hw.keys[0].Holder != custody.HolderHardware || hw.keys[0].Role != custody.RolePayment || hw.keys[0].Owner != "w" {
+	if len(hw.keys) != 1 || hw.keys[0].Role != custody.RolePayment {
 		t.Fatalf("keys %+v", hw.keys)
 	}
 	if hw.paths[0] != "1854H/1815H/3H/0/4" {

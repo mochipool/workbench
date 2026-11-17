@@ -15,8 +15,10 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/mochipool/workbench/spo/internal/app/hwkeys"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
@@ -84,6 +86,14 @@ type Slot struct {
 	Label string
 	Key   custody.KeyRef
 	Hash  txbuild.KeyHash
+	// Party is the co-signer the slot is assigned to (ADR 0005), if any: a
+	// routing instruction for a slot that is answered through an envelope. The
+	// zero fingerprint is no assignment.
+	Party party.Fingerprint
+	// External is set when the operator left the slot to another signer without
+	// naming a party that resolves (a descriptor owner whose ownerWitness is not
+	// local, SPO-05c-INV-005).
+	External bool
 	// Features, when set, replaces the draft's features for this slot's
 	// demand: a pool registration asks the cold key's signer for the
 	// operator mode and an owner's signer for the owner mode.
@@ -129,8 +139,11 @@ func (p Prepared) Hardware() bool { return p.hardware }
 
 // PrepareOptions are the optional parts of PrepareWith.
 type PrepareOptions struct {
-	// Pending returns true for a slot signed elsewhere (see PreparePartial).
-	Pending func(Slot) bool
+	// AllowPending leaves a slot to be answered later when no connected signer
+	// can answer it now, or when it is assigned to a co-signer (the answer
+	// comes through an envelope): see PreparePartial. Without it such a slot
+	// refuses the plan.
+	AllowPending bool
 	// Unrestricted is the operator's explicit consent to the device's
 	// unrestricted signing mode (`--allow-unrestricted-mode`, SPO-21b-SEC-003,
 	// SPO-24b-PR-001). It is never implied: a use case sets it only from a
@@ -156,19 +169,19 @@ type PrepareOptions struct {
 //
 // spec: SPO-Ptx-INV-006, SPO-Ptx-PRE-006
 func (p Pipeline) Prepare(draft txbuild.Draft, slots []Slot, witnesses uint) (Prepared, error) {
-	return p.PreparePartial(draft, slots, witnesses, nil)
+	return p.PreparePartial(draft, slots, witnesses, false)
 }
 
 // PreparePartial is Prepare for a workflow whose slots may be signed
-// elsewhere: a slot for which pending returns true is not planned here (no
-// signer is looked up for it) and is listed in Prepared.Pending. The count of
+// later: a slot that no connected signer can answer now, or that is assigned
+// to a co-signer, is not planned here and is listed in Prepared.Pending. The count of
 // slots is still the fee's witness count, and every required stake key still
 // has a slot. The pool registration uses it when a holder is remote and the
 // caller allows a collection with an open slot.
 //
 // spec: SPO-Ptx-INV-006, SPO-Xparty-PRE-003
-func (p Pipeline) PreparePartial(draft txbuild.Draft, slots []Slot, witnesses uint, pending func(Slot) bool) (Prepared, error) {
-	return p.PrepareWith(draft, slots, witnesses, PrepareOptions{Pending: pending})
+func (p Pipeline) PreparePartial(draft txbuild.Draft, slots []Slot, witnesses uint, allowPending bool) (Prepared, error) {
+	return p.PrepareWith(draft, slots, witnesses, PrepareOptions{AllowPending: allowPending})
 }
 
 // PrepareWith is PreparePartial with the options of a hardware plan. A slot
@@ -178,7 +191,6 @@ func (p Pipeline) PreparePartial(draft txbuild.Draft, slots []Slot, witnesses ui
 //
 // spec: SPO-Ptx-INV-006, SPO-Xparty-PRE-003, SPO-Xparty-INV-012, SPO-21b-SEC-003
 func (p Pipeline) PrepareWith(draft txbuild.Draft, slots []Slot, witnesses uint, opt PrepareOptions) (Prepared, error) {
-	pending := opt.Pending
 	if uint(len(slots)) != witnesses {
 		return Prepared{}, fmt.Errorf("%w: %d signatures planned, the fee is estimated for %d", ErrMisconfigured, len(slots), witnesses)
 	}
@@ -197,17 +209,69 @@ func (p Pipeline) PrepareWith(draft txbuild.Draft, slots []Slot, witnesses uint,
 			return Prepared{}, fmt.Errorf("%w: no signature is planned for the required stake key %x", ErrMisconfigured, k[:])
 		}
 	}
-	if opt.RefuseMixed {
-		if err := refuseMixed(slots); err != nil {
+	// Which signer answers is decided here, from the signers connected now
+	// (ADR 0010 decision 3): the slot names a key identity and no holder. An
+	// operator's assignment is a routing instruction and wins over the directory
+	// (SPO-05c-INV-005): a slot assigned to a co-signer, or left to another
+	// signer (External), is not signed here even when its key is also in this
+	// workspace. The directory chooses only among slots with no assignment.
+	dir := ports.ForPlan(p.Signers)
+	var local, remote []Slot
+	var assignedProblems []custody.Problem
+	signers := map[int]ports.Signer{}
+	deviceDeferred := false
+	for _, s := range slots {
+		conn, err := dir.Connected(s.Key)
+		if err != nil {
 			return Prepared{}, err
 		}
-	}
-	var local, remote []Slot
-	for _, s := range slots {
-		if pending != nil && pending(s) {
+		var now ports.Signer
+		deferred := false
+		for _, c := range conn {
+			if c.Deferred {
+				deferred = true
+				continue
+			}
+			now = c.Signer
+			break
+		}
+		assigned := s.Party != (party.Fingerprint{}) || s.External
+		// A key held on a device, connected or not, is signed on the device; with
+		// AllowPending such a slot is left for the operator's later run, as before.
+		onDevice := hwkeys.IsHardware(now) || (now == nil && hwkeys.OnDevice(dir, s.Key))
+		switch {
+		case opt.AllowPending && (assigned || deferred || onDevice || len(conn) == 0):
 			remote = append(remote, s)
-		} else {
+			deviceDeferred = deviceDeferred || onDevice
+		case assigned:
+			assignedProblems = append(assignedProblems, custody.Problem{
+				Slot:   custody.Slot{Label: s.Label, Key: s.Key, Demand: custody.Demand{Role: s.Key.Role, Operation: custody.OpWitnessTx}},
+				Reason: "the slot is assigned to another signer, and this operation does not open a collection for it"})
+		case now != nil:
+			signers[len(local)] = now
 			local = append(local, s)
+		case len(conn) == 0:
+			// No connected signer: the plan below refuses it, with every other
+			// slot it cannot meet, before anything is read.
+			local = append(local, s)
+		default:
+			return Prepared{}, fmt.Errorf("%w: the %s is answered through an envelope only, and this operation does not open a collection for it", ErrNoSigner, s.Key)
+		}
+	}
+	if len(assignedProblems) > 0 {
+		return Prepared{}, &custody.UnsupportedError{Problems: assignedProblems}
+	}
+	if opt.RefuseMixed {
+		hw, soft := false, false
+		for i := range local {
+			if hwkeys.IsHardware(signers[i]) {
+				hw = true
+			} else {
+				soft = true
+			}
+		}
+		if hw && soft {
+			return Prepared{}, ErrMixedHolders
 		}
 	}
 	slots = local
@@ -218,7 +282,7 @@ func (p Pipeline) PrepareWith(draft txbuild.Draft, slots []Slot, witnesses uint,
 		if s.Features != nil {
 			f = s.Features
 		}
-		if s.Key.Holder == custody.HolderHardware {
+		if hwkeys.IsHardware(signers[i]) {
 			hardware = true
 			if opt.Unrestricted {
 				f = withFeature(f, custody.FeatUnrestricted)
@@ -226,55 +290,32 @@ func (p Pipeline) PrepareWith(draft txbuild.Draft, slots []Slot, witnesses uint,
 		}
 		cs[i] = custody.Slot{Label: s.Label, Key: s.Key, Demand: custody.Demand{Role: s.Key.Role, Operation: custody.OpWitnessTx, Features: f}}
 	}
-	// A hardware slot that is signed elsewhere (a pool owner's witness made
-	// later by `pool witness`) still needs the canonical body: the body is fixed
-	// and shown now, and the device will witness exactly it.
-	for _, s := range remote {
-		hardware = hardware || s.Key.Holder == custody.HolderHardware
-	}
+	// A hardware slot that is signed later (a pool owner's witness made by `pool
+	// witness`) still needs the canonical body: the body is fixed and shown now,
+	// and the device will witness exactly it.
+	hardware = hardware || deviceDeferred
 	if hardware && p.Canonicalizer == nil {
 		return Prepared{}, ErrNoCanonicalizer
 	}
 	var plan custody.Plan
 	if len(cs) > 0 {
-		if plan, err = ports.PlanSignatures(p.Signers, cs); err != nil {
+		if plan, err = ports.PlanSignatures(dir, cs); err != nil {
 			return Prepared{}, err
 		}
 	}
 	out := Prepared{Plan: plan, slots: slots, Pending: remote, hardware: hardware, unrestricted: opt.Unrestricted && hardware}
 	for _, s := range slots {
-		signer, err := p.Signers.SignerFor(s.Key)
+		signer, err := ports.SignerForOperation(dir, s.Key, custody.OpWitnessTx)
 		if err != nil {
 			return Prepared{}, err
 		}
 		w, ok := signer.(ports.TxWitnesser)
 		if !ok {
-			return Prepared{}, fmt.Errorf("%w: the %s key of %s", ErrNoSigner, s.Key.Role, s.Key.Owner)
+			return Prepared{}, fmt.Errorf("%w: the %s", ErrNoSigner, s.Key)
 		}
 		out.witnesser = append(out.witnesser, w)
 	}
 	return out, nil
-}
-
-// RefuseMixed returns ErrMixedHolders when the slots mix a hardware key with a
-// key-file (vault) key.
-//
-// spec: SPO-Ptx-PRE-006
-func RefuseMixed(slots []Slot) error { return refuseMixed(slots) }
-
-func refuseMixed(slots []Slot) error {
-	var hw, soft bool
-	for _, s := range slots {
-		if s.Key.Holder == custody.HolderHardware {
-			hw = true
-		} else {
-			soft = true
-		}
-	}
-	if hw && soft {
-		return ErrMixedHolders
-	}
-	return nil
 }
 
 // CanonicalBodies wraps a body builder so that every body it builds is brought
@@ -377,7 +418,7 @@ func (p Prepared) SignWith(ctx context.Context, body txbuild.TxBody, changeKeys 
 	for i, slot := range p.slots {
 		w, err := p.witness(ctx, i, slot, body, changeKeys)
 		if err != nil {
-			return nil, fmt.Errorf("witness for the %s key of %s: %w", slot.Key.Role, slot.Key.Owner, err)
+			return nil, fmt.Errorf("witness for the %s key of %s: %w", slot.Key.Role, slot.Key.Identity, err)
 		}
 		out = append(out, SlotWitness{Slot: slot, Witness: w})
 	}
@@ -388,10 +429,8 @@ func (p Prepared) SignWith(ctx context.Context, body txbuild.TxBody, changeKeys 
 // asked through WitnessWith with the operator's unrestricted choice and the
 // change keys, when the signer takes them.
 func (p Prepared) witness(ctx context.Context, i int, slot Slot, body txbuild.TxBody, changeKeys []custody.KeyRef) (txbuild.Witness, error) {
-	if slot.Key.Holder == custody.HolderHardware {
-		if hw, ok := p.witnesser[i].(ports.HardwareWitnesser); ok {
-			return hw.WitnessWith(ctx, slot.Key, body, ports.HardwareTxOptions{Unrestricted: p.unrestricted, ChangeKeys: changeKeys})
-		}
+	if hw, ok := p.witnesser[i].(ports.HardwareWitnesser); ok {
+		return hw.WitnessWith(ctx, slot.Key, body, ports.HardwareTxOptions{Unrestricted: p.unrestricted, ChangeKeys: changeKeys})
 	}
 	return p.witnesser[i].Witness(ctx, slot.Key, body)
 }
@@ -403,6 +442,20 @@ func changeKeys(in Input, spec txbuild.BodySpec) []custody.KeyRef {
 		return nil
 	}
 	return in.HardwareChangeKeys
+}
+
+// DeviceChangeKeys are the change keys a device witness is told about: those of
+// Input.HardwareChangeKeys that the directory says are on a device. A vault key
+// is never declared to a device (it has no hardware signing file there): a
+// device voter beside a vault payer is told no change key.
+func (p Pipeline) DeviceChangeKeys(in Input, spec txbuild.BodySpec) []custody.KeyRef {
+	var out []custody.KeyRef
+	for _, k := range changeKeys(in, spec) {
+		if hwkeys.OnDevice(p.Signers, k) {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // Build runs stages 6 to 8: fee and balance, the one body, and the size
@@ -567,12 +620,12 @@ func (p Pipeline) Execute(ctx context.Context, in Input) (Result, error) {
 
 	var witnesses []txbuild.Witness
 	for i, slot := range in.Prepared.slots {
-		w, err := in.Prepared.witness(ctx, i, slot, bal.Body, changeKeys(in, bal.Spec))
+		w, err := in.Prepared.witness(ctx, i, slot, bal.Body, p.DeviceChangeKeys(in, bal.Spec))
 		if err != nil {
-			return Result{}, fmt.Errorf("witness for the %s key of %s: %w", slot.Key.Role, slot.Key.Owner, err)
+			return Result{}, fmt.Errorf("witness for the %s key of %s: %w", slot.Key.Role, slot.Key.Identity, err)
 		}
 		if err := txbuild.VerifyWitness(bal.Body, w, slot.Hash); err != nil {
-			return Result{}, fmt.Errorf("witness for the %s key of %s: %w", slot.Key.Role, slot.Key.Owner, err)
+			return Result{}, fmt.Errorf("witness for the %s key of %s: %w", slot.Key.Role, slot.Key.Identity, err)
 		}
 		witnesses = append(witnesses, w)
 	}

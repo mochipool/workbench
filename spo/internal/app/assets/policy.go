@@ -54,7 +54,7 @@ type GeneratePolicy struct {
 // unlimited (SPO-10-IF-003).
 type GeneratePolicyRequest struct {
 	Name     string
-	Holder   custody.Holder // empty means the vault
+	Place    custody.Placement // empty means the vault
 	Lifetime uint64
 }
 
@@ -90,9 +90,8 @@ func (uc GeneratePolicy) Run(ctx context.Context, req GeneratePolicyRequest) (Po
 	}
 	// Hardware (and any other non-vault holder) is refused before anything
 	// is read or written (ADR 0008).
-	key := custody.KeyRef{Role: custody.RolePolicy, Holder: req.Holder, Owner: name}
-	onDevice := hwkeys.Hardware(key)
-	if _, err := hwkeys.Plan(uc.Hardware, key); err != nil {
+	onDevice := req.Place == custody.PlaceHardware
+	if _, err := hwkeys.Plan(uc.Hardware, req.Place, custody.RolePolicy); err != nil {
 		return PolicyGenerated{}, err
 	}
 	// The expiry is computed before any side effect, and a failed tip read
@@ -133,7 +132,7 @@ func (uc GeneratePolicy) Run(ctx context.Context, req GeneratePolicyRequest) (Po
 	var hwsfile []byte
 	if onDevice {
 		// spec: SPO-10-EXT-002, SPO-10-OUT-004
-		hk, err := hwkeys.Export(ctx, uc.Hardware, key, hwkeys.Options{})
+		hk, err := hwkeys.Export(ctx, uc.Hardware, custody.RolePolicy, hwkeys.Options{})
 		if err != nil {
 			return PolicyGenerated{}, err
 		}
@@ -200,7 +199,12 @@ func (uc GeneratePolicy) Run(ctx context.Context, req GeneratePolicyRequest) (Po
 				return nil
 			})
 		}
-		pk, perr := custody.As[custody.Policy](key)
+		kh, perr := ports.IdentityOfVKey(custody.RolePolicy, pair.VKey)
+		if perr != nil {
+			undo()
+			return PolicyGenerated{}, perr
+		}
+		pk, perr := custody.As[custody.Policy](custody.KeyRef{Role: custody.RolePolicy, Identity: kh})
 		if perr != nil {
 			undo()
 			return PolicyGenerated{}, perr

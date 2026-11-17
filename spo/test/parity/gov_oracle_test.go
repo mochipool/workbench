@@ -19,6 +19,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
+	"github.com/mochipool/workbench/spo/internal/ports/porttest"
 	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
@@ -417,7 +418,11 @@ func TestGovTransactionsMatchCardanoCLI(t *testing.T) {
 	keys := e.newKeys(t, false)
 	k := e.newGovKit(t)
 	// The vault reads the governance keys as <name>.drep.skey and so on.
-	for from, to := range map[string]string{"d.skey": "d.drep.skey", "cc.skey": "m.cc-cold.skey", "ch.skey": "h.cc-hot.skey", "n.skey": "pool.node.skey"} {
+	// A signing key in a workspace has its verification key beside it: key
+	// generation writes both and an import derives a missing one, so a key is found
+	// in the vault by the identity of that verification key.
+	for from, to := range map[string]string{"d.skey": "d.drep.skey", "cc.skey": "m.cc-cold.skey", "ch.skey": "h.cc-hot.skey", "n.skey": "pool.node.skey",
+		"d.vkey": "d.drep.vkey", "cc.vkey": "m.cc-cold.vkey", "ch.vkey": "h.cc-hot.vkey", "n.vkey": "pool.node.vkey"} {
 		raw, err := os.ReadFile(k.p(from))
 		if err != nil {
 			t.Fatal(err)
@@ -488,11 +493,11 @@ func TestGovTransactionsMatchCardanoCLI(t *testing.T) {
 	}
 
 	roleKey := map[string]custody.KeyRef{
-		"drep":    {Role: custody.RoleDRep, Holder: custody.HolderVault, Owner: "d"},
-		"cold":    {Role: custody.RoleCommitteeCold, Holder: custody.HolderVault, Owner: "m"},
-		"hot":     {Role: custody.RoleCommitteeHot, Holder: custody.HolderVault, Owner: "h"},
-		"pool":    {Role: custody.RolePoolCold, Holder: custody.HolderVault, Owner: "pool"},
-		"payment": {Role: custody.RolePayment, Holder: custody.HolderVault, Owner: "w"},
+		"drep":    porttest.Key(t, store, custody.RoleDRep, "d"),
+		"cold":    porttest.Key(t, store, custody.RoleCommitteeCold, "m"),
+		"hot":     porttest.Key(t, store, custody.RoleCommitteeHot, "h"),
+		"pool":    porttest.Key(t, store, custody.RolePoolCold, "pool"),
+		"payment": porttest.Key(t, store, custody.RolePayment, "w"),
 	}
 	skeyOf := map[string][]byte{}
 	for name, f := range map[string]string{"drep": "d.drep.skey", "cold": "m.cc-cold.skey", "hot": "h.cc-hot.skey", "pool": "pool.node.skey"} {

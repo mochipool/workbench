@@ -55,9 +55,11 @@ func (h *hardwareFlags) add(cmd *cobra.Command, opts hwOpt) {
 	}
 }
 
-func (h *hardwareFlags) holder() custody.Holder {
+// place says where a NEW key is generated. It is a command option; once a key
+// exists, the signer directory decides which signer answers for it.
+func (h *hardwareFlags) place() custody.Placement {
 	if h.on {
-		return custody.HolderHardware
+		return custody.PlaceHardware
 	}
 	return ""
 }

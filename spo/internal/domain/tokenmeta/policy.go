@@ -249,3 +249,28 @@ func (s script) satisfied(signers map[[28]byte]bool) bool {
 	}
 	return false
 }
+
+// PolicyKeyHashes lists the key hashes of the signature leaves of a policy
+// script given as JSON: the keys that can attest for the policy.
+func PolicyKeyHashes(scriptJSON []byte) ([][28]byte, error) {
+	value, _, err := PolicyValue(scriptJSON)
+	if err != nil {
+		return nil, err
+	}
+	s, _, err := parsePolicy(value)
+	if err != nil {
+		return nil, err
+	}
+	var out [][28]byte
+	var walk func(script)
+	walk = func(n script) {
+		if n.kind == "sig" {
+			out = append(out, n.hash)
+		}
+		for _, c := range n.subs {
+			walk(c)
+		}
+	}
+	walk(s)
+	return out, nil
+}

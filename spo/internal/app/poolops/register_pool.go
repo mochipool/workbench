@@ -11,10 +11,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mochipool/workbench/spo/internal/app/keyring"
 	"github.com/mochipool/workbench/spo/internal/app/txflow"
 	"github.com/mochipool/workbench/spo/internal/domain/assets"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/domain/stake"
 	"github.com/mochipool/workbench/spo/internal/domain/transfer"
@@ -112,10 +114,14 @@ type RegisterPool struct {
 	// AllowUnverified goes on from the descriptor when the chain could not
 	// say whether the pool is registered; the result lists it.
 	AllowUnverified bool
-	// AllowPending lets a slot with a holder that has no signer here stay
-	// empty: the collection is OpenIncomplete and a transfer file is
-	// written for it.
+	// AllowPending lets a slot that no connected signer can answer now, or that
+	// is assigned to a co-signer, stay empty: the collection is OpenIncomplete
+	// and a transfer file is written for it.
 	AllowPending bool
+	// Parties resolves a party name of the descriptor (ownerWitness, or a
+	// stored collection of an older version) to its fingerprint. nil resolves
+	// none: such a slot is unassigned.
+	Parties ports.PartyRegistry
 	// DiscardOnDecline removes the collection when the final confirmation is
 	// declined (SPO-05c-PR-004 answered Yes).
 	DiscardOnDecline bool
@@ -156,9 +162,12 @@ type RegisterResult struct {
 }
 
 type ownerInfo struct {
-	desc   pool.DescriptorOwner
-	hash   txbuild.KeyHash
-	holder custody.Holder
+	desc pool.DescriptorOwner
+	hash txbuild.KeyHash
+	key  custody.KeyRef
+	// party is the co-signer the descriptor assigns the owner's witness to
+	// (ownerWitness, resolved to its fingerprint); zero when none.
+	party  party.Fingerprint
 	deleg  stake.Certificate
 	hwDesc bool
 }
@@ -168,14 +177,17 @@ type regInputs struct {
 	name    string
 	poolID  chain.PoolID
 	cert    pool.Certificate
-	cold    custody.Holder
-	coldHW  bool
-	owners  []ownerInfo
-	payer   payer
-	coll    *pool.Collection
-	vkeys   map[string]ports.Ref // slot name to its verification key artefact
-	hasMeta bool
-	hasExt  bool
+	coldKey custody.KeyRef
+	// lostParties are party names of a stored collection that no longer
+	// resolve: their slots stay unassigned (reported in the result).
+	lostParties []string
+	coldHW      bool
+	owners      []ownerInfo
+	payer       payer
+	coll        *pool.Collection
+	vkeys       map[string]ports.Ref // slot name to its verification key artefact
+	hasMeta     bool
+	hasExt      bool
 }
 
 // Run registers or continues the registration.
@@ -217,7 +229,10 @@ func (uc RegisterPool) Run(ctx context.Context, req RegisterRequest) (RegisterRe
 	}
 
 	res := RegisterResult{}
-	// The signing plan refuses a holder that no signer serves before any
+	for _, n := range in.lostParties {
+		res.Unchecked = append(res.Unchecked, fmt.Sprintf("the stored collection names the party %q, who is no longer enrolled: its slot is unassigned", n))
+	}
+	// The signing plan refuses a key that no signer serves before any
 	// chain read, with a draft that has the features of the certificates
 	// (ADR 0008); a stored collection is already planned.
 	if in.coll == nil {
@@ -312,13 +327,9 @@ func (uc RegisterPool) Run(ctx context.Context, req RegisterRequest) (RegisterRe
 		if err != nil {
 			return RegisterResult{}, err
 		}
-		var pending func(txflow.Slot) bool
-		if uc.AllowPending {
-			pending = func(s txflow.Slot) bool { return s.Key.Holder != custody.HolderVault }
-		}
 		// SPO-05c-INV-007: the fee is estimated for 2 + owners witnesses.
 		witnesses := uint(2 + len(in.owners))
-		prep, err := uc.Pipeline.PreparePartial(draft, slots, witnesses, pending)
+		prep, err := uc.Pipeline.PreparePartial(draft, slots, witnesses, uc.AllowPending)
 		if err != nil {
 			return RegisterResult{}, err
 		}
@@ -363,11 +374,7 @@ func (uc RegisterPool) early(in regInputs, message []string) error {
 	if err != nil {
 		return err
 	}
-	var pending func(txflow.Slot) bool
-	if uc.AllowPending {
-		pending = func(s txflow.Slot) bool { return s.Key.Holder != custody.HolderVault }
-	}
-	_, err = uc.Pipeline.PreparePartial(draft, slots, uint(len(slots)), pending)
+	_, err = uc.Pipeline.PreparePartial(draft, slots, uint(len(slots)), uc.AllowPending)
 	return err
 }
 
@@ -659,14 +666,11 @@ func (uc RegisterPool) queued(in regInputs, typ pool.RegistrationType) ports.Que
 // key, the payer, then every owner.
 func (uc RegisterPool) allSlots(in regInputs) []pool.Slot {
 	out := []pool.Slot{
-		{Name: in.name + ".node", Role: custody.RolePoolCold, KeyHash: txbuild.KeyHash(in.poolID), Holder: in.cold},
-		{Name: in.payer.name, Role: custody.RolePayment, KeyHash: in.payer.hash, Holder: in.payer.holder},
+		{Name: in.name + ".node", Role: custody.RolePoolCold, KeyHash: txbuild.KeyHash(in.poolID)},
+		{Name: in.payer.name, Role: custody.RolePayment, KeyHash: in.payer.hash},
 	}
 	for _, o := range in.owners {
-		s := pool.Slot{Name: o.desc.Name + ".staking", Role: custody.RoleStake, KeyHash: o.hash, Holder: o.holder}
-		if o.holder == custody.HolderRemote {
-			s.Party = o.desc.Witness
-		}
+		s := pool.Slot{Name: o.desc.Name + ".staking", Role: custody.RoleStake, KeyHash: o.hash, PartyFingerprint: o.party}
 		out = append(out, s)
 	}
 	return out
@@ -691,14 +695,7 @@ func (uc RegisterPool) slots(draft txbuild.Draft, in regInputs) ([]txflow.Slot, 
 	}
 	var out []txflow.Slot
 	for _, s := range uc.allSlots(in) {
-		owner := in.name
-		switch s.Role {
-		case custody.RolePayment:
-			owner = in.payer.name
-		case custody.RoleStake:
-			owner = strings.TrimSuffix(s.Name, ".staking")
-		}
-		sl := txflow.Slot{Label: s.Name, Key: custody.KeyRef{Role: s.Role, Holder: s.Holder, Owner: owner, Party: s.Party}, Hash: s.KeyHash}
+		sl := txflow.Slot{Label: s.Name, Key: in.keyOf(s), Hash: s.KeyHash, Party: s.PartyFingerprint, External: in.external(s)}
 		switch s.Role {
 		case custody.RolePoolCold:
 			sl.Features = without(custody.FeatPoolRegistrationOwner)
@@ -728,8 +725,8 @@ func (uc RegisterPool) bind(c *pool.Collection, in regInputs) error {
 		} else if s.KeyHash != w.KeyHash {
 			return fmt.Errorf("%w: slot %q is bound to another key than the pool's", pool.ErrBadCollection, s.Name)
 		}
-		if c.Slots[i].Holder == "" {
-			c.Slots[i].Holder, c.Slots[i].Party = w.Holder, w.Party
+		if !c.Slots[i].Assigned() {
+			c.Slots[i].PartyFingerprint = w.PartyFingerprint
 		}
 	}
 	return nil
@@ -764,12 +761,23 @@ func (uc RegisterPool) read(r ports.Reader, name, pn string) (regInputs, error) 
 	} else {
 		in.coldHW = hws
 	}
-	if in.cold, err = holderOf(r, ports.Ref{Name: name, Kind: ports.NodeSKey}, ports.Ref{Name: name, Kind: ports.NodeHwsFile}); err != nil {
+	if in.coldKey, err = keyring.Held(r, custody.RolePoolCold, name, ErrNoSigningKey); err != nil {
 		return in, fmt.Errorf("%w: %v", ErrNoColdSigner, err)
 	}
 	// The collection of an earlier run: it carries its own body (SPO-05c-INV-003).
 	if in.coll, err = in.d.Collection(uc.TxIDs.TransactionID); err != nil {
 		return in, err
+	}
+	if in.coll != nil {
+		// A collection stored by an older version names its parties; the name
+		// is resolved to a fingerprint now and never written back.
+		in.lostParties = in.coll.ResolveLegacyParties(func(n string) (party.Fingerprint, bool) {
+			if uc.Parties == nil {
+				return party.Fingerprint{}, false
+			}
+			p, err := uc.Parties.ByName(r, n)
+			return p.Fingerprint, err == nil
+		})
 	}
 	in.vkeys[name+".node"] = nodeRef
 
@@ -826,11 +834,20 @@ func (uc RegisterPool) read(r ports.Reader, name, pn string) (regInputs, error) 
 			return in, fmt.Errorf("%w: %s.deleg.cert", ErrDelegationOtherPool, o.Name)
 		}
 		if o.IsLocal() {
-			if oi.holder, err = holderOf(r, ports.Ref{Name: o.Name, Kind: ports.StakingSKey}, ports.Ref{Name: o.Name, Kind: ports.StakingHwsFile}); err != nil {
+			if oi.key, err = keyring.Held(r, custody.RoleStake, o.Name, ErrNoSigningKey); err != nil {
 				return in, err
 			}
 		} else {
-			oi.holder = custody.HolderRemote
+			// An owner whose witness a co-signer makes: only its verification key
+			// is here. The slot is assigned to the party's fingerprint (ADR 0005).
+			if oi.key, err = keyring.Resolve(r, custody.RoleStake, o.Name); err != nil {
+				return in, err
+			}
+			if uc.Parties != nil {
+				if p, err := uc.Parties.ByName(r, o.Witness); err == nil {
+					oi.party = p.Fingerprint
+				}
+			}
 		}
 		in.owners = append(in.owners, oi)
 	}
@@ -947,3 +964,35 @@ func (uc RegisterPool) readPool(ctx context.Context, id chain.PoolID) (chain.Rea
 }
 
 func describePool(r chain.Reading[chain.PoolState]) string { return chain.DescribePool(r) }
+
+// keyOf is the key reference a slot demands: the key identity of the cold key,
+// the payer or the owner whose slot it is.
+func (in regInputs) keyOf(s pool.Slot) custody.KeyRef {
+	switch s.Role {
+	case custody.RolePoolCold:
+		return in.coldKey
+	case custody.RolePayment:
+		return in.payer.key
+	}
+	for _, o := range in.owners {
+		if o.hash == s.KeyHash {
+			return o.key
+		}
+	}
+	return custody.KeyRef{Role: s.Role}
+}
+
+// external reports a stake slot whose owner the descriptor leaves to another
+// signer (ownerWitness is not local): the operator's assignment wins over any
+// signer that could answer here (SPO-05c-INV-005).
+func (in regInputs) external(s pool.Slot) bool {
+	if s.Role != custody.RoleStake {
+		return false
+	}
+	for _, o := range in.owners {
+		if o.hash == s.KeyHash {
+			return !o.desc.IsLocal()
+		}
+	}
+	return false
+}

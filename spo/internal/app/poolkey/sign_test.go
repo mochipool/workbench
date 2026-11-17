@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
@@ -30,7 +31,7 @@ func TestSignWithCalidusKey(t *testing.T) {
 	}
 	n := len(r.files(t))
 	for _, name := range []string{"cal", "./cal", "cal.calidus", "cal.calidus.vkey"} {
-		res, err := r.signUC().Run(ctx, name, "", []byte("hello pool"))
+		res, err := r.signUC().Run(ctx, name, []byte("hello pool"))
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
@@ -52,22 +53,47 @@ func TestSignWithCalidusKey(t *testing.T) {
 func TestSignWithCalidusKeyRefusals(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()
-	if _, err := r.signUC().Run(ctx, "nope", "", []byte("x")); !errors.Is(err, ErrMissingFile) {
+	if _, err := r.signUC().Run(ctx, "nope", []byte("x")); !errors.Is(err, ErrMissingFile) {
 		t.Errorf("missing: %v", err)
 	}
-	if _, err := r.signUC().Run(ctx, "../x", "", []byte("x")); !errors.Is(err, ErrBadName) {
+	if _, err := r.signUC().Run(ctx, "../x", []byte("x")); !errors.Is(err, ErrBadName) {
 		t.Errorf("name: %v", err)
-	}
-	if _, err := r.signUC().Run(ctx, "cal", custody.HolderHardware, []byte("x")); !errors.Is(err, ErrHardwareCalidusSuspended) {
-		t.Errorf("hardware: %v", err)
 	}
 	// A key file that is only a hardware signing file is not a signing key.
 	r.put(t, ports.Ref{Name: "hw", Kind: ports.CalidusHwsFile}, []byte("{}"))
-	if _, err := r.signUC().Run(ctx, "hw", "", []byte("x")); !errors.Is(err, ErrMissingFile) {
+	if _, err := r.signUC().Run(ctx, "hw", []byte("x")); !errors.Is(err, ErrMissingFile) {
 		t.Errorf("hwsfile only: %v", err)
 	}
-	r.put(t, ports.Ref{Name: "cal", Kind: ports.CalidusSKey}, []byte("{}"))
-	if _, err := r.signUC().Run(ctx, "cal", custody.HolderRemote, []byte("x")); err == nil {
-		t.Error("a remote holder was served by the vault")
+}
+
+type liarText struct{}
+
+func (liarText) Profile() custody.Profile {
+	return custody.NewProfile("liar").Allow(custody.RoleCalidus, custody.OpSignText)
+}
+
+// SignText answers with a valid signature of a key of its own.
+func (liarText) SignText(_ context.Context, _ custody.Key[custody.Calidus], text []byte) (ports.TextSignature, error) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	var out ports.TextSignature
+	copy(out.PublicKey[:], pub)
+	copy(out.Signature[:], ed25519.Sign(priv, text))
+	return out, nil
+}
+
+// A text signature made by another key than the demanded Calidus key is refused
+// before it is returned.
+//
+// spec: SPO-Xidentity-SEC-006
+func TestSignTextAnswerFromAnotherKeyIsRefused(t *testing.T) {
+	r := newRig(t)
+	m := secret.Take([]byte(phrase))
+	defer m.Destroy()
+	if _, err := r.keyUC().Run(context.Background(), GenerateCalidusKeyRequest{Name: "cal", Mnemonic: m}); err != nil {
+		t.Fatal(err)
+	}
+	uc := SignWithCalidusKey{Store: r.store, Signers: ports.SignerFunc(func(custody.KeyRef) (ports.Signer, error) { return liarText{}, nil })}
+	if _, err := uc.Run(context.Background(), "cal", []byte("x")); err == nil || !strings.Contains(err.Error(), "does not verify") {
+		t.Errorf("an answer by another key: %v", err)
 	}
 }

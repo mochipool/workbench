@@ -12,6 +12,7 @@ package hwkeys
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
@@ -35,18 +36,24 @@ type Options struct {
 // message of custody.PlanGeneration.
 //
 // spec: SPO-Chw-PRE-001, SPO-Chw-PRE-003
-func Plan(hw ports.HardwareKeyExporter, keys ...custody.KeyRef) (custody.Plan, error) {
+func Plan(hw ports.HardwareKeyExporter, place custody.Placement, roles ...custody.Role) (custody.Plan, error) {
 	if hw == nil {
-		return custody.PlanGeneration(keys...)
+		return custody.PlanGeneration(place, roles...)
 	}
-	return custody.PlanGenerationWith(func(custody.KeyRef) (custody.Profile, error) { return hw.Profile(), nil }, keys...)
+	return custody.PlanGenerationWith(func(custody.Placement) (custody.Profile, error) { return hw.Profile(), nil }, place, roles...)
 }
 
-// Hardware reports whether the key is held by a hardware wallet.
-func Hardware(k custody.KeyRef) bool { return k.Holder == custody.HolderHardware }
+// IsHardware reports whether a connected signer is a hardware wallet. It asks
+// for the capability (the signer takes the options of a device witness), not
+// for where the signer sits: no use case branches on a holder.
+func IsHardware(s ports.Signer) bool {
+	_, ok := s.(ports.HardwareWitnesser)
+	return ok
+}
 
 // Export makes the key on the device. The caller has planned it with Plan.
-func Export(ctx context.Context, hw ports.HardwareKeyExporter, key custody.KeyRef, opt Options) (ports.HardwareKey, error) {
+func Export(ctx context.Context, hw ports.HardwareKeyExporter, role custody.Role, opt Options) (ports.HardwareKey, error) {
+	key := custody.KeyRef{Role: role} // a key being made has no identity yet
 	if hw == nil {
 		return ports.HardwareKey{}, ports.ErrNoHardwareSigner
 	}
@@ -59,4 +66,19 @@ func Export(ctx context.Context, hw ports.HardwareKeyExporter, key custody.KeyRe
 		return ports.HardwareKey{}, fmt.Errorf("export the %s key from the hardware wallet: %w", key.Role, err)
 	}
 	return hk, nil
+}
+
+// OnDevice reports whether the signer the directory connects for the key is a
+// hardware wallet; no connected signer is "no". It asks the directory, as a
+// signer does, so the answer is the one the plan will see.
+func OnDevice(dir ports.SignerDirectory, k custody.KeyRef) bool {
+	if dir == nil {
+		return false
+	}
+	s, err := dir.SignerFor(k)
+	if err != nil {
+		// The directory knows the key is held on a device but none is connected.
+		return errors.Is(err, ports.ErrNoHardwareSigner)
+	}
+	return IsHardware(s)
 }

@@ -47,7 +47,7 @@ func run() int {
 	}
 	defer secret.Purge()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 
 	deps, err := buildDeps(os.Stdout, os.Stderr, nil)

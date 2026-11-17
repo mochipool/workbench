@@ -269,7 +269,7 @@ device variant. Nothing is written.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return a.withEnv(cmd, envSpec{flags: &cf, needs: []Need{CapSigners, CapSignatures}}, func(ctx context.Context, s *session, env *Env, _ WireOptions) error {
-				res, err := poolkey.SignWithCalidusKey{Store: s.Store, Signers: env.Signers}.Run(ctx, args[0], "", []byte(args[1]))
+				res, err := poolkey.SignWithCalidusKey{Store: s.Store, Signers: env.Signers}.Run(ctx, args[0], []byte(args[1]))
 				if err != nil {
 					return err
 				}
@@ -333,7 +333,7 @@ phrase exist, so it has no QR code. ` + hardwareUntested,
 				if hw.on {
 					a.noteDevice()
 					res, err := catalyst.GenerateVotingKey{Store: s.Store, Hardware: env.Hardware}.Run(ctx, catalyst.GenerateVotingKeyRequest{
-						Name: args[0], Holder: hw.holder(), Account: o.account, Index: o.index})
+						Name: args[0], Place: hw.place(), Account: o.account, Index: o.index})
 					if err != nil {
 						return err
 					}

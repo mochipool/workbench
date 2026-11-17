@@ -56,13 +56,13 @@ type GenerateWalletAccount struct {
 type GenerateWalletRequest struct {
 	// Name is the wallet name: a trailing `.addr` and a leading `./` are
 	// dropped, nothing else (SPO-03a-IF-003).
-	Name   string
-	Holder custody.Holder // empty means the vault
-	// StakeHolder is who holds the stake key; empty means Holder. Hardware
-	// payment key with StakeHolder vault is the `hybrid` type of 03a; the
+	Name  string
+	Place custody.Placement // empty means the vault
+	// StakePlace is where the stake key is made; empty means Place. Hardware
+	// payment key with StakePlace vault is the `hybrid` type of 03a; the
 	// stake key is then a software key. A software payment key with a
 	// hardware stake key is not a type of 03a and is refused.
-	StakeHolder custody.Holder
+	StakePlace custody.Placement
 	// Multisig selects the 1854H root of `hwmulti` and `hybridmulti` for the
 	// hardware payment key (SPO-03a-INV-001).
 	Multisig bool
@@ -99,11 +99,11 @@ func (uc GenerateWalletAccount) Run(ctx context.Context, req GenerateWalletReque
 	if req.Account > MaxDerivationIndex || req.Index > MaxDerivationIndex {
 		return res, ErrDerivationRange
 	}
-	payHolder, stakeHolder := req.Holder, req.StakeHolder
-	if stakeHolder == "" {
-		stakeHolder = payHolder
+	payPlace, stakePlace := req.Place, req.StakePlace
+	if stakePlace == "" {
+		stakePlace = payPlace
 	}
-	payHW, stakeHW := payHolder == custody.HolderHardware, stakeHolder == custody.HolderHardware
+	payHW, stakeHW := payPlace == custody.PlaceHardware, stakePlace == custody.PlaceHardware
 	if stakeHW && !payHW {
 		return res, fmt.Errorf("%w: a hardware stake key with a software payment key is not a wallet type of 03a", ErrOptionNotUsed)
 	}
@@ -135,9 +135,10 @@ func (uc GenerateWalletAccount) Run(ctx context.Context, req GenerateWalletReque
 		return res, fmt.Errorf("unknown key source %q", req.Source)
 	}
 
-	payRef := custody.KeyRef{Role: custody.RolePayment, Holder: payHolder, Owner: name + ".payment"}
-	stakeRef := custody.KeyRef{Role: custody.RoleStake, Holder: stakeHolder, Owner: name}
-	if _, err := hwkeys.Plan(uc.Hardware, payRef, stakeRef); err != nil {
+	if _, err := hwkeys.Plan(uc.Hardware, payPlace, custody.RolePayment); err != nil {
+		return res, err
+	}
+	if _, err := hwkeys.Plan(uc.Hardware, stakePlace, custody.RoleStake); err != nil {
 		return res, err
 	}
 
@@ -170,13 +171,13 @@ func (uc GenerateWalletAccount) Run(ctx context.Context, req GenerateWalletReque
 	var payHws, stakeHws []byte
 	switch {
 	case payHW:
-		hk, err := hwkeys.Export(ctx, uc.Hardware, payRef, hwkeys.Options{Account: req.Account, Index: req.Index, Multisig: req.Multisig})
+		hk, err := hwkeys.Export(ctx, uc.Hardware, custody.RolePayment, hwkeys.Options{Account: req.Account, Index: req.Index, Multisig: req.Multisig})
 		if err != nil {
 			return res, err
 		}
 		pay.VKey, payHws = hk.VKey, hk.SigningFile
 		if stakeHW {
-			sk, err := hwkeys.Export(ctx, uc.Hardware, stakeRef, hwkeys.Options{Account: req.Account, Multisig: req.Multisig})
+			sk, err := hwkeys.Export(ctx, uc.Hardware, custody.RoleStake, hwkeys.Options{Account: req.Account, Multisig: req.Multisig})
 			if err != nil {
 				return res, err
 			}

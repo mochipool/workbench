@@ -119,7 +119,7 @@ func TestRotationIsPendingUntilTheOperatorConfirms(t *testing.T) {
 				t.Fatalf("a refused confirmation changed the registry: %+v", p)
 			}
 			// Confirmed, scope not carried over.
-			res, err := s.C.Node().AcceptRotation(ctx, "bob", s.coordTyped(done.New))
+			res, err := s.C.Node().AcceptRotation(ctx, "bob", s.coordTyped(done.New), s.C.Coordinator().OnRotate)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -185,7 +185,7 @@ func TestRotationCarriesTheScopeOnlyOnAYes(t *testing.T) {
 	if len(old.Scope.Pools) != 1 {
 		t.Fatalf("the scene gave bob no scope: %+v", old.Scope)
 	}
-	if _, err := s.C.Node().AcceptRotation(ctx, "bob", party.RotationAcceptance{Confirmation: pr.New.Fingerprint().String()[:19], CarryScope: true}); err != nil {
+	if _, err := s.C.Node().AcceptRotation(ctx, "bob", party.RotationAcceptance{Confirmation: pr.New.Fingerprint().String()[:19], CarryScope: true}, s.C.Coordinator().OnRotate); err != nil {
 		t.Fatal(err)
 	}
 	nb := partyNamed(t, s.C, "bob")
@@ -331,7 +331,7 @@ func TestInFlightRequestsMustBeRequestedAgainAfterARotation(t *testing.T) {
 		t.Fatal(err)
 	}
 	pr, _ := s.C.Node().RotationOf(ctx, "bob")
-	res, err := s.C.Node().AcceptRotation(ctx, "bob", party.RotationAcceptance{Confirmation: pr.New.Fingerprint().String()[:19], CarryScope: true})
+	res, err := s.C.Node().AcceptRotation(ctx, "bob", party.RotationAcceptance{Confirmation: pr.New.Fingerprint().String()[:19], CarryScope: true}, s.C.Coordinator().OnRotate)
 	if err != nil {
 		t.Fatal(err)
 	}

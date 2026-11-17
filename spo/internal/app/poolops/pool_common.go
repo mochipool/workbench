@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mochipool/workbench/spo/internal/app/keyring"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
@@ -109,28 +110,12 @@ func keyOf(env []byte) ([]byte, txbuild.KeyHash, error) {
 	return raw, txbuild.HashKey(raw), nil
 }
 
-// holderOf says who holds a signing key: the hardware file wins when both
-// exist (SPO-Pfiles-INV-002).
-func holderOf(r ports.Reader, skey, hws ports.Ref) (custody.Holder, error) {
-	if h, err := r.Exists(hws); err != nil {
-		return "", err
-	} else if h {
-		return custody.HolderHardware, nil
-	}
-	if s, err := r.Exists(skey); err != nil {
-		return "", err
-	} else if s {
-		return custody.HolderVault, nil
-	}
-	return "", fmt.Errorf("%w: %s", ErrNoSigningKey, skey)
-}
-
-// payer is the paying address of a transaction with its signing holder.
+// payer is the paying address of a transaction with its payment key.
 type payer struct {
-	name   string
-	addr   chain.Address
-	hash   txbuild.KeyHash
-	holder custody.Holder
+	name string
+	addr chain.Address
+	hash txbuild.KeyHash
+	key  custody.KeyRef
 }
 
 func readPayer(r ports.Reader, ins ports.AddressInspector, network uint8, name string) (payer, error) {
@@ -138,11 +123,11 @@ func readPayer(r ports.Reader, ins ports.AddressInspector, network uint8, name s
 	if err != nil {
 		return payer{}, err
 	}
-	holder, err := holderOf(r, ports.Ref{Name: name, Kind: ports.AddrSKey}, ports.Ref{Name: name, Kind: ports.AddrHwsFile})
+	key, err := keyring.Held(r, custody.RolePayment, name, ErrNoSigningKey)
 	if err != nil {
 		return payer{}, err
 	}
-	p := payer{name: name, addr: chain.Address(firstLine(ab)), holder: holder}
+	p := payer{name: name, addr: chain.Address(firstLine(ab)), key: key}
 	info, err := ins.InspectAddress(p.addr)
 	if err != nil {
 		return payer{}, fmt.Errorf("paying address: %w", err)

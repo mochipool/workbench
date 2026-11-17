@@ -12,8 +12,10 @@ import (
 
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/porttest"
 )
 
 // ---- fakes -----------------------------------------------------------------
@@ -52,6 +54,15 @@ func (m memReader) Exists(r ports.Ref) (bool, error) { _, ok := m[r]; return ok,
 type memStore struct {
 	files memReader
 	views int
+}
+
+// List implements ports.SourceLister: every stored file.
+func (s *memStore) List(context.Context) (ports.SourceListing, error) {
+	var l ports.SourceListing
+	for r := range s.files {
+		l.Entries = append(l.Entries, ports.SourceEntry{Ref: r})
+	}
+	return l, nil
 }
 
 func (s *memStore) View(_ context.Context, fn func(ports.Reader) error) error {
@@ -127,7 +138,7 @@ type fakeSigner struct {
 
 func (s *fakeSigner) Profile() custody.Profile { return s.profile }
 func (s *fakeSigner) Witness(_ context.Context, key custody.KeyRef, body txbuild.TxBody) (txbuild.Witness, error) {
-	s.l.add("witness " + key.Owner)
+	s.l.add("witness w")
 	k := s.priv
 	switch s.mode {
 	case "wrong-key":
@@ -145,14 +156,13 @@ func (s *fakeSigner) Witness(_ context.Context, key custody.KeyRef, body txbuild
 	return w, nil
 }
 
-type fakeDir struct{ signer ports.Signer }
-
-func (d fakeDir) SignerFor(k custody.KeyRef) (ports.Signer, error) {
-	if k.Holder == custody.HolderHardware {
-		return nil, errors.New("no hardware signer is configured")
-	}
-	return d.signer, nil
+// vkeyEnv is a verification key envelope of a fake key.
+func vkeyEnv(typ string, pub ed25519.PublicKey) []byte {
+	return pool.MarshalEnvelope(pool.Envelope{Type: typ, Description: "fake", CborHex: "5820" + fmt.Sprintf("%x", []byte(pub))})
 }
+
+// fakeDir serves one signer for the keys whose signing key the store holds.
+func fakeDir(st ports.Store, s ports.Signer) ports.SignerDirectory { return porttest.VaultOnly(st, s) }
 
 type fakeChain struct {
 	l       *log
@@ -248,9 +258,11 @@ func newRig(t *testing.T) *rig {
 	r.store = &memStore{files: memReader{
 		{Name: "w", Kind: ports.AddrFile}:         []byte("addr_test_src\n"),
 		{Name: "w", Kind: ports.AddrSKey}:         nil,
+		{Name: "w", Kind: ports.AddrVKey}:         vkeyEnv("PaymentVerificationKeyShelley_ed25519", pub),
 		{Name: "d", Kind: ports.AddrFile}:         []byte("addr_test_dst\n"),
 		{Name: "w.payment", Kind: ports.AddrFile}: []byte("addr_test_src\n"),
 		{Name: "w.payment", Kind: ports.AddrSKey}: nil,
+		{Name: "w.payment", Kind: ports.AddrVKey}: vkeyEnv("PaymentVerificationKeyShelley_ed25519", pub),
 	}}
 	var id chain.TxID
 	id[0] = 1
@@ -265,7 +277,7 @@ func newRig(t *testing.T) *rig {
 	r.queue = &fakeQueue{l: l}
 	r.submit = &fakeSubmitter{l: l}
 	r.uc = SendLovelaces{
-		Store: r.store, Signers: fakeDir{r.signer}, Utxos: r.chain, Params: r.chain, Tip: r.chain,
+		Store: r.store, Signers: fakeDir(r.store, r.signer), Utxos: r.chain, Params: r.chain, Tip: r.chain,
 		Addresses: fakeInspector{srcHash: txbuild.HashKey(pub)}, Min: r.ledger, Fees: r.ledger, Bodies: r.ledger, Assembler: r.ledger,
 		Confirmer: r.conf, Queue: r.queue, NetworkID: ports.NetworkTestnet,
 	}
@@ -531,7 +543,7 @@ func TestSourceFiles(t *testing.T) {
 // and a hardware-held key whose signer is not configured is refused by the
 // plan, before any body is built or shown.
 //
-// spec: SPO-Pfiles-INV-002, SPO-Ptx-INV-008
+// spec: SPO-Pfiles-INV-002, SPO-Ptx-INV-008, SPO-Xidentity-INV-016
 func TestHardwareFileWinsAndIsPlanned(t *testing.T) {
 	r := newRig(t)
 	r.store.files[ports.Ref{Name: "w", Kind: ports.AddrHwsFile}] = []byte("{}")
@@ -568,7 +580,7 @@ func TestPlanUsesTheDraftFeatures(t *testing.T) {
 	}
 	// A signer that does not implement TxWitnesser is refused.
 	r2 := newRig(t)
-	r2.uc.Signers = fakeDir{bareSigner{r2.signer.profile}}
+	r2.uc.Signers = fakeDir(r2.store, bareSigner{r2.signer.profile})
 	if _, err := r2.run("5000000"); !errors.Is(err, ErrNoSigner) {
 		t.Errorf("%v", err)
 	}
@@ -801,5 +813,27 @@ func TestDatumHashUtxosAreSpentAsPlainInputs(t *testing.T) {
 	}
 	if strings.Contains(string(res.SignedTx), "Redeemer") {
 		t.Error("a script input was added")
+	}
+}
+
+// A co-signer key that is the payer's own key needs one witness: the plan has
+// two slots, one witness is made and assembled, and no required slot is dropped
+// (the body lists the key as a required signer and the key has signed).
+//
+// spec: SPO-13b-INV-001
+func TestACoSignerKeyEqualToThePayerKeyIsWitnessedOnce(t *testing.T) {
+	r := newRig(t)
+	payKey := porttest.Key(t, r.store, custody.RolePayment, "w")
+	pub := r.signer.priv.Public().(ed25519.PublicKey)
+	_, err := r.uc.Run(context.Background(), SendRequest{Source: "w", Destination: "d", Amount: "5000000",
+		CoSign: &CoSigner{Label: "co", Key: payKey, Hash: txbuild.HashKey(pub), RequiredSigner: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := r.l.count("witness"); n != 1 {
+		t.Errorf("%d witnesses were made, want 1: %v", n, r.l.calls)
+	}
+	if r.l.count("assemble") != 1 || r.l.count("enqueue") != 1 {
+		t.Errorf("the transaction was not assembled and queued: %v", r.l.calls)
 	}
 }

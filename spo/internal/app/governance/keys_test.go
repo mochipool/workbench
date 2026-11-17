@@ -157,7 +157,7 @@ func TestGenerateDRepKeysRefusals(t *testing.T) {
 	if _, err := uc.Run(ctx, GenerateKeysRequest{Name: "x", Source: KeysMnemonic, Index: MaxDerivationIndex + 1}); !errors.Is(err, ErrDerivationRange) {
 		t.Errorf("range: %v", err)
 	}
-	if _, err := uc.Run(ctx, GenerateKeysRequest{Name: "x", Source: KeysRandom, Holder: custody.HolderHardware}); err == nil {
+	if _, err := uc.Run(ctx, GenerateKeysRequest{Name: "x", Source: KeysRandom, Place: custody.PlaceHardware}); err == nil {
 		t.Errorf("hardware: %v", err)
 	}
 	if _, err := uc.Run(ctx, GenerateKeysRequest{Name: "a/b", Source: KeysRandom}); !errors.Is(err, ErrBadWord) {

@@ -96,6 +96,11 @@ type countingDir struct{ s countingSigner }
 
 func (d countingDir) SignerFor(custody.KeyRef) (ports.Signer, error) { return d.s, nil }
 
+// Connected implements ports.SignerDirectory.
+func (d countingDir) Connected(k custody.KeyRef) ([]ports.ConnectedSigner, error) {
+	return ports.ConnectedVia(d, k)
+}
+
 // An answered request that arrives again by file is answered with the stored
 // response and never signed twice; over a network the same id is a replay.
 // spec: SPO-Xparty-INV-017, SPO-Xparty-INV-007, SPO-Xparty-OUT-006
@@ -366,10 +371,10 @@ func TestRevocationKeepsVerifiedWitnessesAndUnassignsTheRest(t *testing.T) {
 	}
 	s.C.Revoke("bob")
 	c := s.collection()
-	if !c.Slots[0].Filled() || c.Slots[0].Party != "bob" {
+	if !c.Slots[0].Filled() || c.Slots[0].PartyFingerprint != s.fp("bob") {
 		t.Errorf("the verified witness was not kept: %+v", c.Slots[0])
 	}
-	if c.Slots[1].Party != "" || c.Slots[1].Filled() {
+	if c.Slots[1].Assigned() || c.Slots[1].Filled() {
 		t.Errorf("the unfilled slot is not unassigned: %+v", c.Slots[1])
 	}
 	if items, _ := s.C.Outbox().Pending(ctx); len(items) != 0 {

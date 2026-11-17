@@ -14,6 +14,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/assets"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
@@ -39,6 +40,12 @@ type Coordinator struct {
 	// package does not depend on the pool use cases; nil leaves a complete
 	// collection for the operator to finish.
 	Complete func(ctx context.Context, ref CollectionRef) (Completion, error)
+	// History returns the recorded roles of a key identity (ports.RoleHistoryOf
+	// over the workspace's index until the role-history record exists). A request
+	// for a key identity that was ever recorded in a cold role is not created for
+	// a network transport, whatever role the slot names (ADR 0010 decision 3).
+	// nil checks the role of the slot only.
+	History func(ctx context.Context, id identity.Ref) (custody.RoleHistory, bool, error)
 }
 
 // Completion is what Complete reports.
@@ -120,11 +127,11 @@ func (c Coordinator) bodyOf(coll pool.Collection) ([]byte, party.TxView, []byte,
 // recorded for a party is what it may ask of us (SPO-Xparty-INV-010) and is
 // not read here.
 func assignable(ps []party.Party, s pool.Slot) (party.Party, error) {
-	if s.Party == "" {
+	if !s.Assigned() {
 		return party.Party{}, fmt.Errorf("%w: %s", ErrUnassigned, s.Name)
 	}
 	for _, p := range ps {
-		if p.Name != s.Party {
+		if p.Fingerprint != s.PartyFingerprint {
 			continue
 		}
 		if !p.Active() || !p.HasRole(party.RoleSigner) {
@@ -132,7 +139,7 @@ func assignable(ps []party.Party, s pool.Slot) (party.Party, error) {
 		}
 		return p, nil
 	}
-	return party.Party{}, fmt.Errorf("%w: %s is not enrolled", ErrNotSigner, s.Party)
+	return party.Party{}, fmt.Errorf("%w: the party %s is not enrolled", ErrNotSigner, s.PartyFingerprint)
 }
 
 // ---- opening ------------------------------------------------------------------
@@ -201,8 +208,14 @@ func (c Coordinator) Open(ctx context.Context, req OpenRequest) (CollectionRef, 
 		if err != nil {
 			return err
 		}
+		// A slot no local witness fills is answered by a co-signer: it must
+		// name an active enrolled signer (SPO-Xparty-PRE-003).
+		localDone := map[string]bool{}
+		for _, sw := range sws {
+			localDone[sw.Slot.Label] = true
+		}
 		for _, s := range coll.Slots {
-			if s.Holder == custody.HolderRemote {
+			if !localDone[s.Name] {
 				if _, err := assignable(ps, s); err != nil {
 					return err
 				}
@@ -264,7 +277,7 @@ const (
 type SlotResult struct {
 	Slot   int
 	Name   string
-	Party  string
+	Party  party.Fingerprint // the co-signer the slot is assigned to; zero when none
 	Status SlotStatus
 	Err    error
 }
@@ -295,6 +308,13 @@ func (c Coordinator) RequestSignatures(ctx context.Context, in RequestInput, tr 
 	slotNow, err := c.Chain.Slot(ctx, now)
 	if err != nil {
 		return nil, err
+	}
+	// The cold-key rule reads the role history of each slot's key, which may read
+	// the store: it is decided before the transaction opens (a store read inside
+	// an Update of the same handle would wait for itself).
+	var coldSlots map[string]bool
+	if !tr.Kind().IsFile() {
+		coldSlots = c.coldSlots(ctx, in.Ref)
 	}
 	var results []SlotResult
 	err = c.Store.Update(ctx, func(w ports.Writer) error {
@@ -337,19 +357,17 @@ func (c Coordinator) RequestSignatures(ctx context.Context, in RequestInput, tr 
 		cs.Body = hexHash([32]byte(l.coll.Body.ID))
 		var items []OutItem
 		for i, s := range l.coll.Slots {
-			r := SlotResult{Slot: i, Name: s.Name, Party: s.Party}
+			r := SlotResult{Slot: i, Name: s.Name, Party: s.PartyFingerprint}
 			switch {
 			case s.Filled():
 				r.Status = SlotFilled
-			case s.Holder != custody.HolderRemote:
-				r.Status = SlotLocal
 			default:
 				p, err := assignable(ps, s)
 				if err != nil {
 					r.Status, r.Err = SlotRefused, err
 					break
 				}
-				if s.Role == custody.RolePoolCold && !tr.Kind().IsFile() {
+				if !tr.Kind().IsFile() && coldSlots[s.Name] {
 					r.Status, r.Err = SlotRefused, ErrColdKeyOverNetwork
 					ev := eventOf(now, "request-not-created", hexColl(id), i, l.coll.Body.ID)
 					ev.Peer, ev.Reason = p.Fingerprint.String(), ErrColdKeyOverNetwork.Error()
@@ -436,9 +454,9 @@ func (c Coordinator) slotConcern(r ports.Reader, st coordState, ps []party.Party
 	if err != nil || collectionID(cs.Ref, l.coll) != cid || int(slot) >= len(l.coll.Slots) {
 		return party.Concern{}
 	}
-	name := l.coll.Slots[slot].Party
+	fp := l.coll.Slots[slot].PartyFingerprint
 	for _, p := range ps {
-		if p.Name == name && name != "" {
+		if l.coll.Slots[slot].Assigned() && p.Fingerprint == fp {
 			return party.Concern{SlotSigner: p.Fingerprint, HasSlotSigner: true}
 		}
 	}
@@ -660,7 +678,7 @@ func (c Coordinator) onResponse(w ports.Writer, o ports.OpenedEnvelope, m party.
 	}
 	var assigned party.Fingerprint
 	for _, p := range ps {
-		if p.Name == slot.Party && slot.Party != "" {
+		if slot.Assigned() && p.Fingerprint == slot.PartyFingerprint {
 			assigned = p.Fingerprint
 		}
 	}
@@ -1004,7 +1022,7 @@ func (c Coordinator) OnRevoke(w ports.Writer, revoked party.Party) error {
 		}
 		changed := false
 		for _, s := range l.coll.Slots {
-			if s.Party != revoked.Name || s.Filled() {
+			if !s.Assigned() || s.PartyFingerprint != revoked.Fingerprint || s.Filled() {
 				continue
 			}
 			if l.coll, err = l.coll.Unassign(s.Name); err != nil {
@@ -1025,6 +1043,72 @@ func (c Coordinator) OnRevoke(w ports.Writer, revoked party.Party) error {
 	}
 	_, err = dropTo(w, revoked.Fingerprint)
 	return err
+}
+
+// coldSlots names the slots of a collection whose key must never be asked for
+// over a network. It fails closed: a history that cannot be read for certain
+// counts as cold.
+func (c Coordinator) coldSlots(ctx context.Context, ref CollectionRef) map[string]bool {
+	var slots []pool.Slot
+	_ = c.Store.View(ctx, func(r ports.Reader) error {
+		if l, err := c.loadCollection(r, c.TxIDs, ref); err == nil {
+			slots = l.coll.Slots
+		}
+		return nil
+	})
+	out := map[string]bool{}
+	for _, s := range slots {
+		out[s.Name] = c.coldKey(ctx, s)
+	}
+	return out
+}
+
+// coldKey is the cold-key rule for one slot: a cold role (pool cold or committee
+// cold) named by the slot, or an identity ever recorded in one. An error reading
+// the history refuses (fails closed).
+func (c Coordinator) coldKey(ctx context.Context, s pool.Slot) bool {
+	if s.Role.IsCold() {
+		return true
+	}
+	if c.History == nil {
+		return false
+	}
+	id, err := identity.NewRef(identity.KindKeyHash, s.KeyHash[:])
+	if err != nil {
+		return false // not a key hash: there is no history of keys to consult
+	}
+	h, known, err := c.History(ctx, id)
+	return err != nil || (known && h.HasColdRole())
+}
+
+// OnRotate is the hook for Node.AcceptRotation (SPO-Xparty-INV-032): inside the
+// rotation's transaction, every unfilled slot assigned to the retired identity
+// is assigned to the new one, so an open collection still reaches the same
+// co-signer. A slot is routed by fingerprint, and a rotation changes it.
+func (c Coordinator) OnRotate(w ports.Writer, retired, next party.Party) error {
+	st, err := readCoord(w)
+	if err != nil {
+		return err
+	}
+	for _, cs := range st.Collections {
+		if cs.Closed != "" {
+			continue
+		}
+		l, err := c.loadCollection(w, c.TxIDs, cs.Ref)
+		if errors.Is(err, ErrNoCollection) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		var moved int
+		if l.coll, moved = l.coll.Reassign(retired.Fingerprint, next.Fingerprint); moved > 0 {
+			if err := c.saveCollection(w, l); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // ---- invitations --------------------------------------------------------------------

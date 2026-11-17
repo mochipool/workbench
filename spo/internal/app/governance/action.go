@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mochipool/workbench/spo/internal/app/hwkeys"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
-	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/governance"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/domain/txparam"
@@ -506,9 +506,6 @@ func (uc RegisterAction) Run(ctx context.Context, req RegisterActionRequest) (Ac
 		if pay, err = uc.readPayer(r, pn); err != nil {
 			return err
 		}
-		if pay.holder != custody.HolderVault {
-			return ErrHardwarePayer
-		}
 		seen := map[string]bool{}
 		for _, f := range req.Files {
 			nm := strings.TrimSuffix(trimDir(f), ".action")
@@ -543,6 +540,11 @@ func (uc RegisterAction) Run(ctx context.Context, req RegisterActionRequest) (Ac
 		return nil
 	}); err != nil {
 		return out, err
+	}
+	// The deposit is paid by a key-file payer (the signer the directory
+	// connects for the key decides, not a flag).
+	if hwkeys.OnDevice(uc.Pipeline.Signers, pay.key) {
+		return out, ErrHardwarePayer
 	}
 	run := txRun{payer: pay, props: props, message: req.Message, extras: req.Extras, pass: req.Passphrase, ttl: ProposalTTL}
 	if err := uc.early(run); err != nil {

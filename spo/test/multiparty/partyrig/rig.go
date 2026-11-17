@@ -6,6 +6,8 @@ package partyrig
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/hex"
 	"errors"
 	"sync"
 	"testing"
@@ -18,6 +20,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/app/parties"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/domain/stake"
@@ -276,7 +279,7 @@ func (w *Workspace) AddKey(role custody.Role, owner string) txbuild.KeyHash {
 	}
 	h := txbuild.HashKey(raw)
 	w.mu.Lock()
-	w.keys[h] = custody.KeyRef{Role: role, Holder: custody.HolderVault, Owner: owner}
+	w.keys[h] = keyRef(role, h)
 	w.mu.Unlock()
 	return h
 }
@@ -440,6 +443,72 @@ func Seal(t *testing.T, from, to *Workspace, body party.Body, expires time.Durat
 // its vault (a key the test wrote as files).
 func (w *Workspace) AddKnownKey(role custody.Role, owner string, hash [28]byte) {
 	w.mu.Lock()
-	w.keys[hash] = custody.KeyRef{Role: role, Holder: custody.HolderVault, Owner: owner}
+	w.keys[hash] = keyRef(role, hash)
 	w.mu.Unlock()
+}
+
+// keyRef is the reference of a key by its key hash: a reference carries an
+// identity and no owner or holder (ADR 0010).
+func keyRef(role custody.Role, h [28]byte) custody.KeyRef {
+	id, err := identity.NewRef(identity.KindKeyHash, h[:])
+	if err != nil {
+		panic(err)
+	}
+	return custody.KeyRef{Role: role, Identity: id}
+}
+
+// SignID signs an arbitrary id with a key of this workspace's vault: the
+// forger of the attack tests. The vault signer itself no longer signs a hash it
+// is handed (ADR 0010 decision 3), so a test that needs a witness over another
+// id signs it here, with the key's own seed.
+func (w *Workspace) SignID(role custody.Role, owner string, id [32]byte) txbuild.Witness {
+	w.T.Helper()
+	kinds, ok := ports.KeyKindsOf(role)
+	if !ok {
+		w.T.Fatalf("no key of role %s", role)
+	}
+	buf, err := w.Store.Open(context.Background(), ports.Ref{Name: owner, Kind: kinds.SKey})
+	if err != nil {
+		w.T.Fatal(err)
+	}
+	defer buf.Destroy()
+	var seed []byte
+	if err := buf.Use(func(b []byte) error {
+		env, err := pool.ParseEnvelope(b)
+		if err != nil {
+			return err
+		}
+		raw, err := hex.DecodeString(env.CborHex)
+		if err != nil || len(raw) < 34 {
+			return errors.New("not a signing key envelope")
+		}
+		seed = append([]byte(nil), raw[len(raw)-32:]...)
+		return nil
+	}); err != nil {
+		w.T.Fatal(err)
+	}
+	priv := ed25519.NewKeyFromSeed(seed)
+	var out txbuild.Witness
+	copy(out.VKey[:], priv.Public().(ed25519.PublicKey))
+	copy(out.Signature[:], ed25519.Sign(priv, id[:]))
+	return out
+}
+
+// FingerprintOf is the fingerprint of the party enrolled here under a name, for
+// a test that assigns a slot to it (a slot names the fingerprint, never the
+// name). A name nobody has gets a fingerprint nobody holds.
+func (w *Workspace) FingerprintOf(name string) party.Fingerprint {
+	w.T.Helper()
+	var fp party.Fingerprint
+	found := false
+	_ = w.Store.View(context.Background(), func(r ports.Reader) error {
+		if p, err := w.Registry.ByName(r, name); err == nil {
+			fp, found = p.Fingerprint, true
+		}
+		return nil
+	})
+	if !found {
+		fp = party.Fingerprint{0xde, 0xad, byte(len(name))}
+	}
+	return fp
 }

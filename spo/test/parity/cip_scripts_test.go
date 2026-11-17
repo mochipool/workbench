@@ -148,7 +148,7 @@ func TestCalidusKeyScriptParity(t *testing.T) {
 	if len(keyShape(t, upDir, "hwk", false)) != 0 {
 		t.Error("upstream `new hw` left files")
 	}
-	if _, err := (poolkey.GenerateCalidusKey{Store: st, Deriver: kg}).Run(context.Background(), poolkey.GenerateCalidusKeyRequest{Name: "hwk", Holder: "hardware", Mnemonic: m}); err == nil {
+	if _, err := (poolkey.GenerateCalidusKey{Store: st, Deriver: kg}).Run(context.Background(), poolkey.GenerateCalidusKeyRequest{Name: "hwk", Place: "hardware", Mnemonic: m}); err == nil {
 		t.Error("port made a hardware Calidus key")
 	}
 	// A mnemonic of another length: refused by both.
