@@ -25,7 +25,7 @@ import (
 )
 
 // chainCaps are the capabilities that depend on the mode.
-var chainCaps = []cli.Cap{cli.CapTip, cli.CapSync, cli.CapOpCertCount, cli.CapParams, cli.CapUtxos, cli.CapRewards, cli.CapPools, cli.CapDReps, cli.CapCrossCheck, cli.CapPoolCross, cli.CapOpCertCross, cli.CapSubmit, cli.CapQueue, cli.CapCalidusRead, cli.CapAdaHandle, cli.CapPollQuestion, cli.CapTokenRegistry, cli.CapPoolInfo, cli.CapPoolUpdates}
+var chainCaps = []cli.Cap{cli.CapTip, cli.CapSync, cli.CapOpCertCount, cli.CapParams, cli.CapUtxos, cli.CapRewards, cli.CapPools, cli.CapDReps, cli.CapCrossCheck, cli.CapPoolCross, cli.CapOpCertCross, cli.CapSubmit, cli.CapQueue, cli.CapTxStatus, cli.CapCalidusRead, cli.CapAdaHandle, cli.CapPollQuestion, cli.CapTokenRegistry, cli.CapPoolInfo, cli.CapPoolUpdates}
 
 func init() { chainCaps = append(chainCaps, cli.GovernanceChainCaps...) }
 
@@ -287,6 +287,7 @@ func wireOffline(env *cli.Env, o cli.WireOptions, f *transferfile.File, clock po
 	env.Absent(cli.CapPoolInfo, noPoolRead)
 	env.Absent(cli.CapPoolUpdates, noPoolRead)
 	env.Absent(cli.CapSubmit, "offline mode has no transaction submitter; queue to a transfer file instead")
+	env.Absent(cli.CapTxStatus, noTxStatusOffline)
 	if st, err := os.Stat(o.TransferFile); err == nil && st.Mode().IsRegular() {
 		env.Utxos, env.Params, env.Queue, env.Eras = f, f, f, f
 		// The snapshot answers reward accounts, and whatever else the

@@ -378,7 +378,7 @@ func (c *Client) RewardAccount(ctx context.Context, stake chain.StakeAddress) (c
 // the mempool. Resubmitting blindly can only be refused by the node as a
 // duplicate or double-spend, so the caller queries the transaction id first
 // (`spo tx` / the chain's tx_status) and resubmits only when it is not there.
-var ErrSubmitOutcomeUnknown = errors.New("koios submittx: the outcome is unknown: the transaction may have been accepted; query its transaction id before resubmitting")
+var ErrSubmitOutcomeUnknown = chain.NewOutcomeUnknown("koios submittx: the outcome is unknown: the transaction may have been accepted; query its transaction id before resubmitting")
 
 // Submit implements ports.TxSubmitter: POST /submittx with the binary
 // transaction as application/cbor (SPO-Clight-EXT-012). Koios answers 202

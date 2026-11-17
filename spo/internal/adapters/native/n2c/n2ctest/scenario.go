@@ -207,3 +207,33 @@ func (n *Node) RecordSubmissions() func() [][]byte {
 		return append([][]byte(nil), got...)
 	}
 }
+
+// SetIncludedTxs makes the by-reference UTxO query answer, for every reference
+// asked whose transaction id include accepts, an unspent output of addr (the
+// same legacy array form as SetUtxos). References of other transactions are
+// left out, as a node leaves out an output it does not hold. include may change
+// between queries, so a test can include a transaction after it was submitted.
+func (n *Node) SetIncludedTxs(addr []byte, include func(txid [32]byte) bool) {
+	n.SetFn("utxo-by-txin", func(q any) any {
+		var outs []Utxo
+		if tq, ok := q.(*lsq.ShelleyUtxoByTxinQuery); ok {
+			for _, in := range tq.TxIns {
+				id := [32]byte(in.Id())
+				if include(id) {
+					outs = append(outs, Utxo{TxID: id, Index: in.Index(), Lovelace: 2_000_000})
+				}
+			}
+		}
+		reply := []byte{0x81}
+		reply = append(reply, mapHead(len(outs))...)
+		for _, o := range outs {
+			reply = append(reply, 0x82)
+			reply = append(reply, cborBytes(o.TxID[:])...)
+			reply = append(reply, cborUint(uint64(o.Index))...)
+			reply = append(reply, 0x82)
+			reply = append(reply, cborBytes(addr)...)
+			reply = append(reply, cborUint(o.Lovelace)...)
+		}
+		return hex.EncodeToString(reply)
+	})
+}

@@ -29,7 +29,7 @@ func (e *RejectedError) Error() string { return "the node rejected the transacti
 // ErrSubmitOutcomeUnknown: the transaction was sent and the answer did not
 // come back (timeout, closed connection). It may be in the mempool; query the
 // transaction before resubmitting.
-var ErrSubmitOutcomeUnknown = errors.New("n2c: the node did not answer the submission; the transaction may be in its mempool")
+var ErrSubmitOutcomeUnknown = chain.NewOutcomeUnknown("n2c: the node did not answer the submission; the transaction may be in its mempool")
 
 // txID is the blake2b-256 hash of the transaction body: the first element of
 // the transaction array, in the bytes it came in.

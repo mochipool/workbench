@@ -427,7 +427,7 @@ func (c *Client) validContract(ctx context.Context, tx chain.TxID) (valid bool, 
 // reached the provider but the answer did not come back: the transaction may
 // be in the mempool. The caller queries the transaction id before
 // resubmitting.
-var ErrSubmitOutcomeUnknown = errors.New("blockfrost tx/submit: the outcome is unknown: the transaction may have been accepted; query its transaction id before resubmitting")
+var ErrSubmitOutcomeUnknown = chain.NewOutcomeUnknown("blockfrost tx/submit: the outcome is unknown: the transaction may have been accepted; query its transaction id before resubmitting")
 
 // Submit implements ports.TxSubmitter: POST /tx/submit with the binary
 // transaction as application/cbor. The documented answer is 200 and the

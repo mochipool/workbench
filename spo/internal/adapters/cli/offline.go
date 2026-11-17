@@ -388,6 +388,7 @@ func printExecuteSummary(w io.Writer, s ports.ExecuteSummary) {
 func (a *app) offlineExecuteCommand() *cobra.Command {
 	var tf string
 	var yes bool
+	var wf chainFlags
 	cmd := &cobra.Command{
 		Use:   "execute [N] [--yes] [--transfer-file PATH]",
 		Short: "Submit the Nth queued transaction (default 1) through the chain provider",
@@ -408,7 +409,7 @@ submitted. Light or online mode only.`,
 				}
 				pos = n
 			}
-			f := chainFlags{transfer: tf}
+			f := chainFlags{transfer: tf, wait: wf.wait, waitDepth: wf.waitDepth, waitTimeout: wf.waitTimeout}
 			spec := envSpec{flags: &f, config: true, needs: []Need{CapBundle, CapClock, CapSubmit, CapUtxos, CapRewards, CapTxID}}
 			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, o WireOptions) error {
 				// A queued asset mint or burn carries its record update in the
@@ -434,6 +435,7 @@ submitted. Light or online mode only.`,
 	}
 	addTransferFlag(cmd, &tf)
 	cmd.Flags().BoolVar(&yes, "yes", false, "approve without asking (the summary is still printed)")
+	addWaitFlags(cmd, &wf)
 	return cmd
 }
 

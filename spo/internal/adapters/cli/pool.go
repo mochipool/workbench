@@ -290,7 +290,7 @@ while it is open.`,
 	fl.BoolVar(&f.allowUnverified, "allow-unverified", false, "go on when the chain could not say whether the pool is registered: the type then comes from the descriptor. A wrong type only makes the ledger reject the transaction. The summary lists every check that was skipped")
 	fl.BoolVar(&f.singleSource, "single-source", false, "accept a registration state that rests on ONE chain source. A false answer decides wrongly between registration and re-registration. The summary says so")
 	fl.BoolVar(&f.allowPending, "allow-pending", false, "leave the slots of signers that are not in this workspace open, write their witness transfer files and exit 0 while waiting")
-	addChainFlags(cmd, &f.chain, true)
+	addSubmitFlags(cmd, &f.chain, true)
 	return cmd
 }
 
@@ -619,6 +619,6 @@ protocol's maximum before a fee is spent.`,
 	cmd.Flags().StringArrayVar(&f.messages, "message", nil, "CIP-20 message line, at most 64 bytes (repeatable)")
 	f.extra.add(cmd, &f.messages, extraCert)
 	cmd.Flags().BoolVar(&f.yes, "yes", false, "not accepted: this command is always asked")
-	addChainFlags(cmd, &f.chain, true)
+	addSubmitFlags(cmd, &f.chain, true)
 	return cmd
 }

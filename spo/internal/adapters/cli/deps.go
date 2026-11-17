@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
@@ -62,6 +63,11 @@ type Deps struct {
 	// Genesis returns the genesis files the release set bundles for a
 	// network, or ok=false when the binary has no manifest or no entry.
 	Genesis func(network string) (shelley, byron string, ok bool)
+
+	// Sleep and Now drive the pauses and the timeout of --wait; nil is the
+	// real clock. A test passes a fake so no test sleeps.
+	Sleep func(ctx context.Context, d time.Duration) error
+	Now   func() time.Time
 }
 
 // UpstreamSource is an upstream-layout directory opened for an import.

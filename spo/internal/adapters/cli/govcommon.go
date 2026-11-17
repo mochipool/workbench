@@ -90,7 +90,10 @@ func (f *govFlags) add(cmd *cobra.Command, o govOpts) {
 	if o.allow {
 		fl.BoolVar(&f.allowUnverified, "allow-unverified", false, allowUnverifiedGovHelp)
 	}
-	if o.tx || o.chainOnly {
+	switch {
+	case o.tx:
+		addSubmitFlags(cmd, &f.chain, true)
+	case o.chainOnly:
 		addChainFlags(cmd, &f.chain, true)
 	}
 }

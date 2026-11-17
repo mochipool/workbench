@@ -80,10 +80,12 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 | `IssueOperationalCertificate` | [`04d`](../upstream/scripts/04d_genNodeOpCert.md) | 44 |
 | `QueryCalidusKeys` | [`15`](../upstream/scripts/15_calidusPoolKey.md) | 42 |
 | `QueryOpCertCounter` | [`04e`](../upstream/scripts/04e_checkNodeOpCert.md) | 27 |
+| `QueryTxStatus` | [`Xconfirm`](../extensions/Xconfirm.md) | 22 |
 | `RegisterPool` | [`05c`](../upstream/scripts/05c_regStakepoolCert.md) | 78 |
 | `RetirePool` | [`07b`](../upstream/scripts/07b_deregStakepoolCert.md) | 37 |
 | `SignPoolWitness` | [`05d`](../upstream/scripts/05d_poolWitness.md) | 47 |
 | `SignWithCalidusKey` | [`15`](../upstream/scripts/15_calidusPoolKey.md) | 42 |
+| `WaitForConfirmation` | [`Xconfirm`](../extensions/Xconfirm.md) | 22 |
 
 ## `governance`
 
@@ -220,4 +222,4 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 | [`25a_genAction`](../upstream/scripts/25a_genAction.md) | Generate a governance action file | governance | 75 | draft |
 | [`25b_regAction`](../upstream/scripts/25b_regAction.md) | Submit governance actions | governance, transaction-construction | 71 | draft |
 
-Totals: 68 specs, 2326 requirements, 84 use cases.
+Totals: 69 specs, 2348 requirements, 86 use cases.

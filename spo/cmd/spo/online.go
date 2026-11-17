@@ -304,6 +304,9 @@ func wireChain(env *cli.Env, o cli.WireOptions, errw io.Writer) error {
 		return err
 	}
 	freshenSources(env, time.Now)
+	if err := wireTxWatchers(env, o, errw); err != nil {
+		return err
+	}
 	announceFetches(env, errw)
 	return nil
 }

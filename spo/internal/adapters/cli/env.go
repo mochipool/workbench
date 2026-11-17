@@ -63,7 +63,10 @@ const (
 	// certificate counter (the node and an indexer, say).
 	CapOpCertCross Cap = "opcert-counter-crosscheck"
 	CapSubmit      Cap = "tx-submit"
-	CapQueue       Cap = "tx-queue"
+	// CapTxStatus is at least one provider that says where a transaction is
+	// (spo tx status, --wait; spec/extensions/Xconfirm.md).
+	CapTxStatus Cap = "tx-status"
+	CapQueue    Cap = "tx-queue"
 
 	CapBundle   Cap = "transfer-file"
 	CapEras     Cap = "era"
@@ -233,6 +236,10 @@ type Env struct {
 	OpCertCross ports.OpCertCounterReader
 	Submitter   ports.TxSubmitter
 	Queue       ports.TxQueue
+	// TxWatchers are the configured providers as the confirmation code uses
+	// them: a status reader each, and a guarded tip where the provider has one
+	// (spec/extensions/Xconfirm.md). Empty where no provider can say.
+	TxWatchers []ports.TxWatcher
 
 	// Bundle is the air-gap transfer file at WireOptions.TransferFile, read
 	// and changed through the narrow bundle ports. It is present in every
@@ -509,6 +516,10 @@ func (e *Env) has(c Cap) bool {
 		v = e.Submitter
 	case CapQueue:
 		v = e.Queue
+	case CapTxStatus:
+		if len(e.TxWatchers) > 0 {
+			v = e.TxWatchers
+		}
 	case CapBundle:
 		v = e.Bundle
 	case CapEras:
@@ -618,6 +629,13 @@ func (e *Env) Source(c Cap) string {
 			return ""
 		}
 		return e.Registry.Registry()
+	}
+	if c == CapTxStatus { // every configured provider
+		var names []string
+		for _, w := range e.TxWatchers {
+			names = append(names, string(w.Status.Source()))
+		}
+		return strings.Join(names, ", ")
 	}
 	var v any
 	switch c {

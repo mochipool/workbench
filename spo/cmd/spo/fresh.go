@@ -16,7 +16,7 @@ import (
 // database that can fall behind or stop; a second source whose chain is hours
 // old would "agree" with a stale first one. Blocks come every 20 seconds on
 // average, so ten minutes is a long time without one.
-const maxWebTipAge = 10 * time.Minute
+const maxWebTipAge = chain.TipFreshnessWindow
 
 // freshness asks a web provider for the time of its tip once per command and
 // judges it against the clock.

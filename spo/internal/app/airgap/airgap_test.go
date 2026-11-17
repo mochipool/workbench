@@ -902,3 +902,31 @@ type failingMutator struct{ *transferfile.File }
 func (failingMutator) MutateBundle(context.Context, func(*transfer.Bundle) error) error {
 	return errors.New("disk full")
 }
+
+type fixedIDs struct{ id chain.TxID }
+
+func (f fixedIDs) TransactionID([]byte) (chain.TxID, error) { return f.id, nil }
+
+// An id the provider answers that is not the id of the bytes that were sent is
+// refused as at the other submission sites, and nothing is recorded: the
+// entry stays in the queue.
+//
+// spec: SPO-Xconfirm-INV-007
+func TestExecuteRefusesAProviderIDThatIsNotTheLocalOne(t *testing.T) {
+	r := prepared(t)
+	uc, _, _ := r.executor() // the submitter answers ab cd
+	uc.TxIDs = fixedIDs{chain.TxID{0x01}}
+	res, err := uc.Run(bg, 1)
+	if err == nil || !strings.Contains(err.Error(), "the provider answered transaction id") || res.Submitted {
+		t.Fatalf("%+v %v", res, err)
+	}
+	in, _ := (InspectBundle{r.file}).Run(bg)
+	if in.PendingTransactions() != 1 {
+		t.Errorf("the queue entry was removed: %+v", in)
+	}
+	// The same id passes.
+	uc.TxIDs = fixedIDs{chain.TxID{0xab, 0xcd}}
+	if res, err := uc.Run(bg, 1); err != nil || !res.Submitted {
+		t.Fatalf("%+v %v", res, err)
+	}
+}

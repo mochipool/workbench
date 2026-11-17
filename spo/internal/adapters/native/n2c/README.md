@@ -49,8 +49,9 @@ defer c.Close()
 | `LastEnactedReader` | `GetRatifyState`, previous-action ids read as four optional ids (parameter update, hard fork, committee, constitution) | hand |
 | `StakeDistributionReader` | `GetDRepStakeDistr`, `GetDRepState`, `GetSPOStakeDistr`, `GetStakePoolDefaultVote` (one query per pool), `GetCommitteeMembersState` | hand |
 | (extra) `InMempool` | local-tx-monitor `HasTxForEra` | library |
+| `TxStatusReader` | `GetUTxOByTxIn` on the transaction's outputs and inputs, then `InMempool`; never "not seen" from outputs | library encodes, hand-written bytes |
 
-Not implemented, because the node cannot answer them: `AssetHolderReader`, `HandleDirectory`, `AssetDatumReader` (asset holders), `PollQuestionReader`, `CalidusKeyReader` (transaction metadata), `PoolUpdateReader` (the time of the last registration update is not ledger state), `VotingSummaryReader` (a node gives the stake distributions to tally from, not a tally), `TxEvaluator` (no script evaluation over node-to-client). Waiting for a transaction to be confirmed is not offered; `InMempool` only says whether it is still queued.
+Not implemented, because the node cannot answer them: `AssetHolderReader`, `HandleDirectory`, `AssetDatumReader` (asset holders), `PollQuestionReader`, `CalidusKeyReader` (transaction metadata), `PoolUpdateReader` (the time of the last registration update is not ledger state), `VotingSummaryReader` (a node gives the stake distributions to tally from, not a tally), `TxEvaluator` (no script evaluation over node-to-client). `TxStatus` (spec Xconfirm) is built from `InMempool` and the by-reference UTxO query: presence from a transaction's own unspent outputs, absence only from an unspent input that the caller supplies; no block height or depth. Test bytes are hand-written.
 
 ## Unverified against a node
 
