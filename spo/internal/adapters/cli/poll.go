@@ -216,6 +216,6 @@ anything is signed (default No); the extra parameters of wallet send apply.`,
 	cmd.Flags().StringArrayVar(&f.messages, "message", nil, "CIP-20 message line, at most 64 bytes (repeatable)")
 	cmd.Flags().BoolVar(&f.yes, "yes", false, "approve the transaction without asking (the summary is still printed)")
 	f.extra.add(cmd, &f.messages, extraSend)
-	addChainFlags(cmd, &f.chain, true)
+	addSubmitFlags(cmd, &f.chain, true)
 	return cmd
 }

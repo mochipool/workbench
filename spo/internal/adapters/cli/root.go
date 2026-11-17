@@ -62,7 +62,7 @@ func NewRoot(d Deps) *cobra.Command {
 		a.poolBLSCommand(), a.poolStatusCommand(), a.poolRetireCertCommand(), a.poolRetireCommand(), a.poolCalidusCommand(),
 		a.poolImportCommand(), a.poolExportInfoCommand())
 	root.AddCommand(poolCmd)
-	root.AddCommand(a.walletCommand(), a.stakeCommand(), a.offlineCommand(), a.addressCommand())
+	root.AddCommand(a.walletCommand(), a.stakeCommand(), a.offlineCommand(), a.addressCommand(), a.txCommand())
 	root.AddCommand(a.drepCommand(), a.committeeCommand(), a.voteCommand(), a.actionCommand())
 	assetCmd := a.assetCommand()
 	assetCmd.AddCommand(a.assetMetaCommand())

@@ -118,7 +118,7 @@ Extra parameters are flags, as for spo wallet send: --message, --metadata-file,
 	cmd.Flags().BoolVar(&yes, "yes", false, "approve without asking (the summary is still printed)")
 	cmd.Flags().BoolVar(&sum, "sum-duplicates", false, "add up the amounts of an asset that is named more than once (default: refuse)")
 	extra.add(cmd, &messages, extraAssets)
-	addChainFlags(cmd, &flags, true)
+	addSubmitFlags(cmd, &flags, true)
 	return cmd
 }
 
@@ -273,7 +273,7 @@ and --input TXHASH#IX.`,
 	cmd.Flags().StringArrayVar(&messages, "message", nil, "CIP-20 message line, at most 64 bytes (repeatable)")
 	cmd.Flags().BoolVar(&yes, "yes", false, "approve without asking (the summary is still printed)")
 	extra.add(cmd, &messages, extraMint)
-	addChainFlags(cmd, &flags, true)
+	addSubmitFlags(cmd, &flags, true)
 	return cmd
 }
 

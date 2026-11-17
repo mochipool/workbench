@@ -196,6 +196,7 @@ type request struct {
 	contentType string
 	long        bool
 	retry       bool
+	noCache     bool
 }
 
 // statusError is a non-success HTTP status.
@@ -268,6 +269,9 @@ func (c *Client) once(ctx context.Context, rq request) (int, []byte, error) {
 		return 0, nil, fmt.Errorf("blockfrost %s: build request: %w", rq.op, err)
 	}
 	req.Header.Set("Accept", "application/json")
+	if rq.noCache {
+		req.Header.Set("Cache-Control", "no-cache")
+	}
 	if rq.contentType != "" {
 		req.Header.Set("Content-Type", rq.contentType)
 	}
@@ -316,6 +320,12 @@ func (c *Client) once(ctx context.Context, rq request) (int, []byte, error) {
 // error; the caller decides what each status means.
 func (c *Client) get(ctx context.Context, op, path, query string) (int, []byte, error) {
 	return c.do(ctx, request{op: op, method: "GET", path: path, query: query, retry: true})
+}
+
+// getFresh is get with Cache-Control: no-cache, for the reads a confirmation
+// rests on: a cached answer is stale evidence (SPO-Xconfirm-IF-003).
+func (c *Client) getFresh(ctx context.Context, op, path, query string) (int, []byte, error) {
+	return c.do(ctx, request{op: op, method: "GET", path: path, query: query, retry: true, noCache: true})
 }
 
 // getOK is get for a read where only 200 is an answer.

@@ -65,7 +65,7 @@ func run() int {
 			err = errors.New(cli.MemlockAdvice)
 		}
 		fmt.Fprintln(os.Stderr, "spo:", cli.SafeMessage(err))
-		return 1
+		return cli.ExitCode(err)
 	}
 	return 0
 }

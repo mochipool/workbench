@@ -7,6 +7,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -23,6 +24,53 @@ type chainFlags struct {
 	byron       string
 	byronEpochs uint64
 	transfer    string
+	// The wait after a submission (addSubmitFlags; SPO-Xconfirm-IF-005).
+	wait        bool
+	waitDepth   uint64
+	waitTimeout time.Duration
+}
+
+// DefaultWaitTimeout is how long --wait waits when --wait-timeout is not given.
+const DefaultWaitTimeout = 5 * time.Minute
+
+// MaxWaitTimeout is the longest --wait-timeout accepted.
+const MaxWaitTimeout = 24 * time.Hour
+
+// addSubmitFlags is addChainFlags for a command that submits a transaction:
+// it adds --wait, --wait-confirmations and --wait-timeout. withEnv runs the
+// wait after the command's own work, on every transaction the command
+// submitted, so a command adds the flags here and does nothing else
+// (SPO-Xconfirm-IF-005).
+func addSubmitFlags(cmd *cobra.Command, f *chainFlags, transfer bool) {
+	addChainFlags(cmd, f, transfer)
+	addWaitFlags(cmd, f)
+}
+
+// addWaitFlags adds only the wait flags, for a command that registers its
+// chain flags another way.
+func addWaitFlags(cmd *cobra.Command, f *chainFlags) {
+	cmd.Flags().BoolVar(&f.wait, "wait", false, "after submitting, wait until the transaction is in a block on every configured provider (light and online mode; never resubmits; Ctrl-C stops waiting, not the transaction)")
+	cmd.Flags().Uint64Var(&f.waitDepth, "wait-confirmations", 1, "with --wait: confirmations to wait for (blocks on top of, and including, the one that holds the transaction)")
+	cmd.Flags().DurationVar(&f.waitTimeout, "wait-timeout", DefaultWaitTimeout, "with --wait: how long to wait before giving up (the transaction may still be included)")
+}
+
+// checkWaitFlags refuses a --wait that cannot work, before anything is asked.
+func (f *chainFlags) checkWaitFlags(cmd *cobra.Command) error {
+	if !f.wait {
+		for _, n := range []string{"wait-confirmations", "wait-timeout"} {
+			if fl := cmd.Flags().Lookup(n); fl != nil && fl.Changed {
+				return fmt.Errorf("--%s has no effect without --wait", n)
+			}
+		}
+		return nil
+	}
+	if f.waitDepth == 0 {
+		return errors.New("--wait-confirmations must be at least 1")
+	}
+	if f.waitTimeout <= 0 || f.waitTimeout > MaxWaitTimeout {
+		return fmt.Errorf("--wait-timeout must be more than 0 and at most %s", MaxWaitTimeout)
+	}
+	return nil
 }
 
 func addChainFlags(cmd *cobra.Command, f *chainFlags, transfer bool) {
@@ -136,6 +184,12 @@ func (a *app) withEnv(cmd *cobra.Command, spec envSpec, fn func(ctx context.Cont
 	if flags == nil {
 		flags = &chainFlags{}
 	}
+	if err := flags.checkWaitFlags(cmd); err != nil {
+		return err
+	}
+	if flags.wait { // the wait needs a provider that says where a transaction is
+		spec.needs = append(append([]Need(nil), spec.needs...), CapTxStatus)
+	}
 	o, genesisWhy, err := a.wireOptions(cmd, flags, spec.config)
 	if err != nil {
 		return err
@@ -206,5 +260,12 @@ func (a *app) withEnv(cmd *cobra.Command, spec envSpec, fn func(ctx context.Cont
 		spec.extras.pass = pass
 		defer func() { pass.Destroy(); spec.extras.pass = nil }()
 	}
-	return fn(ctx, s, env, o)
+	rec := recordSubmits(env)
+	if err := fn(ctx, s, env, o); err != nil {
+		return err
+	}
+	if flags.wait {
+		return a.waitAfterSubmit(ctx, env, flags, rec)
+	}
+	return nil
 }

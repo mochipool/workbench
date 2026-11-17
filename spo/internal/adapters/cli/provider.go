@@ -363,7 +363,7 @@ use, without the network and without opening the workspace.`,
 			env.Absent(CapGenesis, genesisWhy)
 			w := a.d.Out
 			fmt.Fprintf(w, "Workspace %s: network %s, mode %s\n\nChain capabilities:\n", a.workspace, cfg.Network, cfg.Mode)
-			chainCaps := []Cap{CapTip, CapSync, CapOpCertCount, CapParams, CapUtxos, CapRewards, CapPools, CapDReps, CapCrossCheck, CapPoolCross, CapOpCertCross, CapSubmit, CapQueue, CapCalidusRead, CapAdaHandle, CapPollQuestion, CapTokenRegistry, CapPoolInfo, CapPoolUpdates}
+			chainCaps := []Cap{CapTip, CapSync, CapOpCertCount, CapParams, CapUtxos, CapRewards, CapPools, CapDReps, CapCrossCheck, CapPoolCross, CapOpCertCross, CapSubmit, CapQueue, CapTxStatus, CapCalidusRead, CapAdaHandle, CapPollQuestion, CapTokenRegistry, CapPoolInfo, CapPoolUpdates}
 			chainCaps = append(chainCaps, GovernanceChainCaps...)
 			var absent []Cap
 			for _, c := range chainCaps {

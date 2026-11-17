@@ -61,7 +61,7 @@ func (f *stakeFlags) add(cmd *cobra.Command, payer, allow, single bool) {
 		f.hasSingle = true
 		cmd.Flags().BoolVar(&f.singleSource, "single-source", false, singleSourceHelp)
 	}
-	addChainFlags(cmd, &f.chain, true)
+	addSubmitFlags(cmd, &f.chain, true)
 }
 
 func (f *stakeFlags) policy() stake.SourcePolicy {

@@ -229,7 +229,7 @@ Changes `mode` in `spo.toml`. `light` is refused while there is no `[koios]`, `[
 
 Prints what the environment of this workspace's configuration provides, from the same `Env` the commands use. It opens no store and uses no network.
 
-* **Chain capabilities**: for each of `tip`, `sync-check`, `opcert-counter`, `protocol-parameters`, `utxo`, `reward-account`, `pool-state`, `drep-state`, `reward-account-crosscheck`, `pool-state-crosscheck`, `opcert-counter-crosscheck`, `tx-submit`, `tx-queue`, and the governance readers `committee-state`, `governance-actions`, `constitution`, `last-enacted-action`, `stake-distribution`, `epoch`, `voting-summary`, `drep-state-crosscheck`, `plutus-script-evaluation` (light mode with Koios: the provider evaluates the Plutus scripts of a transaction), `ada-handle` and `poll-question`, the provider that supplies it (and its endpoint), or under **Not available** the reason and the remedy, for example "offline mode has no transaction submitter; queue to a transfer file instead" or "no chain provider is configured: spo provider set koios".
+* **Chain capabilities**: for each of `tip`, `sync-check`, `opcert-counter`, `protocol-parameters`, `utxo`, `reward-account`, `pool-state`, `drep-state`, `reward-account-crosscheck`, `pool-state-crosscheck`, `opcert-counter-crosscheck`, `tx-submit`, `tx-queue`, `tx-status` (one entry for the configured providers; absent offline), and the governance readers `committee-state`, `governance-actions`, `constitution`, `last-enacted-action`, `stake-distribution`, `epoch`, `voting-summary`, `drep-state-crosscheck`, `plutus-script-evaluation` (light mode with Koios: the provider evaluates the Plutus scripts of a transaction), `ada-handle` and `poll-question`, the provider that supplies it (and its endpoint), or under **Not available** the reason and the remedy, for example "offline mode has no transaction submitter; queue to a transfer file instead" or "no chain provider is configured: spo provider set koios".
 * **Local**: clock, genesis, key generation (`kes-keygen`, `vrf-keygen`, `cold-keygen`, `payment-keygen`, `stake-keygen`), `mnemonic-generation`, `wallet-derivation`, `address-building`, address inspection, minimum output, fee estimation, transaction body and assembly, `certificate-building` and `certificate-decoding`, and for the Calidus and Catalyst commands `calidus-keygen`, `voting-keygen`, `voting-key-qr` and `registration-signing` (always) and `calidus-registrations` (light mode: Koios; absent offline), and for the governance commands `drep-keygen`, `committee-cold-keygen`, `committee-hot-keygen`, `governance-derivation`, `vote-file`, `action-file` (always), `anchor-fetch` (light) and `anchor-verification` (never: no verifier is built), and for the pool commands `pool-certificate-building`, `pool-certificate-decoding`, `metadata-hash`, `tx-id` and `tx-view` (always), for the extra parameters and native assets `metadata-file`, `message-encryption` and `policy-id` (always), for the workspace commands `verification-key-derivation` (always) and `key-encryption` (upstream's gpg envelope: only where the binary has a toolchain manifest with `gpg`; needed only for upstream's encrypted keys), `transfer-file` (always: the bundle at `--transfer-file`) and `extract-sink` (always), `era` (offline with a transfer file; light, from the Koios tip), `transfer-attach` (offline, with a transfer file), `metadata-fetch` (light) and `ticker-protection` (never: see [Pool registration](#pool-registration-and-retirement)), `bls-keygen` (always) and `hardware-wallet` (only where the binary has a toolchain manifest that provides `cardano-hw-cli`, a network with a magic, and a workspace; whether a device is connected is not probed: `capabilities` never starts the tool, see [Hardware wallets](#hardware-wallets)). `ada-handle` is present in light mode and absent offline with the reason; for the token registry and the pool import, `registry-signing`, `logo-file`, `verification-key-envelope` and `vrf-verification-key` (always) and `token-registry` (light mode with a registry server: the public one on mainnet, `[registry] url` elsewhere), `pool-info` and `pool-updates` (light mode: Koios); `poll-question` is present in light mode (Koios) only.
 * **Signers**: each signer with its profile (role, then the operations it can do).
 
@@ -341,8 +341,63 @@ The summary (source, destination, outputs with assets, fee, valid-until slot, ch
 | `--message TEXT` | CIP-20 message line, at most 64 bytes. Repeatable. |
 | `--yes` | Approve without asking. |
 | `--transfer-file PATH` | The offline transfer file. Default: `offlineTransfer.json` in the workspace directory. It must exist (made by `01_workOffline.sh new` on the online machine). |
+| `--wait`, `--wait-confirmations N`, `--wait-timeout D` | After a submission, wait for it to be in a block: see [`tx status`](#tx-status-and---wait-after-a-submission). |
 | `--offline`, genesis options | As for `pool opcert issue`. The offline slot needs a Shelley genesis. |
 | extra parameters | `--metadata-file`, `--encrypt-messages`, `--message-passphrase-fd`, `--utxo-limit`, `--only-utxo-with-asset`, `--skip-utxo-with-asset`, `--input`: see [Extra parameters](#extra-parameters). |
+
+### `tx status`, and `--wait` after a submission
+
+```
+spo tx status TXID [--confirmations N] [--offline ...chain options]
+```
+
+Asks every configured provider (Koios, Blockfrost, the node socket; in online mode the web providers named in `[provider] order`) once where the transaction is, prints one line per provider, then a verdict. Needs: `tx-status`. Spec: [Xconfirm](../../spec/extensions/Xconfirm.md).
+
+| Provider | How it knows | What it can say |
+| --- | --- | --- |
+| Koios | `POST /tx_status` | in a block with `num_confirmations`; a `null` is "has not seen it". No mempool view. |
+| Blockfrost | `GET /txs/{hash}`, and `GET /blocks/latest` for the depth | in a block with height, slot and confirmations (latest height minus block height plus one); 404 is "has not seen it". No mempool view. |
+| node socket | the transaction's own outputs by reference, then the mempool (local tx monitor) | an unspent output: in a block (no height or depth); held in the mempool: in the mempool; an input of the transaction still unspent, and not in the mempool: "has not seen it". Anything else is unknown. |
+
+The node cannot prove that a transaction is absent from its outputs: an output that was spent after inclusion is not in the UTxO set, so "no unspent output" looks the same as "never included". It reports "has not seen it" only from an unspent **input** (a transaction in a block has spent all its inputs); `spo tx status TXID` has no inputs to give, so for a bare id the node answers "in a block", "in the mempool" or unknown, never "has not seen it". A transaction with collateral is not judged by its inputs, because one that failed phase 2 is in a block with its inputs unspent.
+
+A provider that fails, answers something unreadable, is a web provider whose tip is more than ten minutes behind this machine's clock (checked on every call, not once per command), or is a node that is not synced, is **unknown**, never "has not seen it". The line says why.
+
+Verdict and exit status:
+
+| Verdict | Exit |
+| --- | --- |
+| confirmed: every provider has it in a block at `--confirmations` (default 1) | `0` |
+| pending: seen, but in a mempool only or not yet that deep | `10` |
+| not seen: every provider answered and none has seen it | `11` |
+| unknown: no provider answered, one answered "has not seen it" while another did not answer, or one saw it and the rest gave no answer (partial) | `12` |
+| the providers disagree: one has seen it, another has not; both answers are printed | `13` |
+| any other failure (a bad id, no provider configured, offline mode) | `1` |
+
+"Confirmed" is never "final": a rollback is possible while the block is shallow. A depth is the number of blocks from the one that holds the transaction to the provider's tip, that block counting as one; a provider that says "in a block" and not how deep (the node) counts as depth 1 and satisfies `--confirmations 1` only. Whether Koios' `num_confirmations` counts the holding block is not stated by its documentation; the number is used as given.
+
+Every command that submits a transaction in light or online mode (`wallet send`, `send-assets`, `claim-rewards`, the stake commands, `pool register`, `pool retire`, `offline execute`, `poll submit`, `asset mint` and `burn`, and the governance commands that put a transaction on the chain) takes:
+
+| Option | Meaning |
+| --- | --- |
+| `--wait` | After the command has finished its own work, wait until each transaction it submitted is in a block on every configured provider. Never resubmits and never rebuilds. Ctrl-C stops the wait, not the transaction. |
+| `--wait-confirmations N` | Confirmations to wait for. Default 1. |
+| `--wait-timeout DURATION` | How long to wait. Default 5 minutes, at most 24 hours. |
+
+The wait polls with a pause of 5 seconds that grows by half each time to 30 seconds. The requests of every poll end by the time left of `--wait-timeout` plus 5 seconds, so a wait ends within 5 seconds of its timeout. The transaction id waited for is computed from the submitted bytes; a provider answer with another id is an error (exit `1`) and is not waited for. When a command submitted several transactions, every outcome is printed and the exit status is the worst: `0` confirmed, `21` expired, `20` timed out, `22` unknown, `23` disagreement, `1` an id that does not match, `130` cancelled (which also ends the wait; the rest are named). Local state the command changes on an accepted submission (asset records, the offline queue entry, the audit log) is changed before the wait and is not undone by what the wait finds. `--wait` is refused before any prompt, naming `tx-status`, in offline mode (no provider; a queued transaction is submitted later by `offline execute`, where `--wait` applies). A wait ends with one of:
+
+| Outcome | Exit | What it says |
+| --- | --- | --- |
+| confirmed | `0` | in a block on every provider, with the least depth stated; "this is not final", a rollback can remove it at low depth |
+| timed out | `20` | not confirmed in time; it **may still be included** and must not be built again from the same inputs until it has expired |
+| expired | `21` | for every provider, on two polls in a row, a tip read before its answer is at least 900 slots (the 10 minute freshness window plus 5 minutes, at 1 s per slot) past the validity bound, and that provider then says it has not seen it: it can no longer be included, and **only this outcome says it is safe to build it again**. Needs the transaction's validity bound, which is read from the signed transaction |
+| unknown | `22` | no provider gave a usable answer for the whole wait; nothing is said about the chain |
+| disagreement | `23` | one provider has seen it and another has not when the time ran out |
+| cancelled | `130` | the wait was stopped; the transaction was submitted and may still be included |
+
+With the node among the providers, "expired" needs the node to say "has not seen it", which it can from the transaction's unspent inputs; with Koios or Blockfrost it needs their positive "not seen". A silent or stale provider, or one without a tip, keeps a wait from ever reaching "expired". "Expired" rests on the providers' answers. Koios and Blockfrost addresses are load-balanced, and the freshness check is a separate request from the status read, so the verdict assumes every server behind the address is within the margin above (15 minutes) of the chain; `spo` cannot check that. A rollback deeper than the margin could also overturn it. With a node you run among the providers this assumption does not apply to the node's answer.
+
+When a submission ends with an unknown outcome (the request may have reached the provider and no answer came back) the error names `spo tx status <id>`, with the id computed from the transaction, and says not to build it again from the same inputs first.
 
 ### `wallet claim-rewards`
 
@@ -1015,4 +1070,4 @@ Text that a chain, a provider, a peer or a file chose (anchor URLs, pool tickers
 
 ## Exit status
 
-`0` on success, `1` on any error. The message is on stderr, prefixed `spo:`. A check whose verdict is not OK (`pool opcert check`: FALSE or UNKNOWN) is an error, unlike upstream `04e`, which exits `0` after a FALSE verdict.
+`0` on success, `1` on any error. The message is on stderr, prefixed `spo:`. `spo tx status` and `--wait` use other non-zero codes for their outcomes, listed under [`tx status`](#tx-status-and---wait-after-a-submission). A check whose verdict is not OK (`pool opcert check`: FALSE or UNKNOWN) is an error, unlike upstream `04e`, which exits `0` after a FALSE verdict.

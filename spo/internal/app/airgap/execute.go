@@ -251,6 +251,14 @@ func (uc ExecuteTx) Run(ctx context.Context, position int) (ExecuteResult, error
 	if err != nil {
 		return res, fmt.Errorf("submit through %s: %w", uc.Submitter.Source(), err)
 	}
+	// The id the provider answered must be the one of the bytes that were
+	// sent, as at the other submission sites; on a mismatch nothing is
+	// recorded here and the queue entry stays (SPO-Xconfirm-INV-007).
+	if uc.TxIDs != nil {
+		if local, lerr := uc.TxIDs.TransactionID(txBytes); lerr == nil && local != id {
+			return res, fmt.Errorf("the provider answered transaction id %s for %s", id, local)
+		}
+	}
 	res.TxID, res.Submitted = id, true
 
 	date := now(uc.Clock)

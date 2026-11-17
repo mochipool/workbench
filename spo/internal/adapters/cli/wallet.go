@@ -169,7 +169,7 @@ for without echo or read from --message-passphrase-fd N), --utxo-limit N,
 	send.Flags().StringArrayVar(&messages, "message", nil, "CIP-20 message line, at most 64 bytes (repeatable)")
 	send.Flags().BoolVar(&yes, "yes", false, "approve without asking (the summary is still printed)")
 	extra.add(send, &messages, extraSend)
-	addChainFlags(send, &flags, true)
+	addSubmitFlags(send, &flags, true)
 	w.AddCommand(a.walletNewCommand(), send, a.walletSendAssetsCommand(), a.claimRewardsCommand())
 	return w
 }
