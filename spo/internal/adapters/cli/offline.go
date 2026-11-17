@@ -18,6 +18,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/app/txconfirm"
 	"github.com/mochipool/workbench/spo/internal/app/txsettle"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
+	"github.com/mochipool/workbench/spo/internal/domain/keyfile"
 	"github.com/mochipool/workbench/spo/internal/domain/transfer"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
@@ -553,7 +554,12 @@ func (a *app) offlineAttachCommand() *cobra.Command {
 		Short: "Attach a small file to the transfer file",
 		Long: `Store a file inside the transfer file to carry it to the other machine. The name
 it is stored under is NAME, else the file's own name; it must be a plain file
-name. The limit is ` + strconv.Itoa(airgap.DefaultMaxAttachBytes) + ` bytes.`,
+name. The limit is ` + strconv.Itoa(airgap.DefaultMaxAttachBytes) + ` bytes.
+
+The transfer file travels in clear, so a secret is refused: a signing key (a
+cardano-cli text envelope of a signing key type, a .skey or .hwsfile file, upstream's
+encrypted-key envelope), a mnemonic word list or a .mnemonics file. Use a
+recipient-encrypted channel for those.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			f := chainFlags{transfer: tf}
@@ -565,6 +571,10 @@ name. The limit is ` + strconv.Itoa(airgap.DefaultMaxAttachBytes) + ` bytes.`,
 				n := name
 				if n == "" {
 					n = filepath.Base(args[0])
+				}
+				// The file's own name counts too, whatever name it is stored under.
+				if why := keyfile.SecretFileReason(filepath.Base(args[0]), nil); why != "" {
+					return fmt.Errorf("%w: %s", airgap.ErrSecretAttachment, why)
 				}
 				if err := (airgap.Attach{Bundle: env.Bundle, Clock: env.Clock}).Run(ctx, n, content); err != nil {
 					return err

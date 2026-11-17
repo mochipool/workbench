@@ -11,13 +11,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/cose"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 const phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art"
@@ -38,14 +38,14 @@ func (f fixedTip) Tip(context.Context) (chain.Tip, error) {
 
 type rig struct {
 	dir   string
-	store *fsstore.Store
+	store *plainstore.Store
 	clock fixedClock
 }
 
 func newRig(t *testing.T) rig {
 	t.Helper()
 	dir := t.TempDir()
-	st, err := fsstore.Open(dir)
+	st, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -16,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/hwcli"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
@@ -24,6 +23,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 // The fake tool is the one in test/hardware/fakehw (the same that test/world and
@@ -285,14 +285,14 @@ func testAddr(t *testing.T) chain.Address {
 	return "addr_test1vql6v54azljgm6npwncg248rd3r0e7dsr9mvjd7xp30hc4g995pn0"
 }
 
-func vaultWithSeed(t *testing.T, file string, envType string, seed []byte) *fsstore.Store {
+func vaultWithSeed(t *testing.T, file string, envType string, seed []byte) *plainstore.Store {
 	t.Helper()
 	dir := t.TempDir()
 	env := fmt.Sprintf(`{"type":%q,"description":"","cborHex":"5820%s"}`, envType, hex.EncodeToString(seed))
 	if err := os.WriteFile(filepath.Join(dir, file), []byte(env), 0o400); err != nil {
 		t.Fatal(err)
 	}
-	st, err := fsstore.Open(dir)
+	st, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

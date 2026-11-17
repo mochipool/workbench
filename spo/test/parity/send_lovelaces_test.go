@@ -14,12 +14,12 @@ import (
 
 	"github.com/fxamacker/cbor/v2"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/adapters/transferfile"
 	"github.com/mochipool/workbench/spo/internal/app/wallet"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 // fixedTip is the clock of the Go side. Upstream takes the slot from the
@@ -153,7 +153,7 @@ func normalised(doc map[string]any) string {
 
 func (e env) goSend(t *testing.T, dir string, req wallet.SendRequest, slot uint64, cliVersion string) (wallet.SendResult, error) {
 	t.Helper()
-	store, err := fsstore.Open(dir)
+	store, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

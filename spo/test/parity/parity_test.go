@@ -23,12 +23,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/adapters/toolchain"
 	"github.com/mochipool/workbench/spo/internal/app/poolops"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 type env struct {
@@ -148,7 +148,7 @@ func TestKesKeyGeneration(t *testing.T) {
 
 	upDir := e.upstreamWorkspace(t)
 	portDir := t.TempDir()
-	store, err := fsstore.Open(portDir)
+	store, err := plainstore.OpenTestnet(portDir)
 	if err != nil {
 		t.Fatal(err)
 	}

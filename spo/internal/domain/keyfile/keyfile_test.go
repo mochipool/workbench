@@ -166,3 +166,31 @@ func TestPasswordCandidates(t *testing.T) {
 		t.Error("a candidate aliases the typed password")
 	}
 }
+
+// An encrypted envelope has exactly the members upstream's form defines: any
+// other member (a plaintext key beside the ciphertext, under any name) and a
+// repeated member make it malformed.
+//
+// spec: SPO-Xcustody-INV-005
+func TestEncryptedEnvelopeHasExactlyThreeMembers(t *testing.T) {
+	const head = `"type":"PaymentSigningKeyShelley_ed25519","description":"Encrypted x","encrHex":"`
+	hexs := goodEncr
+	if _, err := ParseEncrypted([]byte(`{` + head + hexs + `"}`)); err != nil {
+		t.Fatal(err)
+	}
+	for name, in := range map[string]string{
+		"an extra string member":     `{` + head + hexs + `","note":"5820aa"}`,
+		"an extra empty member":      `{` + head + hexs + `","x":null}`,
+		"a nested object":            `{` + head + hexs + `","extra":{"cborHex":"5820aa"}}`,
+		"a repeated encrHex":         `{` + head + hexs + `","encrHex":"` + hexs + `"}`,
+		"a repeated description":     `{"description":"y",` + head + hexs + `"}`,
+		"an extra member beforehand": `{"a":1,` + head + hexs + `"}`,
+	} {
+		if _, err := ParseEncrypted([]byte(in)); !errors.Is(err, ErrMalformedEncrypted) {
+			t.Errorf("%s: %v", name, err)
+		}
+		if info, err := Classify([]byte(in)); err == nil || info.Form == FormEncrypted {
+			t.Errorf("%s classified as encrypted", name)
+		}
+	}
+}

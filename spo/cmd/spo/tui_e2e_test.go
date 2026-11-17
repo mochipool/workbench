@@ -151,20 +151,21 @@ func TestTUIRunsInitWalletAndAddressLikeTheCLI(t *testing.T) {
 
 func TestTUIDeclinedConfirmationChangesNothing(t *testing.T) {
 	dir := copyWorkspace(t)
+	file := filepath.Join(dir, cli.TransferFileName)
+	if err := os.WriteFile(file, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(file)
 	d := newTUI(t, dir)
-	out := filepath.Join(t.TempDir(), "export")
-	st := drive(t, d, []string{"workspace", "export"}, map[string]string{"dir": out, "--plaintext": "true"}, map[string]string{
+	st := drive(t, d, []string{"offline", "clear"}, map[string]string{"arguments": "transactions"}, map[string]string{
 		"Passphrase": testPass,
-		"Type":       "no",
+		"Remove":     "no",
 	})
-	if st.Err == nil || !strings.Contains(st.Err.Error(), "declined") {
+	if st.Err == nil || !strings.Contains(st.Err.Error(), "was not changed") {
 		t.Fatalf("err = %v, out %q", st.Err, st.Out)
 	}
-	if _, err := os.Stat(out); err == nil {
-		entries, _ := os.ReadDir(out)
-		if len(entries) != 0 {
-			t.Errorf("a declined export wrote %d files", len(entries))
-		}
+	if after, _ := os.ReadFile(file); !bytes.Equal(before, after) {
+		t.Errorf("a declined confirmation changed the transfer file:\n%s", after)
 	}
 }
 

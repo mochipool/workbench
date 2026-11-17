@@ -83,9 +83,28 @@ func fdIn(t *testing.T, content string) (*os.File, string) {
 	return f, strconv.Itoa(int(f.Fd()))
 }
 
-func fdOut(t *testing.T) (*os.File, string) { return fdIn(t, "") }
+// outWriters maps the read end that fdOut returns to the write end it hands
+// to a command; contents closes the write end so the read ends at EOF.
+var outWriters sync.Map
+
+// fdOut returns a pipe for a secret a command writes to a descriptor (a secret
+// is never written to a file). The file is the read end; the string is the
+// number of the write end, which contents closes before it reads.
+func fdOut(t *testing.T) (*os.File, string) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	outWriters.Store(r, w)
+	t.Cleanup(func() { r.Close(); w.Close() })
+	return r, strconv.Itoa(int(w.Fd()))
+}
 
 func contents(f *os.File) string {
+	if w, ok := outWriters.LoadAndDelete(f); ok {
+		w.(*os.File).Close()
+	}
 	f.Seek(0, 0)
 	var b bytes.Buffer
 	b.ReadFrom(f)
@@ -95,6 +114,7 @@ func contents(f *os.File) string {
 // exec runs the command tree and returns everything it printed.
 func exec(t *testing.T, term *fakeTerm, args ...string) (string, error) {
 	t.Helper()
+	usePlainLayoutIfAsked(t, args)
 	var out bytes.Buffer
 	if term == nil {
 		term = &fakeTerm{}

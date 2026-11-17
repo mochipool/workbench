@@ -11,13 +11,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/app/assets"
 	dassets "github.com/mochipool/workbench/spo/internal/domain/assets"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/tokenmeta"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 type fixedClock struct{ t time.Time }
@@ -44,7 +44,7 @@ var png = append([]byte("\x89PNG\r\n\x1a\n"), bytes.Repeat([]byte{7}, 60)...)
 type world struct {
 	t     *testing.T
 	dir   string
-	store *fsstore.Store
+	store *plainstore.Store
 	clock fixedClock
 	logos fakeLogos
 }
@@ -52,7 +52,7 @@ type world struct {
 func newWorld(t *testing.T) *world {
 	t.Helper()
 	dir := t.TempDir()
-	st, err := fsstore.Open(dir)
+	st, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 type blsFakeGen struct {
@@ -33,7 +33,7 @@ func (g *blsFakeGen) GenerateBLS(context.Context) (ports.KeyPair, error) {
 func blsSetup(t *testing.T) (GenerateBLSKeys, *blsFakeGen, string) {
 	t.Helper()
 	dir := t.TempDir()
-	st, err := fsstore.Open(dir)
+	st, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

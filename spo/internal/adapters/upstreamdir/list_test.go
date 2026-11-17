@@ -1,4 +1,4 @@
-package fsstore
+package upstreamdir
 
 import (
 	"context"
@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -96,48 +95,5 @@ func TestListReportsUnknownAndNeverFollowsLinks(t *testing.T) {
 	}
 	if _, ok := got[".spo-tmp-123"]; ok {
 		t.Error("a temporary file of this program was reported")
-	}
-}
-
-// Modes of the artefacts that stay unlocked (SPO-Pfiles-INV-004) and of the
-// published metadata (SPO-Pfiles-INV-005); everything else is 0400. The
-// offline transfer bag is not a workspace artefact (SPO-Pfiles-OUT-037): the
-// lister reports it and nothing writes it.
-//
-// spec: SPO-Pfiles-INV-004, SPO-Pfiles-INV-005, SPO-Pfiles-OUT-037
-func TestModesOfUnlockedArtefacts(t *testing.T) {
-	dir := t.TempDir()
-	st, _ := Open(dir)
-	want := map[ports.Ref]os.FileMode{
-		{Name: "p", Kind: ports.PoolMetadata}:           0o444,
-		{Name: "p", Kind: ports.PoolExtendedMetadata}:   0o444,
-		{Name: "p", Kind: ports.PoolAdditionalMetadata}: 0o644,
-		{Name: "p_1_ab", Kind: ports.PoolWitnessFile}:   0o644,
-		{Name: "v", Kind: ports.VoteRegistration}:       0o644,
-		{Name: "k", Kind: ports.CalidusRegistration}:    0o644,
-		{Name: "pol", Kind: ports.PolicyScript}:         0o400,
-		{Name: "p", Kind: ports.NodeVKey}:               0o400,
-	}
-	err := st.Update(context.Background(), func(w ports.Writer) error {
-		for r := range want {
-			if err := w.Put(r, []byte("{}")); err != nil {
-				return err
-			}
-		}
-		return w.PutSecret(ports.Ref{Name: "v", Kind: ports.CatalystQRCode}, secret.Take([]byte("png")))
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for r, m := range want {
-		name, _ := FileName(r)
-		fi, err := os.Stat(filepath.Join(dir, name))
-		if err != nil || fi.Mode().Perm() != m {
-			t.Errorf("%s: %v %v, want %v", name, fi, err, m)
-		}
-	}
-	// upstream leaves the QR code at the process default; it is secret, so it is 0400 here
-	if fi, _ := os.Stat(filepath.Join(dir, "v.catalyst-qrcode.png")); fi == nil || fi.Mode().Perm() != 0o400 {
-		t.Errorf("the secret QR code must be 0400: %v", fi)
 	}
 }

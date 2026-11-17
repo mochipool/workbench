@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 const fakeSKey = `{"type":"KesSigningKey_ed25519_kes_2^6","description":"KES Signing Key","cborHex":"5902c0deadbeef"}`
@@ -33,7 +33,7 @@ func (f *fakeKeyGen) GenerateKES(context.Context) (ports.KeyPair, error) {
 func setup(t *testing.T) (GenerateKesKey, *fakeKeyGen, string) {
 	t.Helper()
 	dir := t.TempDir()
-	st, err := fsstore.Open(dir)
+	st, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

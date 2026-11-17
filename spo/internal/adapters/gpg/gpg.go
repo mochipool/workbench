@@ -120,13 +120,23 @@ func (w withNewline) WriteTo(dst io.Writer) (int64, error) {
 	return n + int64(m), err
 }
 
+// ExportCipherArgs pin the parameters of the encrypted form explicitly, so they
+// do not depend on gpg's defaults or on a configuration file: AES-256, S2K mode
+// 3 (iterated and salted) with SHA-512 and the largest iteration count the
+// format codes (65011712, coded 255), and an integrity-protected data packet
+// (MDC, tag 18). Decryption by the upstream scripts needs no option: gpg reads
+// the parameters from the message. This S2K is not memory-hard, so the form is a
+// transport form (SPO-Xcustody-SEC-003).
+var ExportCipherArgs = []string{"--cipher-algo", "AES256", "--s2k-mode", "3", "--s2k-digest-algo", "SHA512", "--s2k-count", "65011712", "--force-mdc"}
+
 // Encrypt implements ports.KeyEncryptor.
 //
 // The command is
 //
 //	gpg --no-options --no-symkey-cache --no-permission-warning --batch --no-tty
 //	    --pinentry-mode loopback --yes --passphrase-file /dev/fd/3
-//	    --symmetric --cipher-algo AES256 --set-filename "" --output - /dev/fd/4
+//	    --symmetric --cipher-algo AES256 --s2k-mode 3 --s2k-digest-algo SHA512
+//	    --s2k-count 65011712 --force-mdc --set-filename "" --output - /dev/fd/4
 //
 // with GNUPGHOME a private empty directory, the passphrase on fd 3, the cborHex text and a newline on fd 4, and
 // the binary message on stdout, which is returned as lower-case hex.
@@ -151,7 +161,7 @@ func (g GPG) Encrypt(ctx context.Context, plaintextCborHex, passphrase *ports.Se
 	var out []byte
 	err = g.withHome(ctx, tool.Path, func(env []string) error {
 		args := commonArgs(execx.SecretIn(passphrase))
-		args = append(args, execx.Lits("--symmetric", "--cipher-algo", "AES256", "--set-filename", "", "--output", "-")...)
+		args = append(args, execx.Lits(append(append([]string{"--symmetric"}, ExportCipherArgs...), "--set-filename", "", "--output", "-")...)...)
 		args = append(args, execx.SecretIn(withNewline{plaintextCborHex}))
 		res, err := g.Runner.Run(ctx, execx.Cmd{Path: tool.Path, Args: args, Env: env})
 		if err != nil {

@@ -31,8 +31,8 @@ import (
 // sign.
 type ImportWorkspace struct {
 	// Source, SourceVault and Lister read the upstream directory
-	// (fsstore.Store implements all three).
-	Source      ports.Store
+	// (upstreamdir.Source implements all three).
+	Source      ports.ReadStore
 	SourceVault ports.Vault
 	Lister      ports.SourceLister
 	// Dest is the sealed store.
@@ -185,7 +185,7 @@ func (u ImportWorkspace) prepareOwner(ctx context.Context, src srcDir, owner str
 				continue
 			}
 			if r.Kind == ports.PoolDescriptor && keyfile.HasField(b, "regProtectionKey") {
-				rep.Warnings = append(rep.Warnings, fmt.Sprintf("the descriptor of %s holds regProtectionKey, a secret (ADR 0004), but its kind is not classified secret: it is stored as an ordinary record", owner))
+				rep.Warnings = append(rep.Warnings, fmt.Sprintf("the descriptor of %s holds regProtectionKey, which ADR 0004 classes as Sensitive, not Secret: it is stored in the descriptor, an ordinary record that is sealed like every record", owner))
 			}
 			data.open[r] = b
 			plan = append(plan, planned{src: r, dst: r, data: b})

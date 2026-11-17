@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 type cliIssuer struct{}
@@ -110,7 +110,7 @@ func opcertDeps(out *bytes.Buffer, cfgs map[string]WorkspaceConfig, w *wired) De
 	return Deps{
 		Out: out, Err: out,
 		Config:       memConfig(cfgs),
-		OpenUpstream: func(dir string) (ports.Store, error) { return fsstore.Open(dir) },
+		OpenUpstream: func(dir string) (ports.Store, error) { return plainstore.OpenTestnet(dir) },
 		Wire:         w.wire,
 		Genesis: func(n string) (string, string, bool) {
 			if n == "preview" {

@@ -182,18 +182,3 @@ func errnoText(err error) error {
 	}
 	return err
 }
-
-// writeFD writes data to a descriptor, completely.
-func writeFD(fd int, data []byte) error {
-	for len(data) > 0 {
-		n, err := unix.Write(fd, data)
-		if err == unix.EINTR {
-			continue
-		}
-		if err != nil {
-			return fmt.Errorf("cannot write to file descriptor %d: %w", fd, errnoText(err))
-		}
-		data = data[n:]
-	}
-	return nil
-}

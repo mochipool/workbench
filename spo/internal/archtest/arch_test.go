@@ -17,7 +17,11 @@ type pkg struct {
 
 func load(t *testing.T) []pkg {
 	t.Helper()
-	out, err := exec.Command("go", "list", "-json=ImportPath,Imports", module+"/...").Output()
+	args := []string{"list", "-json=ImportPath,Imports"}
+	if buildTags != "" {
+		args = append(args, "-tags", buildTags)
+	}
+	out, err := exec.Command("go", append(args, module+"/...")...).Output()
 	if err != nil {
 		t.Skipf("go list unavailable: %v", err)
 	}
@@ -74,6 +78,11 @@ func TestLayering(t *testing.T) {
 		}
 		for _, imp := range p.Imports {
 			if !strings.HasPrefix(imp, module+"/") {
+				continue
+			}
+			// spo/test/ is out of the layers; custody_test.go keeps it out of the
+			// release build and the plain store out of production code.
+			if strings.HasPrefix(imp, module+"/test/") {
 				continue
 			}
 			to := layer(imp)

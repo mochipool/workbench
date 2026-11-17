@@ -13,11 +13,11 @@ import (
 	"github.com/blinklabs-io/bursa"
 	"github.com/blinklabs-io/bursa/bip32"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 const (
@@ -172,7 +172,7 @@ func TestInspectAddress(t *testing.T) {
 
 // ---- witnesses ----------------------------------------------------------------
 
-func vaultDir(t *testing.T, files map[string]string) *fsstore.Store {
+func vaultDir(t *testing.T, files map[string]string) *plainstore.Store {
 	t.Helper()
 	dir := t.TempDir()
 	for n, c := range files {
@@ -180,7 +180,7 @@ func vaultDir(t *testing.T, files map[string]string) *fsstore.Store {
 			t.Fatal(err)
 		}
 	}
-	st, err := fsstore.Open(dir)
+	st, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

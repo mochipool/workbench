@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
@@ -19,6 +18,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 // poolKit holds the keys of a pool made by cardano-cli: the cold and VRF
@@ -248,7 +248,7 @@ func TestPoolTransactionsMatchCardanoCLI(t *testing.T) {
 	ctx := context.Background()
 	params := testParams(t)
 	led := native.Ledger{}
-	store, err := fsstore.Open(k.dir)
+	store, err := plainstore.OpenTestnet(k.dir)
 	if err != nil {
 		t.Fatal(err)
 	}

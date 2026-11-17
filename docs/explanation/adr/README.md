@@ -13,3 +13,6 @@ Decisions for the Go reference implementation (`spo/`). Each record closes conce
 | [0007](./0007-native-first-with-blink-labs.md) | Native first with Blink Labs' Go libraries; cardano-cli becomes the test oracle | X2 finding; amends D2 |
 | [0008](./0008-capability-typed-ports.md) | One workflow; adapters declare capability in types, checked at compile time and before any effect | M5; basis for M4, X6 |
 | [0009](./0009-tui.md) | The TUI is a second driver of the same command tree: menus and forms generated from it, prompts as modals, secrets on private pipes | U1, U2 |
+| [0010](./0010-object-identity.md) | **Proposed.** Objects are identified by hash, names are labels; a key reference carries no holder | closes the name-binding class behind the Xmulti import limits |
+| [0011](./0011-key-custody-and-unlock.md) | **Proposed.** No plaintext secret from the release binary; unlock policies with FIDO2 and Vault/KMS factors; rotation | decisions 1 and 2 are built; the rest awaits approval |
+| [0012](./0012-server-backup-and-deployment.md) | **Draft, not ready for approval.** Server that cannot decrypt, object store, signed history, backup to S3 or a filesystem | needs a further security review |

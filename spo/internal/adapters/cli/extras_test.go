@@ -12,8 +12,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
+	"github.com/mochipool/workbench/spo/internal/adapters/upstreamdir"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/txparam"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
@@ -164,7 +164,7 @@ func withExtras(f *sendFixture) {
 		if err != nil {
 			return nil, err
 		}
-		env.MetadataFiles, env.MsgEncrypter = fsstore.MetadataFiles{}, native.CIP83{}
+		env.MetadataFiles, env.MsgEncrypter = upstreamdir.MetadataFiles{}, native.CIP83{}
 		env.PolicyIDs, env.PaymentKeys = native.Ledger{}, native.SoftwareKeys{}
 		return env, nil
 	}
@@ -293,7 +293,7 @@ func TestStakeRegisterCarriesMetadataFile(t *testing.T) {
 	f.deps.Wire = func(st ports.Store, o WireOptions) (*Env, error) {
 		env, err := old(st, o)
 		if env != nil {
-			env.MetadataFiles = fsstore.MetadataFiles{}
+			env.MetadataFiles = upstreamdir.MetadataFiles{}
 		}
 		return env, err
 	}

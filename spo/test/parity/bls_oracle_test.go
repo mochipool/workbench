@@ -9,11 +9,11 @@ import (
 	"regexp"
 	"testing"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/app/poolops"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 // The BLS key files of the native generator have the shape of those of the
@@ -103,7 +103,7 @@ func TestBLSKeyScriptAgainstThePort(t *testing.T) {
 	}
 	// The port, in a fresh workspace.
 	dir := t.TempDir()
-	st, err := fsstore.Open(dir)
+	st, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

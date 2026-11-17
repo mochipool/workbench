@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
+	"github.com/mochipool/workbench/spo/internal/platform/secretfd"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -217,7 +218,7 @@ func (a *app) open(ctx context.Context) (*session, error) {
 		return &session{Store: st}, nil
 	}
 	if !exists(a.workspaceFile()) {
-		return nil, fmt.Errorf("no workspace in %s (%s not found); create one with: spo init --network <name>. For a directory in the upstream file layout, pass --upstream-layout", a.workspace, WorkspaceFile)
+		return nil, fmt.Errorf("no workspace in %s (%s not found); create one with: spo init --network <name>. To bring in a directory in the upstream file layout, run: spo workspace import <dir>", a.workspace, WorkspaceFile)
 	}
 	pass, err := a.readPassphrase(ctx)
 	if err != nil {
@@ -275,10 +276,10 @@ func (a *app) deliverRecoveryKey(ctx context.Context, key *secret.Buffer, fd int
 // only if the change that made it took effect.
 func (a *app) deliverRecoveryKeyMode(ctx context.Context, key *secret.Buffer, fd int, unknown bool) error {
 	if fd >= 0 {
-		if err := key.Use(func(b []byte) error { return writeFD(fd, b) }); err != nil {
+		if err := key.Use(func(b []byte) error { return secretfd.Write("recovery-key-fd", fd, b) }); err != nil {
 			return err
 		}
-		if err := writeFD(fd, []byte("\n")); err != nil {
+		if err := secretfd.Write("recovery-key-fd", fd, []byte("\n")); err != nil {
 			return err
 		}
 		fmt.Fprintf(a.d.Out, "The recovery key was written to file descriptor %d.\n", fd)

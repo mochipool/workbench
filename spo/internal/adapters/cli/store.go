@@ -318,7 +318,7 @@ key. Make a new backup after changing.`,
 		},
 	}
 	change.Flags().IntVar(&newFD, "new-passphrase-fd", -1, "read the new passphrase from this inherited file descriptor")
-	change.Flags().IntVar(&rkFD, "recovery-key-fd", -1, "write the new recovery key to this file descriptor instead of showing it (needs --passphrase-fd)")
+	change.Flags().IntVar(&rkFD, "recovery-key-fd", -1, "write the new recovery key to this inherited pipe or socket (never a file) instead of showing it (needs --passphrase-fd)")
 	pp.AddCommand(change)
 	return pp
 }
@@ -359,7 +359,7 @@ recovery key of their time.`,
 			return a.deliverRekeyed(cmd.Context(), s.Sealed, &s.log, key, rkFD)
 		},
 	}
-	rkNew.Flags().IntVar(&rkFD, "recovery-key-fd", -1, "write the recovery key to this file descriptor instead of showing it (needs --passphrase-fd)")
+	rkNew.Flags().IntVar(&rkFD, "recovery-key-fd", -1, "write the recovery key to this inherited pipe or socket (never a file) instead of showing it (needs --passphrase-fd)")
 	rk.AddCommand(rkNew)
 	return rk
 }
@@ -439,6 +439,6 @@ apply here.`,
 	}
 	cmd.Flags().IntVar(&inFD, "recovery-key-in-fd", -1, "read the recovery key from this inherited file descriptor")
 	cmd.Flags().IntVar(&newFD, "new-passphrase-fd", -1, "read the new passphrase from this inherited file descriptor")
-	cmd.Flags().IntVar(&rkFD, "recovery-key-fd", -1, "write the new recovery key to this file descriptor instead of showing it (needs --recovery-key-in-fd and --new-passphrase-fd)")
+	cmd.Flags().IntVar(&rkFD, "recovery-key-fd", -1, "write the new recovery key to this inherited pipe or socket (never a file) instead of showing it (needs --recovery-key-in-fd and --new-passphrase-fd)")
 	return cmd
 }

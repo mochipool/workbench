@@ -166,12 +166,15 @@ type SourceLister interface {
 // AuditEvent is the record of a dangerous workspace operation. It holds
 // counts and names the operator gave, never secret material.
 type AuditEvent struct {
-	Operation     string // "export-workspace", "unprotect-key"
-	Owners        []string
-	PlaintextKeys int  // signing keys and mnemonics written in clear
+	Operation string // "export-workspace"; records of earlier versions also hold "unprotect-key"
+	Owners    []string
+	// PlaintextKeys and Acknowledged are what earlier versions recorded when
+	// they could write keys in clear. This version writes none and always
+	// leaves them zero; old records still carry them (SPO-Xcustody-INV-001).
+	PlaintextKeys int
 	ProtectedKeys int  // signing keys written in upstream's encrypted form
 	Protected     bool // a password was used
-	Acknowledged  bool // the operator acknowledged plaintext export
+	Acknowledged  bool
 
 	// The fields below describe a read that rested on one chain source because
 	// the operator gave --single-source (Operation "single-source-read").

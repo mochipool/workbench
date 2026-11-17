@@ -8,11 +8,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 const (
@@ -60,7 +60,7 @@ func (g *genFake) BuildStakeAddress(uint8, txbuild.KeyHash) (chain.StakeAddress,
 func genDeps(out *bytes.Buffer, g *genFake, drop ...Cap) Deps {
 	return Deps{
 		Out: out, Err: out,
-		OpenUpstream: func(dir string) (ports.Store, error) { return fsstore.Open(dir) },
+		OpenUpstream: func(dir string) (ports.Store, error) { return plainstore.OpenTestnet(dir) },
 		Wire: func(ports.Store, WireOptions) (*Env, error) {
 			env := &Env{NetworkID: ports.NetworkTestnet, ColdKeys: g, VrfKeys: g, PaymentKeys: g, StakeKeys: g,
 				Mnemonics: g, WalletDeriver: g, Addresses: g}

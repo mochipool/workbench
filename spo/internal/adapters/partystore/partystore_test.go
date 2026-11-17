@@ -15,7 +15,7 @@ import (
 )
 
 // memStore is a transactional ports.Store in memory. The real stores' kind
-// catalogues are owned elsewhere: fsstore maps kinds to upstream file names
+// catalogues are owned elsewhere: plainstore maps kinds to upstream file names
 // and has no entry for the party kinds yet, so it cannot back these tests.
 type memStore struct {
 	mu   sync.Mutex

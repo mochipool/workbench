@@ -14,7 +14,6 @@ import (
 	"github.com/fxamacker/cbor/v2"
 	"golang.org/x/crypto/blake2b"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/app/txflow"
 	"github.com/mochipool/workbench/spo/internal/app/wallet"
@@ -24,6 +23,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/domain/txparam"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 // ---- fakes ---------------------------------------------------------------
@@ -101,7 +101,7 @@ func (c *countingEncrypter) EncryptMessages(l []string, _ *ports.Secret) ([]stri
 type world struct {
 	t     *testing.T
 	dir   string
-	store *fsstore.Store
+	store *plainstore.Store
 	chain *fakeChain
 	queue *fakeQueue
 	sub   *fakeSubmitter
@@ -112,7 +112,7 @@ type world struct {
 func newWorld(t *testing.T) *world {
 	t.Helper()
 	dir := t.TempDir()
-	store, err := fsstore.Open(dir)
+	store, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

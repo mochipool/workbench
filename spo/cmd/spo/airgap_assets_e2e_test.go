@@ -306,14 +306,14 @@ func TestAcceptSubmittedAppliesOnTheSubmitAlone(t *testing.T) {
 	mustHave(t, assetRecord(t, offline, "p.tok"), `"minted": "7"`)
 }
 
-// The audit file `key unprotect` leaves in an upstream-layout directory is a
-// dotfile, and `workspace import` lists it as ignored, with no warning.
-func TestAuditFileIsADotfileAndImportIgnoresIt(t *testing.T) {
-	if AuditFileName != ".spo-workspace-audit.json" {
-		t.Fatalf("audit file %q", AuditFileName)
-	}
+// An audit file that an earlier version left in an upstream-layout directory is
+// a dotfile, and `workspace import` lists it as ignored, with no warning.
+//
+// spec: SPO-Xcustody-IN-002
+func TestImportIgnoresAnExistingAuditFile(t *testing.T) {
+	const auditFileName = ".spo-workspace-audit.json"
 	src := upstreamDir(t)
-	if err := os.WriteFile(filepath.Join(src, AuditFileName), []byte(`{"events":[]}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(src, auditFileName), []byte(`{"events":[]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	dir := copyWorkspace(t)
@@ -321,7 +321,7 @@ func TestAuditFileIsADotfileAndImportIgnoresIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
-	mustHave(t, out, AuditFileName, "ignored", "audit log")
+	mustHave(t, out, auditFileName, "ignored", "audit log")
 	if strings.Contains(out, "warning") {
 		t.Errorf("a warning:\n%s", out)
 	}

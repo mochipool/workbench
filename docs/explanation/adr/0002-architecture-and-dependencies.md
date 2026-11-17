@@ -20,7 +20,8 @@ spo/
     adapters/
       native/                                 Blink Labs libraries (KeyGen, Signer, Ledger); ADR 0007
       hwcli/ gpg/                             external tools that remain
-      fsstore/                                upstream file layout (Store, Vault)
+      upstreamdir/                            upstream file layout, read-only source of `workspace import`
+      exportdir/                              upstream file layout, export sink (encrypted signing keys only)
       sqlitestore/                            sealed single-file store (Store, Vault)
       koios/ utxorpc/ nodesocket/ snapshot/   ChainQuery, Submitter
       filebag/ tailcat/                       Transport

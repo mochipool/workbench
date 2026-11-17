@@ -11,7 +11,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
@@ -20,6 +19,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 // govKit is a directory with the governance keys cardano-cli makes.
@@ -426,7 +426,7 @@ func TestGovTransactionsMatchCardanoCLI(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	store, err := fsstore.Open(keys.dir)
+	store, err := plainstore.OpenTestnet(keys.dir)
 	if err != nil {
 		t.Fatal(err)
 	}

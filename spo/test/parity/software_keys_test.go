@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/app/poolops"
 	"github.com/mochipool/workbench/spo/internal/app/wallet"
@@ -20,6 +19,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 // keySnapshot is snapshot with the content that differs by design redacted:
@@ -60,10 +60,10 @@ func (e env) latest(t *testing.T, args ...execx.Arg) string {
 	return strings.TrimSpace(string(res.Stdout))
 }
 
-func openStore(t *testing.T) (*fsstore.Store, string) {
+func openStore(t *testing.T) (*plainstore.Store, string) {
 	t.Helper()
 	dir := t.TempDir()
-	st, err := fsstore.Open(dir)
+	st, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

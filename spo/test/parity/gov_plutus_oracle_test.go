@@ -11,7 +11,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
@@ -19,6 +18,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 // A PlutusV3 script that is not the constitution's: cardano-cli does not run it
@@ -212,7 +212,7 @@ func TestGovGuardrailTransactionsMatchCardanoCLI(t *testing.T) {
 
 func mustStore(t *testing.T, dir string) ports.Vault {
 	t.Helper()
-	s, err := fsstore.Open(dir)
+	s, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

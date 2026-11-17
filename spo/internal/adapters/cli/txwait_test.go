@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/transferfile"
 	"github.com/mochipool/workbench/spo/internal/app/airgap"
 	"github.com/mochipool/workbench/spo/internal/app/txconfirm"
@@ -19,6 +18,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/domain/transfer"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 type stubSubmitter struct {
@@ -304,7 +304,7 @@ func TestOfflineExecuteRecordsAnExpiredWait(t *testing.T) {
 //
 // spec: SPO-Xconfirm-IF-006
 func TestNotWaitedNoticeNamesThePendingRecordAndTheCommand(t *testing.T) {
-	st, err := fsstore.Open(t.TempDir())
+	st, err := plainstore.OpenTestnet(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

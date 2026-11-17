@@ -32,22 +32,27 @@ type Deps struct {
 	NodeAddressWarning func(address string) string
 	Sealed             SealedOps
 
-	// OpenUpstream opens a directory in the upstream scripts' file layout,
-	// where signing keys are not sealed (--upstream-layout).
+	// OpenUpstream opens a directory in the upstream scripts' file layout as
+	// a WORKSPACE, with signing keys unsealed (--upstream-layout). The release
+	// binary leaves it nil and has no such flag: it must be unable to write a
+	// signing key in clear (SPO-Xcustody-INV-001). Only a build with the
+	// `plainlayout` tag, and tests, set it, with spo/test/plainstore.
 	OpenUpstream func(dir string) (ports.Store, error)
 
 	// OpenUpstreamSource opens an upstream-layout directory to be read as the
-	// source of a workspace import (nothing in it is changed).
+	// source of a workspace import. The source is read only by type.
 	OpenUpstreamSource func(dir string) (UpstreamSource, error)
 
-	// WorkspaceAuditor makes the recorder of dangerous workspace operations
-	// (export, unprotect) over a store; reason is the operator's, kept with
-	// each event. dir is the workspace directory: a store with no place for
-	// the log (the upstream layout) keeps it in a file there.
-	WorkspaceAuditor func(dir string, store ports.Store, reason string) ports.WorkspaceAuditor
+	// OpenExportDir opens the destination of `workspace export`: a store that
+	// accepts non-secret files and signing keys in upstream's encrypted form,
+	// and refuses every other secret.
+	OpenExportDir func(dir string) (ports.Store, error)
 
-	// RefOfFile maps an upstream file name (`pool.node.skey`) to its artefact.
-	RefOfFile func(file string) (ports.Ref, bool)
+	// WorkspaceAuditor makes the recorder of dangerous workspace operations
+	// (export) over a store; reason is the operator's, kept with each event.
+	// dir is the workspace directory: a store with no place for the log keeps
+	// it in a file there.
+	WorkspaceAuditor func(dir string, store ports.Store, reason string) ports.WorkspaceAuditor
 
 	// Wire builds the Env a command runs in, from the open store (nil to
 	// only inspect what the configuration yields) and the options. It
@@ -72,7 +77,7 @@ type Deps struct {
 
 // UpstreamSource is an upstream-layout directory opened for an import.
 type UpstreamSource interface {
-	ports.Store
+	ports.ReadStore
 	ports.Vault
 	ports.SourceLister
 	ports.SourceTree

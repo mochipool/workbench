@@ -9,15 +9,15 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 // fakeSealed is a SealedStore over a plain directory, enough for commands
 // that only use the store and the vault.
 type fakeSealed struct {
-	*fsstore.Store
+	*plainstore.Store
 	tokens map[string][]byte // the upstream file layout has no place for a provider token
 }
 
@@ -122,7 +122,7 @@ func TestProviderTokenStoreAndUse(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, WorkspaceFile), nil, 0o600)
 	seedPool(t, dir)
-	fs, err := fsstore.Open(dir)
+	fs, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

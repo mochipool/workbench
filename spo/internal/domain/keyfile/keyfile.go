@@ -8,10 +8,12 @@ package keyfile
 
 import (
 	"bytes"
+	"encoding/base32"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"unicode/utf8"
 )
@@ -64,6 +66,7 @@ type Info struct {
 type fields struct {
 	data []byte
 	at   map[string][2]int // member name -> value token [start, end)
+	dup  bool              // a member name occurs more than once
 }
 
 // scan reports ok for a single valid JSON object. A repeated member keeps
@@ -98,6 +101,9 @@ func scan(data []byte) (fields, bool) {
 		end := skipValue(data, i)
 		if end < 0 {
 			return fields{}, false
+		}
+		if _, seen := f.at[key]; seen {
+			f.dup = true
 		}
 		f.at[key] = [2]int{i, end}
 		i = skipWS(data, end)
@@ -286,6 +292,13 @@ func checkEncrypted(f fields) (Encrypted, error) {
 	if !ok1 || !ok2 || !ok3 || f.has("cborHex") {
 		return Encrypted{}, ErrMalformedEncrypted
 	}
+	// Exactly the members of upstream's encrypted form (SPO-Pfiles-OUT-003):
+	// type, description and encrHex. Any other member could carry a secret
+	// beside the ciphertext, and an envelope kept or exported verbatim must
+	// not be able to; a repeated member is refused for the same reason.
+	if len(f.at) != 3 || f.dup {
+		return Encrypted{}, ErrMalformedEncrypted
+	}
 	if !strings.Contains(typ, "SigningKey") || !strings.HasPrefix(desc, encryptedPrefix) {
 		return Encrypted{}, ErrMalformedEncrypted
 	}
@@ -297,7 +310,8 @@ func checkEncrypted(f fields) (Encrypted, error) {
 
 // ParseEncrypted validates an encrypted envelope before any decryption
 // attempt: JSON with `type` (containing SigningKey), `description` (starting
-// with "Encrypted "), a hex `encrHex` of plausible length, and no `cborHex`.
+// with "Encrypted "), a hex `encrHex` of plausible length, and no other member
+// (SPO-Xcustody-INV-005).
 // Anything else is ErrMalformedEncrypted: a damaged file is reported at
 // once, never as a wrong password and never as a reason to ask again (H8).
 //
@@ -445,6 +459,58 @@ func IsStrongPassword(pw []byte) bool {
 }
 
 func decodeRune(b []byte) (rune, int) { return utf8.DecodeRune(b) }
+
+// ExportMinPasswordLength is the shortest password, in characters, that
+// `workspace export` accepts, in addition to IsStrongPassword. The export form
+// is gpg's iterated-and-salted S2K, which is not memory-hard, so the length
+// carries the protection (SPO-Xcustody-PRE-003).
+const ExportMinPasswordLength = 20
+
+// IsLongExportPassword reports whether pw, as upstream's prompt would read it,
+// has at least ExportMinPasswordLength characters.
+//
+// spec: SPO-Xcustody-PRE-003
+func IsLongExportPassword(pw []byte) bool {
+	return utf8.RuneCount(UpstreamRead(pw)) >= ExportMinPasswordLength
+}
+
+// GenerateExportPassword draws 160 random bits from r and returns them as
+// eight groups of four base32 characters joined by hyphens, the groups
+// alternately lower and upper case (so the result meets IsStrongPassword and
+// IsLongExportPassword): 39 ASCII characters. A draw with no digit is made
+// again, which costs far less than a bit of entropy. The caller wipes it.
+//
+// spec: SPO-Xcustody-IF-003
+func GenerateExportPassword(r io.Reader) ([]byte, error) {
+	for {
+		raw := make([]byte, 20)
+		if _, err := io.ReadFull(r, raw); err != nil {
+			return nil, err
+		}
+		enc := make([]byte, base32.StdEncoding.EncodedLen(len(raw)))
+		base32.StdEncoding.Encode(enc, raw)
+		clear(raw)
+		out := make([]byte, 0, len(enc)+len(enc)/4-1)
+		digit := false
+		for i, c := range enc {
+			if i > 0 && i%4 == 0 {
+				out = append(out, '-')
+			}
+			if c >= '2' && c <= '7' {
+				digit = true
+			}
+			if (i/4)%2 == 0 && c >= 'A' && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			out = append(out, c)
+		}
+		clear(enc)
+		if digit {
+			return out, nil
+		}
+		clear(out)
+	}
+}
 
 // UpstreamRead is what `IFS= read -s pass` (without -r) of upstream's
 // ask_pass makes of the typed bytes: a backslash is dropped and the byte

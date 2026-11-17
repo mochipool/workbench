@@ -12,19 +12,19 @@ import (
 	"github.com/blinklabs-io/bursa"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
-func vaultWith(t *testing.T, skeyEnvelope string) *fsstore.Store {
+func vaultWith(t *testing.T, skeyEnvelope string) *plainstore.Store {
 	t.Helper()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "mypool.node.skey"), []byte(skeyEnvelope), 0o400); err != nil {
 		t.Fatal(err)
 	}
-	st, err := fsstore.Open(dir)
+	st, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestVaultSignerRefusesWhatItCannotSign(t *testing.T) {
 		}
 	}
 	// No key in the vault.
-	st, _ := fsstore.Open(t.TempDir())
+	st, _ := plainstore.OpenTestnet(t.TempDir())
 	if _, err := (VaultSigner{Vault: st}).IssueOpCert(context.Background(), coldKey(t), ports.OpCertRequest{KesVKey: make([]byte, 32)}); err == nil {
 		t.Error("missing key accepted")
 	}
@@ -104,7 +104,7 @@ func TestVaultSignerRefusesWhatItCannotSign(t *testing.T) {
 // The profile agrees with the interfaces (ADR 0008) and the directory gives
 // the vault signer for vault keys and a clear refusal for other holders.
 func TestSignerConformanceAndDirectory(t *testing.T) {
-	st, _ := fsstore.Open(t.TempDir())
+	st, _ := plainstore.OpenTestnet(t.TempDir())
 	if err := ports.CheckSigner(VaultSigner{Vault: st}); err != nil {
 		t.Fatal(err)
 	}

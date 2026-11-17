@@ -41,8 +41,10 @@ func TestHardwareCatalystKeyAndRegistrationThroughCommands(t *testing.T) {
 	if !strings.Contains(argv, "vote registration-metadata") || !strings.Contains(argv, "--payment-address-signing-key-hwsfile") {
 		t.Errorf("last device call %s", argv)
 	}
-	// The QR code of a hardware voting key is refused and writes nothing.
-	if out, err := execHW(t, dev, dir, nil, "catalyst", "key", "qrcode", "v", "--out", t.TempDir()+"/v.png", "--pin-fd", func() string { f, fd := fdIn(t, "1234\n"); t.Cleanup(func() { f.Close() }); return fd }()); err == nil || !strings.Contains(err.Error(), "hardware wallet") {
+	// The QR code is drawn on a terminal only: into a pipe it is refused before
+	// the device or the key is looked at (a hardware voting key's own refusal is
+	// tested in test/hardware).
+	if out, err := execHW(t, dev, dir, nil, "catalyst", "key", "qrcode", "v", "--pin-fd", func() string { f, fd := fdIn(t, "1234\n"); t.Cleanup(func() { f.Close() }); return fd }()); err == nil || !strings.Contains(err.Error(), "terminal") {
 		t.Errorf("qrcode: %v\n%s", err, out)
 	}
 

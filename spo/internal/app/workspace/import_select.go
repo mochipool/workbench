@@ -26,7 +26,7 @@ const (
 // Source is an opened source directory: read only, never followed through
 // links.
 type Source interface {
-	ports.Store
+	ports.ReadStore
 	ports.Vault
 	ports.SourceLister
 	ports.SourceTree
@@ -34,7 +34,7 @@ type Source interface {
 
 type srcDir struct {
 	dir    string
-	store  ports.Store
+	store  ports.ReadStore
 	vault  ports.Vault
 	lister ports.SourceLister
 	tree   ports.SourceTree

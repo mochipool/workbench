@@ -22,6 +22,7 @@ var secretFDFlags = map[string]string{
 	"message-passphrase-fd": uihint.SecretIn,
 	"protection-key-fd":     uihint.SecretIn,
 	"recovery-key-fd":       uihint.SecretOut,
+	"password-out-fd":       uihint.SecretOut,
 }
 
 // MarkForUI annotates a command tree for an interactive driver: secret

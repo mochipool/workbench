@@ -14,12 +14,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/genesisfile"
 	"github.com/mochipool/workbench/spo/internal/adapters/koios"
 	"github.com/mochipool/workbench/spo/internal/app/query"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 var ansiRE = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
@@ -196,7 +196,7 @@ func TestCheckOpCertMatchesUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := fsstore.Open(light)
+	store, err := plainstore.OpenTestnet(light)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,7 +318,7 @@ func TestCheckOpCertUnknownPoolAgainstLiveKoios(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := fsstore.Open(light)
+	store, err := plainstore.OpenTestnet(light)
 	if err != nil {
 		t.Fatal(err)
 	}

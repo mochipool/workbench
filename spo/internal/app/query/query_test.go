@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/transferfile"
 	"github.com/mochipool/workbench/spo/internal/app/handles"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 var bg = context.Background()
@@ -85,7 +85,7 @@ func asset(pol string, name string, q uint64) chain.AssetAmount {
 }
 
 func store(t *testing.T) ports.Store {
-	st, err := fsstore.Open(t.TempDir())
+	st, err := plainstore.OpenTestnet(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -472,7 +472,7 @@ func TestOpCertGatesAndFailures(t *testing.T) {
 //
 // spec: SPO-04e-IF-004, SPO-04e-IN-001
 func TestOpCertFromTheStore(t *testing.T) {
-	st, err := fsstore.Open(t.TempDir())
+	st, err := plainstore.OpenTestnet(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -512,7 +512,7 @@ func TestQueryOpCertCounter(t *testing.T) {
 		id[i] = byte(i)
 	}
 	st := func() ports.Store {
-		s, _ := fsstore.Open(t.TempDir())
+		s, _ := plainstore.OpenTestnet(t.TempDir())
 		_ = s.Update(bg, func(w ports.Writer) error {
 			return w.Put(ports.Ref{Name: "mypool", Kind: ports.PoolIDBechFile}, []byte(id.Bech32()+"\n"))
 		})

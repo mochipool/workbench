@@ -16,9 +16,9 @@ import (
 	"github.com/fxamacker/cbor/v2"
 	"golang.org/x/crypto/blake2b"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/adapters/transferfile"
+	"github.com/mochipool/workbench/spo/internal/adapters/upstreamdir"
 	appassets "github.com/mochipool/workbench/spo/internal/app/assets"
 	"github.com/mochipool/workbench/spo/internal/app/txflow"
 	"github.com/mochipool/workbench/spo/internal/app/wallet"
@@ -27,6 +27,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/txparam"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 type fixedClock struct{ t time.Time }
@@ -85,7 +86,7 @@ func (w assetsWorld) fork(t *testing.T, utxos []fxUtxo) (up, port string) {
 
 func (w assetsWorld) ledger(t *testing.T, dir string, slot uint64) (wallet.SendLovelaces, wallet.SendAssets, appassets.Base, *transferfile.File) {
 	t.Helper()
-	store, err := fsstore.Open(dir)
+	store, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,14 +94,14 @@ func (w assetsWorld) ledger(t *testing.T, dir string, slot uint64) (wallet.SendL
 	led := native.Ledger{}
 	sl := wallet.SendLovelaces{Store: store, Signers: native.Signers{Vault: store}, Utxos: file, Params: file, Tip: fixedTip{slot},
 		Addresses: led, Min: led, Fees: led, Bodies: led, Assembler: led, Queue: file,
-		NetworkID: ports.NetworkTestnet, Approval: wallet.ApprovalSkip, Files: fsstore.MetadataFiles{}, Encrypter: native.CIP83{}}
+		NetworkID: ports.NetworkTestnet, Approval: wallet.ApprovalSkip, Files: upstreamdir.MetadataFiles{}, Encrypter: native.CIP83{}}
 	sa := wallet.SendAssets{Store: store, Signers: native.Signers{Vault: store}, Utxos: file, Params: file, Tip: fixedTip{slot},
 		Addresses: led, Min: led, Fees: led, Bodies: led, Assembler: led, Queue: file,
-		NetworkID: ports.NetworkTestnet, Approval: wallet.ApprovalSkip, Files: fsstore.MetadataFiles{}, Encrypter: native.CIP83{}}
+		NetworkID: ports.NetworkTestnet, Approval: wallet.ApprovalSkip, Files: upstreamdir.MetadataFiles{}, Encrypter: native.CIP83{}}
 	base := appassets.Base{Store: store, Signers: native.Signers{Vault: store}, Utxos: file, Params: file, Tip: fixedTip{slot},
 		Addresses: led, Policies: led, Min: led, Fees: led, Bodies: led, Assembler: led, Queue: file,
 		Clock: fixedClock{time.Date(2026, 11, 16, 9, 51, 2, 0, time.FixedZone("", 3600))}, NetworkID: ports.NetworkTestnet,
-		Approval: txflow.ApprovalSkip, Files: fsstore.MetadataFiles{}, Encrypter: native.CIP83{}}
+		Approval: txflow.ApprovalSkip, Files: upstreamdir.MetadataFiles{}, Encrypter: native.CIP83{}}
 	return sl, sa, base, file
 }
 
@@ -544,7 +545,7 @@ func TestGenPolicyMatchesUpstream(t *testing.T) {
 				tip = slot - lifetime
 			}
 			portDir := t.TempDir()
-			store, err := fsstore.Open(portDir)
+			store, err := plainstore.OpenTestnet(portDir)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -699,7 +700,7 @@ func TestMintBurnMatchUpstream(t *testing.T) {
 			// The queue's executor submits it: the record is still untouched
 			// (an accepted submit is not a confirmation); settling on a
 			// confirmation applies it.
-			store, _ := fsstore.Open(port)
+			store, _ := plainstore.OpenTestnet(port)
 			var submitted []byte
 			sub := recordingSubmitter{&submitted}
 			raw, _ := hex.DecodeString(portTxs[0].TxJSON.CborHex)

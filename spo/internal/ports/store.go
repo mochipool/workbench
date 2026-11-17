@@ -169,6 +169,13 @@ type Store interface {
 	Update(ctx context.Context, fn func(Writer) error) error
 }
 
+// ReadStore is a Store that can only be read. A directory that is only the
+// source of an import is opened as one, so no write method exists to be misused
+// (SPO-Xcustody-INV-001).
+type ReadStore interface {
+	View(ctx context.Context, fn func(Reader) error) error
+}
+
 // Vault releases secret material to the adapters that sign or export. Use
 // cases never call it: they pass references to a Signer.
 type Vault interface {

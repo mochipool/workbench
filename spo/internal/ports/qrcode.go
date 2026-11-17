@@ -2,15 +2,10 @@ package ports
 
 import (
 	"context"
-	"errors"
 
 	"github.com/mochipool/workbench/spo/internal/domain/catalyst"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 )
-
-// ErrQRFileExists means the PNG of the QR code is already there; it is never
-// overwritten (SPO-09a-PRE-010).
-var ErrQRFileExists = errors.New("the QR code file already exists; it is not overwritten")
 
 // VotingKeyQRSource builds the payload of the Catalyst mobile app's QR code
 // for a voting key held in the vault: the extended secret key encrypted with
@@ -22,12 +17,10 @@ type VotingKeyQRSource interface {
 	VotingKeyQRPayload(ctx context.Context, name string, pin catalyst.PIN) ([]byte, error)
 }
 
-// QRCodeRenderer draws a payload as a QR code, as the PNG file the mobile app
-// scans and as text for the terminal (SPO-09a-EXT-005, SPO-09a-OUT-007).
+// QRCodeRenderer draws a payload as a QR code as text for a terminal
+// (SPO-09a-OUT-007). It has no method that writes a file: the release binary
+// shows the code on a terminal only (SPO-Xcustody-INV-001).
 type QRCodeRenderer interface {
-	// WritePNG creates the file with mode 0600 and writes the image. It never
-	// replaces an existing file or follows a symbolic link (ErrQRFileExists).
-	WritePNG(path string, payload []byte) error
 	// Terminal returns the QR code as lines of block characters.
 	Terminal(payload []byte) (string, error)
 }

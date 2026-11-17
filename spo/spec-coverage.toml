@@ -3,7 +3,7 @@
 # comment line containing `spec:` and the ids, in a *_test.go file under spo/:
 #   // spec: SPO-04c-PRE-001, SPO-04c-PRE-002
 # Add a code here when its use case is implemented.
-implemented = ["12a", "12b", "0x", "13b", "Chw", "Ctx", "Xparty", "Ckey", "01protectKey", "Pfiles", "04a", "04b", "04c", "04d", "02", "03a", "01sendLovelaces", "Ptx", "03b", "03c", "05b", "06", "08a", "08b", "22a", "22b", "01claimRewards", "05a", "05c", "05e", "07a", "07b", "01workOffline", "04e", "01queryAddress", "Ptransfer", "Coffline", "21a", "21b", "21c", "21d", "23a", "23b", "23c", "23d", "23e", "24a", "24b", "24c", "25a", "25b", "Pparam", "01sendAssets", "10", "11a", "11b", "15", "09a", "Xconfirm", "Cutxo", "Cconv", "Cchain", "Clight", "Cui", "Cconf", "Caddr", "04f", "13a", "05d", "Xmulti"]
+implemented = ["12a", "12b", "0x", "13b", "Chw", "Ctx", "Xparty", "Ckey", "01protectKey", "Pfiles", "04a", "04b", "04c", "04d", "02", "03a", "01sendLovelaces", "Ptx", "03b", "03c", "05b", "06", "08a", "08b", "22a", "22b", "01claimRewards", "05a", "05c", "05e", "07a", "07b", "01workOffline", "04e", "01queryAddress", "Ptransfer", "Coffline", "21a", "21b", "21c", "21d", "23a", "23b", "23c", "23d", "23e", "24a", "24b", "24c", "25a", "25b", "Pparam", "01sendAssets", "10", "11a", "11b", "15", "09a", "Xconfirm", "Cutxo", "Cconv", "Cchain", "Clight", "Cui", "Cconf", "Caddr", "04f", "13a", "05d", "Xmulti", "Xcustody"]
 
 # Requirement ids deliberately not covered, each with a non-empty reason:
 #   "SPO-04c-PR-002" = "display only; the port never shows a password"
@@ -11,7 +11,7 @@ implemented = ["12a", "12b", "0x", "13b", "Chw", "Ctx", "Xparty", "Ckey", "01pro
 [waived]
 # 04c: the port has no gpg `enc` mode at generation. Every signing key goes
 # into the store; protection is the store's (sealed store), and the upstream
-# `enc` file format is produced only by the key-protection use case (01_protectKey).
+# `enc` file format is produced only by the workspace export (SPO-Xcustody-OUT-003).
 "SPO-04c-INV-002" = "enc mode not ported at generation; also broken upstream with cardano-cli 11.2.3.0 (see the quirk note in the spec)"
 "SPO-04c-PR-001" = "enc mode not ported at generation: no per-key password prompt"
 "SPO-04c-PR-002" = "enc mode not ported at generation: the port never displays a password"
@@ -235,15 +235,31 @@ implemented = ["12a", "12b", "0x", "13b", "Chw", "Ctx", "Xparty", "Ckey", "01pro
 
 # Ckey, 01protectKey, Pfiles: key protection and the workspace import/export (app/workspace,
 # adapters/gpg, domain/keyfile). 0x_importHelper (ImportPoolFromChain) is not ported yet.
-"SPO-01protectKey-IF-001" = "command-line usage and argument parsing belong to the `spo` command that wires ProtectKey and UnprotectKey; the use cases take a Ref and a password"
-"SPO-01protectKey-IF-002" = "command-line usage and argument parsing belong to the command: the action is the choice of ProtectKey or UnprotectKey"
-"SPO-01protectKey-IF-003" = "file lookup by name (with or without .skey) belongs to the command and to the store's name mapping (SPO-Pfiles-IN-001, cited in the fsstore tests); the use cases take a Ref"
-"SPO-01protectKey-IF-004" = "extra command-line arguments belong to the command; the use cases take exactly one Ref"
+"SPO-01protectKey-IF-001" = "command-line usage and argument parsing belong to `01_protectKey`, which is not ported (SPO-Xcustody-INV-001)"
+"SPO-01protectKey-IF-002" = "command-line usage and argument parsing belong to the command: `01_protectKey` is not ported (SPO-Xcustody-INV-001)"
+"SPO-01protectKey-IF-003" = "file lookup by name (with or without .skey) belongs to `01_protectKey`, which is not ported (SPO-Xcustody-INV-001); the name mapping is SPO-Pfiles-IN-001"
+"SPO-01protectKey-IF-004" = "extra command-line arguments belong to `01_protectKey`, which is not ported (SPO-Xcustody-INV-001)"
 "SPO-01protectKey-PR-003" = "display only: the port never shows a password"
 "SPO-01protectKey-SEC-002" = "display only: the port never shows a password"
 "SPO-01protectKey-SEC-003" = "display only: the port prints no file content; reports carry names and fixed phrases"
-"SPO-01protectKey-SEC-004" = "display only: the plaintext key is never printed; UnprotectKey writes it to the file and to nothing else (TestReportHoldsNoSecret covers reports)"
-"SPO-01protectKey-SEC-005" = "display only: the plaintext key is never printed after the write"
+"SPO-01protectKey-SEC-004" = "display only: the decrypt of a key file is not ported (SPO-Xcustody-INV-001); a plaintext key is never printed"
+"SPO-01protectKey-SEC-005" = "display only: the decrypt of a key file is not ported (SPO-Xcustody-INV-001); a plaintext key is never printed"
+"SPO-01protectKey-EXT-002" = "the in-place encrypt or decrypt of a key file (`01_protectKey`, `spo key protect` and `unprotect`) is not ported: a plain upstream-layout directory is not a workspace and no signing key is written unprotected (SPO-Xcustody-INV-001); import decrypts, export and `key convert` cover the encrypted form"
+"SPO-01protectKey-OUT-002" = "the in-place encrypt or decrypt of a key file (`01_protectKey`, `spo key protect` and `unprotect`) is not ported: a plain upstream-layout directory is not a workspace and no signing key is written unprotected (SPO-Xcustody-INV-001); import decrypts, export and `key convert` cover the encrypted form"
+"SPO-01protectKey-PR-001" = "the in-place encrypt or decrypt of a key file (`01_protectKey`, `spo key protect` and `unprotect`) is not ported: a plain upstream-layout directory is not a workspace and no signing key is written unprotected (SPO-Xcustody-INV-001); import decrypts, export and `key convert` cover the encrypted form"
+"SPO-01protectKey-PR-002" = "the in-place encrypt or decrypt of a key file (`01_protectKey`, `spo key protect` and `unprotect`) is not ported: a plain upstream-layout directory is not a workspace and no signing key is written unprotected (SPO-Xcustody-INV-001); import decrypts, export and `key convert` cover the encrypted form"
+"SPO-01protectKey-PR-004" = "the in-place encrypt or decrypt of a key file (`01_protectKey`, `spo key protect` and `unprotect`) is not ported: a plain upstream-layout directory is not a workspace and no signing key is written unprotected (SPO-Xcustody-INV-001); import decrypts, export and `key convert` cover the encrypted form"
+"SPO-01protectKey-PR-005" = "the in-place encrypt or decrypt of a key file (`01_protectKey`, `spo key protect` and `unprotect`) is not ported: a plain upstream-layout directory is not a workspace and no signing key is written unprotected (SPO-Xcustody-INV-001); import decrypts, export and `key convert` cover the encrypted form"
+"SPO-01protectKey-PR-006" = "the in-place encrypt or decrypt of a key file (`01_protectKey`, `spo key protect` and `unprotect`) is not ported: a plain upstream-layout directory is not a workspace and no signing key is written unprotected (SPO-Xcustody-INV-001); import decrypts, export and `key convert` cover the encrypted form"
+"SPO-01protectKey-PRE-001" = "the in-place encrypt or decrypt of a key file (`01_protectKey`, `spo key protect` and `unprotect`) is not ported: a plain upstream-layout directory is not a workspace and no signing key is written unprotected (SPO-Xcustody-INV-001); import decrypts, export and `key convert` cover the encrypted form"
+"SPO-01protectKey-PRE-003" = "the in-place encrypt or decrypt of a key file (`01_protectKey`, `spo key protect` and `unprotect`) is not ported: a plain upstream-layout directory is not a workspace and no signing key is written unprotected (SPO-Xcustody-INV-001); import decrypts, export and `key convert` cover the encrypted form"
+"SPO-01protectKey-PRE-004" = "the in-place encrypt or decrypt of a key file (`01_protectKey`, `spo key protect` and `unprotect`) is not ported: a plain upstream-layout directory is not a workspace and no signing key is written unprotected (SPO-Xcustody-INV-001); import decrypts, export and `key convert` cover the encrypted form"
+"SPO-01protectKey-PRE-005" = "the in-place encrypt or decrypt of a key file (`01_protectKey`, `spo key protect` and `unprotect`) is not ported: a plain upstream-layout directory is not a workspace and no signing key is written unprotected (SPO-Xcustody-INV-001); import decrypts, export and `key convert` cover the encrypted form"
+"SPO-01protectKey-PRE-006" = "the in-place encrypt or decrypt of a key file (`01_protectKey`, `spo key protect` and `unprotect`) is not ported: a plain upstream-layout directory is not a workspace and no signing key is written unprotected (SPO-Xcustody-INV-001); import decrypts, export and `key convert` cover the encrypted form"
+"SPO-01protectKey-SEC-001" = "the in-place encrypt or decrypt of a key file (`01_protectKey`, `spo key protect` and `unprotect`) is not ported: a plain upstream-layout directory is not a workspace and no signing key is written unprotected (SPO-Xcustody-INV-001); import decrypts, export and `key convert` cover the encrypted form"
+"SPO-01protectKey-SEC-007" = "the in-place encrypt or decrypt of a key file (`01_protectKey`, `spo key protect` and `unprotect`) is not ported: a plain upstream-layout directory is not a workspace and no signing key is written unprotected (SPO-Xcustody-INV-001); import decrypts, export and `key convert` cover the encrypted form"
+"SPO-Ckey-PRE-002" = "the check that a file is not already encrypted belongs to the in-place `01_protectKey enc`, which is not ported (SPO-Xcustody-INV-001); export encrypts from the sealed store, whose signing keys are plain inside it; a key kept in upstream's encrypted form (an `UpstreamEncryptedSKey` record) is never exported (SPO-Xcustody-INV-003), so export never encrypts a file that is already encrypted"
+"SPO-Ckey-PRE-008" = "the existence check of the key file argument belongs to the in-place `01_protectKey`, which is not ported (SPO-Xcustody-INV-001); import and `key convert` take names from a listing or the store"
 "SPO-Ckey-IF-002" = "read_skeyFILE returns key text on stdout; the port's Vault.Open returns a guarded buffer and the use cases never turn it into text (ADR 0004)"
 "SPO-Ckey-IN-002" = "ENV_DECRYPT_PASSWORD is not read: the password is a *Secret given by the caller, so no environment variable holds it (the point of SPO-Ckey-SEC-003)"
 "SPO-Ckey-PRE-009" = "ENV_DECRYPT_PASSWORD is not read (SPO-Ckey-IN-002); a wrong password is ports.ErrWrongPassphrase after one attempt per candidate, never a retry loop"
@@ -286,6 +302,7 @@ implemented = ["12a", "12b", "0x", "13b", "Chw", "Ctx", "Xparty", "Ckey", "01pro
 "SPO-15-IF-001" = "sub-command selection and usage are the command tree's (spo/internal/adapters/cli), not a use case's"
 "SPO-15-PRE-003" = "upstream's `cli`/`hw` method word is replaced by the key holder of the request; an unknown method cannot be written"
 "SPO-15-SEC-002" = "the mnemonic on cardano-signer's command line is a property of the upstream script; the port derives in process and passes no command line"
+"SPO-09a-PRE-010" = "the release binary writes no PNG of the QR code (SPO-Xcustody-INV-001, SPO-Xcustody-IF-004), so there is no file that could already exist"
 "SPO-09a-IF-001" = "sub-command selection and usage are the command tree's (spo/internal/adapters/cli), not a use case's"
 "SPO-09a-IF-005" = "`query` (QueryCatalystVotingPower) is not ported in this slice: no Catalyst API reader port exists yet"
 "SPO-09a-IN-003" = "`query` is not ported in this slice (see SPO-09a-IF-005)"
