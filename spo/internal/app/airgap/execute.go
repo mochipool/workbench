@@ -91,10 +91,6 @@ type ExecuteTx struct {
 	Metadata ports.MetadataFetcher
 	Hasher   ports.PoolMetadataHasher
 	Tickers  ports.TickerProtectionChecker
-	// Assets is told of a submitted mint or burn whose entry carried an asset
-	// record update; optional. The update also goes into the history of the
-	// bundle, whether or not a hook is wired.
-	Assets ports.AssetUpdateHook
 }
 
 // ExecuteResult says what happened. Nothing in it is secret.
@@ -256,7 +252,7 @@ func (uc ExecuteTx) Run(ctx context.Context, position int) (ExecuteResult, error
 	// recorded here and the queue entry stays (SPO-Xconfirm-INV-007).
 	if uc.TxIDs != nil {
 		if local, lerr := uc.TxIDs.TransactionID(txBytes); lerr == nil && local != id {
-			return res, fmt.Errorf("the provider answered transaction id %s for %s", id, local)
+			return res, &chain.IDMismatchError{Answered: id, Local: local}
 		}
 	}
 	res.TxID, res.Submitted = id, true
@@ -269,15 +265,12 @@ func (uc ExecuteTx) Run(ctx context.Context, position int) (ExecuteResult, error
 		return res, fmt.Errorf("%w (transaction %s): %w", ErrRecordFailed, id, err)
 	}
 	res.Remaining--
-	if entry.AssetPending != "" && uc.Assets != nil {
-		// A failure here never undoes the submit: the update is in the
-		// history of the file, and `spo asset settle` applies it where the
-		// record is.
-		if herr := uc.Assets.OnSubmittedUpdate(ctx, id, entry.AssetPending); herr != nil {
-			res.Notices = append(res.Notices, fmt.Sprintf("the asset record update of transaction %s was not applied here (%v); it is in the history of the transfer file, apply it with spo asset settle where the record is", id, herr))
-		} else {
-			res.Notices = append(res.Notices, "the asset record update travels back in the transfer file: run spo asset settle on the machine that holds the asset record")
-		}
+	if entry.AssetPending != "" {
+		// The update waits for the transaction to be confirmed: the command
+		// waits for that and records it in the history of the file, or
+		// `spo tx settle` does later (SPO-Xconfirm-PR-021, PR-022). Nothing
+		// is applied on the accepted submit.
+		res.Notices = append(res.Notices, "the record update this transaction carries is applied only once it is confirmed in a block: the confirmation is recorded in the transfer file's history (by this command's wait, or later by spo tx settle), and spo asset settle applies it on the machine that holds the records")
 	}
 	if entry.Type == transfer.TypePoolRetirement {
 		res.Notices = append(res.Notices, "do not de-register the pool's reward address yet: the pool deposit is refunded to it")

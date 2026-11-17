@@ -646,6 +646,33 @@ func TestSubmitRefusals(t *testing.T) {
 	}
 }
 
+// A gateway 502 after the forward, 408, 425 and 429 do not say the transaction
+// was not taken; a 400 carrying a node rejection does. A cancellation after the
+// request was sent is unknown too.
+//
+// spec: SPO-Xconfirm-PR-008
+func TestSubmitOutcomeClassification(t *testing.T) {
+	for status, unknown := range map[int]bool{400: false, 403: false, 404: false, 408: true, 425: true, 429: true, 500: true, 502: true, 503: true, 200: true} {
+		f := newFake().on("POST /api/v1/submittx", reply{status: status, body: "x"})
+		_, err := f.client(t).Submit(context.Background(), []byte{1})
+		if err == nil || errors.Is(err, ErrSubmitOutcomeUnknown) != unknown {
+			t.Errorf("status %d: unknown=%v want %v (%v)", status, errors.Is(err, ErrSubmitOutcomeUnknown), unknown, err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	f := newFake()
+	f.hook = func(*http.Request) (*http.Response, error) { cancel(); return nil, ctx.Err() }
+	if _, err := f.client(t).Submit(ctx, []byte{1}); !errors.Is(err, ErrSubmitOutcomeUnknown) {
+		t.Errorf("cancelled after sending: %v", err)
+	}
+	// Cancelled before anything was sent: a plain error.
+	done, stop := context.WithCancel(context.Background())
+	stop()
+	if _, err := newFake().client(t).Submit(done, []byte{1}); err == nil || errors.Is(err, ErrSubmitOutcomeUnknown) {
+		t.Errorf("cancelled before sending: %v", err)
+	}
+}
+
 // ---- transport behaviour ------------------------------------------------
 
 // spec: SPO-Clight-INV-002 (we retry a transport failure once; HTTP errors never)

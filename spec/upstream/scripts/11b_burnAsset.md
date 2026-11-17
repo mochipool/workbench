@@ -155,6 +155,7 @@ Use case `BurnAsset(policy, assetName, amount, payer)` on `MintingPolicy` and `A
 ## Port notes
 
 * As the 11a port notes. Additionally refuse a burn above the holding with a non-zero exit (SPO-11b-PRE-002) and use a single record name (SPO-11b-OUT-002).
+* **Record on confirmation (2026-11-16, hazard H9, port deviation).** The burn follows the 11a port decision: the asset record is not written on an accepted submit or a queueing but as a pending update (`<txid>.pending`) that the wait of `asset burn` (default in light and online mode), `spo tx settle`, or across the air gap `spo asset settle` applies when the transaction is confirmed (SPO-Xconfirm-PR-001, SPO-Xconfirm-PR-012, SPO-Xconfirm-PR-023). This departs from SPO-11b-MODE-001 and SPO-11b-OUT-001, which write it after the submit.
 * Burn and mint are the same use case with a signed amount; a port can share the implementation and differ only in the check and the sign.
 
 ## Open questions

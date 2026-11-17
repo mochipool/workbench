@@ -248,7 +248,16 @@ witness collection stays open, a witness transfer file is written for each open
 slot, and the command exits 0 saying how many signatures it waits for. Import
 each signed file with: spo pool witness import <pool> <file>, then run this
 command again. A stored collection is final: --type and --message are refused
-while it is open.`,
+while it is open.
+
+The registration record (regEpoch, regSubmitted) in the pool descriptor is written
+when the transaction is confirmed in a block, not when it is accepted: it waits as
+a pending update under the transaction's id, while the certificate file and the
+witness collection are consumed at once. In light and online mode this command
+waits for the confirmation by default (--wait-timeout, --wait-confirmations)
+and applies the record; --no-wait, a timeout or Ctrl-C leave it pending and
+spo tx settle applies it later. While it is pending, pool descriptor show and
+pool witness status say so.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if f.yes {
@@ -259,7 +268,7 @@ while it is open.`,
 				return err
 			}
 			needs := stakeTxNeeds(CapPoolCertDecode, CapCertDecode, CapTxID, CapMetaHash, CapClock)
-			spec := envSpec{flags: &f.chain, config: true, needs: needs, extras: &f.extra}
+			spec := envSpec{flags: &f.chain, config: true, needs: needs, extras: &f.extra, settles: true}
 			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, wo WireOptions) error {
 				uc := poolops.RegisterPool{
 					Store: s.Store, Addresses: env.AddressInspector, Params: env.Params, Tip: env.Tip, Utxos: env.Utxos,
@@ -290,7 +299,7 @@ while it is open.`,
 	fl.BoolVar(&f.allowUnverified, "allow-unverified", false, "go on when the chain could not say whether the pool is registered: the type then comes from the descriptor. A wrong type only makes the ledger reject the transaction. The summary lists every check that was skipped")
 	fl.BoolVar(&f.singleSource, "single-source", false, "accept a registration state that rests on ONE chain source. A false answer decides wrongly between registration and re-registration. The summary says so")
 	fl.BoolVar(&f.allowPending, "allow-pending", false, "leave the slots of signers that are not in this workspace open, write their witness transfer files and exit 0 while waiting")
-	addSubmitFlags(cmd, &f.chain, true)
+	addSettleFlags(cmd, &f.chain, true)
 	return cmd
 }
 
@@ -337,7 +346,10 @@ func (a *app) reportRegister(ctx context.Context, s *session, env *Env, wo WireO
 	case res.Queued:
 		fmt.Fprintf(w, "Queued transaction %s in %s. Submit it from an online machine.\n", res.TxID, wo.TransferFile)
 	}
-	fmt.Fprintf(w, "Recorded the %s of pool %s in its descriptor; %s.pool.cert is consumed.\n", res.Type, name, name)
+	fmt.Fprintf(w, "%s.pool.cert is consumed and the witness collection is closed.\n", name)
+	if res.RecordPending {
+		a.reportPending(w, fmt.Sprintf("%s record of pool %s (regEpoch, regSubmitted)", res.Type, shown(name)), res.Queued, s)
+	}
 	return nil
 }
 
@@ -440,7 +452,8 @@ a witness is replaced only with --overwrite.`,
 					tipWhy = env.Reason(CapTip)
 				}
 				life := pool.LifecycleOf(d, coll, slot)
-				fmt.Fprintf(w, "Pool %s: %s\n", name, life)
+				fmt.Fprintf(w, "Pool %s: %s\n", shown(name), life)
+				a.printPoolPending(ctx, w, s, name)
 				if coll == nil {
 					fmt.Fprintln(w, "No witness collection is open.")
 					return nil
@@ -594,7 +607,7 @@ protocol's maximum before a fee is spent.`,
 				return errors.New(yesRetireWhy)
 			}
 			needs := stakeTxNeeds(CapPoolCertDecode, CapClock)
-			spec := envSpec{flags: &f.chain, config: true, needs: needs, extras: &f.extra}
+			spec := envSpec{flags: &f.chain, config: true, needs: needs, extras: &f.extra, settles: true}
 			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, wo WireOptions) error {
 				res, err := poolops.RetirePool{
 					Store: s.Store, Addresses: env.AddressInspector, Params: env.Params, Tip: env.Tip, Utxos: env.Utxos,
@@ -611,7 +624,10 @@ protocol's maximum before a fee is spent.`,
 				case res.Queued:
 					fmt.Fprintf(w, "Queued transaction %s in %s. Submit it from an online machine.\n", res.TxID, wo.TransferFile)
 				}
-				fmt.Fprintf(w, "The pool retires at epoch %d.\n", res.Epoch)
+				fmt.Fprintf(w, "The pool retires at epoch %d, when the transaction is confirmed in a block before then.\n", res.Epoch)
+				if res.RecordPending {
+					a.reportPending(w, fmt.Sprintf("retirement record of pool %s (deregSubmitted)", shown(args[0])), res.Queued, s)
+				}
 				return nil
 			})
 		},
@@ -619,6 +635,6 @@ protocol's maximum before a fee is spent.`,
 	cmd.Flags().StringArrayVar(&f.messages, "message", nil, "CIP-20 message line, at most 64 bytes (repeatable)")
 	f.extra.add(cmd, &f.messages, extraCert)
 	cmd.Flags().BoolVar(&f.yes, "yes", false, "not accepted: this command is always asked")
-	addSubmitFlags(cmd, &f.chain, true)
+	addSettleFlags(cmd, &f.chain, true)
 	return cmd
 }

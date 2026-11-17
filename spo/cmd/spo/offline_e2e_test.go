@@ -131,6 +131,11 @@ type koiosStandIn struct {
 	t         *testing.T
 	calls     []string
 	submitted [][]byte
+	// unconfirmed makes tx_status answer an explicit null (not seen); by
+	// default every transaction is in a block with three confirmations, so the
+	// wait of a command that leaves a pending record ends at once.
+	unconfirmed bool
+	statusAsked int
 }
 
 func (k *koiosStandIn) respond(status int, body []byte, req *http.Request) *http.Response {
@@ -167,6 +172,19 @@ func (k *koiosStandIn) RoundTrip(req *http.Request) (*http.Response, error) {
 				return nil, err
 			}
 			return k.respond(200, b, req), nil
+		case "POST /api/v1/tx_status":
+			k.statusAsked++
+			var q struct {
+				Hashes []string `json:"_tx_hashes"`
+			}
+			body, _ := io.ReadAll(req.Body)
+			if err := json.Unmarshal(body, &q); err != nil || len(q.Hashes) != 1 {
+				return k.respond(400, []byte(`"bad"`), req), nil
+			}
+			if k.unconfirmed {
+				return k.respond(200, []byte(fmt.Sprintf(`[{"tx_hash":"%s","num_confirmations":null}]`, q.Hashes[0])), req), nil
+			}
+			return k.respond(200, []byte(fmt.Sprintf(`[{"tx_hash":"%s","num_confirmations":3}]`, q.Hashes[0])), req), nil
 		case "POST /api/v1/submittx":
 			body, _ := io.ReadAll(req.Body)
 			k.submitted = append(k.submitted, body)

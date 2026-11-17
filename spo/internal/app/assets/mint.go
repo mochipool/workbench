@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/mochipool/workbench/spo/internal/app/txflow"
 	"github.com/mochipool/workbench/spo/internal/domain/assets"
@@ -94,12 +95,11 @@ type Request struct {
 type Result struct {
 	txflow.Result
 	PolicyID string
-	// Record is the store name of the asset record; RecordUpdated is true when
-	// it was updated now (a direct submission). For a queued transaction the
-	// update is pending and is applied when the queue's executor submits it
-	// (see Settle).
+	// Record is the store name of the asset record. The update is pending
+	// (RecordPending) from the moment the transaction is sent or queued, and is
+	// applied when the transaction is confirmed (see Settle); nothing in the
+	// record changes before.
 	Record        string
-	RecordUpdated bool
 	RecordPending bool
 	// Expiry is the policy's expiry slot; Limited is false for an unlimited policy.
 	Expiry  uint64
@@ -390,51 +390,48 @@ func (b Base) run(ctx context.Context, req Request, burn bool) (Result, error) {
 		ws = append(ws, sw.Witness)
 	}
 
-	change := assets.Change{Asset: asset, HexTyped: name.HexTyped, Delta: signed, ValidBefore: assets.ValidBefore(expiry, limited), Date: b.Clock.Now()}
-	// Hazard H9: upstream updates the record when the transaction is queued,
-	// before anything reaches the chain. The port updates it when the
-	// submission is confirmed: at once for a direct submission, and for a
-	// queued transaction by an update that waits under the transaction's id
-	// until the queue's executor reports the submit (Settle).
-	pending := ports.Ref{Name: bal.Body.ID.String(), Kind: ports.AssetPending}
+	// Hazard H9: upstream updates the record when the transaction is queued or
+	// sent, before anything is known of the chain. The port keeps the update
+	// as a pending record under the transaction's id, written before the
+	// transaction leaves (a crash after the submit cannot lose it), and applies
+	// it when the transaction is confirmed (spo tx settle, or the wait of this
+	// command). A transaction that is refused leaves no pending record; one
+	// whose outcome is unknown keeps it, because it may be in a block.
+	action := fmt.Sprintf("%s %d", verb, amount)
 	if b.Queue != nil {
-		change.Action = fmt.Sprintf("%s %d (only Offline proof)", verb, amount)
-		p := assets.Pending{TxID: bal.Body.ID.String(), Record: record, Policy: hex.EncodeToString(asset.Policy[:]),
-			NameHex: hex.EncodeToString(asset.Name), HexTyped: name.HexTyped, Delta: fmt.Sprint(signed),
-			ValidBefore: change.ValidBefore, Action: change.Action}
-		pb, err := p.Marshal()
-		if err != nil {
-			return Result{}, err
-		}
-		if err := b.Store.Update(ctx, func(w ports.Writer) error { return w.Put(pending, pb) }); err != nil {
-			return Result{}, fmt.Errorf("keep the asset record update for the queued transaction: %w", err)
-		}
+		action += " (only Offline proof)"
+	}
+	ttlv := ttl
+	now := b.Clock.Now()
+	p := assets.Pending{Kind: assets.PendingAsset, TxID: bal.Body.ID.String(), ValidUntil: &ttlv, Queued: b.Queue != nil,
+		Date: now.Format(time.RFC3339Nano), Record: record, Policy: hex.EncodeToString(asset.Policy[:]),
+		NameHex: hex.EncodeToString(asset.Name), HexTyped: name.HexTyped, Delta: fmt.Sprint(signed),
+		ValidBefore: assets.ValidBefore(expiry, limited), Action: action}
+	pb, err := p.Marshal()
+	if err != nil {
+		return Result{}, err
+	}
+	pending := ports.Ref{Name: bal.Body.ID.String(), Kind: ports.PendingUpdate}
+	if err := b.Store.Update(ctx, func(w ports.Writer) error { return w.Put(pending, pb) }); err != nil {
+		return Result{}, fmt.Errorf("keep the asset record update until the transaction is confirmed: %w", err)
+	}
+	if b.Queue != nil {
 		// The update also travels with the queue entry, so the machine that
-		// submits it can report the submission back across the air gap.
+		// submits it can report the outcome back across the air gap.
 		var compact bytes.Buffer
 		if err := json.Compact(&compact, pb); err != nil {
 			return Result{}, err
 		}
 		in.Queued.Extra = append(in.Queued.Extra, ports.QueuedField{Key: transfer.KeyAssetPending, Value: compact.String()})
-	} else {
-		change.Action = fmt.Sprintf("%s %d", verb, amount)
 	}
 	spec := bal.Spec
 	res, err := pipe.Deliver(ctx, in, bal.Body, &spec, ws, skipped)
 	if err != nil {
-		if b.Queue != nil {
-			_ = b.Store.Update(ctx, func(w ports.Writer) error { return w.Delete(pending) })
+		if b.Queue == nil && errors.Is(err, chain.ErrSubmitOutcomeUnknown) {
+			return Result{}, fmt.Errorf("%w\nThe update of the asset record %s stays pending under transaction %s: spo tx settle applies it once the transaction is confirmed, and drops it when it has expired", err, record, bal.Body.ID)
 		}
+		_ = b.Store.Update(ctx, func(w ports.Writer) error { return w.Delete(pending) })
 		return Result{}, err
 	}
-	out := Result{Result: res, PolicyID: idHex, Record: record, Expiry: expiry, Limited: limited, RecordPending: res.Queued}
-	if res.Submitted {
-		// The transaction is on its way; a failure to update the record is
-		// reported with the transaction id, not as a failed submission.
-		if err := ApplyChange(ctx, b.Store, record, change); err != nil {
-			return out, fmt.Errorf("the transaction %s was submitted but the asset record %s could not be updated: %w", res.TxID, record, err)
-		}
-		out.RecordUpdated = true
-	}
-	return out, nil
+	return Result{Result: res, PolicyID: idHex, Record: record, Expiry: expiry, Limited: limited, RecordPending: true}, nil
 }

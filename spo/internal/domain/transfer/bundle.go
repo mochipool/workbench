@@ -241,8 +241,9 @@ func (b *Bundle) AddHistory(date, action string) error {
 	return nil
 }
 
-// addHistoryWith appends `{date, action, <key>: value}` to history.
-func (b *Bundle) addHistoryWith(date, action, key string, value json.RawMessage) error {
+// addHistoryWith appends `{date, action, <key>: value}` to history, with the
+// extra key/value pairs after it.
+func (b *Bundle) addHistoryWith(date, action, key string, value json.RawMessage, extra ...[2]json.RawMessage) error {
 	hist, err := b.root.Array("history")
 	if err != nil {
 		return err
@@ -251,6 +252,13 @@ func (b *Bundle) addHistoryWith(date, action, key string, value json.RawMessage)
 	e.Set("date", Str(date))
 	e.Set("action", Str(action))
 	e.Set(key, value)
+	for _, kv := range extra {
+		var k string
+		if err := json.Unmarshal(kv[0], &k); err != nil {
+			return err
+		}
+		e.Set(k, kv[1])
+	}
 	hist = append(hist, e.Compact())
 	b.root.Set("history", joinArray(hist))
 	return nil
@@ -272,6 +280,111 @@ func (b *Bundle) SubmittedAssetUpdates() ([]string, error) {
 		}
 		if v, ok := e[KeyAssetSubmitted]; ok {
 			out = append(out, string(compactJSON(v)))
+		}
+	}
+	return out, nil
+}
+
+// SubmittedUpdate is a history entry of a submitted transaction that carried
+// an update: the update's compact JSON and the signed transaction as `execute`
+// stored it (hex; empty in a history written without it). The file is not
+// authenticated: a reader derives the transaction id and the validity bound
+// from CborHex and refuses an update that disagrees with it.
+type SubmittedUpdate struct {
+	Update   string
+	CborHex  string
+	Position int // 0-based position in the history
+}
+
+// SubmittedUpdates is SubmittedAssetUpdates with the signed transaction of each
+// entry, oldest first.
+func (b *Bundle) SubmittedUpdates() ([]SubmittedUpdate, error) {
+	raws, err := b.root.Array("history")
+	if err != nil {
+		return nil, err
+	}
+	var out []SubmittedUpdate
+	for i, r := range raws {
+		var e map[string]json.RawMessage
+		if json.Unmarshal(r, &e) != nil {
+			continue
+		}
+		v, ok := e[KeyAssetSubmitted]
+		if !ok {
+			continue
+		}
+		u := SubmittedUpdate{Update: string(compactJSON(v)), Position: i}
+		_ = json.Unmarshal(e[KeyTxCBOR], &u.CborHex)
+		out = append(out, u)
+	}
+	return out, nil
+}
+
+// Outcome is what a provider said about a submitted transaction that carried
+// an update, recorded by the machine that submitted it so the machine that
+// holds the records can act on it (spoConfirmed, spoExpired).
+type Outcome struct {
+	TxID string `json:"txid"`
+	// Expired is true for a transaction that can no longer be included (the
+	// strict rule of SPO-Xconfirm-PRE-002), false for a confirmed one.
+	Expired bool `json:"-"`
+	// Depth is the least confirmation depth the providers stated (confirmed).
+	Depth uint64 `json:"depth,omitempty"`
+	// Sources are the providers that said it.
+	Sources []string `json:"sources,omitempty"`
+}
+
+// RecordOutcome appends the outcome as its own history entry, after the entry
+// of the submit, and says whether it did: a transaction that already has an
+// outcome of that kind records nothing (the entry is not rewritten, so a
+// second run changes nothing).
+func (b *Bundle) RecordOutcome(o Outcome, date, action string) (bool, error) {
+	have, err := b.Outcomes()
+	if err != nil {
+		return false, err
+	}
+	if prev, ok := have[o.TxID]; ok && prev.Expired == o.Expired {
+		return false, nil
+	}
+	key := KeyConfirmed
+	if o.Expired {
+		key = KeyExpired
+	}
+	raw, err := json.Marshal(o)
+	if err != nil {
+		return false, err
+	}
+	return true, b.addHistoryWith(date, action, key, raw)
+}
+
+// Outcomes lists the recorded outcomes by transaction id. A confirmation
+// wins over an expiry recorded earlier or later: confirmed is a fact about a
+// block.
+func (b *Bundle) Outcomes() (map[string]Outcome, error) {
+	raws, err := b.root.Array("history")
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]Outcome{}
+	for _, r := range raws {
+		var e map[string]json.RawMessage
+		if json.Unmarshal(r, &e) != nil {
+			continue
+		}
+		for key, expired := range map[string]bool{KeyConfirmed: false, KeyExpired: true} {
+			v, ok := e[key]
+			if !ok {
+				continue
+			}
+			var o Outcome
+			if json.Unmarshal(v, &o) != nil || o.TxID == "" {
+				continue
+			}
+			o.Expired = expired
+			if prev, have := out[o.TxID]; have && !prev.Expired {
+				continue
+			}
+			out[o.TxID] = o
 		}
 	}
 	return out, nil
@@ -613,6 +726,17 @@ const (
 	// KeyAssetSubmitted is the history entry's field, written by `execute`
 	// after a submit: the update of the asset record, submitted.
 	KeyAssetSubmitted = "spoAssetSubmitted"
+	// KeyTxCBOR is the history entry's field that holds the signed transaction
+	// (hex) next to KeyAssetSubmitted, so that a later reader can derive the
+	// transaction id and the validity bound from the transaction itself.
+	KeyTxCBOR = "spoTxCbor"
+	// KeyConfirmed and KeyExpired are history fields of their own entry,
+	// written by the online machine once a provider has said a submitted
+	// transaction is in a block (with the depth and the providers) or can no
+	// longer be included. The machine that holds the records applies a carried
+	// update only on KeyConfirmed.
+	KeyConfirmed = "spoConfirmed"
+	KeyExpired   = "spoExpired"
 )
 
 // Queue lists the queued transactions in order.
@@ -766,7 +890,8 @@ func (b *Bundle) CompleteSubmit(cborHex, txid, date string) error {
 			return fmt.Errorf("the asset update of the queued transaction is damaged: %w", err)
 		}
 		upd.Set("txid", Str(txid))
-		if err := b.addHistoryWith(date, entry.HistoryText(txid), KeyAssetSubmitted, upd.Compact()); err != nil {
+		txc, _ := json.Marshal(entry.CborHex)
+		if err := b.addHistoryWith(date, entry.HistoryText(txid), KeyAssetSubmitted, upd.Compact(), [2]json.RawMessage{json.RawMessage(`"` + KeyTxCBOR + `"`), txc}); err != nil {
 			return err
 		}
 	}

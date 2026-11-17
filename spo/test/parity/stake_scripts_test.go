@@ -349,6 +349,9 @@ func queuedEntryEqual(t *testing.T, up, port string) queued {
 	if upTxs[0].TxJSON.CborHex != portTxs[0].TxJSON.CborHex {
 		t.Errorf("queued transaction differs\n  upstream: %s\n  port:     %s", upTxs[0].TxJSON.CborHex, portTxs[0].TxJSON.CborHex)
 	}
+	// The port's one addition to an entry that carries a pending record update
+	// (a pool registration or retirement): the spoAssetPending field.
+	stripAssetPending(portDoc)
 	if u, p := normalised(upDoc), normalised(portDoc); u != p {
 		t.Errorf("transfer file differs\n--- upstream\n%s\n--- port\n%s", u, p)
 	}

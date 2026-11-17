@@ -390,20 +390,29 @@ var ErrSubmitOutcomeUnknown = chain.NewOutcomeUnknown("koios submittx: the outco
 // repeated here (SPO-Clight-INV-008; upstream's five attempts are not ported,
 // because a silent retry hides the first error). A failure after the request
 // may have been sent is returned as ErrSubmitOutcomeUnknown, wrapping the cause;
-// an HTTP status other than 202 is a definite answer and is not.
+// a 4xx answer other than 408, 425 and 429 is a definite refusal (chain.SubmitStatusRefuses) and is not; a 5xx and the other statuses are unknown.
 //
 // spec: SPO-Clight-INV-008
 func (c *Client) Submit(ctx context.Context, signedTx []byte) (chain.TxID, error) {
 	if len(signedTx) == 0 {
 		return chain.TxID{}, errors.New("koios submittx: empty transaction")
 	}
+	if err := ctx.Err(); err != nil {
+		return chain.TxID{}, err // nothing was sent
+	}
 	body, err := c.expect(ctx, request{op: "submittx", method: "POST", path: "/submittx",
 		body: signedTx, contentType: "application/cbor", auth: true, long: true}, 202)
 	if err != nil {
 		var st *statusError
-		if errors.As(err, &st) || ctx.Err() != nil || strings.Contains(err.Error(), "build request") {
-			return chain.TxID{}, err // an answer, or the request was never sent
+		switch {
+		case strings.Contains(err.Error(), "build request"):
+			return chain.TxID{}, err // the request was never sent
+		case errors.As(err, &st) && chain.SubmitStatusRefuses(st.status):
+			return chain.TxID{}, err // a definite refusal
 		}
+		// A transport failure, a cancellation or deadline after the request may
+		// have been sent, and any status that is not a definite refusal (5xx,
+		// 408, 425, 429, anything unexpected): the outcome is unknown.
 		return chain.TxID{}, fmt.Errorf("%w: %v", ErrSubmitOutcomeUnknown, err)
 	}
 	id := strings.TrimSpace(strings.ReplaceAll(string(body), `"`, ""))

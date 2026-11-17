@@ -374,3 +374,47 @@ func TestStatusAsksEveryProviderAndNeedsOne(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+// A probe (what settling uses) costs one poll when the transaction is simply
+// still waiting, and the two polls the expiry rule needs when it looks expired.
+//
+// spec: SPO-Xconfirm-PR-012
+func TestProbeEndsAtOnceUnlessItLooksExpired(t *testing.T) {
+	bound := uint64(1000)
+	pastBound := tipAt(bound + DefaultExpirySlack + 1)
+	req := Request{ID: id, ValidUntil: &bound, Depth: 1, Timeout: 30 * time.Second}
+
+	// Not seen, tip short of the bound: one poll, a timeout, nothing slept.
+	clk := &fakeClock{now: time.Unix(1000, 0)}
+	w := newWaiter(clk, ports.TxWatcher{Status: &script{name: "a", reads: []chain.Reading[chain.TxStatus]{none}}, Tip: tipAt(5)})
+	w.Probe = true
+	res, err := w.Wait(context.Background(), req)
+	if err != nil || res.Outcome != OutcomeTimedOut || res.Polls != 1 || len(clk.sleeps) != 0 {
+		t.Fatalf("waiting: %+v %v sleeps %v", res, err, clk.sleeps)
+	}
+
+	// Not seen and past the bound on every provider: two polls, expired.
+	clk = &fakeClock{now: time.Unix(1000, 0)}
+	w = newWaiter(clk, ports.TxWatcher{Status: &script{name: "a", reads: []chain.Reading[chain.TxStatus]{none}}, Tip: pastBound})
+	w.Probe = true
+	res, err = w.Wait(context.Background(), req)
+	if err != nil || res.Outcome != OutcomeExpired || res.Polls != 2 || len(clk.sleeps) != 1 {
+		t.Fatalf("expired: %+v %v sleeps %v", res, err, clk.sleeps)
+	}
+
+	// Confirmed on the first poll.
+	clk = &fakeClock{now: time.Unix(1000, 0)}
+	w = newWaiter(clk, ports.TxWatcher{Status: &script{name: "a", reads: []chain.Reading[chain.TxStatus]{block(1)}}})
+	w.Probe = true
+	if res, err = w.Wait(context.Background(), req); err != nil || res.Outcome != OutcomeConfirmed || res.Polls != 1 {
+		t.Fatalf("confirmed: %+v %v", res, err)
+	}
+
+	// No usable answer: unknown after one poll.
+	clk = &fakeClock{now: time.Unix(1000, 0)}
+	w = newWaiter(clk, ports.TxWatcher{Status: &script{name: "a", reads: []chain.Reading[chain.TxStatus]{unk}}})
+	w.Probe = true
+	if res, err = w.Wait(context.Background(), req); err != nil || res.Outcome != OutcomeUnknown || res.Polls != 1 {
+		t.Fatalf("unknown: %+v %v", res, err)
+	}
+}

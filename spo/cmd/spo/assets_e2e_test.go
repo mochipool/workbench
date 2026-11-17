@@ -69,7 +69,7 @@ func TestMintQueuedOfflineSettlesWhenExecuted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
-	mustHave(t, out, "Asset mint", "amount       100 p.tok", "Queued transaction ", "is updated when spo offline execute submits")
+	mustHave(t, out, "Asset mint", "amount       100 p.tok", "Queued transaction ", "is not changed yet: it is applied when spo offline execute has submitted")
 	if queueLen(t, transfer) != 1 {
 		t.Fatalf("not queued:\n%s", out)
 	}

@@ -188,6 +188,8 @@ func (r *poolRig) certAndDescriptor(t *testing.T, owners ...string) {
 // A first registration: descriptor, certificate, registration queued with the
 // cold, owner and payer witnesses, then the retirement. Nothing readable in
 // the sealed file.
+//
+// spec: SPO-Xconfirm-PR-003
 func TestPoolRegistrationAndRetirementOffline(t *testing.T) {
 	r := newPoolRig(t, "quartz-owner")
 	out, err := withPass(t, r.dir, testPass, "pool", "descriptor", "new", "p")
@@ -250,7 +252,7 @@ func TestPoolRegistrationAndRetirementOffline(t *testing.T) {
 	mustHave(t, out, "Pool registration: first registration (pays the pool deposit)", "pool id      pool1", "pledge       100.000000 ADA",
 		"cost         75.000000 ADA", "margin       0.05", "reward acct  quartz-owner", "owner        quartz-owner (local)", "relay        DNS relay.example.org:3001",
 		"metadata     https://example.org/p.metadata.json", "meta hash    ", "deposit      500.000000 ADA", "fee          ", "valid until  slot",
-		"[signed]", "NOT CHECKED", "Queued transaction ", "Recorded the PoolRegistration of pool p")
+		"[signed]", "NOT CHECKED", "Queued transaction ", "p.pool.cert is consumed", "record of pool p (regEpoch, regSubmitted) is not changed yet")
 	notLeaked(t, out, protectionKey, "SigningKey", "cborHex")
 	txs := queuedTxs(t, r.file)
 	if len(txs) != 1 {
@@ -283,7 +285,19 @@ func TestPoolRegistrationAndRetirementOffline(t *testing.T) {
 		t.Errorf("pool id %s, key hashes to %s", poolIDHex, pid)
 	}
 	out = r.mustG(t, nil, "pool", "witness", "status", "p")
-	mustHave(t, out, "Pool p: Registered", "No witness collection is open")
+	// Queued only: the descriptor does not record a registration, and says it is pending.
+	mustHave(t, out, "PENDING: the registration of pool p", "not yet recorded as registered", "No witness collection is open")
+	if strings.Contains(out, "Pool p: Registered") {
+		t.Errorf("a queued registration is shown as registered:\n%s", out)
+	}
+	if d := poolDescriptorText(t, r.dir); strings.Contains(d, "regSubmitted") {
+		t.Errorf("the descriptor records a registration that was only queued:\n%s", d)
+	}
+	dout, derr := exec2(t, r.dir, nil, "pool", "descriptor", "show", "p")
+	if derr != nil {
+		t.Fatalf("%v\n%s", derr, dout)
+	}
+	mustHave(t, dout, "PENDING: the registration of pool p")
 	// The offline entry carries the metadata files (SPO-05c-PR-005).
 	raw, _ := os.ReadFile(r.file)
 	if !strings.Contains(string(raw), "p.metadata.json") {
@@ -298,7 +312,7 @@ func TestPoolRegistrationAndRetirementOffline(t *testing.T) {
 		t.Fatalf("retire --yes: %v\n%s", err, out)
 	}
 	out = r.must(t, []string{"y"}, "pool", "retire", "p", "quartz-owner.payment")
-	mustHave(t, out, "Pool retirement: retirement certificate only", "retires at   epoch", "paid by      quartz-owner.payment", "Queued transaction ", "The pool retires at epoch")
+	mustHave(t, out, "Pool retirement: retirement certificate only", "retires at   epoch", "paid by      quartz-owner.payment", "Queued transaction ", "The pool retires at epoch", "retirement record of pool p (deregSubmitted) is not changed yet")
 	txs = queuedTxs(t, r.file)
 	if len(txs) != 2 || len(txs[1].witness[0]) != 2 {
 		t.Fatalf("%d queued transactions after the retirement", len(txs))

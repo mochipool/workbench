@@ -9,11 +9,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/mochipool/workbench/spo/internal/app/airgap"
 	appassets "github.com/mochipool/workbench/spo/internal/app/assets"
+	"github.com/mochipool/workbench/spo/internal/app/txconfirm"
+	"github.com/mochipool/workbench/spo/internal/app/txsettle"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/transfer"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -409,34 +412,101 @@ submitted. Light or online mode only.`,
 				}
 				pos = n
 			}
-			f := chainFlags{transfer: tf, wait: wf.wait, waitDepth: wf.waitDepth, waitTimeout: wf.waitTimeout}
-			spec := envSpec{flags: &f, config: true, needs: []Need{CapBundle, CapClock, CapSubmit, CapUtxos, CapRewards, CapTxID}}
+			f := chainFlags{transfer: tf, wait: wf.wait, waitDepth: wf.waitDepth, waitTimeout: wf.waitTimeout, noWait: wf.noWait}
+			spec := envSpec{flags: &f, config: true, needs: []Need{CapBundle, CapClock, CapSubmit, CapUtxos, CapRewards, CapTxID}, settlesIfPending: true}
 			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, o WireOptions) error {
-				// A queued asset mint or burn carries its record update in the
-				// queue entry (hazard H9). After the submit the hook applies it
-				// when this workspace holds the record or the pending update;
-				// the result also goes into the history of the file, for
-				// `spo asset settle` on the machine that queued it. It never
-				// fails the submission.
-				var hook ports.AssetUpdateHook
-				if s.Store != nil && env.Clock != nil {
-					hook = appassets.UpdateHook{Store: s.Store, Clock: env.Clock}
-				}
-				uc := airgap.ExecuteTx{Bundle: env.Bundle, Submitter: env.Submitter, Assets: hook, Utxos: env.Utxos, Rewards: env.Rewards,
+				uc := airgap.ExecuteTx{Bundle: env.Bundle, Submitter: env.Submitter, Utxos: env.Utxos, Rewards: env.Rewards,
 					Sync: env.Sync, Confirmer: executeConfirmer{a}, Clock: env.Clock, OnlineCLI: a.versions(o).CLI,
 					TxIDs: env.TxIDs, Metadata: env.Metadata, Hasher: env.MetadataHasher, Tickers: env.Tickers}
 				if yes {
 					uc.Approval = airgap.ApprovalSkip
 				}
 				res, err := uc.Run(ctx, pos)
-				return a.reportExecute(res, err, o, yes)
+				rerr := a.reportExecute(res, err, o, yes)
+				if err == nil && res.Submitted && res.Entry.AssetPending != "" {
+					a.executeSettling(s, env, o, &f, res)
+				}
+				return rerr
 			})
 		},
 	}
 	addTransferFlag(cmd, &tf)
 	cmd.Flags().BoolVar(&yes, "yes", false, "approve without asking (the summary is still printed)")
 	addWaitFlags(cmd, &wf)
+	cmd.Flags().BoolVar(&wf.noWait, "no-wait", false, "do not wait for the confirmation of an entry that carries a pending record update (this command waits for it by default): spo tx settle records the confirmation later")
 	return cmd
+}
+
+// executeSettling arranges what happens after the submit of an entry that
+// carries a pending update (hazard H9): the command waits for confirmation
+// unless --no-wait, and on a confirmed wait records in the history of the
+// transfer file that the transaction is confirmed (depth and providers) and
+// applies the update where this workspace holds the pending record or a copy
+// of the record. An accepted submit alone applies nothing.
+func (a *app) executeSettling(s *session, env *Env, o WireOptions, f *chainFlags, res airgap.ExecuteResult) {
+	w := a.d.Out
+	if f.noWait {
+		fmt.Fprintf(w, "Not waiting (--no-wait): the transaction %s is recorded as submitted only. Record its confirmation with: spo tx settle --transfer-file %s\n", res.TxID, o.TransferFile)
+		return
+	}
+	if !env.Has(CapTxStatus) {
+		fmt.Fprintf(w, "Not waiting: %s. The transaction %s is recorded as submitted only; record its confirmation with spo tx settle where a provider is configured.\n", shown(env.Reason(CapTxStatus)), res.TxID)
+		return
+	}
+	s.lateWait = true
+	if env.Bundle == nil || s.rec == nil {
+		return
+	}
+	hook := appassets.UpdateHook{Store: s.Store, Clock: env.Clock, Appliers: settleAppliers(), TxIDs: env.TxIDs, Viewer: env.TxViewer}
+	if tx, err := res.Entry.TxBytes(); err == nil {
+		hook.Tx = tx
+	}
+	update, id := res.Entry.AssetPending, res.TxID
+	// This replaces the default hook: the pending record of this workspace is
+	// applied by the update hook, once, and the confirmation goes into the file.
+	s.rec.onConfirmed = []func(context.Context, chain.TxID, txconfirm.Result) error{func(ctx context.Context, tid chain.TxID, tr txconfirm.Result) error {
+		if tid != id {
+			return nil
+		}
+		depth, _ := txsettle.LeastDepth(tr.Answers)
+		var src []string
+		for _, ans := range tr.Answers {
+			src = append(src, string(ans.Source))
+		}
+		oc := transfer.Outcome{TxID: id.String(), Depth: depth, Sources: src}
+		date := env.Clock.Now().Format(time.RFC1123Z)
+		if err := env.Bundle.MutateBundle(ctx, func(nb *transfer.Bundle) error {
+			_, err := nb.RecordOutcome(oc, date, fmt.Sprintf("transaction %s confirmed at depth %d", id, depth))
+			return err
+		}); err != nil {
+			return fmt.Errorf("record the confirmation in %s: %w", o.TransferFile, err)
+		}
+		fmt.Fprintf(w, "Recorded in %s: transaction %s is confirmed at least %d deep%s.\n", o.TransferFile, id, depth, providersText(src))
+		if s.Store == nil || env.Clock == nil {
+			return nil
+		}
+		return hook.OnConfirmedUpdate(ctx, id, update)
+	}}
+	s.rec.onUnsettled = append(s.rec.onUnsettled, func(ctx context.Context, tid chain.TxID, tr txconfirm.Result) {
+		if tid == id && tr.Outcome == txconfirm.OutcomeExpired {
+			// Recorded under the strict rule of the wait that just ended
+			// expired (SPO-Xconfirm-PRE-002), as a confirmation is.
+			date := env.Clock.Now().Format(time.RFC1123Z)
+			err := env.Bundle.MutateBundle(ctx, func(nb *transfer.Bundle) error {
+				_, err := nb.RecordOutcome(transfer.Outcome{TxID: id.String(), Expired: true}, date, fmt.Sprintf("transaction %s expired: it can no longer be included", id))
+				return err
+			})
+			if err != nil {
+				fmt.Fprintf(w, "Could not record the expiry of transaction %s in %s: %s. Record it with: spo tx settle --transfer-file %s\n", id, o.TransferFile, shown(err.Error()), o.TransferFile)
+				return
+			}
+			fmt.Fprintf(w, "Recorded in %s: transaction %s expired. The machine that holds the records discards its update with spo asset settle; that rests on this machine's providers' report.\n", o.TransferFile, id)
+			return
+		}
+		if tid == id {
+			fmt.Fprintf(w, "The transfer file records transaction %s as submitted, not as confirmed: the machine that holds the records applies its update only once it is confirmed. Record it with: spo tx settle --transfer-file %s\n", id, o.TransferFile)
+		}
+	})
 }
 
 func (a *app) reportExecute(res airgap.ExecuteResult, err error, o WireOptions, yes bool) error {

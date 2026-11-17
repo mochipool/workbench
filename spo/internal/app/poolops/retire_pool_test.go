@@ -6,10 +6,13 @@ import (
 	"strings"
 	"testing"
 
+	appassets "github.com/mochipool/workbench/spo/internal/app/assets"
 	"github.com/mochipool/workbench/spo/internal/app/txflow"
+	"github.com/mochipool/workbench/spo/internal/domain/assets"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
+	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
 func (r *prig) retirement() GenerateRetirementCertificate {
@@ -116,7 +119,7 @@ func (r *prig) retireReady(t *testing.T, e uint64) {
 }
 
 // spec: SPO-07b-IF-001, SPO-07b-IF-002, SPO-07b-IN-001, SPO-07b-IN-002, SPO-07b-IN-003, SPO-07b-INV-001, SPO-07b-INV-002, SPO-07b-MODE-001,
-// spec: SPO-07b-OUT-001, SPO-07b-OUT-003, SPO-07b-PR-001, SPO-07b-INV-004, SPO-07b-MODE-004, SPO-Ptx-PR-004
+// spec: SPO-07b-OUT-001, SPO-07b-OUT-003, SPO-07b-PR-001, SPO-07b-INV-004, SPO-07b-MODE-004, SPO-Ptx-PR-004, SPO-Xconfirm-PR-002
 func TestRetirementSubmitsOnlineWithTwoWitnesses(t *testing.T) {
 	r := newPoolRig(t)
 	r.retireReady(t, 12)
@@ -141,8 +144,19 @@ func TestRetirementSubmitsOnlineWithTwoWitnesses(t *testing.T) {
 	if got := r.conf.got[0]; got.Kind != "pool retirement" || got.Pool != r.poolID.Bech32() || len(got.Attachments) != 1 || !strings.Contains(got.Attachments[0], "epoch 12") {
 		t.Errorf("%+v", got)
 	}
+	// Nothing is recorded on the accepted submit; confirmation records it once
+	// (SPO-Xconfirm-PR-002).
 	d := r.descriptor()
-	if d.Text("deregSubmitted") != "Mon, 16 Nov 2026 12:00:00 +0000" {
+	if d.Has("deregSubmitted") || !res.RecordPending {
+		t.Errorf("%s", d.Render())
+	}
+	if p, ok := r.pending(res.TxID); !ok || p.Kind != assets.PendingPoolRetirement || p.Pool != "mypool" || p.Queued || p.ValidUntil == nil {
+		t.Errorf("the pending update: %v %+v", ok, p)
+	}
+	if !r.confirm(res.TxID) || r.confirm(res.TxID) {
+		t.Error("the pending retirement is applied once")
+	}
+	if d = r.descriptor(); d.Text("deregSubmitted") != "Mon, 16 Nov 2026 12:00:00 +0000" {
 		t.Errorf("%s", d.Render())
 	}
 	// The certificate is used up, where upstream leaves it to be submitted again.
@@ -167,8 +181,14 @@ func TestRetirementQueuesOffline(t *testing.T) {
 	}
 	q := r.queue.got[0]
 	if q.Type != "PoolRetirement" || q.FromName != "pay" || q.Description != "signed pool retirement transaction for 'MYPL', payment via 'pay'" ||
-		fmt.Sprint(q.Extra) != "[{poolMetaTicker MYPL}]" {
+		q.Extra[0] != (ports.QueuedField{Key: "poolMetaTicker", Value: "MYPL"}) {
 		t.Errorf("%+v", q)
+	}
+	if r.descriptor().Has("deregSubmitted") || len(q.Extra) != 2 || q.Extra[1].Key != "spoAssetPending" {
+		t.Errorf("a queued retirement records nothing until it is confirmed: %q", q.Extra)
+	}
+	if !r.confirm(res.TxID) {
+		t.Fatal("nothing pending")
 	}
 	if got := r.descriptor().Text("deregSubmitted"); got != "Mon, 16 Nov 2026 12:00:00 +0000 (only offline, no proof)" {
 		t.Errorf("%q", got)
@@ -285,5 +305,72 @@ func TestStageMapOfTheRetirement(t *testing.T) {
 	r2.edit("deregSubmitted", "then")
 	if _, err := r2.run(r2.register(false)); !errors.Is(err, pool.ErrChooseType) {
 		t.Errorf("%v", err)
+	}
+}
+
+// A submission whose outcome is unknown may be in a block: the pending record
+// stays (settling decides later), where a refused one leaves nothing behind;
+// the certificate is not consumed either way (SPO-Xconfirm-PR-006).
+//
+// spec: SPO-Xconfirm-PR-006, SPO-Xconfirm-PR-008
+func TestUnknownSubmitOutcomeKeepsThePendingRecord(t *testing.T) {
+	for _, mismatch := range []bool{false, true} {
+		t.Run(fmt.Sprintf("id mismatch %v", mismatch), func(t *testing.T) { unknownOutcomeKeepsPending(t, mismatch) })
+	}
+	t.Run("a refusal removes it", func(t *testing.T) {
+		r := ready(t)
+		r.sub.err = errors.New("node said no")
+		if _, err := r.run(r.register(false)); err == nil {
+			t.Fatal("accepted")
+		}
+		if list, _, _ := appassets.ListPending(ctx, r.store, r.store); len(list) != 0 {
+			t.Errorf("a refused registration left %+v", list)
+		}
+	})
+}
+
+func unknownOutcomeKeepsPending(t *testing.T, mismatch bool) {
+	for _, tc := range []struct {
+		name string
+		run  func(r *prig) error
+		kind string
+	}{
+		{"retirement", func(r *prig) error {
+			r.retireReady(t, 12)
+			_, err := r.retire(false).Run(ctx, RetireRequest{Pool: "mypool", Payer: "pay"})
+			return err
+		}, assets.PendingPoolRetirement},
+		{"registration", func(r *prig) error {
+			_, err := r.run(r.register(false))
+			return err
+		}, assets.PendingPoolRegistration},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := ready(t)
+			if mismatch {
+				r.sub.wrongID = true // the provider accepted it and named another id
+			} else {
+				r.sub.err = chain.NewOutcomeUnknown("the node did not answer")
+			}
+			err := tc.run(r)
+			if err == nil || !strings.Contains(err.Error(), "stays pending") {
+				t.Fatalf("%v", err)
+			}
+			list, ok, lerr := appassets.ListPending(ctx, r.store, r.store)
+			if lerr != nil || !ok || len(list) != 1 || list[0].Kind != tc.kind {
+				t.Fatalf("pending: %v %v %+v", lerr, ok, list)
+			}
+			if d := r.descriptor(); d.Has("regSubmitted") || d.Has("deregSubmitted") {
+				t.Error("the record was written on an unknown outcome")
+			}
+			// Settling later applies it once the transaction is confirmed.
+			id, _ := chain.ParseTxID(list[0].TxID)
+			if !r.confirm(id) {
+				t.Fatal("nothing to apply")
+			}
+			if d := r.descriptor(); !d.Has("regSubmitted") && !d.Has("deregSubmitted") {
+				t.Error("not applied")
+			}
+		})
 	}
 }

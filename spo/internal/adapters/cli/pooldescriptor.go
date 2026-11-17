@@ -476,6 +476,7 @@ then signs elsewhere and its slot stays open until its witness is imported.
 					return err
 				}
 				a.d.Out.Write(out.Render())
+				a.printPoolPending(ctx, a.d.Err, s, name)
 				if hidden {
 					fmt.Fprintf(a.d.Err, "%s is set and is not shown.\n", pool.FieldRegProtection)
 				}

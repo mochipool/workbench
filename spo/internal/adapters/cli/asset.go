@@ -219,21 +219,26 @@ address that pays the fee and receives the asset. The policy key and the
 payer's key sign. The summary is shown and you are asked before anything is
 signed (default No; --yes approves).
 
-The asset record <policy>.<asset> keeps what was ` + past + `. With a transaction that is
-sent at once the record is updated then. A transaction that is only queued
-(offline mode) leaves the record as it is: the update waits in the workspace
-under the transaction's id and also travels in the queue entry of the transfer
-file. spo offline execute applies it on the machine that submits it when that
-machine holds the record; the submission is recorded in the transfer file's
-history, and on the machine that queued the mint spo asset settle applies it
-once the file is carried back. Show it with: spo asset show <policy.asset>.
+The asset record <policy>.<asset> keeps what was ` + past + `. It is updated when the
+transaction is confirmed in a block, not when it is accepted: the update waits
+in the workspace under the transaction's id (a pending update). In light and
+online mode this command waits for the confirmation by default (up to
+--wait-timeout, default 5m, at --wait-confirmations blocks, default 1) and then
+applies the update; --no-wait skips the wait, and so does a timeout or Ctrl-C:
+the update then stays pending and spo tx settle applies it once the providers
+confirm the transaction. A transaction that is only queued (offline mode) also
+leaves the record as it is: the update travels in the queue entry of the
+transfer file; spo offline execute records on the online machine that the
+transaction was submitted and, once it is confirmed, that too, and spo asset
+settle applies it on the machine that queued it. Show it with: spo asset show
+<policy.asset>.
 
 The extra parameters are flags: --message, --metadata-file, --encrypt-messages
 and --input TXHASH#IX.`,
 		Args: cobra.ExactArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			needs := assetTxNeeds(CapPolicyID, CapClock)
-			spec := envSpec{flags: &flags, config: true, extras: &extra, needs: needs}
+			spec := envSpec{flags: &flags, config: true, extras: &extra, needs: needs, settles: true}
 			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, o WireOptions) error {
 				base := appassets.Base{
 					Store: s.Store, Signers: env.Signers, Utxos: env.Utxos, Params: env.Params, Tip: env.Tip,
@@ -261,11 +266,11 @@ and --input TXHASH#IX.`,
 						return fmt.Errorf("%w: nothing was signed, submitted or queued", err)
 					}
 					if res.TxID != (chain.TxID{}) {
-						a.reportAsset(verb, args, res, env, o, messages)
+						a.reportAsset(verb, args, res, env, o, messages, s)
 					}
 					return err
 				}
-				a.reportAsset(verb, args, res, env, o, messages)
+				a.reportAsset(verb, args, res, env, o, messages, s)
 				return nil
 			})
 		},
@@ -273,11 +278,11 @@ and --input TXHASH#IX.`,
 	cmd.Flags().StringArrayVar(&messages, "message", nil, "CIP-20 message line, at most 64 bytes (repeatable)")
 	cmd.Flags().BoolVar(&yes, "yes", false, "approve without asking (the summary is still printed)")
 	extra.add(cmd, &messages, extraMint)
-	addSubmitFlags(cmd, &flags, true)
+	addSettleFlags(cmd, &flags, true)
 	return cmd
 }
 
-func (a *app) reportAsset(verb string, args []string, res appassets.Result, env *Env, o WireOptions, messages []string) {
+func (a *app) reportAsset(verb string, args []string, res appassets.Result, env *Env, o WireOptions, messages []string, s *session) {
 	w := a.d.Out
 	if res.ApprovalSkipped {
 		printStakeSummary(w, ports.TxSummary{Kind: "asset " + verb, Source: args[2], Destination: args[2],
@@ -290,11 +295,21 @@ func (a *app) reportAsset(verb string, args []string, res appassets.Result, env 
 	case res.Queued:
 		fmt.Fprintf(w, "Queued transaction %s in %s. Submit it from an online machine.\n", res.TxID, o.TransferFile)
 	}
+	if res.RecordPending {
+		a.reportPending(w, "asset record "+shown(res.Record), res.Queued, s)
+	}
+}
+
+// reportPending says that a record waits for the transaction's confirmation
+// and, when this command is not waiting for it, how to apply it.
+func (a *app) reportPending(w io.Writer, what string, queued bool, s *session) {
 	switch {
-	case res.RecordUpdated:
-		fmt.Fprintf(w, "Updated the asset record %s.\n", res.Record)
-	case res.RecordPending:
-		fmt.Fprintf(w, "The asset record %s is updated when spo offline execute submits this transaction.\n", res.Record)
+	case queued:
+		fmt.Fprintf(w, "The %s is not changed yet: it is applied when spo offline execute has submitted this transaction and it is confirmed. On the online machine spo tx settle records the confirmation in the transfer file; here spo asset settle applies it.\n", what)
+	case s != nil && s.waiting:
+		fmt.Fprintf(w, "The %s is changed when the transaction is confirmed.\n", what)
+	default:
+		fmt.Fprintf(w, "The %s is not changed yet: it waits for the transaction to be confirmed. %s\n", what, settleLater)
 	}
 }
 
@@ -346,36 +361,39 @@ queued is not counted until it has been submitted. The record holds no secret.`,
 
 func (a *app) assetSettleCommand() *cobra.Command {
 	var tf string
-	var dry, discard bool
+	var dry, discard, accept bool
 	cmd := &cobra.Command{
 		Use:   "settle [--dry-run] [--transfer-file PATH]",
-		Short: "Apply the results of submitted mints and burns to the asset records",
+		Short: "Apply the confirmed results of queued transactions (mints, burns, pool registrations and retirements) from the transfer file",
 		Long: `Read the history of the transfer file that came back from the online machine
-and apply, to the asset records of this workspace, each queued mint or burn
-that spo offline execute submitted. Each update is applied once: a second run
-changes nothing.
+and apply, to the records of this workspace (the asset records, the pool
+descriptors), each pending update of a queued transaction that the file records
+as CONFIRMED in a block (spo tx settle on the online machine, or the wait of
+spo offline execute, writes that). Each update is applied once: a second run
+changes nothing. The same code path serves every kind of pending update; the
+name is from the first version, which knew only assets.
 
-A queued mint or burn that this transfer file knows nothing about (neither
-queued nor submitted) is reported and kept: the file may be the wrong one. If
-its transaction was removed with spo offline clear transactions, pass
+A transaction the file records as submitted but not as confirmed is reported as
+waiting and its update is kept: an accepted submit is not a transaction in a
+block. --accept-submitted applies it anyway: it trusts the submit alone, so use
+it only when you know the transaction landed. One the file records as expired
+(it can no longer be included) is discarded with a notice, never applied.
+
+A pending update that this transfer file knows nothing about (neither queued
+nor submitted) is reported and kept: the file may be the wrong one. If its
+transaction was removed with spo offline clear transactions, pass
 --discard-unmatched to drop the update; it is never applied. One that is still
 in the queue waits. --dry-run shows what would happen and changes nothing.
 
-Run it on the machine that holds the policy key and the asset record, with the
-transfer file that was carried back.`,
+Run it on the machine that holds the keys and the records, with the transfer
+file that was carried back. It needs no provider and works offline.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			f := chainFlags{transfer: tf}
 			spec := envSpec{flags: &f, config: true, needs: []Need{CapBundle, CapClock}}
 			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, o WireOptions) error {
-				uc := appassets.SettleFromBundle{Store: s.Store, Bundle: env.Bundle, Clock: env.Clock, DiscardUnmatched: discard}
-				if l, ok := any(s.Store).(ports.SourceLister); ok {
-					uc.Lister = l
-				} else if s.Sealed != nil {
-					if l, ok := any(s.Sealed).(ports.SourceLister); ok {
-						uc.Lister = l
-					}
-				}
+				uc := appassets.SettleFromBundle{Store: s.Store, Bundle: env.Bundle, Clock: env.Clock, Lister: pendingLister(s),
+					Appliers: settleAppliers(), DiscardUnmatched: discard, AcceptSubmitted: accept}
 				var res appassets.SettleResult
 				var err error
 				if dry {
@@ -389,27 +407,9 @@ transfer file that was carried back.`,
 					}
 					return err
 				}
-				w := a.d.Out
-				verb := map[bool]string{false: "Applied", true: "Would apply"}[dry]
-				for _, x := range res.Applied {
-					fmt.Fprintf(w, "%s %s to the asset record %s (transaction %s).\n", verb, shown(fmt.Sprint(x.Action)), shown(x.Record), shown(fmt.Sprint(x.TxID)))
-				}
-				for _, x := range res.Discarded {
-					fmt.Fprintf(w, "Notice: the transaction %s (%s on %s) is not in the queue and was not submitted: its update is %s, never applied.\n",
-						shown(fmt.Sprint(x.TxID)), shown(fmt.Sprint(x.Action)), shown(x.Record), map[bool]string{false: "discarded", true: "to be discarded"}[dry])
-				}
-				for _, x := range res.Unmatched {
-					fmt.Fprintf(w, "Unmatched: %s knows nothing of the transaction %s (%s on %s). Its update is kept. If the transaction was cleared from the queue, run again with --discard-unmatched.\n",
-						o.TransferFile, shown(fmt.Sprint(x.TxID)), shown(fmt.Sprint(x.Action)), shown(x.Record))
-				}
-				for _, x := range res.Waiting {
-					fmt.Fprintf(w, "Waiting: the transaction %s (%s on %s) is still queued.\n", shown(fmt.Sprint(x.TxID)), shown(fmt.Sprint(x.Action)), shown(x.Record))
-				}
-				if res.NoListing {
-					fmt.Fprintln(w, "Note: this workspace cannot list its pending updates, so updates of removed transactions were not looked for.")
-				}
-				if len(res.Applied)+len(res.Discarded)+len(res.Waiting)+len(res.Unmatched) == 0 {
-					fmt.Fprintf(w, "Nothing to settle: %s reports no submitted update that waits in this workspace.\n", o.TransferFile)
+				a.printBundleSettle(o.TransferFile, res, dry)
+				if n := len(res.Inconsistent); n > 0 {
+					return fmt.Errorf("%d update(s) were kept because the transfer file's outcome for them does not match what this workspace queued", n)
 				}
 				return nil
 			})
@@ -418,5 +418,59 @@ transfer file that was carried back.`,
 	addTransferFlag(cmd, &tf)
 	cmd.Flags().BoolVar(&dry, "dry-run", false, "show what would be applied or discarded, change nothing")
 	cmd.Flags().BoolVar(&discard, "discard-unmatched", false, "drop pending updates whose transaction this transfer file does not know (use after clearing the queue)")
+	cmd.Flags().BoolVar(&accept, "accept-submitted", false, "TRUSTS THE SUBMIT ALONE: also apply updates whose transaction the file records as submitted but not as confirmed in a block")
 	return cmd
+}
+
+func settledText(x appassets.Settled) string {
+	return fmt.Sprintf("%s on %s (transaction %s)", shown(x.Action), shown(x.Record), shown(x.TxID))
+}
+
+func (a *app) printBundleSettle(file string, res appassets.SettleResult, dry bool) {
+	w := a.d.Out
+	verb := map[bool]string{false: "Applied", true: "Would apply"}[dry]
+	for _, x := range res.Applied {
+		switch {
+		case x.Trusted:
+			fmt.Fprintf(w, "%s %s, on the submit alone: %s does not record it as confirmed in a block (--accept-submitted).\n", verb, settledText(x), file)
+		default:
+			fmt.Fprintf(w, "%s %s: confirmed at least %d deep%s.\n", verb, settledText(x), x.Depth, providersText(x.Sources))
+		}
+	}
+	for _, x := range res.Expired {
+		fmt.Fprintf(w, "Notice: %s expired, it can no longer be included: its update is %s, never applied. This rests on the online machine's report in %s, which this machine cannot check.\n", settledText(x), map[bool]string{false: "discarded", true: "to be discarded"}[dry], file)
+	}
+	for _, x := range res.Inconsistent {
+		fmt.Fprintf(w, "Inconsistent: %s: %s. Its update is kept and nothing was applied or discarded.\n", settledText(x), shown(x.Why))
+	}
+	for _, x := range res.Discarded {
+		fmt.Fprintf(w, "Notice: %s is not in the queue and was not submitted: its update is %s, never applied.\n",
+			settledText(x), map[bool]string{false: "discarded", true: "to be discarded"}[dry])
+	}
+	for _, x := range res.Submitted {
+		fmt.Fprintf(w, "Waiting: %s was submitted, but %s does not record it as confirmed in a block. Its update is kept. Run spo tx settle on the online machine, carry the file back, and run this again; or pass --accept-submitted to trust the submit alone.\n", settledText(x), file)
+	}
+	for _, x := range res.Unmatched {
+		fmt.Fprintf(w, "Unmatched: %s knows nothing of %s. Its update is kept. If the transaction was cleared from the queue, run again with --discard-unmatched.\n", file, settledText(x))
+	}
+	for _, x := range res.Waiting {
+		fmt.Fprintf(w, "Waiting: %s is still queued.\n", settledText(x))
+	}
+	if res.NoListing {
+		fmt.Fprintln(w, "Note: this workspace cannot list its pending updates, so updates of removed transactions were not looked for.")
+	}
+	if len(res.Applied)+len(res.Discarded)+len(res.Expired)+len(res.Waiting)+len(res.Unmatched)+len(res.Submitted)+len(res.Inconsistent) == 0 {
+		fmt.Fprintf(w, "Nothing to settle: %s reports no update that waits in this workspace.\n", file)
+	}
+}
+
+func providersText(src []string) string {
+	if len(src) == 0 {
+		return ""
+	}
+	out := make([]string, len(src))
+	for i, x := range src {
+		out[i] = shown(x)
+	}
+	return " (" + strings.Join(out, ", ") + ")"
 }
