@@ -296,6 +296,7 @@ func (r readOnlySource) Open(ctx context.Context, ref ports.Ref) (*secret.Buffer
 	return r.s.Open(ctx, ref)
 }
 func (r readOnlySource) List(ctx context.Context) (ports.SourceListing, error) { return r.s.List(ctx) }
+func (r readOnlySource) Subdirs(ctx context.Context) ([]string, error)         { return r.s.Subdirs(ctx) }
 
 // sealedStore adapts *sqlitestore.Store to cli.SealedStore.
 type sealedStore struct{ s *sqlitestore.Store }

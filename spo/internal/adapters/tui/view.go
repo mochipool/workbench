@@ -91,6 +91,8 @@ func (m *model) render() string {
 		body, help = m.unlockView()
 	case m.picker != nil:
 		body, help = m.pickerView()
+	case m.screen == scImport:
+		body, help = m.importView()
 	case m.screen == scForm:
 		body, help = m.formView()
 	case m.screen == scRun:
@@ -262,7 +264,11 @@ func (m *model) formView() ([]string, string) {
 	if m.notice != "" {
 		lines = append(lines, errStyle.Render(fit(CleanLine(m.notice), m.w-1)))
 	}
-	return lines, "tab/down next · up prev · space toggles · enter next or adds · ctrl+r run · esc back"
+	help := "tab/down next · up prev · space toggles · enter next or adds · ctrl+r run · esc back"
+	if c.Annotations[uihint.Guided] == uihint.GuidedImport {
+		help = "ctrl+g guided import · " + help
+	}
+	return lines, help
 }
 
 func cleanAll(in []string) []string {
@@ -280,6 +286,9 @@ func (m *model) runView() ([]string, string) {
 		text.Write(s.data)
 	}
 	all := wrap(Clean(text.String()), m.w-1)
+	if r.quiet && !r.done {
+		all = []string{"working..."}
+	}
 	// the prompt, if any, is the last thing: shown apart from the transcript
 	var modal []string
 	if p := r.prompt; p != nil {

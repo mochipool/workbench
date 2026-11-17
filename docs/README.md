@@ -38,6 +38,7 @@ Operator workflows:
 * [Rotate KES keys](./how-to/rotate-kes-keys.md)
 * [Claim rewards air-gapped](./how-to/claim-rewards-air-gapped.md)
 * [Update pool parameters](./how-to/update-pool-parameters.md)
+* [Import pools and wallets kept in separate folders](./how-to/import-multi-folder-layout.md)
 * [Send ADA](./how-to/send-ada.md)
 * [Resume an interrupted run](./how-to/resume-an-interrupted-run.md)
 

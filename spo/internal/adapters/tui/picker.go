@@ -25,6 +25,7 @@ type picker struct {
 	note    string
 	confirm string // the link waiting for a second Enter
 	field   *field
+	onDone  func(string) // set by a picker that is not for a form field
 }
 
 type pentry struct {
@@ -40,6 +41,16 @@ func newPicker(f *field, start string) *picker {
 		start = abs
 	}
 	p := &picker{spec: *f.hint, dir: start, field: f}
+	p.load()
+	return p
+}
+
+// newDirPicker starts a picker that chooses a directory and hands it to done.
+func newDirPicker(start string, done func(string)) *picker {
+	if abs, err := filepath.Abs(start); err == nil {
+		start = abs
+	}
+	p := &picker{spec: uihint.Spec{Kind: uihint.KindDir}, dir: start, onDone: done}
 	p.load()
 	return p
 }
@@ -231,9 +242,13 @@ func (m *model) pickActivate(e pentry) {
 // pickDone puts the chosen path in the field and closes the picker.
 func (m *model) pickDone(path string) {
 	p := m.picker
+	m.picker = nil
+	if p.onDone != nil {
+		p.onDone(path)
+		return
+	}
 	p.field.text.set(path)
 	p.field.cyc = nil
-	m.picker = nil
 }
 
 // pickerView draws the picker in the body.

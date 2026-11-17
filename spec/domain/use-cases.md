@@ -14,9 +14,10 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 
 | Use case | Specs | Requirements |
 | --- | --- | --- |
+| `DiscoverSources` | [`Xmulti`](../extensions/Xmulti.md) | 55 |
 | `EnrollParty` | [`Xparty`](../extensions/Xparty.md) | 69 |
 | `ImportSigningResponse` | [`Xparty`](../extensions/Xparty.md) | 69 |
-| `ImportWorkspace` | [`Pfiles`](../upstream/patterns/Pfiles.md) | 51 |
+| `ImportWorkspace` | [`Pfiles`](../upstream/patterns/Pfiles.md), [`Xmulti`](../extensions/Xmulti.md) | 106 |
 | `ProtectSigningKey` | [`01protectKey`](../upstream/scripts/01_protectKey.md) | 29 |
 | `RequestSignatures` | [`Xparty`](../extensions/Xparty.md) | 69 |
 | `ReviewSigningRequest` | [`Xparty`](../extensions/Xparty.md) | 69 |
@@ -223,4 +224,4 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 | [`25a_genAction`](../upstream/scripts/25a_genAction.md) | Generate a governance action file | governance | 75 | draft |
 | [`25b_regAction`](../upstream/scripts/25b_regAction.md) | Submit governance actions | governance, transaction-construction | 71 | draft |
 
-Totals: 69 specs, 2371 requirements, 87 use cases.
+Totals: 70 specs, 2426 requirements, 88 use cases.
