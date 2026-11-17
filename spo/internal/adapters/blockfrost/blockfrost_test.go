@@ -576,6 +576,36 @@ func TestSubmit(t *testing.T) {
 	}
 }
 
+// spec: SPO-Xconfirm-PR-008
+func TestSubmitOutcomeClassification(t *testing.T) {
+	r := newRig(t)
+	for status, unknown := range map[int]bool{400: false, 403: false, 408: true, 425: true, 429: true, 500: true, 502: true} {
+		r.json("POST /api/v0/tx/submit", status, "x")
+		_, err := r.client(t).Submit(context.Background(), []byte{1})
+		if err == nil || errors.Is(err, ErrSubmitOutcomeUnknown) != unknown {
+			t.Errorf("status %d: unknown=%v want %v (%v)", status, errors.Is(err, ErrSubmitOutcomeUnknown), unknown, err)
+		}
+	}
+	// A deadline that ends while the request is in flight may follow a
+	// transaction that was sent.
+	started := make(chan struct{})
+	r.routes["POST /api/v0/tx/submit"] = func(w http.ResponseWriter, req *http.Request) {
+		io.Copy(io.Discard, req.Body)
+		close(started)
+		<-req.Context().Done()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { <-started; cancel() }()
+	if _, err := r.client(t).Submit(ctx, []byte{1}); !errors.Is(err, ErrSubmitOutcomeUnknown) {
+		t.Errorf("cancelled after sending: %v", err)
+	}
+	done, stop := context.WithCancel(context.Background())
+	stop()
+	if _, err := r.client(t).Submit(done, []byte{1}); err == nil || errors.Is(err, ErrSubmitOutcomeUnknown) {
+		t.Errorf("cancelled before sending: %v", err)
+	}
+}
+
 func TestBodyLimit(t *testing.T) {
 	r := newRig(t)
 	r.json("GET /api/v0/blocks/latest", 200, `{"slot":1,"epoch":1,"pad":"`+strings.Repeat("x", 2000)+`"}`)

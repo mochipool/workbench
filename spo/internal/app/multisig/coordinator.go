@@ -11,6 +11,7 @@ import (
 	"golang.org/x/crypto/blake2b"
 
 	"github.com/mochipool/workbench/spo/internal/app/txflow"
+	"github.com/mochipool/workbench/spo/internal/domain/assets"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
@@ -931,6 +932,15 @@ func (c Coordinator) submittedAfterRequest(r ports.Reader, cs collState) (id cha
 	b, err := hex.DecodeString(cs.Body)
 	if err != nil || len(b) != len(id) {
 		return id, false, false
+	}
+	// A registration that was submitted and waits for its confirmation has no
+	// regSubmitted yet (hazard H9): its pending record, under this body's
+	// transaction id and naming this pool, is the proof that it was sent.
+	if raw, perr := r.Get(ports.Ref{Name: cs.Body, Kind: ports.PendingUpdate}); perr == nil {
+		if p, perr := assets.ParsePending(raw); perr == nil && p.Kind == assets.PendingPoolRegistration && p.Pool == cs.Ref.Name && p.TxID == cs.Body {
+			copy(id[:], b)
+			return id, p.Queued, true
+		}
 	}
 	first := int64(0)
 	for _, ss := range cs.Slots {

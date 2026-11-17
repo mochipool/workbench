@@ -26,6 +26,12 @@ type submitRecorder struct {
 	inner ports.TxSubmitter
 	ids   ports.TxIDCalculator
 
+	// onConfirmed run, in order, for a transaction whose wait ended confirmed;
+	// onUnsettled for one whose wait ended any other way. They apply or keep
+	// the pending updates of the transaction (settleHooks).
+	onConfirmed []func(ctx context.Context, id chain.TxID, res txconfirm.Result) error
+	onUnsettled []func(ctx context.Context, id chain.TxID, res txconfirm.Result)
+
 	mu       sync.Mutex
 	subs     []submittedTx
 	problems []string // submissions whose id could not be tied to the local transaction
@@ -70,9 +76,9 @@ func (r *submitRecorder) Submit(ctx context.Context, tx []byte) (chain.TxID, err
 		case ierr != nil:
 			r.problems = append(r.problems, fmt.Sprintf("the provider answered transaction id %s, which could not be checked against the transaction itself (%v)", id, ierr))
 		case local != id:
-			msg := fmt.Sprintf("the provider answered transaction id %s for %s", id, local)
-			r.problems = append(r.problems, msg)
-			return id, errors.New(msg)
+			mm := &chain.IDMismatchError{Answered: id, Local: local}
+			r.problems = append(r.problems, mm.Error())
+			return id, mm
 		default:
 			r.subs = append(r.subs, submittedTx{ID: local, CBOR: append([]byte(nil), tx...)})
 		}
@@ -155,7 +161,18 @@ func (a *app) waitAfterSubmit(ctx context.Context, env *Env, f *chainFlags, rec 
 		errs = append(errs, exitErr(1, "%s: nothing is said about whether it is in a block. Do not build it again from the same inputs", msg))
 	}
 	for i, s := range subs {
-		err := a.waitOne(ctx, env, f, s)
+		res, err := a.waitOne(ctx, env, f, s)
+		if err == nil && res.Outcome == txconfirm.OutcomeConfirmed {
+			for _, h := range rec.onConfirmed {
+				if herr := h(ctx, s.ID, res); herr != nil {
+					errs = append(errs, exitErr(1, "transaction %s is confirmed, but its record update failed: %s", s.ID, herr))
+				}
+			}
+		} else {
+			for _, h := range rec.onUnsettled {
+				h(ctx, s.ID, res)
+			}
+		}
 		if err != nil {
 			errs = append(errs, err)
 		}
@@ -210,7 +227,7 @@ func requestFor(env *Env, s submittedTx) (req txconfirm.Request, boundKnown bool
 	return req, boundKnown
 }
 
-func (a *app) waitOne(ctx context.Context, env *Env, f *chainFlags, s submittedTx) error {
+func (a *app) waitOne(ctx context.Context, env *Env, f *chainFlags, s submittedTx) (txconfirm.Result, error) {
 	w := a.d.Out
 	req, boundKnown := requestFor(env, s)
 	req.Depth, req.Timeout = f.waitDepth, f.waitTimeout
@@ -228,9 +245,9 @@ func (a *app) waitOne(ctx context.Context, env *Env, f *chainFlags, s submittedT
 		}}
 	res, err := waiter.Wait(ctx, req)
 	if err != nil {
-		return err
+		return res, err
 	}
-	return a.waitOutcome(w, s.ID, res)
+	return res, a.waitOutcome(w, s.ID, res)
 }
 
 // answerLines is one indented line per provider.
@@ -316,7 +333,7 @@ func (a *app) waitOutcome(w io.Writer, id chain.TxID, res txconfirm.Result) erro
 
 func (a *app) txCommand() *cobra.Command {
 	c := &cobra.Command{Use: "tx", Short: "Transactions already on their way"}
-	c.AddCommand(a.txStatusCommand())
+	c.AddCommand(a.txStatusCommand(), a.txSettleCommand())
 	return c
 }
 

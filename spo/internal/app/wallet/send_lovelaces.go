@@ -525,7 +525,7 @@ func (uc SendLovelaces) Run(ctx context.Context, req SendRequest) (SendResult, e
 		return SendResult{}, fmt.Errorf("submit: %w", err)
 	}
 	if id != signed.ID {
-		return SendResult{}, fmt.Errorf("the provider answered transaction id %s for %s", id, signed.ID)
+		return SendResult{}, &chain.IDMismatchError{Answered: id, Local: signed.ID}
 	}
 	res.Submitted = true
 	return res, nil

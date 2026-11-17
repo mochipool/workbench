@@ -1,8 +1,10 @@
 package poolops
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -10,10 +12,12 @@ import (
 	"time"
 
 	"github.com/mochipool/workbench/spo/internal/app/txflow"
+	"github.com/mochipool/workbench/spo/internal/domain/assets"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/domain/stake"
+	"github.com/mochipool/workbench/spo/internal/domain/transfer"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/domain/txparam"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -141,6 +145,9 @@ type RegisterResult struct {
 	Missing       []string
 	TransferFiles []string
 	Deposit       chain.Lovelace
+	// RecordPending is true when the registration record waits for the
+	// transaction to be confirmed.
+	RecordPending bool
 	Sources       []chain.Source
 	SingleSource  bool
 	Unchecked     []string
@@ -494,18 +501,48 @@ func (uc RegisterPool) finish(ctx context.Context, in regInputs, inp txflow.Inpu
 		}
 		return res, txflow.ErrDeclined
 	}
-	out, err := uc.Pipeline.Deliver(ctx, inp, coll.Body, spec, ws, res.ApprovalSkipped)
+	// The registration record (regEpoch, regSubmitted) waits until the
+	// transaction is confirmed: the update is kept as a pending record under the
+	// transaction's id, written before the transaction leaves so that a crash
+	// after the submit cannot lose it, and applied by `spo tx settle` or by the
+	// wait of this command (hazard H9, SPO-Xconfirm-PR-001). A refused
+	// submission removes it again; one whose outcome is unknown keeps it.
+	queued := uc.Pipeline.Queue != nil
+	stamp := rfc5322(uc.Clock.Now())
+	if queued {
+		stamp += " (only offline, no proof)"
+	}
+	ttl := coll.TTL
+	pend := assets.Pending{Kind: assets.PendingPoolRegistration, TxID: coll.Body.ID.String(), ValidUntil: &ttl, Queued: queued,
+		Date: uc.Clock.Now().Format(time.RFC3339Nano), Pool: in.name, Epoch: strconv.FormatUint(tip.Epoch, 10), Stamp: stamp}
+	pref := ports.Ref{Name: pend.TxID, Kind: ports.PendingUpdate}
+	pb, err := pend.Marshal()
 	if err != nil {
 		return res, err
 	}
-	res.Result = out
-	// Record the submission, retire the certificate and the collection in
-	// one transaction (SPO-05c-OUT-006: a crash between the two must not
-	// leave a reusable certificate).
-	stamp := rfc5322(uc.Clock.Now())
-	if out.Queued {
-		stamp += " (only offline, no proof)"
+	if err := uc.Store.Update(ctx, func(w ports.Writer) error { return w.Put(pref, pb) }); err != nil {
+		return res, fmt.Errorf("keep the registration record until the transaction is confirmed: %w", err)
 	}
+	if queued {
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, pb); err != nil {
+			return res, err
+		}
+		inp.Queued.Extra = append(inp.Queued.Extra, ports.QueuedField{Key: transfer.KeyAssetPending, Value: compact.String()})
+	}
+	out, err := uc.Pipeline.Deliver(ctx, inp, coll.Body, spec, ws, res.ApprovalSkipped)
+	if err != nil {
+		if !queued && errors.Is(err, chain.ErrSubmitOutcomeUnknown) {
+			return res, fmt.Errorf("%w\nThe registration record of pool %s stays pending under transaction %s: spo tx settle applies it once the transaction is confirmed, and drops it when it has expired", err, in.name, pend.TxID)
+		}
+		_ = uc.Store.Update(ctx, func(w ports.Writer) error { return w.Delete(pref) })
+		return res, err
+	}
+	res.Result = out
+	res.RecordPending = true
+	// What the submission consumed goes in one transaction (SPO-05c-OUT-006: a
+	// crash between the two must not leave a reusable certificate): the witness
+	// collection and the certificate, and the id of what was sent.
 	if err := uc.Store.Update(ctx, func(w ports.Writer) error {
 		raw, err := w.Get(ports.Ref{Name: in.name, Kind: ports.PoolDescriptor})
 		if err != nil {
@@ -515,7 +552,7 @@ func (uc RegisterPool) finish(ctx context.Context, in regInputs, inp txflow.Inpu
 		if err != nil {
 			return err
 		}
-		d.RecordSubmission(strconv.FormatUint(tip.Epoch, 10), stamp)
+		d.ClearCollection()
 		if err := w.Put(ports.Ref{Name: in.name, Kind: ports.PoolDescriptor}, d.Render()); err != nil {
 			return err
 		}
@@ -526,7 +563,7 @@ func (uc RegisterPool) finish(ctx context.Context, in regInputs, inp txflow.Inpu
 		}
 		return w.Delete(ports.Ref{Name: in.name, Kind: ports.PoolCert})
 	}); err != nil {
-		return res, fmt.Errorf("the transaction was sent (%s), but the registration record could not be stored: %w", out.TxID, err)
+		return res, fmt.Errorf("the transaction was sent (%s), but the registration could not be recorded as pending in the descriptor: %w", out.TxID, err)
 	}
 	res.State = pool.CollectionSubmitted
 	if out.Queued && uc.Attach != nil {
@@ -535,7 +572,8 @@ func (uc RegisterPool) finish(ctx context.Context, in regInputs, inp txflow.Inpu
 		}
 	}
 	res.Decisions = append(res.Decisions,
-		"the certificate file is deleted in the transaction that records the submission (SPO-05c-OUT-006, port note)",
+		"the certificate file is deleted in the transaction that consumes the witness collection (SPO-05c-OUT-006, port note)",
+		"regEpoch and regSubmitted are written when the transaction is confirmed, not when it is sent (SPO-Xconfirm-PR-001, port note)",
 		"an empty set of UTxOs or too small a change is an error, where upstream exits 0 (SPO-05c-PRE-007, SPO-05c-PRE-008)")
 	return res, nil
 }

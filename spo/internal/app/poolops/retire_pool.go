@@ -1,15 +1,21 @@
 package poolops
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"time"
 
 	"github.com/mochipool/workbench/spo/internal/app/txflow"
+	"github.com/mochipool/workbench/spo/internal/domain/assets"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	stk "github.com/mochipool/workbench/spo/internal/domain/stake"
+	"github.com/mochipool/workbench/spo/internal/domain/transfer"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/domain/txparam"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -158,8 +164,11 @@ type RetireRequest struct {
 // RetireResult is what happened.
 type RetireResult struct {
 	txflow.Result
-	Epoch     uint64
-	Decisions []string
+	Epoch uint64
+	// RecordPending is true when the retirement record waits for the
+	// transaction to be confirmed.
+	RecordPending bool
+	Decisions     []string
 }
 
 // retireWitnesses is the fixed witness count: the payer and the cold key
@@ -305,38 +314,60 @@ func (uc RetirePool) Run(ctx context.Context, req RetireRequest) (RetireResult, 
 	ticker := d.Text(pool.FieldMetaTicker)
 	sum := ports.TxSummary{Kind: "pool retirement", Stage: "submit", Pool: id.Bech32(), Source: pay.name, SourceAddr: pay.addr, Account: name,
 		Attachments: draft.AttachmentLines()}
-	res, err := pl.Execute(ctx, txflow.Input{Draft: draft, Params: params, TTL: ttl, Prepared: prep, Witnesses: retireWitnesses, Summary: sum, HardwareChangeKeys: hwChangeKeys(slots[0].Key),
+	// The retirement record (deregSubmitted) waits until the transaction is
+	// confirmed: Stage keeps it as a pending record under the transaction's id
+	// before the transaction leaves, and `spo tx settle` or the wait of this
+	// command applies it (hazard H9, SPO-Xconfirm-PR-002).
+	var pref ports.Ref
+	stage := func(ctx context.Context, id chain.TxID, validUntil uint64, queued bool) ([]ports.QueuedField, error) {
+		stamp := rfc5322(uc.Clock.Now())
+		if queued {
+			stamp += " (only offline, no proof)"
+		}
+		pend := assets.Pending{Kind: assets.PendingPoolRetirement, TxID: id.String(), ValidUntil: &validUntil, Queued: queued,
+			Date: uc.Clock.Now().Format(time.RFC3339Nano), Pool: name, Epoch: strconv.FormatUint(cert.Retirement.Epoch, 10), Stamp: stamp}
+		pb, err := pend.Marshal()
+		if err != nil {
+			return nil, err
+		}
+		pref = ports.Ref{Name: pend.TxID, Kind: ports.PendingUpdate}
+		if err := uc.Store.Update(ctx, func(w ports.Writer) error { return w.Put(pref, pb) }); err != nil {
+			return nil, fmt.Errorf("keep the retirement record until the transaction is confirmed: %w", err)
+		}
+		if !queued {
+			return nil, nil
+		}
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, pb); err != nil {
+			return nil, err
+		}
+		return []ports.QueuedField{{Key: transfer.KeyAssetPending, Value: compact.String()}}, nil
+	}
+	res, err := pl.Execute(ctx, txflow.Input{Stage: stage, Draft: draft, Params: params, TTL: ttl, Prepared: prep, Witnesses: retireWitnesses, Summary: sum, HardwareChangeKeys: hwChangeKeys(slots[0].Key),
 		Queued: ports.QueuedTx{Type: "PoolRetirement", FromName: pay.name, FromAddr: pay.addr, ToName: pay.name, ToAddr: pay.addr,
 			Description: fmt.Sprintf("signed pool retirement transaction for '%s', payment via '%s'", ticker, pay.name),
 			Extra:       []ports.QueuedField{{Key: "poolMetaTicker", Value: ticker}}}})
 	if err != nil {
+		switch {
+		case pref.Name == "":
+		case pl.Queue == nil && errors.Is(err, chain.ErrSubmitOutcomeUnknown):
+			// The transaction may be in a block: the pending record stays.
+			err = fmt.Errorf("%w\nThe retirement record of pool %s stays pending under transaction %s: spo tx settle applies it once the transaction is confirmed, and drops it when it has expired", err, name, pref.Name)
+		default:
+			_ = uc.Store.Update(ctx, func(w ports.Writer) error { return w.Delete(pref) })
+		}
 		return RetireResult{}, err
 	}
-	stamp := rfc5322(uc.Clock.Now())
-	if res.Queued {
-		stamp += " (only offline, no proof)"
-	}
-	// The record and the consumption of the certificate are one transaction
-	// (SPO-07b-OUT-003: upstream leaves the certificate reusable).
+	// The consumption of the certificate follows the pending record (SPO-07b-OUT-003:
+	// upstream leaves the certificate reusable).
 	if err := uc.Store.Update(ctx, func(w ports.Writer) error {
-		raw, err := w.Get(ports.Ref{Name: name, Kind: ports.PoolDescriptor})
-		if err != nil {
-			return err
-		}
-		d, err := pool.ParseDescriptor(raw)
-		if err != nil {
-			return err
-		}
-		d.RecordRetirement(stamp)
-		if err := w.Put(ports.Ref{Name: name, Kind: ports.PoolDescriptor}, d.Render()); err != nil {
-			return err
-		}
 		return w.Delete(ports.Ref{Name: name, Kind: ports.PoolDeregCert})
 	}); err != nil {
-		return RetireResult{Result: res}, fmt.Errorf("the transaction was sent (%s), but the retirement record could not be stored: %w", res.TxID, err)
+		return RetireResult{Result: res}, fmt.Errorf("the transaction was sent (%s), but the retirement certificate could not be consumed: %w", res.TxID, err)
 	}
-	return RetireResult{Result: res, Epoch: cert.Retirement.Epoch, Decisions: []string{
-		"the retirement certificate is deleted with the record of the submission, where upstream leaves it reusable (SPO-07b-OUT-003)",
+	return RetireResult{Result: res, Epoch: cert.Retirement.Epoch, RecordPending: true, Decisions: []string{
+		"deregSubmitted is written when the transaction is confirmed, not when it is sent (SPO-Xconfirm-PR-002, port note)",
+		"the retirement certificate is deleted when the transaction is sent, where upstream leaves it reusable (SPO-07b-OUT-003)",
 		"the retirement epoch is checked against the current epoch and eMax before a fee is spent (SPO-07b-INV-003)",
 	}}, nil
 }

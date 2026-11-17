@@ -319,6 +319,13 @@ type Input struct {
 	Summary ports.TxSummary
 	// Queued is the queue entry; Execute fills in the signed transaction.
 	Queued ports.QueuedTx
+	// Stage, when set, is called with the id and the validity bound of the
+	// assembled transaction after every check has passed and right before it is
+	// queued or submitted. A command that must keep a record for the
+	// transaction (a pending update, hazard H9) writes it there, so a crash
+	// after the submission cannot lose it. The fields it returns are added to
+	// the queue entry; an error stops the delivery before anything leaves.
+	Stage func(ctx context.Context, id chain.TxID, validUntil uint64, queued bool) ([]ports.QueuedField, error)
 	// SkipSizeCheck leaves the size check out (nobody sets it today:
 	// 01_claimRewards skips it upstream, SPO-01claimRewards-INV-005, and
 	// the port does not).
@@ -507,6 +514,19 @@ func (p Pipeline) Deliver(ctx context.Context, in Input, body txbuild.TxBody, sp
 	if spec != nil {
 		res.Fee, res.TTL, res.Outputs, res.Inputs = spec.Fee, spec.TTL, spec.Outputs, len(spec.Inputs)
 	}
+	if in.Stage != nil {
+		ttl := res.TTL
+		if ttl == 0 {
+			ttl = in.TTL
+		}
+		extra, err := in.Stage(ctx, signed.ID, ttl, p.Queue != nil)
+		if err != nil {
+			return Result{}, err
+		}
+		if p.Queue != nil && len(extra) > 0 {
+			in.Queued.Extra = append(append([]ports.QueuedField(nil), in.Queued.Extra...), extra...)
+		}
+	}
 	if p.Queue != nil {
 		q := in.Queued
 		q.Tx = signed
@@ -521,7 +541,7 @@ func (p Pipeline) Deliver(ctx context.Context, in Input, body txbuild.TxBody, sp
 		return Result{}, fmt.Errorf("submit: %w", err)
 	}
 	if id != signed.ID {
-		return Result{}, fmt.Errorf("the provider answered transaction id %s for %s", id, signed.ID)
+		return Result{}, &chain.IDMismatchError{Answered: id, Local: signed.ID}
 	}
 	res.Submitted = true
 	return res, nil

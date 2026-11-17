@@ -112,7 +112,7 @@ func TestPolicyMintBurnAndShowThroughTheCommands(t *testing.T) {
 	if err := run(nil, "asset", "mint", "p.tok", "100", "w", "--yes", "--input", strings.Repeat("ab", 1)+strings.Repeat("00", 31)+"#1"); err != nil {
 		t.Fatalf("%v\n%s", err, f.out.String())
 	}
-	mustContain(t, f.out.String(), "Asset mint", "amount       100 p.tok", "Queued transaction", "is updated when spo offline execute submits")
+	mustContain(t, f.out.String(), "Asset mint", "amount       100 p.tok", "Queued transaction", "is not changed yet: it is applied when spo offline execute has submitted")
 	if len(f.queue.got) != 1 || f.queue.got[0].Type != "Asset-Minting" {
 		t.Fatalf("queue: %+v", f.queue.got)
 	}

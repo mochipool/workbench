@@ -4,12 +4,20 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
+	"github.com/mochipool/workbench/spo/internal/adapters/transferfile"
+	"github.com/mochipool/workbench/spo/internal/app/airgap"
+	"github.com/mochipool/workbench/spo/internal/app/txconfirm"
+	domassets "github.com/mochipool/workbench/spo/internal/domain/assets"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
+	"github.com/mochipool/workbench/spo/internal/domain/transfer"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -154,6 +162,9 @@ func TestRecorderTiesTheIDToTheBytesSent(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), theirs.String()) || !strings.Contains(err.Error(), local.String()) {
 		t.Fatalf("%v", err)
 	}
+	if !errors.Is(err, chain.ErrSubmitOutcomeUnknown) || !strings.Contains(err.Error(), "spo tx status "+local.String()) {
+		t.Errorf("an id mismatch is an unknown outcome that names the status command: %v", err)
+	}
 	if len(rec.submitted()) != 0 || len(rec.unverified()) != 1 {
 		t.Errorf("a mismatched id was recorded as the transaction: %+v %v", rec.submitted(), rec.unverified())
 	}
@@ -237,5 +248,88 @@ func TestWaitReportsEveryTransactionAndExitsWithTheWorst(t *testing.T) {
 	if !(waitRank[ExitWaitExpired] < waitRank[ExitWaitTimedOut] && waitRank[ExitWaitTimedOut] < waitRank[ExitWaitUnknown] &&
 		waitRank[ExitWaitUnknown] < waitRank[ExitWaitDisagree] && waitRank[ExitWaitDisagree] < waitRank[1] && waitRank[1] < waitRank[ExitWaitCancel]) {
 		t.Error("the order of outcomes changed")
+	}
+}
+
+type silentStatus struct{}
+
+func (silentStatus) Source() chain.Source { return "stub" }
+func (silentStatus) TxStatus(context.Context, ports.TxStatusQuery) (chain.Reading[chain.TxStatus], error) {
+	return chain.None[chain.TxStatus](), nil
+}
+
+// When the wait of `offline execute` ends expired, the expiry is recorded in the
+// history of the transfer file as a confirmation is, and a wait that ends any
+// other way records nothing (SPO-Xconfirm-PR-022).
+//
+// spec: SPO-Xconfirm-PR-022
+func TestOfflineExecuteRecordsAnExpiredWait(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "offlineTransfer.json")
+	if err := os.WriteFile(path, []byte(`{"protocol":{"era":"conway","parameters":{"txFeePerByte":44}},"history":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := &transferfile.File{Path: path}
+	id := chain.TxID{0x31}
+	for name, tc := range map[string]struct {
+		outcome txconfirm.Outcome
+		want    bool
+	}{"expired": {txconfirm.OutcomeExpired, true}, "timed out": {txconfirm.OutcomeTimedOut, false}} {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(`{"protocol":{"era":"conway","parameters":{"txFeePerByte":44}},"history":[]}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			a := &app{d: Deps{Out: &out}}
+			s := &session{rec: &submitRecorder{}}
+			env := &Env{Clock: cliClock{}, Bundle: f, TxWatchers: []ports.TxWatcher{{Status: silentStatus{}}}}
+			a.executeSettling(s, env, WireOptions{TransferFile: path}, &chainFlags{}, airgap.ExecuteResult{TxID: id, Submitted: true,
+				Entry: transfer.QueuedEntry{AssetPending: `{"txid":"` + id.String() + `"}`}})
+			if len(s.rec.onUnsettled) == 0 {
+				t.Fatal("no hook for an unsettled wait")
+			}
+			for _, h := range s.rec.onUnsettled {
+				h(context.Background(), id, txconfirm.Result{Outcome: tc.outcome})
+			}
+			b, _, _ := f.ReadBundle(context.Background())
+			oc, _ := b.Outcomes()
+			if got := oc[id.String()].Expired; got != tc.want || (len(oc) == 1) != tc.want {
+				t.Errorf("%s: outcomes %+v\n%s", name, oc, out.String())
+			}
+		})
+	}
+}
+
+// A settling command that could not wait names each new pending record and the
+// exact settle command, and says what its exit status 0 means.
+//
+// spec: SPO-Xconfirm-IF-006
+func TestNotWaitedNoticeNamesThePendingRecordAndTheCommand(t *testing.T) {
+	st, err := fsstore.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	put := func(id chain.TxID) {
+		p := domassets.Pending{Kind: domassets.PendingPoolRegistration, TxID: id.String(), Pool: "mypool", Epoch: "7", Stamp: "x"}
+		b, _ := p.Marshal()
+		if err := st.Update(context.Background(), func(w ports.Writer) error { return w.Put(ports.Ref{Name: p.TxID, Kind: ports.PendingUpdate}, b) }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old, fresh := chain.TxID{1}, chain.TxID{2}
+	put(old)
+	var out bytes.Buffer
+	a := &app{d: Deps{Out: &out}}
+	s := &session{Store: st}
+	before := a.pendingIDs(context.Background(), s, true)
+	put(fresh)
+	a.printNotWaited(context.Background(), s, before)
+	got := out.String()
+	for _, w := range []string{"PENDING", "registration record of pool mypool", fresh.String(), "run: spo tx settle", "means submitted or queued, not confirmed"} {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q in %q", w, got)
+		}
+	}
+	if strings.Contains(got, old.String()) {
+		t.Errorf("an older pending record was named: %q", got)
 	}
 }

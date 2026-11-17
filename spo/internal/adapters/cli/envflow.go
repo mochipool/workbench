@@ -28,6 +28,9 @@ type chainFlags struct {
 	wait        bool
 	waitDepth   uint64
 	waitTimeout time.Duration
+	// noWait is --no-wait of a command that leaves a pending record
+	// (envSpec.settles): such a command waits by default.
+	noWait bool
 }
 
 // DefaultWaitTimeout is how long --wait waits when --wait-timeout is not given.
@@ -46,19 +49,40 @@ func addSubmitFlags(cmd *cobra.Command, f *chainFlags, transfer bool) {
 	addWaitFlags(cmd, f)
 }
 
+// addSettleFlags is addSubmitFlags for a command that leaves a pending record
+// (an asset mint or burn, a pool registration or retirement): the command waits
+// for confirmation by default and applies the record when it is confirmed, so
+// --wait is accepted and redundant; --no-wait skips the wait
+// (SPO-Xconfirm-IF-006).
+func addSettleFlags(cmd *cobra.Command, f *chainFlags, transfer bool) {
+	addChainFlags(cmd, f, transfer)
+	addWaitFlags(cmd, f) // --wait is redundant here, and accepted so a script that passes it still works
+	cmd.Flags().BoolVar(&f.noWait, "no-wait", false, "do not wait for the transaction to be confirmed: the record stays pending until spo tx settle applies it (this command waits by default in light and online mode)")
+}
+
 // addWaitFlags adds only the wait flags, for a command that registers its
 // chain flags another way.
 func addWaitFlags(cmd *cobra.Command, f *chainFlags) {
 	cmd.Flags().BoolVar(&f.wait, "wait", false, "after submitting, wait until the transaction is in a block on every configured provider (light and online mode; never resubmits; Ctrl-C stops waiting, not the transaction)")
+	addWaitDepthFlags(cmd, f)
+}
+
+func addWaitDepthFlags(cmd *cobra.Command, f *chainFlags) {
 	cmd.Flags().Uint64Var(&f.waitDepth, "wait-confirmations", 1, "with --wait: confirmations to wait for (blocks on top of, and including, the one that holds the transaction)")
 	cmd.Flags().DurationVar(&f.waitTimeout, "wait-timeout", DefaultWaitTimeout, "with --wait: how long to wait before giving up (the transaction may still be included)")
 }
 
 // checkWaitFlags refuses a --wait that cannot work, before anything is asked.
-func (f *chainFlags) checkWaitFlags(cmd *cobra.Command) error {
-	if !f.wait {
+// A command that waits by default (settles) takes the depth and timeout flags
+// without --wait and refuses --no-wait with them.
+func (f *chainFlags) checkWaitFlags(cmd *cobra.Command, settles bool) error {
+	changed := func(n string) bool { fl := cmd.Flags().Lookup(n); return fl != nil && fl.Changed }
+	if f.noWait && (f.wait || changed("wait-confirmations") || changed("wait-timeout")) {
+		return errors.New("--no-wait cannot be combined with --wait, --wait-confirmations or --wait-timeout")
+	}
+	if !f.wait && !settles {
 		for _, n := range []string{"wait-confirmations", "wait-timeout"} {
-			if fl := cmd.Flags().Lookup(n); fl != nil && fl.Changed {
+			if changed(n) {
 				return fmt.Errorf("--%s has no effect without --wait", n)
 			}
 		}
@@ -156,6 +180,16 @@ type envSpec struct {
 	// transfer file) and needs neither the store nor a passphrase: it runs
 	// without opening the workspace.
 	local bool
+	// settles marks a command that leaves a pending record (a mint, a burn, a
+	// pool registration or retirement): in light and online mode it waits for
+	// confirmation by default and applies the record when confirmed; --no-wait
+	// skips that. Where no provider can say where a transaction is, it does not
+	// wait and says how to settle later.
+	settles bool
+	// settlesIfPending is `offline execute`: it waits by default only when the
+	// entry it submitted carries a pending update (the command decides after
+	// the submit and sets session.lateWait).
+	settlesIfPending bool
 	// sealed makes the command refuse --upstream-layout before anything is
 	// built or asked: it needs the sealed workspace (party identities and
 	// their keys live in it).
@@ -184,11 +218,8 @@ func (a *app) withEnv(cmd *cobra.Command, spec envSpec, fn func(ctx context.Cont
 	if flags == nil {
 		flags = &chainFlags{}
 	}
-	if err := flags.checkWaitFlags(cmd); err != nil {
+	if err := flags.checkWaitFlags(cmd, spec.settles || spec.settlesIfPending); err != nil {
 		return err
-	}
-	if flags.wait { // the wait needs a provider that says where a transaction is
-		spec.needs = append(append([]Need(nil), spec.needs...), CapTxStatus)
 	}
 	o, genesisWhy, err := a.wireOptions(cmd, flags, spec.config)
 	if err != nil {
@@ -200,6 +231,20 @@ func (a *app) withEnv(cmd *cobra.Command, spec envSpec, fn func(ctx context.Cont
 	}
 	defer probe.Close()
 	probe.Absent(CapGenesis, genesisWhy)
+	// A command that leaves a pending record waits by default, where a provider
+	// can say where a transaction is; where none can, it does not wait and says
+	// how to settle later. An explicit --wait is a need like any other.
+	var notWaiting string
+	if spec.settles && !flags.wait && !flags.noWait && (o.Mode == ModeLight || o.Mode == ModeOnline) {
+		if probe.Has(CapTxStatus) {
+			flags.wait = true
+		} else {
+			notWaiting = probe.Reason(CapTxStatus)
+		}
+	}
+	if flags.wait { // the wait needs a provider that says where a transaction is
+		spec.needs = append(append([]Need(nil), spec.needs...), CapTxStatus)
+	}
 	if err := probe.Require(spec.needs...); err != nil {
 		return err
 	}
@@ -261,10 +306,21 @@ func (a *app) withEnv(cmd *cobra.Command, spec envSpec, fn func(ctx context.Cont
 		defer func() { pass.Destroy(); spec.extras.pass = nil }()
 	}
 	rec := recordSubmits(env)
+	s.rec = rec
+	s.waiting = flags.wait
+	s.canWait = env.Has(CapTxStatus)
+	if notWaiting != "" {
+		fmt.Fprintf(a.d.Err, "Not waiting for confirmation: %s. The record stays pending; apply it with: spo tx settle\n", shown(notWaiting))
+	}
+	a.settleHooks(rec, s, env)
+	before := a.pendingIDs(ctx, s, notWaiting != "")
 	if err := fn(ctx, s, env, o); err != nil {
 		return err
 	}
-	if flags.wait {
+	if notWaiting != "" {
+		a.printNotWaited(ctx, s, before)
+	}
+	if flags.wait || (s.lateWait && !flags.noWait && s.canWait) {
 		return a.waitAfterSubmit(ctx, env, flags, rec)
 	}
 	return nil

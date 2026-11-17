@@ -2,16 +2,23 @@ package assets
 
 import (
 	"context"
+	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/transferfile"
 	"github.com/mochipool/workbench/spo/internal/domain/assets"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
+	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/domain/transfer"
+	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
+	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
 // carry is a transfer file in the world's directory that the mint queues to.
@@ -53,6 +60,20 @@ func complete(t *testing.T, f *transferfile.File, id chain.TxID) {
 	t.Fatalf("transaction %s is not queued", id)
 }
 
+// confirm records, in the history of the file, what the online machine's tx
+// settle (or the wait of offline execute) records once a provider says the
+// transaction is in a block.
+func confirm(t *testing.T, f *transferfile.File, id chain.TxID) {
+	t.Helper()
+	err := f.MutateBundle(context.Background(), func(nb *transfer.Bundle) error {
+		_, err := nb.RecordOutcome(transfer.Outcome{TxID: id.String(), Depth: 3, Sources: []string{"koios", "blockfrost"}}, "date", "confirmed")
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func (w *world) settler(f *transferfile.File) SettleFromBundle {
 	return SettleFromBundle{Store: w.store, Lister: w.store, Bundle: f, Clock: w.clock}
 }
@@ -72,7 +93,7 @@ func TestQueuedMintEntryCarriesTheAssetUpdate(t *testing.T) {
 	if err != nil || p.TxID != res.TxID.String() || p.Record != "free.tok" || p.Delta != "100" || p.Action != "mint 100 (only Offline proof)" {
 		t.Fatalf("the carried update: %v %+v", err, p)
 	}
-	if !w.exists(res.TxID.String() + ".asset-pending") {
+	if !w.exists(res.TxID.String() + ".pending") {
 		t.Error("the queuing machine keeps its own pending record")
 	}
 	// A mint submitted at once carries nothing: there is no queue.
@@ -81,8 +102,11 @@ func TestQueuedMintEntryCarriesTheAssetUpdate(t *testing.T) {
 	}
 }
 
-// Steps 3 and 4: settle applies exactly once, waits for a queued one, and
-// discards what left the queue unsubmitted.
+// Steps 3 and 4: settle applies exactly once, and only what the history
+// records as confirmed; it waits for a queued one and for one that is only
+// submitted, and discards what left the queue unsubmitted.
+//
+// spec: SPO-Xconfirm-PR-023, SPO-Xconfirm-PR-024
 func TestSettleFromBundle(t *testing.T) {
 	w := newWorld(t)
 	w.policy("free", 0)
@@ -98,8 +122,21 @@ func TestSettleFromBundle(t *testing.T) {
 	}
 
 	complete(t, f, a.TxID)
-	plan, err := w.settler(f).Plan(ctx)
-	if err != nil || len(plan.Applied) != 1 || plan.Applied[0].TxID != a.TxID.String() || w.exists("free.tok.asset") {
+	// Submitted is not confirmed: the update waits and the record is untouched.
+	res, err = w.settler(f).Run(ctx)
+	if err != nil || len(res.Applied) != 0 || len(res.Submitted) != 1 || res.Submitted[0].TxID != a.TxID.String() || len(res.Waiting) != 1 || w.exists("free.tok.asset") {
+		t.Fatalf("submitted only: %v %+v", err, res)
+	}
+	// Only --accept-submitted applies it on the submit alone (a plan writes nothing).
+	trusting := w.settler(f)
+	trusting.AcceptSubmitted = true
+	plan, err := trusting.Plan(ctx)
+	if err != nil || len(plan.Applied) != 1 || !plan.Applied[0].Trusted || w.exists("free.tok.asset") {
+		t.Fatalf("accept-submitted plan: %v %+v", err, plan)
+	}
+	confirm(t, f, a.TxID)
+	plan, err = w.settler(f).Plan(ctx)
+	if err != nil || len(plan.Applied) != 1 || plan.Applied[0].TxID != a.TxID.String() || plan.Applied[0].Trusted || plan.Applied[0].Depth != 3 || w.exists("free.tok.asset") {
 		t.Fatalf("plan: %v %+v (a plan writes nothing)", err, plan)
 	}
 	res, err = w.settler(f).Run(ctx)
@@ -107,7 +144,7 @@ func TestSettleFromBundle(t *testing.T) {
 		t.Fatalf("run: %v %+v", err, res)
 	}
 	rec, _ := assets.ParseRecord([]byte(w.file("free.tok.asset")))
-	if rec.Get("minted") != "100" || rec.Get("lastAction") != "mint 100 (only Offline proof)" || w.exists(a.TxID.String()+".asset-pending") {
+	if rec.Get("minted") != "100" || rec.Get("lastAction") != "mint 100 (only Offline proof)" || w.exists(a.TxID.String()+".pending") {
 		t.Fatalf("record: %s", w.file("free.tok.asset"))
 	}
 
@@ -128,7 +165,7 @@ func TestSettleFromBundle(t *testing.T) {
 	// Without the operator's word the update is reported and kept: the file
 	// might be the wrong one.
 	res, err = w.settler(f).Run(ctx)
-	if err != nil || len(res.Unmatched) != 1 || len(res.Discarded) != 0 || !w.exists(b.TxID.String()+".asset-pending") {
+	if err != nil || len(res.Unmatched) != 1 || len(res.Discarded) != 0 || !w.exists(b.TxID.String()+".pending") {
 		t.Fatalf("unmatched must be kept: %v %+v", err, res)
 	}
 	sd := w.settler(f)
@@ -137,7 +174,7 @@ func TestSettleFromBundle(t *testing.T) {
 	if err != nil || len(res.Discarded) != 1 || res.Discarded[0].TxID != b.TxID.String() || len(res.Applied) != 0 {
 		t.Fatalf("discard: %v %+v", err, res)
 	}
-	if w.exists(b.TxID.String()+".asset-pending") || func() bool {
+	if w.exists(b.TxID.String()+".pending") || func() bool {
 		r, _ := assets.ParseRecord([]byte(w.file("free.tok.asset")))
 		return r.Get("minted") != "100"
 	}() {
@@ -146,6 +183,87 @@ func TestSettleFromBundle(t *testing.T) {
 	if res, _ = w.settler(f).Run(ctx); !res.Nothing() || len(res.Waiting) != 0 {
 		t.Errorf("after the discard: %+v", res)
 	}
+}
+
+// An expiry recorded in the history discards the update and never applies it.
+//
+// spec: SPO-Xconfirm-PR-025
+func TestSettleFromBundleDiscardsAnExpiredTransaction(t *testing.T) {
+	w := newWorld(t)
+	w.policy("free", 0)
+	f := carry(t, w)
+	a := queuedMint(t, w, f, "free.tok", "100")
+	complete(t, f, a.TxID)
+	if err := f.MutateBundle(context.Background(), func(nb *transfer.Bundle) error {
+		_, err := nb.RecordOutcome(transfer.Outcome{TxID: a.TxID.String(), Expired: true}, "date", "expired")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := w.settler(f).Run(context.Background())
+	if err != nil || len(res.Expired) != 1 || len(res.Applied) != 0 || w.exists("free.tok.asset") || w.exists(a.TxID.String()+".pending") {
+		t.Fatalf("%v %+v", err, res)
+	}
+}
+
+// The outcome entries of a transfer file are not authenticated. One counts only
+// for a transaction this workspace queued that the file records as submitted
+// and gone from its queue; an expiry only discards when the bound stored here is
+// the one that was queued.
+//
+// spec: SPO-Xconfirm-PR-023
+func TestSettleFromBundleRefusesInconsistentOutcomes(t *testing.T) {
+	ctx := context.Background()
+	t.Run("confirmed for a transaction still queued", func(t *testing.T) {
+		w := newWorld(t)
+		w.policy("free", 0)
+		f := carry(t, w)
+		a := queuedMint(t, w, f, "free.tok", "100")
+		confirm(t, f, a.TxID) // never submitted: still in the queue
+		res, err := w.settler(f).Run(ctx)
+		if err != nil || len(res.Applied) != 0 || len(res.Inconsistent) != 1 || !w.exists(a.TxID.String()+".pending") || w.exists("free.tok.asset") {
+			t.Fatalf("%v %+v", err, res)
+		}
+	})
+	t.Run("confirmed for a transaction never recorded as submitted", func(t *testing.T) {
+		w := newWorld(t)
+		w.policy("free", 0)
+		f := carry(t, w)
+		a := queuedMint(t, w, f, "free.tok", "100")
+		// Taken out of the queue without a submit, then an edited file claims it was confirmed.
+		if err := f.MutateBundle(ctx, func(nb *transfer.Bundle) error { return nb.ClearTransactions("date") }); err != nil {
+			t.Fatal(err)
+		}
+		confirm(t, f, a.TxID)
+		res, err := w.settler(f).Run(ctx)
+		if err != nil || len(res.Applied) != 0 || len(res.Inconsistent) != 1 || !w.exists(a.TxID.String()+".pending") || w.exists("free.tok.asset") {
+			t.Fatalf("%v %+v", err, res)
+		}
+	})
+	t.Run("expired with a bound that is not the stored one", func(t *testing.T) {
+		w := newWorld(t)
+		w.policy("free", 0)
+		f := carry(t, w)
+		a := queuedMint(t, w, f, "free.tok", "100")
+		complete(t, f, a.TxID)
+		// The file's carried record is edited to a bound this workspace never stored.
+		raw, _ := os.ReadFile(f.Path)
+		edited := regexp.MustCompile(`"validUntil":\s*\d+`).ReplaceAllString(string(raw), `"validUntil": 1`)
+		if edited == string(raw) {
+			t.Fatal("no bound to edit")
+		}
+		_ = os.WriteFile(f.Path, []byte(edited), 0o600)
+		if err := f.MutateBundle(ctx, func(nb *transfer.Bundle) error {
+			_, err := nb.RecordOutcome(transfer.Outcome{TxID: a.TxID.String(), Expired: true}, "date", "expired")
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		res, err := w.settler(f).Run(ctx)
+		if err != nil || len(res.Expired) != 0 || len(res.Inconsistent) != 1 || !w.exists(a.TxID.String()+".pending") {
+			t.Fatalf("%v %+v", err, res)
+		}
+	})
 }
 
 func TestSettleFromBundleNeedsTheFile(t *testing.T) {
@@ -161,6 +279,8 @@ func TestSettleFromBundleNeedsTheFile(t *testing.T) {
 
 // Step 2: the hook of the executing machine applies the carried update when it
 // holds the pending record or the asset record, and does nothing otherwise.
+//
+// spec: SPO-Xconfirm-PR-027
 func TestUpdateHook(t *testing.T) {
 	w := newWorld(t)
 	w.policy("free", 0)
@@ -176,10 +296,10 @@ func TestUpdateHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := (UpdateHook{Store: other, Clock: w.clock}).OnSubmittedUpdate(ctx, r.TxID, update); err != nil {
+	if err := (UpdateHook{Store: other, Clock: w.clock}).OnConfirmedUpdate(ctx, r.TxID, update); err != nil {
 		t.Fatal(err)
 	}
-	if err := (UpdateHook{Store: other, Clock: w.clock}).OnSubmittedUpdate(ctx, r.TxID, "{broken"); err == nil {
+	if err := (UpdateHook{Store: other, Clock: w.clock}).OnConfirmedUpdate(ctx, r.TxID, "{broken"); err == nil {
 		t.Error("a damaged update")
 	}
 	if entries, _ := os.ReadDir(w.dir); strings.Contains(listNames(entries), "free.tok.asset ") {
@@ -187,15 +307,48 @@ func TestUpdateHook(t *testing.T) {
 	}
 
 	// The queuing machine itself: the pending record is applied and removed.
-	if err := (UpdateHook{Store: w.store, Clock: w.clock}).OnSubmittedUpdate(ctx, r.TxID, update); err != nil {
+	if err := (UpdateHook{Store: w.store, Clock: w.clock}).OnConfirmedUpdate(ctx, r.TxID, update); err != nil {
 		t.Fatal(err)
 	}
-	if rec, _ := assets.ParseRecord([]byte(w.file("free.tok.asset"))); rec.Get("minted") != "100" || w.exists(r.TxID.String()+".asset-pending") {
+	if rec, _ := assets.ParseRecord([]byte(w.file("free.tok.asset"))); rec.Get("minted") != "100" || w.exists(r.TxID.String()+".pending") {
 		t.Fatalf("record: %s", w.file("free.tok.asset"))
 	}
 	// Told again, with no pending record left, the record it holds is
-	// updated from the carried data: the executing machine runs once per entry.
-	if err := (UpdateHook{Store: w.store, Clock: w.clock}).OnSubmittedUpdate(ctx, r.TxID, update); err != nil {
+	// updated from the carried data, once it matches the transaction itself:
+	// the executing machine runs once per entry.
+	tx, err := q[0].TxBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	carried, _ := assets.ParsePending([]byte(update))
+	pol, _ := hex.DecodeString(carried.Policy)
+	var polID [28]byte
+	copy(polID[:], pol)
+	nm, _ := hex.DecodeString(carried.NameHex)
+	mintOf := func(q int64) mintViewer {
+		return mintViewer{view: party.TxView{Mint: []party.ViewAsset{{Policy: polID, Name: nm, Quantity: q}}}}
+	}
+	hook := func(v mintViewer) UpdateHook {
+		return UpdateHook{Store: w.store, Clock: w.clock, Tx: tx, TxIDs: idCalc{}, Viewer: v}
+	}
+	// What does not match the transaction is refused and changes nothing.
+	for name, c := range map[string]struct {
+		hook   UpdateHook
+		update string
+	}{
+		"the amount differs from the mint field": {hook(mintOf(101)), update},
+		"another transaction id":                 {hook(mintOf(100)), strings.Replace(update, r.TxID.String(), strings.Repeat("0", 64), 1)},
+		"no way to check":                        {UpdateHook{Store: w.store, Clock: w.clock}, update},
+		"another asset name":                     {hook(mintViewer{view: party.TxView{Mint: []party.ViewAsset{{Policy: polID, Name: []byte("other"), Quantity: 100}}}}), update},
+	} {
+		if err := c.hook.OnConfirmedUpdate(ctx, r.TxID, c.update); !errors.Is(err, ErrCarriedUpdateRefused) {
+			t.Errorf("%s: %v", name, err)
+		}
+		if rec, _ := assets.ParseRecord([]byte(w.file("free.tok.asset"))); rec.Get("minted") != "100" {
+			t.Fatalf("%s changed the record: %s", name, w.file("free.tok.asset"))
+		}
+	}
+	if err := hook(mintOf(100)).OnConfirmedUpdate(ctx, r.TxID, update); err != nil {
 		t.Fatal(err)
 	}
 	if rec, _ := assets.ParseRecord([]byte(w.file("free.tok.asset"))); rec.Get("minted") != "200" {
@@ -203,10 +356,74 @@ func TestUpdateHook(t *testing.T) {
 	}
 }
 
+type idCalc struct{}
+
+func (idCalc) TransactionID(tx []byte) (chain.TxID, error) { return txIDOf(tx), nil }
+
+// mintViewer is a TxViewer whose decoded body is fixed.
+type mintViewer struct{ view party.TxView }
+
+func (mintViewer) BodyOf(tx []byte) ([]byte, error)      { return tx, nil }
+func (m mintViewer) View([]byte) (party.TxView, error)   { return m.view, nil }
+func (mintViewer) AuxOf([]byte) ([]byte, error)          { return nil, nil }
+func (mintViewer) ViewAux([]byte) (party.AuxView, error) { return party.AuxView{}, nil }
+
 func listNames(es []os.DirEntry) string {
 	var b strings.Builder
 	for _, e := range es {
 		b.WriteString(e.Name() + " ")
 	}
 	return b.String()
+}
+
+// The settle from the transfer file serves every kind of pending update: a pool
+// registration is routed to its applier, only when its confirmation is
+// recorded, and a kind with no applier is an error that keeps the update.
+//
+// spec: SPO-Xconfirm-PR-023, SPO-Xconfirm-PR-001
+func TestSettleFromBundleRoutesByKind(t *testing.T) {
+	w := newWorld(t)
+	f := carry(t, w)
+	ctx := context.Background()
+	id := chain.TxID{0x44}
+	p := assets.Pending{Kind: assets.PendingPoolRegistration, TxID: id.String(), Queued: true, Pool: "mypool", Epoch: "7", Stamp: "stamp"}
+	pb, _ := p.Marshal()
+	var compact strings.Builder
+	compact.WriteString(strings.Join(strings.Fields(string(pb)), ""))
+	if err := w.store.Update(ctx, func(wr ports.Writer) error { return wr.Put(ports.Ref{Name: p.TxID, Kind: ports.PendingUpdate}, pb) }); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Enqueue(ctx, ports.QueuedTx{Type: transfer.TypePoolRegistration, FromName: "w", FromAddr: "a", ToName: "w", ToAddr: "a",
+		Tx: txbuild.SignedTx{CBOR: []byte{0x44}, ID: id}, Description: "d", Extra: []ports.QueuedField{{Key: transfer.KeyAssetPending, Value: compact.String()}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.MutateBundle(ctx, func(nb *transfer.Bundle) error { return nb.CompleteSubmit("44", id.String(), "date") }); err != nil {
+		t.Fatal(err)
+	}
+	applied := 0
+	apply := func(_ ports.Writer, got assets.Pending, _ time.Time) error {
+		if got.Pool != "mypool" || got.Epoch != "7" {
+			t.Errorf("%+v", got)
+		}
+		applied++
+		return nil
+	}
+	uc := w.settler(f)
+	uc.Appliers = map[string]Applier{assets.PendingPoolRegistration: apply}
+	// Submitted only: kept, the pool applier not called.
+	if res, err := uc.Run(ctx); err != nil || len(res.Submitted) != 1 || res.Submitted[0].Kind != assets.PendingPoolRegistration || applied != 0 {
+		t.Fatalf("%v %+v", err, res)
+	}
+	confirm(t, f, id)
+	// No applier: an error, nothing lost.
+	if _, err := w.settler(f).Run(ctx); err == nil || !strings.Contains(err.Error(), "no applier") || !w.exists(id.String()+".pending") {
+		t.Fatalf("no applier: %v", err)
+	}
+	res, err := uc.Run(ctx)
+	if err != nil || len(res.Applied) != 1 || applied != 1 || w.exists(id.String()+".pending") {
+		t.Fatalf("%v %+v applied %d", err, res, applied)
+	}
+	if res, err = uc.Run(ctx); err != nil || len(res.Applied) != 0 || applied != 1 {
+		t.Fatalf("a second run: %v %+v", err, res)
+	}
 }

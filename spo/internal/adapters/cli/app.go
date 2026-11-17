@@ -163,6 +163,13 @@ type session struct {
 	Sealed SealedStore // nil for the upstream layout
 	Pass   *secret.Buffer
 	log    noticeLog
+	// waiting is true when the command waits for confirmation after its own
+	// work; canWait that a provider can say where a transaction is; lateWait is
+	// set by a command that decides only after it has submitted whether it must
+	// wait (offline execute, for an entry with a pending update).
+	waiting, canWait, lateWait bool
+	// rec is the recorder of the submissions of the running command.
+	rec *submitRecorder
 }
 
 // Close closes the workspace and prints the notices Close produced. A close

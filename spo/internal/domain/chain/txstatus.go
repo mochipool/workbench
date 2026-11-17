@@ -34,6 +34,40 @@ func (e *outcomeUnknown) Error() string { return e.msg }
 
 func (e *outcomeUnknown) Is(target error) bool { return target == ErrSubmitOutcomeUnknown }
 
+// IDMismatchError is the answer of a provider that accepted a transaction and
+// named a different id for it than the one computed from the bytes sent. The
+// transaction left, so this is an unknown outcome and not a refusal: it
+// matches ErrSubmitOutcomeUnknown, and a caller keeps whatever it staged for
+// the transaction (SPO-Xconfirm-PR-008).
+type IDMismatchError struct{ Answered, Local TxID }
+
+func (e *IDMismatchError) Error() string {
+	return fmt.Sprintf("the provider answered transaction id %s for %s: the transaction may have been accepted under its own id. Check where it is with: spo tx status %s", e.Answered, e.Local, e.Local)
+}
+
+// Is makes a mismatch an unknown submit outcome.
+func (e *IDMismatchError) Is(target error) bool { return target == ErrSubmitOutcomeUnknown }
+
+// SubmitStatusRefuses says whether an HTTP status from a web provider's submit
+// endpoint is a definite refusal: the node or the provider looked at the
+// transaction and said no, so it did not leave. The rule: a 4xx is definite
+// (400 carries the node's rejection; 401, 403, 404, 413 and the like are
+// stopped before the transaction is looked at), except 408, 425 and 429, which
+// say the request was not finished or deferred and do not say the transaction
+// was not taken. Every other status, a 5xx (a gateway can answer 502 after it
+// forwarded the transaction), a 3xx, or a 2xx the adapter did not expect, is
+// an unknown outcome (SPO-Xconfirm-PR-008).
+func SubmitStatusRefuses(status int) bool {
+	if status < 400 || status > 499 {
+		return false
+	}
+	switch status {
+	case 408, 425, 429:
+		return false
+	}
+	return true
+}
+
 // TxState is where a provider says a transaction is.
 type TxState int
 

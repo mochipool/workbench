@@ -106,6 +106,13 @@ type Waiter struct {
 	// is left of the wait plus this margin (a context deadline), so a wait
 	// ends within the margin of its timeout. Zero leaves polls unbounded.
 	PollBudget time.Duration
+	// Probe ends the wait at the first poll that shows neither a confirmation
+	// nor a possible expiry (every provider's pre-read tip past the bound and
+	// every answer not seen): the one case that needs a second poll, because
+	// expiry is stated only after two polls in a row. Settling a pending
+	// record uses it, so a transaction that is simply still waiting costs one
+	// poll and not the whole timeout.
+	Probe bool
 	// OnPoll is called after every poll, so the command can print progress.
 	OnPoll func(poll int, verdict chain.Verdict, answers []chain.ProviderAnswer)
 }
@@ -211,6 +218,9 @@ func (w Waiter) Wait(ctx context.Context, r Request) (Result, error) {
 			expiredRun = 0
 		}
 		remaining := r.Timeout - res.Elapsed
+		if w.Probe && expiredRun == 0 {
+			remaining = 0
+		}
 		if remaining <= 0 {
 			switch {
 			case !usable:

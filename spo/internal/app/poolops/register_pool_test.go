@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/mochipool/workbench/spo/internal/app/txflow"
+	"github.com/mochipool/workbench/spo/internal/domain/assets"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
@@ -81,8 +82,21 @@ func TestFirstRegistrationAllLocal(t *testing.T) {
 	if len(res.Outputs) != 1 || res.Outputs[0].Lovelace != total-res.Fee-500_000_000 {
 		t.Errorf("change %+v fee %d", res.Outputs, res.Fee)
 	}
-	// The record: epoch, time, no collection, and the certificate consumed.
+	// The accepted submit records no registration: the collection and the
+	// certificate are consumed and the record waits under the transaction id
+	// (SPO-Xconfirm-PR-001).
 	d := r.descriptor()
+	if d.Has("regEpoch") || d.Has("regSubmitted") || d.Has("regWitness") || !res.RecordPending {
+		t.Errorf("%s", d.Render())
+	}
+	if p, ok := r.pending(res.TxID); !ok || p.Kind != assets.PendingPoolRegistration || p.Pool != "mypool" || p.Queued || p.ValidUntil == nil {
+		t.Errorf("the pending update: %v %+v", ok, p)
+	}
+	// Confirmation writes the record the old path wrote, once.
+	if !r.confirm(res.TxID) || r.confirm(res.TxID) {
+		t.Error("the pending registration is applied once")
+	}
+	d = r.descriptor()
 	if d.Text("regEpoch") != "7" || d.Text("regSubmitted") != "Mon, 16 Nov 2026 12:00:00 +0000" || d.Has("regWitness") {
 		t.Errorf("%s", d.Render())
 	}
@@ -273,11 +287,23 @@ func TestOfflineRegistrationQueuesTheTransaction(t *testing.T) {
 	}
 	want := []ports.QueuedField{{Key: "poolMetaTicker", Value: "MYPL"}, {Key: "regProtectionKey", Value: "key-in-the-descriptor"},
 		{Key: "poolMetaUrl", Value: "https://example.org/mypool.metadata.json"}, {Key: "poolMetaHash", Value: r.descriptor().Text("poolMetaHash")}}
-	if fmt.Sprint(q.Extra) != fmt.Sprint(want) {
+	// The entry also carries the pending update, as the field of the asset updates.
+	if len(q.Extra) != len(want)+1 || fmt.Sprint(q.Extra[:len(want)]) != fmt.Sprint(want) || q.Extra[len(want)].Key != "spoAssetPending" ||
+		!strings.Contains(q.Extra[len(want)].Value, `"kind":"pool-registration"`) {
 		t.Errorf("%v", q.Extra)
 	}
 	d := r.descriptor()
-	if d.Text("regSubmitted") != "Mon, 16 Nov 2026 12:00:00 +0000 (only offline, no proof)" || d.Text("regEpoch") != "7" || r.exists("mypool.pool.cert") {
+	if d.Has("regSubmitted") || d.Has("regEpoch") || r.exists("mypool.pool.cert") {
+		t.Errorf("a queued registration records nothing until it is confirmed: %s", d.Render())
+	}
+	if p, ok := r.pending(res.TxID); !ok || !p.Queued || p.Stamp != "Mon, 16 Nov 2026 12:00:00 +0000 (only offline, no proof)" || p.Epoch != "7" {
+		t.Errorf("the pending update: %v %+v", ok, p)
+	}
+	if !r.confirm(res.TxID) {
+		t.Fatal("nothing to apply")
+	}
+	d = r.descriptor()
+	if d.Text("regSubmitted") != "Mon, 16 Nov 2026 12:00:00 +0000 (only offline, no proof)" || d.Text("regEpoch") != "7" {
 		t.Errorf("%s", d.Render())
 	}
 	if len(attached) != 1 || attached[0] != "mypool.metadata.json" {
@@ -446,8 +472,11 @@ func TestImportedWitnessCompletesTheCollectionAndAssemblesTheSameTransaction(t *
 	if r.calls.count("utxos") != 1 {
 		t.Errorf("%d UTxO reads: the body is built once", r.calls.count("utxos"))
 	}
-	if r.exists("mypool.pool.cert") || r.descriptor().Has("regWitness") || !r.descriptor().Has("regSubmitted") {
+	if r.exists("mypool.pool.cert") || r.descriptor().Has("regWitness") || r.descriptor().Has("regSubmitted") {
 		t.Error("submission record")
+	}
+	if !r.confirm(res.TxID) || !r.descriptor().Has("regSubmitted") {
+		t.Error("the confirmation records the registration")
 	}
 }
 

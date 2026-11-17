@@ -431,25 +431,31 @@ var ErrSubmitOutcomeUnknown = chain.NewOutcomeUnknown("blockfrost tx/submit: the
 
 // Submit implements ports.TxSubmitter: POST /tx/submit with the binary
 // transaction as application/cbor. The documented answer is 200 and the
-// transaction id as a JSON string. A single attempt. A 4xx is a definite
-// refusal; a transport failure, a 5xx or an answer that is not a transaction
+// transaction id as a JSON string. A single attempt. A 4xx other than 408, 425 and 429 is a definite
+// refusal (chain.SubmitStatusRefuses); a transport failure, a cancellation, a 5xx or an answer that is not a transaction
 // id leaves the outcome unknown.
 func (c *Client) Submit(ctx context.Context, signedTx []byte) (chain.TxID, error) {
 	if len(signedTx) == 0 {
 		return chain.TxID{}, errors.New("blockfrost tx/submit: empty transaction")
 	}
+	if err := ctx.Err(); err != nil {
+		return chain.TxID{}, err // nothing was sent
+	}
 	status, body, err := c.do(ctx, request{op: "tx/submit", method: "POST", path: "/tx/submit", body: signedTx, contentType: "application/cbor", long: true})
 	if err != nil {
-		if ctx.Err() != nil || strings.Contains(err.Error(), "build request") {
-			return chain.TxID{}, err
+		if strings.Contains(err.Error(), "build request") {
+			return chain.TxID{}, err // the request was never sent
 		}
+		// A cancellation or deadline after the request may have been sent is
+		// unknown too.
 		return chain.TxID{}, fmt.Errorf("%w: %v", ErrSubmitOutcomeUnknown, err)
 	}
 	switch {
-	case status >= 500:
-		return chain.TxID{}, fmt.Errorf("%w: HTTP %d: %s", ErrSubmitOutcomeUnknown, status, prefix(body))
-	case status != 200:
+	case status == 200:
+	case chain.SubmitStatusRefuses(status):
 		return chain.TxID{}, &statusError{op: "tx/submit", status: status, body: prefix(body)}
+	default: // 5xx, 408, 425, 429 and anything unexpected
+		return chain.TxID{}, fmt.Errorf("%w: HTTP %d: %s", ErrSubmitOutcomeUnknown, status, prefix(body))
 	}
 	id := strings.TrimSpace(strings.ReplaceAll(string(body), `"`, ""))
 	tx, err := chain.ParseTxID(id)

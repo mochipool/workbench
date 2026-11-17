@@ -16,8 +16,10 @@ import (
 	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/adapters/transferfile"
+	appassets "github.com/mochipool/workbench/spo/internal/app/assets"
 	"github.com/mochipool/workbench/spo/internal/app/poolops"
 	"github.com/mochipool/workbench/spo/internal/app/txflow"
+	"github.com/mochipool/workbench/spo/internal/domain/assets"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -409,9 +411,57 @@ func queuedTTL(t *testing.T, dir string) (fee, ttl uint64, hexTx string) {
 	return fee, ttl, txs[0].TxJSON.CborHex
 }
 
-// descriptorEqual compares the descriptors after a run, the dates masked.
-func descriptorEqual(t *testing.T, up, port string, why string) {
+// settlePending applies every pending update of the port workspace, as
+// settling does when the providers confirm the transactions: the port writes
+// the registration and retirement records on confirmation, where upstream
+// writes them when it queues or sends (hazard H9, a pinned deviation), so the
+// descriptors are compared after the confirmation.
+//
+// want is the kind of pending update the run must have left (the pool
+// registration or retirement kind) or "" for a run that sends nothing: the
+// record of the right kind, for the pool, under a transaction id, must exist
+// before it is applied, so a missing pending record fails the test instead of
+// letting an unchanged descriptor pass for "settled".
+func settlePending(t *testing.T, port, want string) {
 	t.Helper()
+	store, err := fsstore.Open(port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pend, _, err := appassets.ListPending(bg, store, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want == "" {
+		if len(pend) != 0 {
+			t.Fatalf("a run that sends nothing left pending updates: %+v", pend)
+		}
+		return
+	}
+	if len(pend) != 1 || pend[0].KindOrAsset() != want || pend[0].Pool != "mypool" || len(pend[0].TxID) != 64 {
+		t.Fatalf("the port left %+v, not one pending %s update of mypool under a transaction id", pend, want)
+	}
+	st := appassets.Settle{Store: store, Clock: fixedNow{}, Appliers: map[string]appassets.Applier{
+		assets.PendingPoolRegistration: poolops.ApplyRegistration, assets.PendingPoolRetirement: poolops.ApplyRetirement}}
+	for _, p := range pend {
+		id, err := chain.ParseTxID(p.TxID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := st.Apply(bg, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+type fixedNow struct{}
+
+func (fixedNow) Now() time.Time { return time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC) }
+
+// descriptorEqual compares the descriptors after a run, the dates masked.
+func descriptorEqual(t *testing.T, up, port string, why, pending string) {
+	t.Helper()
+	settlePending(t, port, pending)
 	u, p := maskDates(fileMode(t, up, "mypool.pool.json")), maskDates(fileMode(t, port, "mypool.pool.json"))
 	if u != p {
 		t.Errorf("%s: the descriptor differs\n  upstream: %s\n  port:     %s", why, u, p)
@@ -455,7 +505,7 @@ func TestPoolRegistrationMatchesUpstream(t *testing.T) {
 				t.Errorf("%+v (upstream fee %d)", res, upFee)
 			}
 			queuedEntryEqual(t, r.up, r.port)
-			descriptorEqual(t, r.up, r.port, "after the registration")
+			descriptorEqual(t, r.up, r.port, "after the registration", assets.PendingPoolRegistration)
 			for _, f := range []string{"mypool.pool.cert"} {
 				if _, err := os.Stat(filepath.Join(r.up, f)); err == nil {
 					t.Errorf("upstream kept %s", f)
@@ -625,7 +675,7 @@ func TestPoolWitnessTransferMatchesUpstream(t *testing.T) {
 		t.Fatalf("%+v", fin)
 	}
 	queuedEntryEqual(t, r.up, r.port)
-	descriptorEqual(t, r.up, r.port, "after the assembled registration")
+	descriptorEqual(t, r.up, r.port, "after the assembled registration", assets.PendingPoolRegistration)
 }
 
 func (e env) goRetireCert(t *testing.T, dir string, epoch uint64, req poolops.RetirementRequest) (poolops.RetirementCertificate, error) {
@@ -683,7 +733,7 @@ func TestPoolRetirementMatchesUpstream(t *testing.T) {
 			if u, p := fileMode(t, up, "mypool.pool.dereg-cert"), fileMode(t, port, "mypool.pool.dereg-cert"); u != p {
 				t.Errorf("certificate differs\n  upstream: %q\n  port:     %q", u, p)
 			}
-			descriptorEqual(t, up, port, "after 07a")
+			descriptorEqual(t, up, port, "after 07a", "")
 		})
 	}
 
@@ -709,7 +759,7 @@ func TestPoolRetirementMatchesUpstream(t *testing.T) {
 			t.Errorf("%+v (upstream fee %d)", res, upFee)
 		}
 		queuedEntryEqual(t, up, port)
-		descriptorEqual(t, up, port, "after 07b")
+		descriptorEqual(t, up, port, "after 07b", assets.PendingPoolRetirement)
 		// Upstream leaves the certificate to be submitted again; the port uses it up.
 		if _, err := os.Stat(filepath.Join(up, "mypool.pool.dereg-cert")); err != nil {
 			t.Error("upstream no longer keeps the retirement certificate (SPO-07b-OUT-003)")

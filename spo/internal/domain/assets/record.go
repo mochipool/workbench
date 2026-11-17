@@ -219,20 +219,67 @@ func (f RecordFields) AssetOf() (chain.AssetID, error) {
 	return id, fmt.Errorf("%w: the format of the name in the asset file is not understood", ErrBadSelection)
 }
 
-// Pending is an update of an asset record that waits for the confirmed
-// submission of the transaction it belongs to (hazard H9). It is stored under
-// the transaction's id when the transaction is queued, and applied by the
-// executor of the queue on success.
+// Kinds of a pending update. A record without a kind is an asset update, which
+// is all the first version wrote.
+const (
+	PendingAsset            = "asset"
+	PendingPoolRegistration = "pool-registration"
+	PendingPoolRetirement   = "pool-retirement"
+)
+
+// Pending is an update of a local record (an asset record, or the registration
+// or retirement record of a pool descriptor) that waits for the transaction it
+// belongs to to be confirmed in a block (hazard H9, spec/extensions/Xconfirm.md).
+// It is stored under the transaction's id when the transaction is submitted or
+// queued, and applied once, when the transaction is confirmed. The type keeps
+// its name from the asset-only first version; the JSON of such a record has no
+// "kind" and is read as an asset update.
 type Pending struct {
+	// Kind is one of the Pending constants; empty is PendingAsset.
+	Kind string `json:"kind,omitempty"`
 	TxID string `json:"txid"`
-	// Record is the store name of the asset record.
-	Record      string `json:"record"`
-	Policy      string `json:"policy"`   // the policy id, hex
-	NameHex     string `json:"nameHex"`  // the asset name, hex
-	HexTyped    bool   `json:"hexTyped"` // the name was typed as {hex}
-	Delta       string `json:"delta"`    // signed decimal
-	ValidBefore string `json:"validBefore"`
-	Action      string `json:"action"`
+	// ValidUntil is the transaction's validity upper bound (a slot), when it
+	// has one: it lets a later settle call the transaction expired.
+	ValidUntil *uint64 `json:"validUntil,omitempty"`
+	// Queued is true when the transaction was only queued for a later
+	// submission (offline mode).
+	Queued bool `json:"queued,omitempty"`
+	// Date is when the update was recorded as pending (RFC 3339); an asset
+	// record's lastUpdate takes it, as the old path stamped the submission.
+	Date string `json:"date,omitempty"`
+
+	// Asset updates. Record is the store name of the asset record.
+	Record      string `json:"record,omitempty"`
+	Policy      string `json:"policy,omitempty"`   // the policy id, hex
+	NameHex     string `json:"nameHex,omitempty"`  // the asset name, hex
+	HexTyped    bool   `json:"hexTyped,omitempty"` // the name was typed as {hex}
+	Delta       string `json:"delta,omitempty"`    // signed decimal
+	ValidBefore string `json:"validBefore,omitempty"`
+	Action      string `json:"action,omitempty"`
+
+	// Pool updates: the pool's store name, the epoch of a registration and the
+	// stamp the descriptor field takes (what the old path wrote when it sent
+	// the transaction).
+	Pool  string `json:"pool,omitempty"`
+	Epoch string `json:"epoch,omitempty"`
+	Stamp string `json:"stamp,omitempty"`
+}
+
+// KindOrAsset is the kind of the update, an asset update when none is stored.
+func (p Pending) KindOrAsset() string {
+	if p.Kind == "" {
+		return PendingAsset
+	}
+	return p.Kind
+}
+
+// Target names what the update changes, for messages: the asset record or the
+// pool.
+func (p Pending) Target() string {
+	if p.KindOrAsset() == PendingAsset {
+		return p.Record
+	}
+	return p.Pool
 }
 
 // Marshal renders the pending update for the store.
@@ -242,7 +289,12 @@ func (p Pending) Marshal() ([]byte, error) { return json.MarshalIndent(p, "", " 
 func ParsePending(b []byte) (Pending, error) {
 	var p Pending
 	if err := json.Unmarshal(b, &p); err != nil {
-		return Pending{}, fmt.Errorf("the pending asset update is damaged: %w", err)
+		return Pending{}, fmt.Errorf("the pending update is damaged: %w", err)
+	}
+	switch p.KindOrAsset() {
+	case PendingAsset, PendingPoolRegistration, PendingPoolRetirement:
+	default:
+		return Pending{}, fmt.Errorf("the pending update has an unknown kind %q", p.Kind)
 	}
 	return p, nil
 }
@@ -264,5 +316,8 @@ func (p Pending) Change(date time.Time) (Change, error) {
 	var id chain.AssetID
 	copy(id.Policy[:], pol)
 	id.Name = nm
+	if t, err := time.Parse(time.RFC3339Nano, p.Date); err == nil {
+		date = t
+	}
 	return Change{Asset: id, HexTyped: p.HexTyped, Delta: d.Int64(), ValidBefore: p.ValidBefore, Action: p.Action, Date: date}, nil
 }

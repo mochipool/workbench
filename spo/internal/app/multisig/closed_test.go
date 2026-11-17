@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/mochipool/workbench/spo/internal/app/multisig"
+	"github.com/mochipool/workbench/spo/internal/domain/assets"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -189,7 +190,7 @@ func TestClosedNoticeFromANonCoordinatorIsRefused(t *testing.T) {
 // TTL slot has passed is Expired, and the signers it asked get the notice at
 // the next sweep (SPO-Xparty-INV-035).
 //
-// spec: SPO-Xparty-INV-035, SPO-Xparty-INV-015
+// spec: SPO-Xparty-INV-035, SPO-Xparty-INV-015, SPO-Xconfirm-PR-007
 func TestSweepAnnouncesAnExpiredCollection(t *testing.T) {
 	s := newScene(t, sceneOpt{})
 	s.request()
@@ -222,14 +223,23 @@ func TestSweepAnnouncesAnExpiredCollection(t *testing.T) {
 // pool command records the id of what it submitted, and "submitted" needs it to
 // be the collection's own body id.
 //
-// spec: SPO-Xparty-INV-035, SPO-Xparty-INV-015
+// spec: SPO-Xparty-INV-035, SPO-Xparty-INV-015, SPO-Xconfirm-PR-007
 func TestSweepTellsASubmissionFromADiscard(t *testing.T) {
-	for _, mode := range []string{"submitted", "queued", "discarded", "replaced"} {
-		submitted := mode != "discarded"
+	// "pending" modes: the registration was sent and waits for its confirmation,
+	// so the descriptor records no submission yet (hazard H9); the pending
+	// update under the body's transaction id is the proof.
+	for _, mode := range []string{"submitted", "queued", "discarded", "replaced", "pending", "pending-queued", "pending-other"} {
+		pending := strings.HasPrefix(mode, "pending")
+		submitted := mode != "discarded" && !pending
 		name := mode
 		want := mode
-		if mode == "replaced" {
+		switch mode {
+		case "replaced", "pending-other":
 			want = "discarded"
+		case "pending":
+			want = "submitted"
+		case "pending-queued":
+			want = "queued"
 		}
 		t.Run(name, func(t *testing.T) {
 			s := newScene(t, sceneOpt{})
@@ -270,6 +280,17 @@ func TestSweepTellsASubmissionFromADiscard(t *testing.T) {
 					}
 				} else {
 					d.ClearCollection()
+				}
+				if pending {
+					id := s.body.ID
+					if mode == "pending-other" {
+						id[0] ^= 0xff
+					}
+					p := assets.Pending{Kind: assets.PendingPoolRegistration, TxID: hex.EncodeToString(id[:]), Pool: "mypool", Epoch: "5", Stamp: "x", Queued: mode == "pending-queued"}
+					pb, _ := p.Marshal()
+					if err := w.Put(ports.Ref{Name: p.TxID, Kind: ports.PendingUpdate}, pb); err != nil {
+						return err
+					}
 				}
 				return w.Put(poolRef, d.Render())
 			}); err != nil {

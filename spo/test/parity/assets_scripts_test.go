@@ -682,8 +682,8 @@ func TestMintBurnMatchUpstream(t *testing.T) {
 			if u, p := normalised(upDoc), normalised(portDoc); u != p {
 				t.Errorf("transfer file differs (queue entry, history)\n--- upstream\n%s\n--- port\n%s", u, p)
 			}
-			if !res.Queued || !res.RecordPending || res.RecordUpdated {
-				t.Errorf("result: queued %v pending %v updated %v", res.Queued, res.RecordPending, res.RecordUpdated)
+			if !res.Queued || !res.RecordPending {
+				t.Errorf("result: queued %v pending %v", res.Queued, res.RecordPending)
 			}
 
 			// H9, pinned: upstream's record exists now; the port's does not.
@@ -696,15 +696,23 @@ func TestMintBurnMatchUpstream(t *testing.T) {
 				t.Errorf("upstream record mode %v", got)
 			}
 
-			// The queue's executor submits it; the settling submitter applies the record.
+			// The queue's executor submits it: the record is still untouched
+			// (an accepted submit is not a confirmation); settling on a
+			// confirmation applies it.
 			store, _ := fsstore.Open(port)
 			var submitted []byte
-			var hookErr error
-			settle := appassets.SettlingSubmitter{Inner: recordingSubmitter{&submitted}, Hook: appassets.Settle{Store: store, Clock: base.Clock},
-				OnError: func(_ chain.TxID, err error) { hookErr = err }}
+			sub := recordingSubmitter{&submitted}
 			raw, _ := hex.DecodeString(portTxs[0].TxJSON.CborHex)
-			if _, err := settle.Submit(context.Background(), raw); err != nil || hookErr != nil {
-				t.Fatalf("submit: %v, hook: %v", err, hookErr)
+			id, err := sub.Submit(context.Background(), raw)
+			if err != nil {
+				t.Fatalf("submit: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(port, tc.portRec)); err == nil {
+				t.Fatalf("the port wrote %s on the accepted submit", tc.portRec)
+			}
+			settle := appassets.Settle{Store: store, Clock: base.Clock}
+			if _, found, err := settle.Apply(context.Background(), id); err != nil || !found {
+				t.Fatalf("settle: %v %v", err, found)
 			}
 			portRec := readFile(t, port, tc.portRec)
 			if got := mode(t, port, tc.portRec); got != 0o400 {
@@ -714,9 +722,9 @@ func TestMintBurnMatchUpstream(t *testing.T) {
 			if u, p := dateRE.ReplaceAllString(upRec, ""), dateRE.ReplaceAllString(portRec, ""); u != p {
 				t.Errorf("asset record differs after the submit\n--- upstream (%s)\n%s\n--- port (%s)\n%s", tc.record, u, tc.portRec, p)
 			}
-			// the update is spent: a second report of the same id changes nothing
-			if _, err := settle.Submit(context.Background(), raw); err != nil {
-				t.Fatal(err)
+			// the update is spent: a second settle of the same id changes nothing
+			if _, found, err := settle.Apply(context.Background(), id); err != nil || found {
+				t.Fatalf("a second settle: %v %v", err, found)
 			}
 			if again := readFile(t, port, tc.portRec); again != portRec {
 				t.Error("the record was updated twice")

@@ -16,7 +16,9 @@ import (
 
 	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
+	appassets "github.com/mochipool/workbench/spo/internal/app/assets"
 	"github.com/mochipool/workbench/spo/internal/app/txflow"
+	"github.com/mochipool/workbench/spo/internal/domain/assets"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
@@ -94,6 +96,8 @@ type psub struct {
 	c    *pcalls
 	sent [][]byte
 	err  error
+	// wrongID makes the provider accept the transaction and answer another id.
+	wrongID bool
 }
 
 func (s *psub) Source() chain.Source { return "fake chain" }
@@ -103,6 +107,9 @@ func (s *psub) Submit(_ context.Context, tx []byte) (chain.TxID, error) {
 		return chain.TxID{}, s.err
 	}
 	s.sent = append(s.sent, tx)
+	if s.wrongID {
+		return chain.TxID{0xee}, nil
+	}
 	return native.Ledger{}.TransactionID(tx)
 }
 
@@ -419,4 +426,28 @@ func readerOf(r *prig) ports.Reader {
 	var out ports.Reader
 	_ = r.store.View(context.Background(), func(rd ports.Reader) error { out = rd; return nil })
 	return out
+}
+
+// confirm is what settling does when the providers say the transaction is in a
+// block: it applies the pending update of the transaction, once. It says
+// whether there was one.
+func (r *prig) confirm(id chain.TxID) bool {
+	r.t.Helper()
+	st := appassets.Settle{Store: r.store, Clock: r.clock, Appliers: map[string]appassets.Applier{
+		assets.PendingPoolRegistration: ApplyRegistration, assets.PendingPoolRetirement: ApplyRetirement}}
+	_, found, err := st.Apply(context.Background(), id)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return found
+}
+
+// pending reads the pending update of the transaction.
+func (r *prig) pending(id chain.TxID) (assets.Pending, bool) {
+	r.t.Helper()
+	p, found, err := appassets.PendingOf(context.Background(), r.store, id)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return p, found
 }
