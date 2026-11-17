@@ -13,12 +13,12 @@ import (
 
 	"golang.org/x/crypto/blake2b"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/app/wallet"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 // bech32 encodes data under hrp (BIP 173), enough to make a test address.
@@ -148,7 +148,7 @@ func newSendFixture(t *testing.T) *sendFixture {
 	cfgs := map[string]WorkspaceConfig{f.dir: {Network: "preview", Mode: ModeOffline}}
 	f.deps = Deps{
 		Out: &f.out, Err: &f.out, Config: memConfig(cfgs),
-		OpenUpstream: func(dir string) (ports.Store, error) { return fsstore.Open(dir) },
+		OpenUpstream: func(dir string) (ports.Store, error) { return plainstore.OpenTestnet(dir) },
 		Wire: func(st ports.Store, o WireOptions) (*Env, error) {
 			led := native.Ledger{}
 			env := &Env{Mode: o.Mode, NetworkID: ports.NetworkTestnet, Clock: cliClock{},

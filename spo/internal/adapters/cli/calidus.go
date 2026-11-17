@@ -16,6 +16,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/app/catalyst"
 	"github.com/mochipool/workbench/spo/internal/app/poolkey"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
+	"github.com/mochipool/workbench/spo/internal/platform/textsafe"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -23,8 +24,9 @@ import (
 // (CIP-36, upstream 09a_catalystVote). Neither command submits anything: the
 // registration is stored in the workspace and attached to an ordinary payment
 // with `spo wallet send ... --metadata-record NAME`. No command prints a
-// signing key or a mnemonic. `catalyst key qrcode` writes the PIN-protected QR
-// code of a voting key, the one command whose output is as secret as the key.
+// signing key or a mnemonic. `catalyst key qrcode` draws the PIN-protected QR
+// code of a voting key on a terminal (never to a file), the one command whose
+// output is as secret as the key.
 
 // derivedKeyOptions are the flags of the two key commands.
 type derivedKeyOptions struct {
@@ -368,27 +370,32 @@ phrase exist, so it has no QR code. ` + hardwareUntested,
 func (a *app) catalystKeyQRCommand() *cobra.Command {
 	var (
 		pinFD int
-		out   string
-		show  bool
+		yes   bool
 		cf    chainFlags
 	)
 	cmd := &cobra.Command{
-		Use:   "qrcode <name> [--pin-fd N] [--out FILE] [--show]",
-		Short: "Write the PIN-protected QR code of a voting key for the Catalyst mobile app",
-		Long: `Encrypt the voting signing key <name> with a four-digit PIN and write it as the
-QR code the Catalyst mobile app scans to import the key: the PNG file
-<name>.catalyst-qrcode.png in the current directory (or --out FILE), created with
-mode 0600 and never over an existing file. The code is drawn in the terminal
-only with --show, and only when standard output is a terminal. The PIN is read from a prompt, or from file
-descriptor N with --pin-fd; it is never an argument.
+		Use:   "qrcode <name> [--pin-fd N] [--yes]",
+		Short: "Show the PIN-protected QR code of a voting key on the terminal for the Catalyst mobile app",
+		Long: `Encrypt the voting signing key <name> with a four-digit PIN and draw it as the
+QR code the Catalyst mobile app scans to import the key. The code is drawn on
+the terminal only: this program writes it to no file, because a four-digit PIN
+protects the payload and four digits do not resist an offline guess (10,000
+guesses). Standard output must be a terminal; a pipe or a redirect is refused
+before anything is asked, and so is --yes there.
+
+Before drawing, the command says that anyone who photographs or records the
+screen can recover the key with at most 10,000 guesses, and asks for
+confirmation (default no; --yes answers it, on a terminal only). The display is
+recorded in the workspace's audit log first and is not made when the record
+cannot be written. The drawing is on the terminal's alternate screen and the
+screen is cleared when you press Enter, so it does not stay in the scrollback
+(a terminal log, a recording or a shared screen can still hold it). The PIN is
+read from a prompt, or from file descriptor N with --pin-fd; it is never an
+argument.
 
 The payload is the key encrypted with the PIN alone (PBKDF2-HMAC-SHA512,
 ChaCha20-Poly1305, the format of the Catalyst toolbox, implemented from its
-public source). Four digits do not resist an offline guess: the PNG and the
-terminal drawing are exactly as sensitive as the key. The drawing stays in the
-terminal's scrollback, in any terminal log or recording, and on a shared
-screen; that is why it is drawn only on request. Delete the PNG once the
-app has the key and do not keep it beside the key's backup.
+public source).
 
 NOT VERIFIED against the mobile app: the format is built from the toolbox
 source and checked against independently computed values and a round trip, but
@@ -396,6 +403,9 @@ no QR code made here has been scanned by the app. Scan one for a throw-away key
 first. A voting key on a hardware wallet has no signing key and no QR code.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if !stdoutIsTerminal(a.d.Out) {
+				return errors.New("the QR code is drawn on a terminal only, and standard output is not one: this program writes it to no file, and --yes does not change that")
+			}
 			pinSet := cmd.Flags().Changed("pin-fd")
 			if pinSet && pinFD < 0 {
 				return errors.New("--pin-fd needs a file descriptor number")
@@ -403,9 +413,19 @@ first. A voting key on a hardware wallet has no signing key and no QR code.`,
 			if pinSet && a.passFD >= 0 && pinFD == a.passFD {
 				return errors.New("--pin-fd and --passphrase-fd name the same descriptor")
 			}
+			if a.d.WorkspaceAuditor == nil {
+				return errors.New("this build has no audit log, and the QR code is not shown without a record of it")
+			}
 			return a.withEnv(cmd, envSpec{flags: &cf, needs: []Need{CapVotingQR}}, func(ctx context.Context, s *session, env *Env, _ WireOptions) error {
+				fmt.Fprintf(a.d.Out, "The QR code of the voting key %s is the key itself, protected by a four-digit PIN only.\nAnyone who photographs, records or shares this screen can recover the key with at most 10,000 guesses.\nThe display is recorded in the audit log.\n", textsafe.Text(args[0]))
+				ok, err := a.confirm(ctx, "Draw the QR code on this terminal?", yes)
+				if err != nil {
+					return err
+				}
+				if !ok {
+					return errors.New("not drawn: the QR code was not confirmed")
+				}
 				var pin *secret.Buffer
-				var err error
 				if pinSet {
 					pin, err = readFDSecret(pinFD, "the PIN")
 				} else {
@@ -418,33 +438,33 @@ first. A voting key on a hardware wallet has no signing key and no QR code.`,
 					return err
 				}
 				defer pin.Destroy()
-				path := out
-				if path == "" {
-					path = args[0] + ".catalyst-qrcode.png"
-				}
 				var res catalyst.QRExported
 				err = pin.Use(func(b []byte) error {
 					var rerr error
-					res, rerr = catalyst.ExportVotingKeyQR{Store: s.Store, Source: env.VotingQR, Renderer: env.QRCodes}.Run(ctx, catalyst.QRRequest{Name: args[0], PIN: b, Path: path})
+					res, rerr = catalyst.ExportVotingKeyQR{Store: s.Store, Source: env.VotingQR, Renderer: env.QRCodes,
+						Auditor: a.d.WorkspaceAuditor(a.workspace, s.Store, "")}.Run(ctx, catalyst.QRRequest{Name: args[0], PIN: b})
 					return rerr
 				})
 				if err != nil {
 					return err
 				}
-				fmt.Fprintf(a.d.Out, "Wrote the QR code of the voting key %s to %s (mode 0600).\nThe PNG and a drawing of the code are key-equivalent: a four-digit PIN protects them, and four digits do not resist an offline guess. Delete the PNG once the app has the key.\n", res.Name, res.Path)
-				switch {
-				case show && stdoutIsTerminal(a.d.Out):
-					fmt.Fprintf(a.d.Out, "\nThe drawing below is the key, protected by the four-digit PIN only. It stays in this terminal's scrollback, in any terminal log or recording and on a shared screen: clear them afterwards.\n\n%s", res.Terminal)
-				case show:
-					fmt.Fprintln(a.d.Out, "Not drawn: --show draws the code only when standard output is a terminal; the PNG was written.")
+				// The alternate screen keeps the drawing out of the scrollback; the
+				// clear on the way out runs on every path.
+				fmt.Fprint(a.d.Out, "\x1b[?1049h\x1b[2J\x1b[H")
+				defer fmt.Fprint(a.d.Out, "\x1b[2J\x1b[?1049l")
+				fmt.Fprintf(a.d.Out, "QR code of the voting key %s (the key, under a four-digit PIN)\n\n%s\nPress Enter to clear the screen.\n", textsafe.Text(res.Name), res.Terminal)
+				if _, err := a.term.ReadLine(ctx, ""); err != nil {
+					if errors.Is(err, ErrNoTerminal) {
+						return errors.New("no terminal to wait on, so the screen was cleared at once; run the command on a terminal")
+					}
+					return err
 				}
 				return nil
 			})
 		},
 	}
 	cmd.Flags().IntVar(&pinFD, "pin-fd", -1, "read the four-digit PIN from this file descriptor (never from the command line)")
-	cmd.Flags().StringVar(&out, "out", "", "the PNG file to create (default: <name>.catalyst-qrcode.png in the current directory); it must not exist")
-	cmd.Flags().BoolVar(&show, "show", false, "also draw the QR code in the terminal (only when standard output is a terminal): the drawing stays in scrollback, terminal logs and on shared screens, and is as sensitive as the key")
+	cmd.Flags().BoolVar(&yes, "yes", false, "answer the confirmation (the code is drawn on a terminal only; this flag does not change that)")
 	addChainFlags(cmd, &cf, false)
 	return cmd
 }

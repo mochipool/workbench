@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
+	"github.com/mochipool/workbench/spo/internal/adapters/upstreamdir"
 	"github.com/mochipool/workbench/spo/internal/app/governance"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	dgov "github.com/mochipool/workbench/spo/internal/domain/governance"
@@ -191,7 +191,7 @@ func newGovFix(t *testing.T) *govFix {
 			AddressInspector: led, MinOutputCalculator: led, FeeEstimator: led, TxBodyBuilder: led, TxAssembler: led,
 			Addresses: led, Certs: led, CertDecoder: led, PaymentKeys: soft, StakeKeys: soft, Mnemonics: soft, WalletDeriver: soft,
 			DRepKeys: soft, ComColdKeys: soft, ComHotKeys: soft, GovDeriver: soft, VoteFiles: led, ActionFiles: led,
-			Genesis: cliGenesis{}, Tip: cliTip{}, Params: f.paramsReader(), Utxos: f.utxoReader(), MetadataFiles: fsstore.MetadataFiles{},
+			Genesis: cliGenesis{}, Tip: cliTip{}, Params: f.paramsReader(), Utxos: f.utxoReader(), MetadataFiles: upstreamdir.MetadataFiles{},
 			DReps: f.dreps, Committee: f.committee, GovActions: f.actions, StakeDists: f.dist, Summaries: f.summaries, DRepCross: f.drepCross, Rewards: f.rewards,
 			Constitution: f.constitutionReader(), LastEnacted: fakeLastEnacted{}, Epochs: fakeEpoch{}, AnchorFetcher: f.fetcher, TxEvaluator: f.evaluator}
 		if f.submit {

@@ -5,7 +5,7 @@
 ## Start
 
 ```
-spo [-C DIR] [--upstream-layout] [--accept-rollback] tui
+spo [-C DIR] [--accept-rollback] tui
 ```
 
 The global options apply to the whole session. `--passphrase-fd` is refused: the TUI asks for the passphrase when a command needs it. `spo tui` needs a terminal on standard input and output of at least 40 columns by 10 rows; a smaller terminal shows only a notice (keys still work, so a prompt can be cancelled with `ctrl+c`) until it is resized. Bare `spo` still prints help.
@@ -40,7 +40,7 @@ The header shows the workspace directory, the network and mode from `spo.toml`, 
 These are driven by metadata on the commands (see [ADR 0009](../explanation/adr/0009-tui.md)), not by TUI code.
 
 * **Name completion.** A field that names a workspace object (a wallet, pool, stake key, policy, asset, DRep, committee key, voting key, Calidus key or party) shows the matching names under it. `tab` completes to the common prefix, then steps through the candidates; with no candidate or an exact match it moves to the next field. Names only: no record content is read for this.
-* **Sealed workspaces.** Listing names needs the workspace open. The TUI does not open it to draw a form: with a sealed workspace the field says `names are sealed`, and `ctrl+n` asks for the passphrase once, in a hidden modal, lists the names, closes the workspace and forgets the passphrase. The names stay in memory until a command is run (it may change them) or the TUI ends. With `--upstream-layout` there is no passphrase and the names are listed when a form opens.
+* **Sealed workspaces.** Listing names needs the workspace open. The TUI does not open it to draw a form: with a sealed workspace the field says `names are sealed`, and `ctrl+n` asks for the passphrase once, in a hidden modal, lists the names, closes the workspace and forgets the passphrase. The names stay in memory until a command is run (it may change them) or the TUI ends.
 * **File picker.** `ctrl+o` on a field that takes a path opens a keyboard picker that starts in the workspace directory. `up` `down` `enter` move and open, `left` goes up, `.` (`ctrl+a` when typing a new file name) shows or hides hidden entries, `s` chooses the current directory when a directory is wanted, `esc` cancels. A field that takes a new file also takes a typed name. Where the command names an extension, other files are not listed. A symbolic link is listed with its target (`name -> target`); it is followed or chosen only on a second `enter`, after the target was shown. The picker lists names; it never opens or reads a file.
 * **Exclusions.** Where a command declares flags mutually exclusive, required together, or one required (cobra's `MarkFlags...`), the form marks the flags: a field that conflicts with one already given is greyed (`not with --x`) and takes no input until the other is cleared, a flag that needs a partner says `needed with --x`, and `Run` is refused with the reason before the command starts. Cobra still validates when the command runs.
 

@@ -159,7 +159,7 @@ func count(t *testing.T, s *Store, table string) int {
 	return n
 }
 
-// ---- behaviour shared with fsstore ----
+// ---- behaviour shared with plainstore ----
 
 func TestFailedUpdateWritesNothing(t *testing.T) {
 	s, _ := newStore(t)

@@ -17,13 +17,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/koios"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/adapters/transferfile"
 	"github.com/mochipool/workbench/spo/internal/app/airgap"
 	"github.com/mochipool/workbench/spo/internal/domain/transfer"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 // A public preview address and its stake address, recorded once from the live
@@ -346,7 +346,7 @@ func TestWorkOfflineRefusesChainActionsOffline(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "offlineTransfer.json")); err == nil {
 		t.Error("a refused action created the file")
 	}
-	store, err := fsstore.Open(dir)
+	store, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +408,7 @@ func goAirgap(t *testing.T, k *koiosServer, dir, cliVersion string, now func() t
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := fsstore.Open(dir)
+	store, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

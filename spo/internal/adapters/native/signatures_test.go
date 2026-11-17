@@ -7,11 +7,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/domain/cose"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 func envPub(t *testing.T, env []byte) string {
@@ -78,7 +78,7 @@ func TestCalidusAndVotingDerivationVectors(t *testing.T) {
 // (the conformance check), keeps the operations of VaultSigner, and refuses
 // roles it cannot sign for.
 func TestVaultSignaturesProfile(t *testing.T) {
-	st, _ := fsstore.Open(t.TempDir())
+	st, _ := plainstore.OpenTestnet(t.TempDir())
 	s := VaultSignatures{VaultSigner{Vault: st}}
 	if err := ports.CheckSignatureSigner(s); err != nil {
 		t.Fatal(err)
@@ -135,7 +135,7 @@ func (onlyClaims) Profile() custody.Profile {
 //
 // spec: SPO-15-EXT-005
 func TestVaultSignaturesSignMessage(t *testing.T) {
-	st, _ := fsstore.Open(t.TempDir())
+	st, _ := plainstore.OpenTestnet(t.TempDir())
 	pair, err := SoftwareKeys{}.GenerateStake(context.Background())
 	if err != nil {
 		t.Fatal(err)

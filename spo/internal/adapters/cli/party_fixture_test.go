@@ -11,7 +11,6 @@ import (
 
 	"github.com/mochipool/workbench/spo/internal/adapters/envelope"
 	"github.com/mochipool/workbench/spo/internal/adapters/filebag"
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/adapters/partystore"
 	"github.com/mochipool/workbench/spo/internal/adapters/tailcat"
@@ -26,6 +25,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
 	"github.com/mochipool/workbench/spo/test/multiparty/partyrig"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 var partyT0 = time.Unix(1_800_000_000, 0).UTC()
@@ -99,7 +99,7 @@ const ptPass = "a long enough passphrase"
 type pfix struct {
 	t     *testing.T
 	dir   string
-	st    *fsstore.Store
+	st    *plainstore.Store
 	clock *partyrig.Clock
 	ch    *partyrig.Chain
 	out   syncBuf
@@ -117,7 +117,7 @@ type pfix struct {
 	absent       map[Cap]string
 }
 
-func newPfixDir(t *testing.T, dir string, st *fsstore.Store, clock *partyrig.Clock, ch *partyrig.Chain) *pfix {
+func newPfixDir(t *testing.T, dir string, st *plainstore.Store, clock *partyrig.Clock, ch *partyrig.Chain) *pfix {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, WorkspaceFile), nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -129,7 +129,7 @@ func newPfixDir(t *testing.T, dir string, st *fsstore.Store, clock *partyrig.Clo
 func newPfix(t *testing.T) *pfix {
 	t.Helper()
 	dir := t.TempDir()
-	st, err := fsstore.Open(dir)
+	st, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +185,7 @@ func (f *pfix) deps(term Terminal) Deps {
 		Sealed: SealedOps{Open: func(string, *secret.Buffer, OpenOptions) (SealedStore, error) {
 			return fakeSealed{Store: f.st, tokens: map[string][]byte{}}, nil
 		}},
-		OpenUpstream: func(dir string) (ports.Store, error) { return fsstore.Open(dir) },
+		OpenUpstream: func(dir string) (ports.Store, error) { return plainstore.OpenTestnet(dir) },
 		Wire: func(st ports.Store, o WireOptions) (*Env, error) {
 			led := native.Ledger{}
 			env := &Env{Mode: o.Mode, NetworkID: ports.NetworkTestnet, Clock: f.clock, Genesis: f.ch, Tip: f.ch,

@@ -12,13 +12,13 @@ import (
 	"time"
 
 	"github.com/mochipool/workbench/spo/internal/adapters/envelope"
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/partystore"
 	"github.com/mochipool/workbench/spo/internal/app/parties"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 var ctx = context.Background()
@@ -29,14 +29,14 @@ func (c clock) Now() time.Time { return c.t }
 
 type ws struct {
 	t     *testing.T
-	store *fsstore.Store
+	store *plainstore.Store
 	kit   envelope.Kit
 	reg   partystore.Registry
 	clk   clock
 }
 
 func newWS(t *testing.T) *ws {
-	st, err := fsstore.Open(t.TempDir())
+	st, err := plainstore.OpenTestnet(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

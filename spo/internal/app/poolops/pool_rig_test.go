@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	appassets "github.com/mochipool/workbench/spo/internal/app/assets"
 	"github.com/mochipool/workbench/spo/internal/app/txflow"
@@ -25,9 +24,10 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/stake"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
-// The pool rig runs the use cases over the real store (fsstore), the real
+// The pool rig runs the use cases over the real store (plainstore), the real
 // ledger (native: certificates, bodies, fees, addresses, assembly) and the
 // real vault signer. Only what is outside the process is faked: the chain
 // readers, the confirmation, the queue and the submitter.
@@ -155,7 +155,7 @@ func (c pfixedClock) Now() time.Time { return c.t }
 type prig struct {
 	t      *testing.T
 	dir    string
-	store  *fsstore.Store
+	store  *plainstore.Store
 	calls  *pcalls
 	chain  *pchain
 	conf   *pconf
@@ -268,7 +268,7 @@ const descriptorFmt = `{
 func newPoolRig(t *testing.T) *prig {
 	t.Helper()
 	dir := t.TempDir()
-	st, err := fsstore.Open(dir)
+	st, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

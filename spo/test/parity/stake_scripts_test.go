@@ -11,7 +11,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/adapters/transferfile"
 	"github.com/mochipool/workbench/spo/internal/app/stake"
@@ -20,6 +19,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	stk "github.com/mochipool/workbench/spo/internal/domain/stake"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 // upstreamTTY runs a script that always asks for its final confirmation
@@ -157,7 +157,7 @@ func writeStakeTransfer(t *testing.T, b stakeBase, dir string, s snap) {
 // kit is the Go side of one workspace: the real adapters in the offline
 // composition.
 type kit struct {
-	store *fsstore.Store
+	store *plainstore.Store
 	file  *transferfile.File
 	led   native.Ledger
 	base  stake.Base
@@ -165,7 +165,7 @@ type kit struct {
 
 func (e env) newKit(t *testing.T, dir string, slot uint64, cliVersion string) kit {
 	t.Helper()
-	store, err := fsstore.Open(dir)
+	store, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -272,6 +272,9 @@
           # Needs the Cardano toolchain, so CI runs it only where the IOG
           # cache has native builds.
           spo-parity = wb.spoBin.parity;
+          # No derivation built with the plainlayout tag installs an executable
+          # (SPO-Xcustody-INV-001).
+          spo-tagged-no-binary = wb.spoBin.taggedNoBinary;
           # The upstream spec corpus (spec/) must match the pinned spo-scripts
           # tree: file and function hashes, mechanical facts, source ranges,
           # unique ids, full coverage. See spec/README.md.

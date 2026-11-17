@@ -11,7 +11,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/hwcli"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
@@ -20,6 +19,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 func envelopeOf(t *testing.T, b []byte) pool.Envelope {
@@ -584,7 +584,7 @@ func TestSigningFilesComeFromTheStoreNotFromAnOperatorPath(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "mypool.node.hwsfile"), hk.SigningFile, 0o400); err != nil {
 		t.Fatal(err)
 	}
-	st, err := fsstore.Open(dir)
+	st, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -106,7 +106,7 @@ func TestImportDecryptsEncryptedKeysWithOnePasswordIncludingBackslash(t *testing
 // spec: SPO-Pfiles-OUT-003
 func TestImportEncryptedWithoutPassword(t *testing.T) {
 	src, keys := workspaceFixture(t)
-	src.put(ref("mypool", ports.NodeSKey), encryptedOf(t, keys["cold"], "Str0ng-Passw0rd!"))
+	src.put(ref("mypool", ports.NodeSKey), encryptedOf(t, keys["cold"], "Str0ng-Passw0rd!-And-Long"))
 	dst := newMem()
 	rep, err := importer(src, dst, &fakeGPG{}).Run(context.Background(), ImportOptions{})
 	if err != nil {
@@ -150,7 +150,7 @@ func TestImportEncryptedWithoutPassword(t *testing.T) {
 // spec: SPO-Ckey-PRE-007
 func TestImportWrongPasswordImportsNothingOfTheOwner(t *testing.T) {
 	src, keys := workspaceFixture(t)
-	src.put(ref("w.payment", ports.AddrSKey), encryptedOf(t, keys["pay"], "Str0ng-Passw0rd!"))
+	src.put(ref("w.payment", ports.AddrSKey), encryptedOf(t, keys["pay"], "Str0ng-Passw0rd!-And-Long"))
 	dst := newMem()
 	rep, _ := importer(src, dst, &fakeGPG{}).Run(context.Background(), ImportOptions{Owners: []string{"w"}, Password: sec("Wrong-Passw0rd!x")})
 	if rep.Failed() != 1 || len(dst.snapshot()) != 0 {
@@ -176,7 +176,7 @@ func TestImportWrongPasswordImportsNothingOfTheOwner(t *testing.T) {
 // spec: SPO-Ckey-PRE-003, SPO-Ckey-PRE-006, SPO-Ckey-PRE-010
 func TestImportMalformedEncryptedFailsFastWithoutDecrypting(t *testing.T) {
 	src, keys := workspaceFixture(t)
-	good := encryptedOf(t, keys["pay"], "Str0ng-Passw0rd!")
+	good := encryptedOf(t, keys["pay"], "Str0ng-Passw0rd!-And-Long")
 	for name, bad := range map[string][]byte{
 		"truncated":  good[:len(good)-8],
 		"no hex":     []byte(`{"type":"PaymentSigningKeyShelley_ed25519","description":"Encrypted x","encrHex":"zzzz"}`),
@@ -187,7 +187,7 @@ func TestImportMalformedEncryptedFailsFastWithoutDecrypting(t *testing.T) {
 		s2, _ := workspaceFixture(t)
 		s2.put(ref("w.payment", ports.AddrSKey), bad)
 		g := &fakeGPG{}
-		rep, err := importer(s2, newMem(), g).Run(context.Background(), ImportOptions{Owners: []string{"w"}, Password: sec("Str0ng-Passw0rd!")})
+		rep, err := importer(s2, newMem(), g).Run(context.Background(), ImportOptions{Owners: []string{"w"}, Password: sec("Str0ng-Passw0rd!-And-Long")})
 		if err != nil || rep.Failed() != 1 {
 			t.Errorf("%s: %v %+v", name, err, rep)
 			continue

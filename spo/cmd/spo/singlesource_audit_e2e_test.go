@@ -11,6 +11,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/adapters/sqlitestore"
 	"github.com/mochipool/workbench/spo/internal/adapters/storeaudit"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 // singleSourceEvents are the single-source records of a workspace: the sealed
@@ -28,7 +29,7 @@ func singleSourceEvents(t *testing.T, dir string) []storeaudit.Event {
 		defer st.Close()
 		evs, err = storeaudit.Events(context.Background(), st)
 	} else {
-		evs, err = storeaudit.Events(context.Background(), auditFile{dir: dir})
+		evs, err = storeaudit.Events(context.Background(), plainstore.AuditStore(dir))
 	}
 	if err != nil {
 		t.Fatal(err)

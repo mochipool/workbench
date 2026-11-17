@@ -10,11 +10,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/adapters/transferfile"
 	"github.com/mochipool/workbench/spo/internal/app/query"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 // 01_queryAddress in offline mode against a crafted snapshot. The script's
@@ -56,7 +56,7 @@ func TestQueryAddressOfflineMatchesTheSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store, err := fsstore.Open(dir)
+	store, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestQueryAddressOfflineMatchesTheSnapshot(t *testing.T) {
 			t.Fatalf("upstream %v exited %d\n%s", a, code, out)
 		}
 	}
-	ostore, _ := fsstore.Open(other)
+	ostore, _ := plainstore.OpenTestnet(other)
 	ouc := query.QueryAddress{Store: ostore, Addresses: native.Ledger{}, Utxos: file, Rewards: file, Snapshot: file}
 	if code, _ := e.upstreamOut(t, other, "exec", "01_queryAddress.sh", "x"); code != 1 {
 		t.Errorf("upstream, payment address not in the file, exited %d, want 1", code)

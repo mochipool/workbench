@@ -17,7 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/hwcli"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/app/txflow"
@@ -26,6 +25,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 // Chain is a fake chain: the UTxOs of some addresses, parameters, a tip, and
@@ -90,7 +90,7 @@ func (l LegacyInputs) BuildBody(s txbuild.BodySpec) (txbuild.TxBody, error) {
 type World struct {
 	T       *testing.T
 	Dir     string
-	Store   *fsstore.Store
+	Store   *plainstore.Store
 	Chain   *Chain
 	Ledger  native.Ledger
 	Conf    *Confirmer
@@ -103,7 +103,7 @@ type World struct {
 func New(t *testing.T) *World {
 	t.Helper()
 	dir := t.TempDir()
-	st, err := fsstore.Open(dir)
+	st, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

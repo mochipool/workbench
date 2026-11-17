@@ -194,8 +194,8 @@ func TestVotingKeyOnLedger(t *testing.T) {
 		t.Errorf("public key %q", res.PKey)
 	}
 	// The QR code of a hardware key is refused.
-	_, err = (catalyst.ExportVotingKeyQR{Store: w.Store, Source: native.VotingKeyQR{Vault: w.Store}, Renderer: failingRenderer{}}).
-		Run(ctx, catalyst.QRRequest{Name: "v", PIN: []byte("1234"), Path: filepath.Join(t.TempDir(), "x.png")})
+	_, err = (catalyst.ExportVotingKeyQR{Store: w.Store, Source: native.VotingKeyQR{Vault: w.Store}, Renderer: failingRenderer{}, Auditor: failingAuditor{}}).
+		Run(ctx, catalyst.QRRequest{Name: "v", PIN: []byte("1234")})
 	if !errors.Is(err, catalyst.ErrHardwareVotingKey) {
 		t.Errorf("qr: %v", err)
 	}
@@ -225,8 +225,13 @@ func TestVotingKeyOnLedger(t *testing.T) {
 
 type failingRenderer struct{}
 
-func (failingRenderer) WritePNG(string, []byte) error   { return errors.New("must not be called") }
 func (failingRenderer) Terminal([]byte) (string, error) { return "", errors.New("must not be called") }
+
+type failingAuditor struct{}
+
+func (failingAuditor) Record(context.Context, ports.AuditEvent) error {
+	return errors.New("must not be called")
+}
 
 func catalystRegistration(t *testing.T, w *world.World, rewards string) (catalyst.RegistrationGenerated, error) {
 	t.Helper()

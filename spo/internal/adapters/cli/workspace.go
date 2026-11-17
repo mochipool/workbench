@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -13,24 +14,25 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mochipool/workbench/spo/internal/app/workspace"
+	"github.com/mochipool/workbench/spo/internal/domain/keyfile"
+	"github.com/mochipool/workbench/spo/internal/platform/secret"
+	"github.com/mochipool/workbench/spo/internal/platform/secretfd"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
 // gpgNeed is the sentence a refusal for the missing gpg tool carries.
 const gpgNote = "gpg is needed only for upstream's encrypted signing keys"
 
-// plaintextWord is what the operator types to confirm that signing keys are
-// written unprotected.
-const plaintextWord = "plaintext"
-
 func (a *app) workspaceCommand() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "workspace",
-		Short: "Move an upstream-layout directory into the sealed workspace, and back out",
-		Long: `The sealed workspace holds every key protected. An existing directory in the
+		Short: "Bring an upstream-layout directory into the sealed workspace, and write one out, encrypted",
+		Long: `The sealed workspace holds every key protected, and this program never writes a
+signing key or any other secret unprotected. An existing directory in the
 upstream scripts' file layout (what gitmachtl/scripts wrote) is brought in with
-import; export writes the files out again for the upstream scripts, which is a
-dangerous operation and is recorded in the workspace's audit log.`,
+import, which only reads it. Export writes the files out again for the upstream
+scripts with every signing key encrypted in upstream's gpg form; it is recorded
+in the workspace's audit log.`,
 	}
 	c.AddCommand(a.workspaceImportCommand(), a.workspaceExportCommand())
 	return c
@@ -39,13 +41,12 @@ dangerous operation and is recorded in the workspace's audit log.`,
 func (a *app) keyCommand() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "key",
-		Short: "Upstream-layout signing key files: encrypt or decrypt one in place",
-		Long: `The encrypted form of a signing key file is upstream's: a gpg symmetric
-envelope with the password hashed as upstream's prompt does. These commands work
-on a plain upstream-layout directory (--upstream-layout) only: a key in the
-sealed workspace is always protected.`,
+		Short: "Signing keys kept in upstream's encrypted form",
+		Long: `A workspace import with --keep-encrypted stores a key still in upstream's
+password-encrypted form. Such a key cannot sign and is never written out. convert
+turns it into an ordinary sealed key.`,
 	}
-	c.AddCommand(a.keyProtectCommand(false), a.keyProtectCommand(true))
+	c.AddCommand(a.keyConvertCommand())
 	return c
 }
 
@@ -189,51 +190,68 @@ func (a *app) workspaceExportCommand() *cobra.Command {
 	var (
 		owners    []string
 		passFD    int
-		plaintext bool
+		generate  bool
+		outFD     int
 		overwrite bool
-		yes       bool
 		reason    string
 	)
 	cmd := &cobra.Command{
-		Use:   "export <dir> [--owner NAME]... (--password-fd N | --plaintext) [--overwrite] [--reason TEXT] [--yes]",
-		Short: "Write pools and wallets out of the sealed workspace in the upstream file layout",
+		Use:   "export <dir> (--password-fd N | --generate-password [--password-out-fd N]) [--owner NAME]... [--overwrite] [--reason TEXT]",
+		Short: "Write pools and wallets out of the sealed workspace in the upstream file layout, keys encrypted",
 		Long: `Write the files the upstream scripts expect into <dir>, which must be new or
-empty (--overwrite writes into a directory that is not). You must say how the
-signing keys leave:
+empty (--overwrite writes into a directory that is not). Every signing key is
+encrypted in upstream's gpg form (needs gpg: AES-256, iterated-and-salted S2K
+with SHA-512 and the largest count, integrity-protected) with the password read
+from --password-fd, which must be strong in upstream's sense and at least 20
+characters long, or with a password this command generates (--generate-password:
+160 random bits as base32 groups), shown once on the terminal (standard output
+must be one) or written to a pipe on --password-out-fd N, before any file is
+written (a regular file, a terminal and descriptors 0, 1, 2 are refused: a
+secret is never written to a file). A signing key is never written
+in clear: there is no option for it.
 
-  --password-fd N   encrypt each signing key in upstream's gpg form with the
-                    password read from that descriptor (needs gpg)
-  --plaintext       write them in CLEAR, as upstream stores them. You must type
-                    the word "` + plaintextWord + `" to confirm (--yes types it for you)
+The password's protection is gpg's S2K, which is not memory-hard, so an export is
+weaker against offline guessing than the sealed workspace. Treat the directory as
+a transport form: move it, use it, delete it and the password.
 
-Mnemonics have no protected form and are written only with --plaintext.
+Mnemonics and the Catalyst QR code have no encrypted form and are not written;
+nor are keys kept in upstream's encrypted form (convert them first with
+spo key convert).
 
 The export is recorded in the workspace's audit log, with --reason, BEFORE any
 key is written, and is not made when the record cannot be. The directory holds
-every secret you export: put it on storage you control and remove it afterwards.`,
+what you export: put it on storage you control and remove it afterwards.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if a.upstream {
 				return errors.New("workspace export reads the sealed workspace; it does not apply with --upstream-layout")
 			}
-			protected := passFD >= 0
-			switch {
-			case protected && plaintext:
-				return errors.New("choose one: --password-fd N protects the signing keys, --plaintext writes them in clear")
-			case !protected && !plaintext:
-				return errors.New("say how the signing keys leave the workspace: --password-fd N (encrypt them in upstream's form) or --plaintext (write them in clear)")
+			if !generate && cmd.Flags().Changed("password-out-fd") {
+				return errors.New("--password-out-fd goes with --generate-password")
 			}
-			if a.passFD == passFD && protected {
+			if generate {
+				if cmd.Flags().Changed("password-out-fd") {
+					if outFD < 0 {
+						return errors.New("--password-out-fd needs a file descriptor number")
+					}
+					if outFD == a.passFD {
+						return errors.New("--password-out-fd and --passphrase-fd name the same descriptor")
+					}
+					// Before any key is read or file written: a descriptor that
+					// is not a pipe or a socket would lose or leak the password.
+					if err := secretfd.Check("password-out-fd", outFD); err != nil {
+						return err
+					}
+				} else if !stdoutIsTerminal(a.d.Out) {
+					return errors.New("a generated password is shown once, on a terminal, and standard output is not one: pass --password-out-fd N to receive it on a descriptor")
+				}
+			} else if a.passFD == passFD {
 				return errors.New("--password-fd and --passphrase-fd name the same descriptor")
 			}
-			if a.d.OpenUpstream == nil || a.d.WorkspaceAuditor == nil {
-				return errors.New("the upstream layout is not available in this build")
+			if a.d.OpenExportDir == nil || a.d.WorkspaceAuditor == nil {
+				return errors.New("workspace export is not available in this build")
 			}
-			needs := []Need{}
-			if protected {
-				needs = append(needs, CapKeyCrypto)
-			}
-			return a.withEnv(cmd, envSpec{needs: needs}, func(ctx context.Context, s *session, env *Env, _ WireOptions) (err error) {
+			return a.withEnv(cmd, envSpec{needs: []Need{CapKeyCrypto}}, func(ctx context.Context, s *session, env *Env, _ WireOptions) (err error) {
 				if s.Sealed == nil {
 					return errors.New("workspace export reads the sealed workspace")
 				}
@@ -244,42 +262,50 @@ every secret you export: put it on storage you control and remove it afterwards.
 				if sameDir(args[0], a.workspace) {
 					return fmt.Errorf("%s is the workspace directory: export into another directory", args[0])
 				}
-				if plaintext {
-					ok, err := a.confirmPlaintext(ctx, args[0], yes)
-					if err != nil {
+				var pw *secret.Buffer
+				if generate {
+					raw, gerr := keyfile.GenerateExportPassword(rand.Reader)
+					if gerr != nil {
+						return gerr
+					}
+					if pw, err = secret.TryTake(raw); err != nil {
 						return err
 					}
-					if !ok {
-						return errors.New("the export was declined: nothing was written")
-					}
+				} else if pw, err = readFDSecret(passFD, "the export password"); err != nil {
+					return err
 				}
-				var pw *ports.Secret
-				if protected {
-					pw, err = readFDSecret(passFD, "the export password")
-					if err != nil {
-						return err
+				defer pw.Destroy()
+				// A generated password goes to its descriptor BEFORE any file is
+				// written: when the write fails nothing exists yet, and when it
+				// succeeds and the export then fails, the only loss is a
+				// password that opens nothing. A password cannot be lost while
+				// encrypted files remain.
+				if generate && cmd.Flags().Changed("password-out-fd") {
+					if derr := a.deliverExportPassword(pw, outFD, true); derr != nil {
+						return derr
 					}
-					defer pw.Destroy()
 				}
 				created, err := prepareExportDir(args[0], overwrite)
 				if err != nil {
 					return err
 				}
-				dest, err := a.d.OpenUpstream(args[0])
+				dest, err := a.d.OpenExportDir(args[0])
 				if err != nil {
 					return err
 				}
 				uc := workspace.ExportWorkspace{Source: s.Store, SourceVault: s.Sealed, Lister: lister, Dest: dest,
 					Encryptor: env.KeyEncryptor, Decryptor: env.KeyDecryptor, Auditor: a.d.WorkspaceAuditor(a.workspace, s.Store, reason)}
-				rep, err := uc.Run(ctx, workspace.ExportOptions{Owners: owners, Password: pw, PlaintextAcknowledged: plaintext, Overwrite: overwrite})
+				rep, err := uc.Run(ctx, workspace.ExportOptions{Owners: owners, Password: pw, Overwrite: overwrite})
 				if rep != nil {
-					printWorkspaceReport(a.d.Out, rep, exportProtection(protected))
+					printWorkspaceReport(a.d.Out, rep, exportProtection)
 					fmt.Fprintf(a.d.Out, "\n%d owner(s) of %d exported to %s, %d artefact(s) written.\n", len(rep.Owners)-rep.Failed(), len(rep.Owners), args[0], rep.Done())
 					if rep.Done() > 0 {
-						if plaintext {
-							fmt.Fprintf(a.d.Out, "The signing keys in %s are in CLEAR. Remove the directory when you are done.\n", args[0])
-						} else {
-							fmt.Fprintf(a.d.Out, "The signing keys in %s are encrypted in upstream's form with the password you gave.\n", args[0])
+						fmt.Fprintf(a.d.Out, "The signing keys in %s are encrypted in upstream's form with the %s password.\n", args[0], map[bool]string{true: "generated", false: "given"}[generate])
+						fmt.Fprint(a.d.Out, "gpg's key derivation is not memory-hard: this is a transport form, weaker against offline guessing than the sealed workspace. Delete the directory and the password after use.\n")
+						if generate && !cmd.Flags().Changed("password-out-fd") {
+							if derr := a.deliverExportPassword(pw, outFD, false); derr != nil {
+								return derr
+							}
 						}
 					}
 				}
@@ -298,44 +324,40 @@ every secret you export: put it on storage you control and remove it afterwards.
 	}
 	cmd.Flags().StringArrayVar(&owners, "owner", nil, "export only this pool or wallet (repeatable; default: all)")
 	cmd.Flags().IntVar(&passFD, "password-fd", -1, "encrypt the signing keys with the password read from this inherited file descriptor (trailing newline stripped); there is no password flag or variable")
-	cmd.Flags().BoolVar(&plaintext, "plaintext", false, "write the signing keys in clear, as upstream stores them (asks you to type \""+plaintextWord+"\")")
+	cmd.Flags().BoolVar(&generate, "generate-password", false, "encrypt with a password generated here (160 random bits, base32 groups), shown once on the terminal or written to --password-out-fd; exclusive with --password-fd")
+	cmd.Flags().IntVar(&outFD, "password-out-fd", -1, "with --generate-password: write the generated password to this inherited pipe or socket (never a file) instead of showing it")
 	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "write into a directory that is not empty, replacing files of the same name")
-	cmd.Flags().BoolVar(&yes, "yes", false, "type \""+plaintextWord+"\" for --plaintext")
 	cmd.Flags().StringVar(&reason, "reason", "", "why the keys are exported; recorded in the audit log (not secret: no key material)")
-	cmd.MarkFlagsMutuallyExclusive("password-fd", "plaintext")
-	cmd.MarkFlagsOneRequired("password-fd", "plaintext")
+	cmd.MarkFlagsMutuallyExclusive("password-fd", "generate-password")
+	cmd.MarkFlagsOneRequired("password-fd", "generate-password")
 	return cmd
 }
 
-// exportProtection says how an exported artefact is protected, for the table.
-func exportProtection(protected bool) func(ports.Ref) string {
-	return func(r ports.Ref) string {
-		switch {
-		case r.Kind == ports.UpstreamEncryptedSKey:
-			return "encrypted"
-		case r.Kind.IsSigningKey() && protected:
-			return "encrypted"
-		case r.Kind.Secret():
-			return "PLAINTEXT"
+// deliverExportPassword gives the operator the generated export password,
+// once: written to the descriptor they opened, or shown on the terminal.
+func (a *app) deliverExportPassword(pw *secret.Buffer, fd int, toFD bool) error {
+	if toFD {
+		if err := pw.Use(func(b []byte) error { return secretfd.Write("password-out-fd", fd, b) }); err != nil {
+			return err
 		}
-		return ""
+		if err := secretfd.Write("password-out-fd", fd, []byte("\n")); err != nil {
+			return err
+		}
+		fmt.Fprintf(a.d.Out, "The generated password was written to file descriptor %d, before any file was written.\n", fd)
+		return nil
 	}
+	fmt.Fprint(a.d.Out, "\nThe export password (shown once; it is not stored anywhere):\n\n  ")
+	pw.WriteTo(a.d.Out)
+	fmt.Fprint(a.d.Out, "\n\n")
+	return nil
 }
 
-// confirmPlaintext asks the operator to type the word, or accepts --yes.
-func (a *app) confirmPlaintext(ctx context.Context, dir string, yes bool) (bool, error) {
-	if yes {
-		return true, nil
+// exportProtection says how an exported artefact is protected, for the table.
+func exportProtection(r ports.Ref) string {
+	if r.Kind.IsSigningKey() {
+		return "encrypted"
 	}
-	fmt.Fprintf(a.d.Err, "Signing keys and mnemonics will be written to %s in CLEAR, unprotected.\n", dir)
-	ans, err := a.term.ReadLine(ctx, "Type "+plaintextWord+" to go on: ")
-	if errors.Is(err, ErrNoTerminal) {
-		return false, errors.New("no terminal to ask on; pass --yes to confirm the plaintext export")
-	}
-	if err != nil {
-		return false, err
-	}
-	return strings.TrimSpace(ans) == plaintextWord, nil
+	return ""
 }
 
 // prepareExportDir makes sure the destination is a new or empty directory (or
@@ -371,125 +393,62 @@ func prepareExportDir(dir string, overwrite bool) (created bool, err error) {
 	return false, nil
 }
 
-// ---- key protect, unprotect ----
+// ---- key convert ----
 
-func (a *app) keyProtectCommand(unprotect bool) *cobra.Command {
-	var (
-		passFD int
-		yes    bool
-		reason string
-	)
-	use, short := "protect", "Encrypt a plain signing key file in place, in upstream's form"
-	if unprotect {
-		use, short = "unprotect", "Decrypt an upstream-encrypted signing key file in place, back to clear text"
-	}
+func (a *app) keyConvertCommand() *cobra.Command {
+	var passFD int
 	cmd := &cobra.Command{
-		Use:   use + " <file> [--password-fd N]" + map[bool]string{true: " [--reason TEXT] [--yes]"}[unprotect],
-		Short: short,
-		Long: `<file> is the upstream name of a signing key in the directory (for example
-mypool.node.skey or mywallet.skey). Needs --upstream-layout: in the sealed
-workspace every key is protected already. The password must be strong in upstream's
-sense (10 characters, lower case, upper case, a digit and a special character).
-It is read from --password-fd N, else asked for without echo. gpg is needed.` + map[bool]string{true: `
+		Use:   "convert <key> [--password-fd N]",
+		Short: "Turn a key kept in upstream's encrypted form into a sealed signing key",
+		Long: `<key> names a key that an import with --keep-encrypted stored in upstream's
+encrypted form: the key file name, with or without .skey (mypool.node,
+mywallet.payment.skey). The upstream password is read from --password-fd N, else
+asked for without echo. gpg is needed.
 
-Unprotect writes the key in CLEAR and is recorded in the audit log, with
---reason. You must type "` + plaintextWord + `" to confirm; --yes types it for you.`}[unprotect],
+The key is decrypted in protected memory only, checked against the verification
+key in the workspace (import the .vkey file too; a key with no verification key
+here is refused), then stored sealed, and the kept record removed, in one
+transaction. The key is never written in clear. KES, VRF and BLS keys cannot be
+checked this way and are not converted: import them again with --password-fd.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if !a.upstream {
-				// The use case's typed refusal, with the way out.
-				var err error
-				if unprotect {
-					err = workspace.UnprotectKey{Sealed: true}.Run(cmd.Context(), ports.Ref{}, nil, false)
-				} else {
-					err = workspace.ProtectKey{Sealed: true}.Run(cmd.Context(), ports.Ref{}, nil)
+			if a.upstream {
+				return errors.New("key convert works on the sealed workspace; it does not apply with --upstream-layout")
+			}
+			return a.withEnv(cmd, envSpec{needs: []Need{CapKeyCrypto, CapVKeyDerive}}, func(ctx context.Context, s *session, env *Env, _ WireOptions) error {
+				vault, ok := any(s.Sealed).(ports.Vault)
+				if !ok || s.Sealed == nil {
+					return errors.New("key convert works on the sealed workspace")
 				}
-				return &explained{msg: err.Error() + "; to " + use + " a key of a plain upstream-layout directory, pass --upstream-layout", err: err}
-			}
-			if a.d.RefOfFile == nil {
-				return errors.New("the upstream layout is not available in this build")
-			}
-			ref, ok := a.d.RefOfFile(filepath.Base(args[0]))
-			if !ok || !ref.Kind.IsSigningKey() {
-				return fmt.Errorf("%s is not the name of a signing key file in the upstream layout", args[0])
-			}
-			if unprotect && a.d.WorkspaceAuditor == nil {
-				return errors.New("the upstream layout is not available in this build")
-			}
-			spec := envSpec{needs: []Need{CapKeyCrypto}}
-			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, _ WireOptions) error {
-				vault, ok := s.Store.(ports.Vault)
-				if !ok {
-					return errors.New("the store cannot release signing keys")
-				}
-				if unprotect {
-					okc, err := a.confirmPlaintext(ctx, args[0], yes)
-					if err != nil {
-						return err
-					}
-					if !okc {
-						return errors.New("declined: the key file was not changed")
-					}
-				}
-				pw, err := a.keyPassword(ctx, passFD, !unprotect)
+				pw, err := a.keyPassword(ctx, passFD)
 				if err != nil {
 					return err
 				}
 				defer pw.Destroy()
-				if unprotect {
-					err = workspace.UnprotectKey{Store: s.Store, Vault: vault, Decryptor: env.KeyDecryptor,
-						Auditor: a.d.WorkspaceAuditor(a.workspace, s.Store, reason)}.Run(ctx, ref, pw, true)
-				} else {
-					err = workspace.ProtectKey{Store: s.Store, Vault: vault, Encryptor: env.KeyEncryptor, Decryptor: env.KeyDecryptor}.Run(ctx, ref, pw)
-				}
+				ref, err := workspace.ConvertKey{Store: s.Store, Vault: vault, Decryptor: env.KeyDecryptor, Deriver: env.VKeyDeriver}.Run(ctx, args[0], pw)
 				if err != nil {
 					return err
 				}
-				if unprotect {
-					fmt.Fprintf(a.d.Out, "%s is now in CLEAR.\n", args[0])
-				} else {
-					fmt.Fprintf(a.d.Out, "%s is now encrypted in upstream's form.\n", args[0])
-				}
+				fmt.Fprintf(a.d.Out, "%s is now a sealed signing key (%s); the kept encrypted record was removed.\n", args[0], artefactName(ref))
 				return nil
 			})
 		},
 	}
-	cmd.Flags().IntVar(&passFD, "password-fd", -1, "read the password from this inherited file descriptor (trailing newline stripped); there is no password flag or variable")
-	if unprotect {
-		cmd.Flags().BoolVar(&yes, "yes", false, "type \""+plaintextWord+"\" for you")
-		cmd.Flags().StringVar(&reason, "reason", "", "why the key is written in clear; recorded in the audit log")
-	}
+	cmd.Flags().IntVar(&passFD, "password-fd", -1, "read the upstream password from this inherited file descriptor (trailing newline stripped); there is no password flag or variable")
 	return cmd
 }
 
-// keyPassword reads a password from the descriptor, else without echo (twice
-// when it is a new one).
-func (a *app) keyPassword(ctx context.Context, fd int, confirm bool) (*ports.Secret, error) {
+// keyPassword reads a password from the descriptor, else without echo.
+func (a *app) keyPassword(ctx context.Context, fd int) (*ports.Secret, error) {
 	if fd >= 0 {
 		if a.passFD == fd {
 			return nil, errors.New("--password-fd and --passphrase-fd name the same descriptor")
 		}
 		return readFDSecret(fd, "the password")
 	}
-	p, err := a.term.ReadSecret(ctx, "Password: ")
+	p, err := a.term.ReadSecret(ctx, "Password of the upstream-encrypted key: ")
 	if errors.Is(err, ErrNoTerminal) {
 		return nil, errors.New("no terminal to ask for the password on; give it on a file descriptor with --password-fd N")
 	}
-	if err != nil {
-		return nil, err
-	}
-	if confirm {
-		again, err := a.term.ReadSecret(ctx, "Repeat the password: ")
-		if err != nil {
-			p.Destroy()
-			return nil, err
-		}
-		same := equalSecrets(p, again)
-		again.Destroy()
-		if !same {
-			p.Destroy()
-			return nil, errors.New("the two entries differ; nothing was changed")
-		}
-	}
-	return p, nil
+	return p, err
 }

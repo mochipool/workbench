@@ -11,27 +11,25 @@ import (
 )
 
 // ExportWorkspace writes the artefacts of the sealed store into a directory in
-// the upstream layout. It is a dangerous operation: signing keys leave the
-// sealed store. Each run is recorded through the Auditor before any secret is
-// written, and it needs an explicit choice:
+// the upstream layout, for upstream's scripts. Signing keys leave the sealed
+// store only in upstream's encrypted form: a Password is required, every
+// signing key is encrypted with it (the strong-password rule applies), and the
+// destination refuses anything else (SPO-Xcustody-INV-001, SPO-Xcustody-OUT-003;
+// ADR 0011 (proposed)). Each run is recorded through the Auditor before any
+// secret is written.
 //
-//   - a Password protects every signing key in upstream's encrypted form
-//     (the strong-password rule applies); this is the default whenever a
-//     password is given;
-//   - PlaintextAcknowledged writes signing keys as upstream's default
-//     plaintext files (SPO-Pfiles-SEC-002), mode 0400.
-//
-// Artefacts with no protected form (mnemonics, the Catalyst QR code) are
-// written only with PlaintextAcknowledged, whatever else is chosen; without it
-// they are left out and the report says so. Nothing of the source changes.
+// Artefacts with no encrypted form (mnemonics, the Catalyst QR code) and the
+// records of keys kept in upstream's encrypted form are never written: they are
+// left out and the report says so. Nothing of the source changes.
 type ExportWorkspace struct {
 	// Source, SourceVault and Lister read the sealed store.
 	Source      ports.Store
 	SourceVault ports.Vault
 	Lister      ports.SourceLister
-	// Dest is the upstream-layout store (fsstore).
+	// Dest is the destination directory (exportdir). It must refuse a
+	// secret that is not an encrypted signing key.
 	Dest ports.Store
-	// Encryptor makes upstream's encrypted form; needed with a password.
+	// Encryptor makes upstream's encrypted form; required.
 	// Decryptor, when set, checks that each encrypted key opens again with
 	// the password before it is written (SPO-01protectKey-INV-001).
 	Encryptor ports.KeyEncryptor
@@ -44,34 +42,31 @@ type ExportWorkspace struct {
 type ExportOptions struct {
 	// Owners names the pools and wallets to export; empty means everything.
 	Owners []string
-	// Password protects signing keys (upstream form). The caller destroys it.
+	// Password encrypts the signing keys (upstream form). Required; the
+	// caller destroys it.
 	Password *ports.Secret
-	// PlaintextAcknowledged is the operator's explicit acceptance that
-	// secrets are written in clear.
-	PlaintextAcknowledged bool
 	// Overwrite replaces files the destination already holds.
 	Overwrite bool
 }
 
 // Run exports. Options are checked before anything is read or written.
 //
-// spec: SPO-Pfiles-SEC-001, SPO-Pfiles-SEC-002, SPO-Pfiles-INV-003, SPO-Pfiles-OUT-003, SPO-Ckey-OUT-001, SPO-Ckey-INV-001, SPO-Ckey-EXT-001, SPO-Ckey-SEC-002, SPO-01protectKey-OUT-001, SPO-01protectKey-SEC-001
+// spec: SPO-Pfiles-SEC-001, SPO-Pfiles-INV-003, SPO-Pfiles-OUT-003, SPO-Ckey-OUT-001, SPO-Ckey-INV-001, SPO-Ckey-EXT-001, SPO-Ckey-SEC-002, SPO-Xcustody-INV-001, SPO-Xcustody-OUT-003, SPO-Xcustody-PRE-003
 func (u ExportWorkspace) Run(ctx context.Context, opts ExportOptions) (*Report, error) {
 	if u.Auditor == nil {
 		return nil, ErrNoAuditor
 	}
-	protect := opts.Password != nil
-	var pwForm *ports.Secret // the password as it is used to encrypt
-	if protect {
-		if u.Encryptor == nil {
-			return nil, errors.New("no encryptor wired")
-		}
-		var err error
-		if pwForm, err = upstreamForm(opts.Password); err != nil {
-			return nil, err
-		}
-		defer pwForm.Destroy()
+	if opts.Password == nil {
+		return nil, ErrExportPasswordRequired
 	}
+	if u.Encryptor == nil {
+		return nil, errors.New("no encryptor wired")
+	}
+	pwForm, err := upstreamForm(opts.Password) // the password as it is used to encrypt
+	if err != nil {
+		return nil, err
+	}
+	defer pwForm.Destroy()
 	listing, err := u.Lister.List(ctx)
 	if err != nil {
 		return nil, err
@@ -99,18 +94,6 @@ func (u ExportWorkspace) Run(ctx context.Context, opts ExportOptions) (*Report, 
 	}
 	sort.Strings(owners)
 
-	// Without a password a plaintext export must be acknowledged, and it is
-	// refused before anything is read when the selection has a secret.
-	if !protect && !opts.PlaintextAcknowledged {
-		for _, o := range owners {
-			for _, r := range byOwner[o] {
-				if r.Kind.Secret() && r.Kind != ports.UpstreamEncryptedSKey {
-					return nil, ErrPlaintextNotAcknowledged
-				}
-			}
-		}
-	}
-
 	rep := &Report{Operation: "export"}
 	for _, o := range owners {
 		if err := ctx.Err(); err != nil {
@@ -123,7 +106,8 @@ func (u ExportWorkspace) Run(ctx context.Context, opts ExportOptions) (*Report, 
 
 // upstreamForm is the password as upstream's prompt would have produced it,
 // so the operator can type the same characters into upstream's scripts. It
-// must be strong in that form (SPO-Ckey-INV-001).
+// must be strong in that form (SPO-Ckey-INV-001) and at least 20 characters
+// long (SPO-Xcustody-PRE-003).
 func upstreamForm(pw *ports.Secret) (*ports.Secret, error) {
 	var out *ports.Secret
 	err := pw.Use(func(b []byte) error {
@@ -131,6 +115,10 @@ func upstreamForm(pw *ports.Secret) (*ports.Secret, error) {
 		if !keyfile.IsStrongPassword(u) {
 			clear(u)
 			return ErrWeakPassword
+		}
+		if !keyfile.IsLongExportPassword(b) {
+			clear(u)
+			return ErrShortExportPassword
 		}
 		b2, terr := ports.TakeSecret(u)
 		if terr != nil {
@@ -153,7 +141,7 @@ func (u ExportWorkspace) exportOwner(ctx context.Context, owner string, refs []p
 		}
 	}()
 	failed := false
-	var plaintext, protected int
+	var protected int
 	for _, r := range refs {
 		res := &ArtefactReport{Ref: r, Status: StatusDone}
 		results[r] = res
@@ -173,15 +161,10 @@ func (u ExportWorkspace) exportOwner(ctx context.Context, owner string, refs []p
 			}
 			plan = append(plan, planned{dst: r, data: b})
 		case r.Kind == ports.UpstreamEncryptedSKey:
-			dst, ok := SKeyRefFromStem(r.Name)
-			buf, err := u.SourceVault.Open(ctx, r)
-			if err != nil || !ok {
-				fail("could not be read")
-				continue
-			}
-			toDestroy = append(toDestroy, buf)
-			plan = append(plan, planned{dst: dst, sec: buf})
-			res.Note = "written back in upstream's encrypted form as it was imported"
+			// Never written out (SPO-Xcustody-OUT-003): convert it into a
+			// sealed key first (spo key convert), then export that.
+			skip("a key kept in upstream's encrypted form is never written out: convert it into a sealed key with `spo key convert`, then export")
+			continue
 		case r.Kind.IsSigningKey():
 			buf, err := u.SourceVault.Open(ctx, r)
 			if err != nil {
@@ -199,11 +182,6 @@ func (u ExportWorkspace) exportOwner(ctx context.Context, owner string, refs []p
 				plan = append(plan, planned{dst: r, sec: buf})
 				protected++
 			case keyfile.FormPlain:
-				if pw == nil {
-					plan = append(plan, planned{dst: r, sec: buf})
-					plaintext++
-					break
-				}
 				env, eerr := u.protect(ctx, buf, info, pw)
 				if eerr != nil {
 					fail(eerr.Error())
@@ -215,19 +193,9 @@ func (u ExportWorkspace) exportOwner(ctx context.Context, owner string, refs []p
 			default:
 				fail("not a signing key envelope")
 			}
-		default: // mnemonics, QR codes: no protected form
-			if !opts.PlaintextAcknowledged {
-				skip("has no protected form: written only with PlaintextAcknowledged")
-				continue
-			}
-			buf, err := u.SourceVault.Open(ctx, r)
-			if err != nil {
-				fail("could not be read")
-				continue
-			}
-			toDestroy = append(toDestroy, buf)
-			plan = append(plan, planned{dst: r, sec: buf})
-			plaintext++
+		default: // mnemonics, QR codes: no encrypted form, so never written
+			skip("has no encrypted form and is never written in clear (SPO-Xcustody-OUT-003)")
+			continue
 		}
 	}
 
@@ -248,9 +216,8 @@ func (u ExportWorkspace) exportOwner(ctx context.Context, owner string, refs []p
 		return finish("an artefact failed; nothing of this owner was exported")
 	}
 	// Record before the first secret is written; a failed record stops the owner.
-	if plaintext+protected > 0 {
-		ev := ports.AuditEvent{Operation: "export-workspace", Owners: []string{owner}, PlaintextKeys: plaintext, ProtectedKeys: protected,
-			Protected: pw != nil, Acknowledged: opts.PlaintextAcknowledged}
+	if protected > 0 {
+		ev := ports.AuditEvent{Operation: "export-workspace", Owners: []string{owner}, ProtectedKeys: protected, Protected: true}
 		if err := u.Auditor.Record(ctx, ev); err != nil {
 			return finish("the audit record could not be made")
 		}

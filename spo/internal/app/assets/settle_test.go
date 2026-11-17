@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/transferfile"
 	"github.com/mochipool/workbench/spo/internal/domain/assets"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
@@ -19,6 +18,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/transfer"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 // carry is a transfer file in the world's directory that the mint queues to.
@@ -292,7 +292,7 @@ func TestUpdateHook(t *testing.T) {
 	ctx := context.Background()
 
 	// An online workspace that holds neither: nothing.
-	other, err := fsstore.Open(t.TempDir())
+	other, err := plainstore.OpenTestnet(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

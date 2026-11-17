@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -10,9 +11,10 @@ import (
 	"testing"
 
 	"github.com/mochipool/workbench/spo/internal/adapters/cli"
-	"github.com/mochipool/workbench/spo/internal/adapters/storeaudit"
 	"github.com/mochipool/workbench/spo/internal/adapters/toolchain"
+	"github.com/mochipool/workbench/spo/internal/domain/keyfile"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
+	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
 const (
@@ -69,10 +71,12 @@ func fileSet(t *testing.T, dir string) map[string]fileInfo {
 
 var cborHexRE = regexp.MustCompile(`"cborHex"\s*:\s*"([0-9a-f]+)"`)
 
-// (c) and (d): an upstream-layout directory is imported into a sealed
-// workspace, the pool works there, and a plaintext export gives the same files
-// back, byte for byte, with the audit event in the chain.
-func TestWorkspaceImportThenExportRoundTrip(t *testing.T) {
+// (c): an upstream-layout directory is imported into a sealed workspace, the
+// pool works there, and the source is only read: it is byte for byte what it
+// was, modes included.
+//
+// spec: SPO-Xcustody-IN-001, SPO-Xcustody-SEC-001
+func TestWorkspaceImportReadsTheSourceAndThePoolWorks(t *testing.T) {
 	src := upstreamDir(t)
 	orig := fileSet(t, src)
 	if len(orig) < 8 {
@@ -105,9 +109,16 @@ func TestWorkspaceImportThenExportRoundTrip(t *testing.T) {
 	if len(keyHexes) < 4 {
 		t.Fatalf("only %d signing keys", len(keyHexes))
 	}
-	// The source was only read.
-	if got := fileSet(t, src); len(got) != len(orig) {
+	// The source was only read: names, modes and contents are as they were.
+	got := fileSet(t, src)
+	if len(got) != len(orig) {
 		t.Error("the import changed the source directory")
+	}
+	for n, want := range orig {
+		g, ok := got[n]
+		if !ok || g.mode != want.mode || !bytes.Equal(g.data, want.data) {
+			t.Errorf("%s changed in the source by the import", n)
+		}
 	}
 	// Importing again without --overwrite refuses each owner, exit non-zero.
 	out, err = withPass(t, dir, testPass, "workspace", "import", src)
@@ -116,88 +127,8 @@ func TestWorkspaceImportThenExportRoundTrip(t *testing.T) {
 	}
 	mustHave(t, out, "already holds", "0 owner(s) of 2 imported")
 
-	// Export: a protection choice is required, and the directory must be new or empty.
-	target := filepath.Join(t.TempDir(), "out")
-	out, err = withPass(t, dir, testPass, "workspace", "export", target)
-	if err == nil || !strings.Contains(err.Error(), "password-fd") || !strings.Contains(err.Error(), "plaintext") {
-		t.Fatalf("an export with no protection choice: %v\n%s", err, out)
-	}
-	if _, serr := os.Stat(target); serr == nil {
-		t.Error("a refused export created the directory")
-	}
-	full := t.TempDir()
-	os.WriteFile(filepath.Join(full, "keep"), []byte("x"), 0o600)
-	if out, err = withPass(t, dir, testPass, "workspace", "export", full, "--plaintext", "--yes"); err == nil || !strings.Contains(err.Error(), "not empty") {
-		t.Fatalf("an export into a directory that is not empty: %v\n%s", err, out)
-	}
-	// --plaintext needs the typed word, or --yes.
-	pf, pfd := fdIn(t, testPass+"\n")
-	defer pf.Close()
-	out, err = exec(t, &fakeTerm{lines: []string{"yes"}}, "-C", dir, "--passphrase-fd", pfd, "workspace", "export", target, "--plaintext")
-	if err == nil || !strings.Contains(err.Error(), "declined") {
-		t.Fatalf("plaintext confirmed by something other than the word: %v\n%s", err, out)
-	}
-	if _, serr := os.Stat(target); serr == nil {
-		t.Error("a declined export created the directory")
-	}
-	pf2, pfd2 := fdIn(t, testPass+"\n")
-	defer pf2.Close()
-	term := &fakeTerm{lines: []string{"plaintext"}}
-	out, err = exec(t, term, "-C", dir, "--passphrase-fd", pfd2, "workspace", "export", target, "--plaintext", "--reason", "test")
-	if err != nil {
-		t.Fatalf("%v\n%s", err, out)
-	}
-	if len(term.asked) != 1 || !strings.Contains(term.asked[0], "plaintext") {
-		t.Errorf("the confirmation prompt: %q", term.asked)
-	}
-	mustHave(t, out, "PLAINTEXT", "in CLEAR", "2 owner(s) of 2 exported")
-
-	// Byte for byte: names, modes, contents.
-	got := fileSet(t, target)
-	if len(got) != len(orig) {
-		var a, b []string
-		for n := range orig {
-			a = append(a, n)
-		}
-		for n := range got {
-			b = append(b, n)
-		}
-		t.Errorf("file names differ:\n%v\n%v", a, b)
-	}
-	for n, want := range orig {
-		g, ok := got[n]
-		switch {
-		case !ok:
-			t.Errorf("%s was not exported", n)
-		case g.mode != want.mode:
-			t.Errorf("%s: mode %v, was %v", n, g.mode, want.mode)
-		case !bytes.Equal(g.data, want.data):
-			t.Errorf("%s: contents differ", n)
-		}
-	}
-
-	// The audit event is in the chain, and the workspace still verifies.
-	if out, err = withPass(t, dir, testPass, "store", "verify"); err != nil {
-		t.Fatalf("%v\n%s", err, out)
-	}
-	st := storeOf(t, dir)
-	evs, err := storeaudit.Events(context.Background(), st)
-	st.Close() // the commands below open the workspace again
-	if err != nil || len(evs) == 0 {
-		t.Fatalf("no audit events: %v", err)
-	}
-	var plain int
-	for _, e := range evs {
-		if e.Operation != "export-workspace" || e.Reason != "test" || !e.Acknowledged || e.Protected {
-			t.Errorf("event %+v", e)
-		}
-		plain += e.PlaintextKeys
-	}
-	if plain < 4 {
-		t.Errorf("the audit counted %d plaintext keys, the export wrote %d", plain, len(keyHexes))
-	}
-
-	// The imported pool works in the sealed workspace.
+	// The imported pool works in the sealed workspace, and the workspace file
+	// holds no key and no name in clear.
 	out, err = withPass(t, dir, testPass, "pool", "opcert", "issue", iPool, "--offline", "--shelley-genesis", genesis)
 	if err != nil || !strings.Contains(out, "Issued operational certificate "+iPool+".node-000.opcert") {
 		t.Fatalf("%v\n%s", err, out)
@@ -211,49 +142,72 @@ func TestWorkspaceImportThenExportRoundTrip(t *testing.T) {
 			t.Errorf("workspace.spo contains %q", n)
 		}
 	}
+	if err := withPassStoreVerify(t, dir); err != nil {
+		t.Fatal(err)
+	}
+}
 
-	// Into a directory that is now not empty: refused, unless --overwrite.
-	if out, err = withPass(t, dir, testPass, "workspace", "export", target, "--plaintext", "--yes"); err == nil {
-		t.Errorf("an export over an existing export:\n%s", out)
+func withPassStoreVerify(t *testing.T, dir string) error {
+	t.Helper()
+	out, err := withPass(t, dir, testPass, "store", "verify")
+	if err != nil {
+		return fmt.Errorf("%v\n%s", err, out)
 	}
-	if out, err = withPass(t, dir, testPass, "workspace", "export", target, "--plaintext", "--yes", "--overwrite"); err != nil {
-		t.Errorf("--overwrite: %v\n%s", err, out)
-	}
-	// One owner only.
-	one := filepath.Join(t.TempDir(), "one")
-	if out, err = withPass(t, dir, testPass, "workspace", "export", one, "--plaintext", "--yes", "--owner", iWallet); err != nil {
+	return nil
+}
+
+// An export needs a password and gpg and has no way to write a key in clear.
+// Without a toolchain manifest the missing tool is named and nothing is made.
+//
+// spec: SPO-Xcustody-INV-001, SPO-Xcustody-IF-001
+func TestWorkspaceExportNeedsAPasswordAndGPG(t *testing.T) {
+	src := upstreamDir(t)
+	dir := copyWorkspace(t)
+	if out, err := withPass(t, dir, testPass, "workspace", "import", src); err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
-	for n := range fileSet(t, one) {
-		if strings.HasPrefix(n, iPool) {
-			t.Errorf("--owner leaked %s", n)
+	target := filepath.Join(t.TempDir(), "out")
+	out, err := withPass(t, dir, testPass, "workspace", "export", target)
+	if err == nil || !strings.Contains(err.Error(), "password-fd") {
+		t.Fatalf("an export with no password: %v\n%s", err, out)
+	}
+	for _, flag := range []string{"--plaintext", "--yes"} {
+		if _, err := withPass(t, dir, testPass, "workspace", "export", target, flag); err == nil || !strings.Contains(err.Error(), "unknown flag") {
+			t.Errorf("%s: %v", flag, err)
 		}
 	}
-	if out, err = withPass(t, dir, testPass, "workspace", "export", filepath.Join(t.TempDir(), "x"), "--plaintext", "--yes", "--owner", "nobody"); err == nil {
-		t.Errorf("an unknown owner:\n%s", out)
+	pf, pfd := fdIn(t, "Pa55word!Correct-horse\n")
+	defer pf.Close()
+	pp, ppfd := fdIn(t, testPass+"\n")
+	defer pp.Close()
+	out, err = exec(t, nil, "-C", dir, "--passphrase-fd", ppfd, "workspace", "export", target, "--password-fd", pfd)
+	if err == nil || !strings.Contains(err.Error(), "key-encryption") || !strings.Contains(err.Error(), "gpg") {
+		t.Errorf("no gpg: %v\n%s", err, out)
+	}
+	if _, serr := os.Stat(target); serr == nil {
+		t.Error("a refused export created the directory")
 	}
 }
 
-// Commands that only mean something on an upstream-layout directory say so.
-func TestKeyProtectOnASealedWorkspaceExplains(t *testing.T) {
+// key convert without a toolchain names gpg, and changes nothing.
+//
+// spec: SPO-Xcustody-PR-001
+func TestKeyConvertWithoutGPGNamesTheTool(t *testing.T) {
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "w.skey"), keyfile.EncryptedEnvelope("PaymentSigningKeyShelley_ed25519", "Payment Signing Key", []byte(strings.Repeat("ab", 64))), 0o400); err != nil {
+		t.Fatal(err)
+	}
 	dir := copyWorkspace(t)
-	_, err := exec(t, nil, "-C", dir, "key", "protect", "w.skey")
-	if err == nil || !strings.Contains(err.Error(), "sealed store are always protected") || !strings.Contains(err.Error(), "--upstream-layout") {
-		t.Errorf("protect: %v", err)
+	if out, err := withPass(t, dir, testPass, "workspace", "import", src, "--keep-encrypted"); err != nil {
+		t.Fatalf("%v\n%s", err, out)
 	}
-	_, err = exec(t, nil, "-C", dir, "key", "unprotect", "w.skey")
-	if err == nil || !strings.Contains(err.Error(), "sealed store are always protected") {
-		t.Errorf("unprotect: %v", err)
-	}
-}
-
-// A binary without a toolchain manifest names the missing tool, and says it is
-// needed only for upstream's encrypted keys.
-func TestKeyProtectWithoutGPGNamesTheTool(t *testing.T) {
-	src := upstreamDir(t)
-	_, err := exec(t, nil, "-C", src, "--upstream-layout", "key", "protect", iWallet+".skey")
-	if err == nil || !strings.Contains(err.Error(), "key-encryption") || !strings.Contains(err.Error(), "gpg") || !strings.Contains(err.Error(), "upstream's encrypted") {
-		t.Errorf("%v", err)
+	pf, pfd := fdIn(t, "Pa55word!Correct-horse\n")
+	defer pf.Close()
+	pp, ppfd := fdIn(t, testPass+"\n")
+	defer pp.Close()
+	out, err := exec(t, nil, "-C", dir, "--passphrase-fd", ppfd, "key", "convert", "w", "--password-fd", pfd)
+	if err == nil || !strings.Contains(err.Error(), "key-encryption") || !strings.Contains(err.Error(), "gpg") {
+		t.Errorf("%v\n%s", err, out)
 	}
 }
 
@@ -265,6 +219,7 @@ func execTC(t *testing.T, term *fakeTerm, args ...string) (string, error) {
 		term = &fakeTerm{}
 	}
 	term.out = &out
+	usePlainLayoutIfAsked(t, args)
 	deps := newDeps(&out, &out, term)
 	m, err := toolchain.Load(os.Getenv(toolchain.EnvVar))
 	if err != nil {
@@ -278,69 +233,94 @@ func execTC(t *testing.T, term *fakeTerm, args ...string) (string, error) {
 	return out.String(), err
 }
 
-// The gpg path, with the real gpg of the toolchain: protect a key in place,
-// import it with its password, unprotect it. Only run where the toolchain
-// manifest is available (SPO_TOOLCHAIN).
+// The gpg path, with the real gpg of the toolchain: export a workspace with its
+// keys encrypted in upstream's form, import that with its password, import it
+// again undecrypted and turn the kept key into a sealed one with key convert.
+// Only run where the toolchain manifest is available (SPO_TOOLCHAIN).
+//
+// spec: SPO-Xcustody-OUT-003, SPO-Xcustody-PR-001, SPO-Ckey-EXT-001, SPO-Ckey-EXT-002
 func TestEncryptedKeysThroughGPG(t *testing.T) {
 	if os.Getenv(toolchain.EnvVar) == "" {
 		t.Skip("SPO_TOOLCHAIN is not set: the gpg path needs the toolchain manifest (run inside nix run .#spo or source the parity env)")
 	}
-	src := upstreamDir(t)
-	keyFile := iWallet + ".skey"
-	before, err := os.ReadFile(filepath.Join(src, keyFile))
-	if err != nil {
-		t.Fatal(err)
-	}
 	const upstreamPass = "Pa55word!Correct-horse"
+	src := upstreamDir(t)
+	walletKey := ports.Ref{Name: iWallet, Kind: ports.AddrSKey}
+	original := cborOf(t, filepath.Join(src, iWallet+".skey"))
+
+	// 1. A sealed workspace holding the source, exported with a password.
+	dir := copyWorkspace(t)
+	if out, err := withPass(t, dir, testPass, "workspace", "import", src); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	target := filepath.Join(t.TempDir(), "out")
 	pf, pfd := fdIn(t, upstreamPass+"\n")
 	defer pf.Close()
-	out, err := execTC(t, nil, "-C", src, "--upstream-layout", "key", "protect", keyFile, "--password-fd", pfd)
-	if err != nil {
-		t.Fatalf("%v\n%s", err, out)
-	}
-	if enc, _ := os.ReadFile(filepath.Join(src, keyFile)); bytes.Equal(enc, before) || !bytes.Contains(enc, []byte("encrHex")) {
-		t.Fatalf("the key file was not encrypted:\n%s", enc)
-	}
-	notLeaked(t, out, upstreamPass)
-
-	// Import without the password and without --keep-encrypted: refused, and
-	// nothing of the wallet is written.
-	dir := copyWorkspace(t)
-	out, err = withPass(t, dir, testPass, "workspace", "import", src, "--owner", iWallet)
-	if err == nil {
-		t.Fatalf("an encrypted key was imported with no password:\n%s", out)
-	}
-	// With the password, through gpg.
-	pw, pwfd := fdIn(t, upstreamPass+"\n")
-	defer pw.Close()
 	pp, ppfd := fdIn(t, testPass+"\n")
 	defer pp.Close()
-	out, err = execTC(t, nil, "-C", dir, "--passphrase-fd", ppfd, "workspace", "import", src, "--owner", iWallet, "--password-fd", pwfd)
+	out, err := execTC(t, nil, "-C", dir, "--passphrase-fd", ppfd, "workspace", "export", target, "--password-fd", pfd, "--reason", "test")
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
-	notLeaked(t, out, upstreamPass)
-	// Out again in clear: the original key text comes back.
-	target := filepath.Join(t.TempDir(), "out")
+	notLeaked(t, out, upstreamPass, original)
+	for n, f := range fileSet(t, target) {
+		if strings.HasSuffix(n, ".skey") {
+			if !bytes.Contains(f.data, []byte("encrHex")) || bytes.Contains(f.data, []byte(original)) || f.mode != 0o400 {
+				t.Errorf("%s is not an encrypted, locked key file (mode %v)", n, f.mode)
+			}
+		}
+	}
+
+	// 2. Imported with the password: the same key.
+	dir2 := copyWorkspace(t)
+	pw, pwfd := fdIn(t, upstreamPass+"\n")
+	defer pw.Close()
 	pp2, ppfd2 := fdIn(t, testPass+"\n")
 	defer pp2.Close()
-	if out, err = execTC(t, nil, "-C", dir, "--passphrase-fd", ppfd2, "workspace", "export", target, "--plaintext", "--yes"); err != nil {
+	if out, err = execTC(t, nil, "-C", dir2, "--passphrase-fd", ppfd2, "workspace", "import", target, "--owner", iWallet, "--password-fd", pwfd); err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
-	after, err := os.ReadFile(filepath.Join(target, keyFile))
+	notLeaked(t, out, upstreamPass)
+	if got := secretHex(t, dir2, walletKey); got != original {
+		t.Error("the key did not survive export and import")
+	}
+
+	// 3. Imported undecrypted: it cannot sign, is never exported, and key
+	// convert makes it a sealed key.
+	dir3 := copyWorkspace(t)
+	if out, err = withPass(t, dir3, testPass, "workspace", "import", target, "--owner", iWallet, "--keep-encrypted"); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	pw3, pwfd3 := fdIn(t, "Wrong-Passw0rd-1\n")
+	defer pw3.Close()
+	pp3, ppfd3 := fdIn(t, testPass+"\n")
+	defer pp3.Close()
+	if out, err = execTC(t, nil, "-C", dir3, "--passphrase-fd", ppfd3, "key", "convert", iWallet, "--password-fd", pwfd3); err == nil {
+		t.Fatalf("a wrong password converted the key:\n%s", out)
+	}
+	pw4, pwfd4 := fdIn(t, upstreamPass+"\n")
+	defer pw4.Close()
+	pp4, ppfd4 := fdIn(t, testPass+"\n")
+	defer pp4.Close()
+	if out, err = execTC(t, nil, "-C", dir3, "--passphrase-fd", ppfd4, "key", "convert", iWallet, "--password-fd", pwfd4); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	notLeaked(t, out, upstreamPass, original)
+	if got := secretHex(t, dir3, walletKey); got != original {
+		t.Error("key convert produced another key")
+	}
+}
+
+// cborOf is the cborHex of a signing key file.
+func cborOf(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m1, m2 := cborHexRE.FindSubmatch(before), cborHexRE.FindSubmatch(after); m1 == nil || m2 == nil || !bytes.Equal(m1[1], m2[1]) {
-		t.Errorf("the key did not survive encrypt, import, export")
+	m := cborHexRE.FindSubmatch(b)
+	if m == nil {
+		t.Fatalf("no key in %s", path)
 	}
-	// Unprotect in place.
-	pw2, pwfd2 := fdIn(t, upstreamPass+"\n")
-	defer pw2.Close()
-	if out, err = execTC(t, nil, "-C", src, "--upstream-layout", "key", "unprotect", keyFile, "--password-fd", pwfd2, "--yes", "--reason", "test"); err != nil {
-		t.Fatalf("%v\n%s", err, out)
-	}
-	if now, _ := os.ReadFile(filepath.Join(src, keyFile)); !cborHexRE.Match(now) {
-		t.Errorf("the key was not decrypted:\n%s", now)
-	}
+	return string(m[1])
 }

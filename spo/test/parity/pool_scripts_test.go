@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/adapters/transferfile"
 	appassets "github.com/mochipool/workbench/spo/internal/app/assets"
@@ -23,6 +22,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 // upstreamAnswers runs a script on a pseudo terminal made by script(1) with
@@ -176,13 +176,13 @@ func (b poolBase) workspaces(t *testing.T, descriptor string) (up, port string) 
 	return up, port
 }
 
-func (e env) poolKit(t *testing.T, dir string, slot, epoch uint64, at time.Time) (store *fsstore.Store, file *transferfile.File, led native.Ledger, tip epochTip, clock clockAt) {
+func (e env) poolKit(t *testing.T, dir string, slot, epoch uint64, at time.Time) (store *plainstore.Store, file *transferfile.File, led native.Ledger, tip epochTip, clock clockAt) {
 	t.Helper()
 	cli, err := e.tc.Tool(bg, ports.CardanoCLI)
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err = fsstore.Open(dir)
+	store, err = plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -424,7 +424,7 @@ func queuedTTL(t *testing.T, dir string) (fee, ttl uint64, hexTx string) {
 // letting an unchanged descriptor pass for "settled".
 func settlePending(t *testing.T, port, want string) {
 	t.Helper()
-	store, err := fsstore.Open(port)
+	store, err := plainstore.OpenTestnet(port)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -615,7 +615,7 @@ func TestPoolWitnessTransferMatchesUpstream(t *testing.T) {
 	signedBytes := []byte(readFile(t, r.up, name))
 	_, file, led, tip, _ := e.poolKit(t, r.port, uf.TTL-100000, 0, time.Now())
 	_ = file
-	store, _ := fsstore.Open(r.port)
+	store, _ := plainstore.OpenTestnet(r.port)
 	imp := poolops.ImportWitness{Store: store, Tip: tip, TxIDs: led}
 
 	// A forged witness: upstream's `add` takes it, the port refuses it.

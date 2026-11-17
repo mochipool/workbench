@@ -23,17 +23,14 @@ import (
 
 // Errors a caller can test for. None names a key or a password.
 var (
-	ErrPasswordRequired         = errors.New("an encrypted key needs the password (or keep it encrypted)")
-	ErrWeakPassword             = errors.New("the password is not strong: at least 10 characters with a lower-case letter, an upper-case letter, a digit and a special character")
-	ErrPlaintextNotAcknowledged = errors.New("exporting signing keys in plaintext needs PlaintextAcknowledged")
-	ErrSealedStore              = errors.New("keys in the sealed store are always protected: there is nothing to encrypt or decrypt (use the workspace export)")
-	ErrNoSuchOwner              = errors.New("no such pool or wallet in the source")
-	ErrNoAuditor                = errors.New("an audit sink is required for a dangerous operation")
-	ErrNotSigningKey            = errors.New("not a signing key")
-	ErrAlreadyEncrypted         = errors.New("the key is already encrypted")
-	ErrNotEncrypted             = errors.New("the key is not encrypted")
-	ErrNotAKeyFile              = errors.New("the file is not a signing key envelope")
-	ErrVerifyFailed             = errors.New("the encrypted key did not decrypt back to the original; nothing was written")
+	ErrPasswordRequired       = errors.New("an encrypted key needs the password (or keep it encrypted)")
+	ErrWeakPassword           = errors.New("the password is not strong: at least 10 characters with a lower-case letter, an upper-case letter, a digit and a special character")
+	ErrShortExportPassword    = errors.New("the export password is too short: an export needs at least 20 characters (and the strength rule), because gpg's key derivation is not memory-hard; use --generate-password")
+	ErrExportPasswordRequired = errors.New("an export writes signing keys in upstream's encrypted form only and needs the password to encrypt them")
+	ErrNoSuchOwner            = errors.New("no such pool or wallet in the source")
+	ErrNoAuditor              = errors.New("an audit sink is required for a dangerous operation")
+	ErrNotAKeyFile            = errors.New("the file is not a signing key envelope")
+	ErrVerifyFailed           = errors.New("the encrypted key did not decrypt back to the original; nothing was written")
 )
 
 // Status of one artefact in a report.

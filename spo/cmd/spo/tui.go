@@ -47,7 +47,7 @@ questions (passphrase, confirmations) in a modal, exactly as the command
 phrases them. The TUI has no behaviour of its own: whatever a command refuses,
 confirms or records is what you get on the command line.
 
-The global flags (-C DIR, --upstream-layout, --accept-rollback) apply to the
+The global flags (-C DIR, --accept-rollback) apply to the
 whole session. The workspace is not opened until a command needs it.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {

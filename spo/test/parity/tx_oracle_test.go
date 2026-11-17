@@ -11,7 +11,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
@@ -19,6 +18,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 // lightParameters is the recorded preview parameters document, in
@@ -210,7 +210,7 @@ func TestTxMatchesCardanoCLI(t *testing.T) {
 
 	for _, extended := range []bool{false, true} {
 		keys := e.newKeys(t, extended)
-		store, err := fsstore.Open(keys.dir)
+		store, err := plainstore.OpenTestnet(keys.dir)
 		if err != nil {
 			t.Fatal(err)
 		}

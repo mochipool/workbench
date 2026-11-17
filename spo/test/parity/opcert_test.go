@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/genesisfile"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/adapters/offline"
@@ -23,6 +22,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 // previewGenesis is the Shelley genesis file of the preview network from the
@@ -84,7 +84,7 @@ var expireRE = regexp.MustCompile(`"expireKESdate": "([^"]*)"`)
 
 func issueUseCase(t *testing.T, dir, genesis string) poolops.IssueOperationalCertificate {
 	t.Helper()
-	store, err := fsstore.Open(dir)
+	store, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +215,7 @@ func TestOpCertMatchesCardanoCLI(t *testing.T) {
 		"--cold-signing-key-file", p("mypool.node.skey"), "--operational-certificate-issue-counter-file", p("seed.counter"))
 	e.cardanoCLI(t, "latest", "node", "key-gen-KES", "--verification-key-file", p("kes.vkey"), "--signing-key-file", p("kes.skey"))
 
-	store, err := fsstore.Open(dir)
+	store, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

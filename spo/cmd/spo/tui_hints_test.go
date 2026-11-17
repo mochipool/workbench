@@ -79,6 +79,7 @@ func TestTUINamesFromTheSealedWorkspace(t *testing.T) {
 }
 
 func TestTUINamesFromTheUpstreamLayoutNeedNoPassphrase(t *testing.T) {
+	usePlainLayout(t)
 	dir := t.TempDir()
 	d := newNamedTUI(t, dir, "--upstream-layout=true")
 	st := drive(t, d, []string{"wallet", "new"}, map[string]string{"name": "up-w"}, nil)
@@ -113,17 +114,11 @@ func TestTUIFilePickerStartsInTheWorkspace(t *testing.T) {
 	}
 }
 
-// The exclusions the commands declare reach the form (wallet new, workspace
-// export), and are cobra's own: the CLI refuses the same combination.
+// The exclusions the commands declare reach the form (wallet new), and are
+// cobra's own: the CLI refuses the same combination.
 func TestTUIShowsTheExclusionsCommandsDeclare(t *testing.T) {
 	dir := copyWorkspace(t)
 	d := newNamedTUI(t, dir)
-	if err := d.Open("workspace", "export"); err != nil {
-		t.Fatal(err)
-	}
-	if err := d.Run(); err == nil || !strings.Contains(err.Error(), "give one of --password-fd, --plaintext") {
-		t.Errorf("export with neither: %v", err)
-	}
 	if err := d.Open("wallet", "new"); err != nil {
 		t.Fatal(err)
 	}

@@ -51,8 +51,6 @@ var argHints = map[string]map[string]string{
 	"drep register":                  {"name": hDRep, "payer": hWallet},
 	"drep retire":                    {"name": hDRep, "payer": hWallet},
 	"drep status":                    {"name|id": hDRep},
-	"key protect":                    {"file": hFile},
-	"key unprotect":                  {"file": hFile},
 	"offline add":                    {"name": hWallet},
 	"offline add-drep":               {"name": hStake},
 	"offline attach":                 {"file": hFile},

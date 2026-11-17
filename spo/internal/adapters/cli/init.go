@@ -87,12 +87,23 @@ you to confirm that first. Mode offline configures no provider.`,
 			}
 			defer recovery.Destroy()
 			fmt.Fprintf(a.d.Out, "Created workspace in %s: network %s, mode %s.\n", a.workspace, cfg.Network, cfg.Mode)
-			return a.deliverRecoveryKey(ctx, recovery, rkFD)
+			if derr := a.deliverRecoveryKey(ctx, recovery, rkFD); derr != nil {
+				if rkFD >= 0 {
+					// The key went nowhere and nothing else can open the workspace
+					// if the passphrase is lost: take back what this run created.
+					for _, p := range []string{a.workspaceFile(), a.workspaceFile() + ".head", a.workspaceFile() + ".head.lock", a.workspaceFile() + "-wal", a.workspaceFile() + "-shm", a.workspaceFile() + "-journal", a.configPath()} {
+						os.Remove(p)
+					}
+					return fmt.Errorf("%w. The workspace created by this run was removed because its recovery key was not delivered; run init again", derr)
+				}
+				return derr
+			}
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&network, "network", "", "mainnet, preprod or preview")
 	cmd.Flags().StringVar(&mode, "mode", ModeOffline, "online (a node socket: spo provider set node), light (Koios) or offline")
-	cmd.Flags().IntVar(&rkFD, "recovery-key-fd", -1, "write the recovery key to this file descriptor instead of showing it (needs --passphrase-fd)")
+	cmd.Flags().IntVar(&rkFD, "recovery-key-fd", -1, "write the recovery key to this inherited pipe or socket (never a file) instead of showing it (needs --passphrase-fd)")
 	cmd.Flags().BoolVar(&yes, "yes", false, "answer yes to the provider confirmation (the statement is still printed)")
 	return cmd
 }

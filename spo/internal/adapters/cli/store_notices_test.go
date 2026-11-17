@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 )
@@ -56,10 +57,7 @@ func (s *scriptedStore) RekeyKeepPassphrase(context.Context, *secret.Buffer) (*s
 func (s *scriptedStore) Cleanup(context.Context) error {
 	s.calls = append(s.calls, "cleanup")
 	if s.keyFile != nil {
-		s.keyFile.Seek(0, 0)
-		var b bytes.Buffer
-		b.ReadFrom(s.keyFile)
-		s.keyAtClean = b.String()
+		s.keyAtClean = drainPipe(s.keyFile)
 	}
 	return s.cleanupErr
 }
@@ -109,16 +107,25 @@ func storeRun(t *testing.T, st *scriptedStore, args ...string) (stdout, stderr s
 	return out.String(), errw.String(), err
 }
 
-// tokenFileKeep is an empty file for the recovery key, returned open (the
-// descriptor flag value is the second result).
+// tokenFileKeep is a pipe for the recovery key (a secret is never written to a
+// file): the first result is its read end, the second the number of its write
+// end, the descriptor flag value. drainPipe reads what was written.
 func tokenFileKeep(t *testing.T) (*os.File, string) {
 	t.Helper()
-	f, err := os.CreateTemp(t.TempDir(), "key")
+	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { f.Close() })
-	return f, strconv.Itoa(int(f.Fd()))
+	t.Cleanup(func() { r.Close(); w.Close() })
+	return r, strconv.Itoa(int(w.Fd()))
+}
+
+// drainPipe reads what is in the pipe now, without waiting for it to close.
+func drainPipe(r *os.File) string {
+	var b bytes.Buffer
+	r.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	b.ReadFrom(r)
+	return b.String()
 }
 
 func TestRekeyCommandsPrintNoticesAndCleanUpAfterTheKey(t *testing.T) {
@@ -289,11 +296,8 @@ func TestUnknownRekeyOutcomeShowsTheKeyWithGuidance(t *testing.T) {
 			if st.keyFile == nil {
 				t.Fatal("no key file")
 			}
-			st.keyFile.Seek(0, 0)
-			var b bytes.Buffer
-			b.ReadFrom(st.keyFile)
-			if !strings.Contains(b.String(), "ABCD-EFGH-IJKL-MNOP") {
-				t.Errorf("the key was not delivered: %q", b.String())
+			if got := drainPipe(st.keyFile); !strings.Contains(got, "ABCD-EFGH-IJKL-MNOP") {
+				t.Errorf("the key was not delivered: %q", got)
 			}
 			// explain keeps the specific advice.
 			if got := explain(err); got.Error() != err.Error() {

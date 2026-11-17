@@ -39,7 +39,7 @@ Unit tests use stand-ins (`tests/fake_scripts.py`) that reproduce the upstream f
 
 Started 2026-11-16. Read [Go reference implementation: concerns](./go-reference-implementation-concerns.md) and the [ADRs](../explanation/adr/README.md) before touching it. The concerns page has a *Status* table that says what is closed.
 
-State: 68 of 68 specs are implemented (`spo/spec-coverage.toml`; the waived ids carry their reasons, and `python3 spec/tools/specctl.py coverage --tests spo --config spo/spec-coverage.toml` is the proof). The sealed store is the default (ADR 0003): `spo init` creates a workspace (`workspace.spo`, its head file and `spo.toml`), every command opens it with a passphrase from the terminal or `--passphrase-fd`, a rekey always revokes the old recovery key, and a rolled-back file is refused unless `--accept-rollback`. `--upstream-layout` still works on a plain directory, with keys unsealed. Offline mode (clock, transfer file) and light mode (Koios, light-mode parameters file) are wired. Provider API tokens are stored in the sealed store. See [spo CLI](../reference/spo-cli.md) and [spo.toml](../reference/spo-toml.md).
+State: 68 of 68 specs are implemented (`spo/spec-coverage.toml`; the waived ids carry their reasons, and `python3 spec/tools/specctl.py coverage --tests spo --config spo/spec-coverage.toml` is the proof). The sealed store is the default (ADR 0003): `spo init` creates a workspace (`workspace.spo`, its head file and `spo.toml`), every command opens it with a passphrase from the terminal or `--passphrase-fd`, a rekey always revokes the old recovery key, and a rolled-back file is refused unless `--accept-rollback`. The release binary cannot write a signing key or any other secret unprotected (see *No secret is written unprotected* below): a plain upstream-layout directory is only the source of `workspace import`. Offline mode (clock, transfer file) and light mode (Koios, light-mode parameters file) are wired. Provider API tokens are stored in the sealed store. See [spo CLI](../reference/spo-cli.md) and [spo.toml](../reference/spo-toml.md).
 
 Built, by area (the table below says where):
 
@@ -60,6 +60,7 @@ Built, by area (the table below says where):
 
 **Not built:**
 
+* `node export` of ADR 0011 (an age-encrypted delivery of the KES key, VRF key and operational certificate to a block producer, with a start-up helper) is not approved and not built. Until then a block producer gets its hot keys from `workspace export --generate-password`, transfer and a gpg decryption by hand ([how-to](../how-to/deliver-keys-to-a-block-producer.md)); that export also encrypts the pool's cold key, which must never be copied to a block producer. Also not built: converting a kept-encrypted KES, VRF or BLS key (no verification key can be derived; import it again with `--password-fd`), and encrypting or decrypting a key file in place in a plain directory (the upstream script `01_protectKey.sh` does that).
 
 * A Blockfrost reading of the stake key deposit and of a DRep's deposit. The Blockfrost adapter (`adapters/blockfrost`, ADR 0006 adapter 4) is the second provider of the harmful-class reads (reward balance, pool registration, DRep registration), wired in `cmd/spo/providers.go`; its response shapes are from the public documentation and were never checked against a live service, and the API states neither deposit, so those values rest on the first provider. Blockfrost has no opcert counter.
 * Node-socket gaps (the adapter itself is built, see "Never run against a real cardano-node" below): the node cannot answer asset holders (ADA Handles), transaction metadata (SPO polls, Calidus registrations), a pool's last-update time, a tally or script evaluation, so those capabilities are absent in online mode unless a web provider is configured *and* named in `[provider] order`; the adapter has no era reader for the air-gap commands (`offline new` in online mode reports `era` absent); and the node cannot give a block height or depth for a transaction (`spo tx status`, `--wait`: it states presence only, so a wait on `--wait-confirmations N` above 1 needs a web provider to state a depth).
@@ -90,13 +91,14 @@ How a command gets what it needs, and how to add one:
 | Ports (one small interface per capability) and domain (custody, chain vocabulary, txbuild, pool, stake, assets, tokenmeta, party, ...) | `spo/internal/ports`, `spo/internal/domain` |
 | Use cases | `spo/internal/app/*` |
 | Native ledger, key generation, signers (vault, registry), verification-key and VRF derivation, on Blink Labs libraries (ADR 0007) | `spo/internal/adapters/native` |
-| Sealed single-file store, its audit chain, backup and restore; the upstream-layout store | `spo/internal/adapters/{sqlitestore,storeaudit,fsstore}` |
+| Sealed single-file store, its audit chain, backup and restore; the read-only upstream-layout reader and the export destination | `spo/internal/adapters/{sqlitestore,storeaudit,upstreamdir,exportdir}` |
 | `spo.toml` with a strict schema, and the network presets | `spo/internal/adapters/config` |
 | Chain and web readers: Koios (recorded responses) and the light-mode parameters, ADA Handle API, token-registry server, metadata fetch | `spo/internal/adapters/{koios,adahandle,tokenregistry,httpfetch}` |
 | Offline: tip from the clock, genesis file reader, the transfer file as snapshot, queue and bundle | `spo/internal/adapters/{offline,genesisfile,systemclock,transferfile}` |
 | Hardware wallets over `cardano-hw-cli` (untested on devices) | `spo/internal/adapters/hwcli` |
 | Multi-party: party registry, envelopes, file and tailcat transports | `spo/internal/adapters/{partystore,envelope,filebag,tailcat}` |
 | gpg envelope for upstream's encrypted keys | `spo/internal/adapters/gpg` |
+| The writable plain-directory store (TEST-ONLY; the release does not contain it) | `spo/test/plainstore` |
 | Differential tests against the pinned upstream scripts | `spo/test/parity` |
 | Which specs are implemented, and the waived ids with reasons | `spo/spec-coverage.toml` |
 
@@ -105,7 +107,8 @@ Fast loop, from `spo/` (needs Go 1.27; `-count=1` matters, Go caches the import-
 
 ```sh
 gofmt -l internal cmd && go vet ./... && go test -count=1 ./...
-go test -count=1 ./internal/archtest/            # the dependency rule
+go test -count=1 ./internal/archtest/            # the dependency rule and the no-plaintext rule
+go test -count=1 -tags plainlayout ./internal/archtest/ ./cmd/spo/ ./test/plainstore/   # the tagged (non-release) build
 go test -count=1 -run TestU ./cmd/...             # the TUI parity and descriptor-flag tests
 go test -count=1 -run TestPTY -v ./cmd/spo          # the TUI on a real pty (skips without one)
 ```
@@ -115,7 +118,7 @@ Verify:
 ```sh
 # a sealed workspace without a terminal: passphrase and recovery key on descriptors
 printf 'correct horse battery staple\n' > pw
-nix run --accept-flake-config .#spo -- -C ws init --network preview --passphrase-fd 3 --recovery-key-fd 4 3<pw 4>rk
+nix run --accept-flake-config .#spo -- -C ws init --network preview --passphrase-fd 3 --recovery-key-fd 4 3<pw 4> >(pass insert -m spo-recovery-key)
 nix run --accept-flake-config .#spo -- -C ws --passphrase-fd 3 store verify 3<pw
 nix build --accept-flake-config --no-link -L .#checks.x86_64-linux.spo-tests   # go vet + go test in the sandbox
 nix run --accept-flake-config .#spo -- toolchain check                        # real pinned tools pass the gates
@@ -125,6 +128,27 @@ python3 spec/tools/specctl.py coverage --tests spo --config spo/spec-coverage.to
 ```
 
 Things that will bite:
+
+* **No secret is written unprotected** (the owner's rule; ADR 0011 (proposed); [Xcustody](../../spec/extensions/Xcustody.md)). The release binary must be unable to write a signing key or any other secret unencrypted. The plain upstream-layout directory is not a workspace: `--upstream-layout`, `key protect`, `key unprotect` and `workspace export --plaintext` are gone. What enforces it: `adapters/upstreamdir` is the read-only reader (no write method; `ports.ReadStore`), `adapters/exportdir` is the only writer of the layout and refuses every secret that is not a signing key in upstream's encrypted form, and the writable plain store lives in `spo/test/plainstore`, which `internal/archtest` keeps out of every non-test file except `cmd/spo/wiring_plain.go` (built only with `-tags plainlayout`, not a release). `tools/spo.nix` proves absence in the release build: `go list -deps` has no `spo/test/` package, and the installed binary's help names no `--upstream-layout`, `--plaintext` or `unprotect`. Tests that need a plain directory (`cmd/spo` e2e, the CLI fixtures, `test/parity`, `test/world`) import `plainstore` directly or call `usePlainLayout(t)` in `cmd/spo`; `spo-parity` also runs with the tag. Imported keys that stay in upstream's password-encrypted form (`--keep-encrypted`) are sealed records that cannot sign and are never exported: `spo key convert` decrypts one, checks it against its verification key and stores it as a normal sealed key (ed25519 key types only; KES, VRF and BLS are re-imported with `--password-fd`).
+
+  Inventory of what could write secret material outside the sealed store, as of this change:
+
+  | Path | What it writes | Decision |
+  | --- | --- | --- |
+  | `--upstream-layout` plain store (`fsstore`, `cli/root.go`, `cmd/spo/wiring.go`) | every secret kind in clear (signing keys, mnemonics, QR code, party keys), mode 0400 | removed from the release; the writer moved to `test/plainstore` (refuses mainnet); the reader that stays is read-only |
+  | `key unprotect` and its `.spo-workspace-audit.json` | a decrypted signing key in clear, in place | removed; an existing audit file is ignored by import |
+  | `key protect` | an encrypted key in place, in a plain directory | removed (only meaningful in a plain directory) |
+  | `workspace export --plaintext` | signing keys and mnemonics in clear | removed; the flag, `--yes` and the confirmation word are gone |
+  | `workspace export --password-fd` / `--generate-password` | signing keys encrypted in upstream's gpg form (pinned `--s2k-mode 3 --s2k-digest-algo SHA512 --s2k-count 65011712 --cipher-algo AES256 --force-mdc`), non-secret files | kept as a transport form (gpg's S2K is not memory-hard); password at least 20 characters or generated; destination `exportdir` checks the OpenPGP packets and refuses anything else; mnemonics, QR codes, kept keys are skipped |
+  | `workspace export` of a kept-encrypted record | the encrypted key text, back out | removed (INV-003); `key convert` first |
+  | `catalyst key qrcode` | the voting key as a QR code under a 4-digit PIN (Catalyst's format) | the PNG writer is removed from the release; the code is drawn on a terminal only (alternate screen, cleared on Enter), after a stated 10,000-guess warning and a confirmation, and the display is audited; see item (3) below |
+  | `init`, `store rekey`, `store recover` recovery key (`deliverRecoveryKey`) | the new recovery key: shown once on the terminal with a typed confirmation, or written to `--recovery-key-fd N` | kept; see item list below |
+  | `hwcli` scratch directory (`hwcli/exec.go`) | hardware signing files, transaction bodies and witnesses, 0600 in a 0700 temp dir removed after the call | kept: none is a secret by ADR 0004 (no key material) |
+  | `party export`, `party` snapshot copy (`privateCopy`), witness files, the offline transfer file | public identity document, chain-view snapshot, witnesses, transactions | kept: not secret (ADR 0004); party private keys stay sealed |
+  | mnemonics (`wallet new --mnemonic`, `drep`, `committee`, `calidus`) | stored sealed; never displayed or written | kept as is |
+  | crash dumps and logs | none: `secret.HardenProcess` sets RLIMIT_CORE 0 and no ptrace; secrets are in locked guarded buffers; no logger is configured | kept |
+
+  Legitimate secret outputs that stay, with their guards and a recommendation (nothing was changed silently): (1) the recovery key on the terminal: shown once, the operator must type back its last group, a hard refusal without a terminal unless `--recovery-key-fd` is given; recommendation: keep, it is the only copy. (2) `--recovery-key-fd N` and `--password-out-fd N` write a secret to a descriptor the operator opened; `internal/platform/secretfd` accepts only a pipe or a Unix socket open for writing and refuses a regular file, directory, device or terminal, descriptors 0, 1 and 2, and a closed descriptor, before any effect ([Xcustody](../../spec/extensions/Xcustody.md) OUT-005, PRE-006); the check is driven by the same table (`secretFDFlags`) that classifies the flags for the TUI, so a new secret-output flag is checked as soon as it is classified. The export delivers its generated password before it writes any file. (3) The Catalyst QR code: the payload is encrypted with a 4-digit PIN, which does not resist an offline guess, so it is written to no file. The drawing on a terminal is the one named, audited, non-persistent output of this secret ([Xcustody](../../spec/extensions/Xcustody.md) INV-001, OUT-004): a tty is required, the risk is stated first, the default answer is no, `--yes` works on a tty only, and the display is recorded in the audit log before the payload is built. (4) `workspace export` of keys encrypted with a gpg symmetric password: the parameters are pinned, the password must be at least 20 characters besides upstream's strength rule, or is generated (160 bits); gpg's S2K is not memory-hard, so the export is a transport form to be deleted after use ([Xcustody](../../spec/extensions/Xcustody.md) SEC-003). (5) The `spo-parity` derivation is built with the `plainlayout` tag and installs no executable (a log and a marker only); the check `spo-tagged-no-binary` fails when a tagged derivation has any runnable file.
 
 * **Hardware wallets are untested on real devices.** The adapter is built and tested against a stand-in tool. Before relying on it, work through [the device checklist](./hardware-device-checklist.md).
 

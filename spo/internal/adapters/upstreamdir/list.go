@@ -1,4 +1,4 @@
-package fsstore
+package upstreamdir
 
 import (
 	"context"
@@ -130,7 +130,7 @@ func RefOf(file string) (ports.Ref, bool) {
 func reasonFor(file string) string {
 	switch {
 	case file == ".spo-workspace-audit.json" || file == "spo-workspace-audit.json":
-		return "this program's own audit log of the directory (spo key unprotect), not an artefact"
+		return "an audit log an earlier version of this program left in a plain directory, not an artefact"
 	case file == "offlineTransfer.json":
 		return "the offline transfer bag (Ptransfer), not part of a workspace"
 	case strings.HasSuffix(file, ".witness"), strings.HasSuffix(file, ".txbody"), strings.HasSuffix(file, ".tx"), strings.HasSuffix(file, ".txwitness"):
@@ -143,7 +143,7 @@ func reasonFor(file string) string {
 // that the name mapping recognises, and the rest as unknown. Directories,
 // symbolic links and special files are never followed; this program's own
 // temporary files are skipped.
-func (s *Store) List(ctx context.Context) (ports.SourceListing, error) {
+func (s *Source) List(ctx context.Context) (ports.SourceListing, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ents, err := os.ReadDir(s.dir)
@@ -193,13 +193,13 @@ func FileName(r ports.Ref) (string, error) {
 	return fn(r), nil
 }
 
-var _ ports.SourceLister = (*Store)(nil)
+var _ ports.SourceLister = (*Source)(nil)
 
 // Subdirs implements ports.SourceTree: the real (not symbolic link)
 // directories inside the directory, hidden ones left out, sorted by name.
 //
 // spec: SPO-Xmulti-SEC-001
-func (s *Store) Subdirs(ctx context.Context) ([]string, error) {
+func (s *Source) Subdirs(ctx context.Context) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ents, err := os.ReadDir(s.dir)
@@ -221,4 +221,4 @@ func (s *Store) Subdirs(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
-var _ ports.SourceTree = (*Store)(nil)
+var _ ports.SourceTree = (*Source)(nil)

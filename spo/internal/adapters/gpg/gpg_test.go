@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mochipool/workbench/spo/internal/adapters/toolchain"
+	"github.com/mochipool/workbench/spo/internal/domain/keyfile"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -143,6 +144,43 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 			return nil
 		})
 		plain.Destroy()
+	}
+}
+
+// The parameters of the encrypted form are pinned in the command, not left to
+// gpg's defaults: the message gpg makes has the iterated-and-salted S2K with
+// SHA-512 and the count 65011712, AES-256, and an integrity-protected data
+// packet. The options themselves are in the spawned command.
+//
+// spec: SPO-Ckey-INV-003, SPO-Xcustody-EXT-001, SPO-Xcustody-SEC-003
+func TestEncryptPinsTheParameters(t *testing.T) {
+	g, rec := rig(t)
+	enc, err := g.Encrypt(context.Background(), sec(cbor), sec("Str0ng-Passw0rd!"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := hex.DecodeString(string(enc))
+	m, err := keyfile.CheckSymmetricMessage(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Version != 4 || m.Cipher != 9 || m.S2KMode != 3 || m.HashAlgo != 10 || m.Count != 65011712 {
+		t.Errorf("parameters %+v", m)
+	}
+	var found bool
+	for _, sp := range rec.spawns {
+		joined := " " + strings.Join(sp.Argv, " ") + " "
+		if strings.Contains(joined, " --symmetric ") {
+			found = true
+			for _, want := range []string{"--cipher-algo AES256", "--s2k-mode 3", "--s2k-digest-algo SHA512", "--s2k-count 65011712", "--force-mdc"} {
+				if !strings.Contains(joined, " "+want) {
+					t.Errorf("the command lacks %s: %s", want, joined)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Error("no encrypt command was recorded")
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/mochipool/workbench/spo/internal/domain/keyfile"
 	"github.com/mochipool/workbench/spo/internal/domain/transfer"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
@@ -128,12 +129,19 @@ const DefaultMaxAttachBytes = 1 << 20
 // ErrTooLarge: the file is larger than the limit.
 var ErrTooLarge = errors.New("the file is too large to attach")
 
+// ErrSecretAttachment: the file is a secret, and the transfer file takes none.
+var ErrSecretAttachment = errors.New("the file is a secret and is not attached to the transfer file, which travels in clear")
+
 // Attach stores a file in the bundle (upstream `attach`). It needs a usable
 // bundle (SPO-01workOffline-PRE-008) and works in every mode. The caller
 // reads the file; the name is the key stored, as given, and must be a plain
 // file name (a leading `./` is kept as upstream stores it). A path with a
 // directory part is refused: extraction would refuse it too
 // (SPO-Ptransfer-SEC-001).
+//
+// A file that is a secret is refused (ErrSecretAttachment): a signing key in
+// any form, a hardware signing file, a mnemonic word list, upstream's
+// encrypted-key envelope. The transfer file is plain text that travels.
 type Attach struct {
 	Bundle   ports.BundleStore
 	Clock    ports.Clock
@@ -160,6 +168,11 @@ func (uc Attach) Run(ctx context.Context, name string, content []byte) error {
 	}
 	if _, err := transfer.SafeName(name); err != nil {
 		return err
+	}
+	// The transfer file is carried between machines in clear: it takes no
+	// secret (SPO-Xcustody-INV-001).
+	if why := keyfile.SecretFileReason(name, content); why != "" {
+		return fmt.Errorf("%w: %s", ErrSecretAttachment, why)
 	}
 	if err := RequireUsable(ctx, uc.Bundle); err != nil {
 		return err

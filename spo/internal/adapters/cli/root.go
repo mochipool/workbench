@@ -20,13 +20,20 @@ func NewRoot(d Deps) *cobra.Command {
 		Short:         "Stake pool operations from one binary, with sealed keys and multi-party signing",
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		// A descriptor that is to receive a secret must be a pipe or a socket,
+		// and is refused before the command does anything (secretout.go).
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error { return checkSecretOutFlags(cmd) },
 	}
 	root.SetOut(d.Out)
 	root.SetErr(d.Err)
 
 	root.PersistentFlags().StringVarP(&a.workspace, "workspace", "C", ".", "workspace directory (holds "+WorkspaceFile+" and "+configFile+")")
-	root.PersistentFlags().BoolVar(&a.upstream, "upstream-layout", false,
-		"use a plain directory in the upstream scripts' file layout instead of a sealed workspace; signing keys are stored unsealed, as upstream stores them")
+	// The plain-directory workspace exists only in a build that wires it
+	// (tag plainlayout) and in tests; the release binary has no such flag.
+	if d.OpenUpstream != nil {
+		root.PersistentFlags().BoolVar(&a.upstream, "upstream-layout", false,
+			"TEST BUILD ONLY: use a plain directory in the upstream scripts' file layout instead of a sealed workspace; signing keys are stored unsealed")
+	}
 	root.PersistentFlags().IntVar(&a.passFD, "passphrase-fd", -1,
 		"read the workspace passphrase from this inherited file descriptor (trailing newline stripped) instead of prompting; there is no passphrase flag or variable")
 

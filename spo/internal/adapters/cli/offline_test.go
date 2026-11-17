@@ -10,16 +10,17 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/adapters/transferfile"
 	"github.com/mochipool/workbench/spo/internal/app/airgap"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
+	"github.com/mochipool/workbench/spo/internal/domain/keyfile"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/domain/transfer"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 const (
@@ -94,7 +95,7 @@ type ogFixture struct {
 func newOgFixture(t *testing.T, mode string) *ogFixture {
 	t.Helper()
 	f := &ogFixture{t: t, dir: t.TempDir(), mode: mode, sub: &ogSubmitter{}}
-	st, err := fsstore.Open(f.dir)
+	st, err := plainstore.OpenTestnet(f.dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +108,7 @@ func newOgFixture(t *testing.T, mode string) *ogFixture {
 	put("w", ports.StakingAddr, ogStake)
 	cfgs := map[string]WorkspaceConfig{f.dir: {Network: "preview", Mode: mode}}
 	f.deps = Deps{Out: &f.out, Err: &f.out, Version: "test", Config: memConfig(cfgs),
-		OpenUpstream: func(dir string) (ports.Store, error) { return fsstore.Open(dir) },
+		OpenUpstream: func(dir string) (ports.Store, error) { return plainstore.OpenTestnet(dir) },
 		Wire: func(_ ports.Store, o WireOptions) (*Env, error) {
 			led := native.Ledger{}
 			env := &Env{Mode: o.Mode, NetworkID: ports.NetworkTestnet, Clock: cliClock{}, AddressInspector: led, TxIDs: led,
@@ -231,6 +232,44 @@ func TestOfflineNewAddInfoMapFlagsToTheUseCases(t *testing.T) {
 	if err := f.run(&scriptTerm{t: t}, "offline", "info", "--transfer-file", filepath.Join(f.dir, "nope.json")); !errors.Is(err, transfer.ErrNoFile) {
 		t.Errorf("info of a missing file: %v", err)
 	}
+}
+
+// The transfer file travels in clear, so attach refuses a secret and says why:
+// a cardano-cli signing key envelope, a .skey or .hwsfile name, a mnemonic word
+// list, upstream's encrypted-key envelope. An ordinary file still attaches.
+//
+// spec: SPO-Xcustody-INV-001, SPO-Xcustody-PRE-004
+func TestOfflineAttachRefusesSecrets(t *testing.T) {
+	f := preparedOg(t)
+	plain := `{"type":"PaymentSigningKeyShelley_ed25519","description":"","cborHex":"5820` + strings.Repeat("ab", 32) + `"}`
+	enc := string(keyfile.EncryptedEnvelope("PaymentSigningKeyShelley_ed25519", "Payment Signing Key", []byte(strings.Repeat("cd", 40))))
+	words := strings.TrimSpace(strings.Repeat("abandon ", 11) + "about")
+	for name, tc := range map[string]struct{ file, content, why string }{
+		"a signing key envelope":         {"note.txt", plain, "signing key envelope"},
+		"a key under an odd name":        {"notes", `{"type":"StakeExtendedSigningKeyShelley_ed25519_bip32","description":"","cborHex":"5880` + strings.Repeat("ab", 64) + `"}`, "signing key"},
+		"a .skey name":                   {"w.payment.skey", "anything", ".skey"},
+		"a .hwsfile name":                {"w.payment.hwsfile", "{}", ".hwsfile"},
+		"an encrypted-key envelope":      {"x.json", enc, "encrypted-key envelope"},
+		"a mnemonic list":                {"words.txt", words, "mnemonic"},
+		"a mnemonic list, one line each": {"w.txt", strings.ReplaceAll(words, " ", "\n"), "mnemonic"},
+	} {
+		src := filepath.Join(f.dir, tc.file)
+		os.WriteFile(src, []byte(tc.content), 0o600)
+		f.out.Reset()
+		err := f.run(&scriptTerm{t: t}, "offline", "attach", src)
+		if !errors.Is(err, airgap.ErrSecretAttachment) || !strings.Contains(err.Error(), tc.why) {
+			t.Errorf("%s: %v", name, err)
+		}
+		// Renamed on the way in: the content still counts.
+		if tc.file != "w.payment.skey" && tc.file != "w.payment.hwsfile" {
+			if err := f.run(&scriptTerm{t: t}, "offline", "attach", src, "--name", "innocent.txt"); !errors.Is(err, airgap.ErrSecretAttachment) {
+				t.Errorf("%s, renamed: %v", name, err)
+			}
+		}
+	}
+	src := filepath.Join(f.dir, "ok.txt")
+	os.WriteFile(src, []byte("an ordinary note about the pool"), 0o600)
+	f.must("offline", "attach", src)
 }
 
 func TestOfflineInfoListsTheQueueWithIdAndAttachments(t *testing.T) {

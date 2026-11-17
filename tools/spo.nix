@@ -82,7 +82,64 @@ let
       export HOME=$TMPDIR
       go vet ./...
       go test ./...
+      # The tests above run without the plainlayout tag. The tagged build is
+      # not a release: it wires the test-only plain store (ADR 0011 (proposed),
+      # SPO-Xcustody-INV-001), so it is vetted and the architecture test checks
+      # its import graph too.
+      go vet -tags plainlayout ./...
+      go test -count=1 -tags plainlayout ./internal/archtest/ ./test/plainstore/
+      go test -count=1 -tags plainlayout -run TestPlainLayoutTagWiresTheStore ./cmd/spo/
+      # The release binary must be unable to write a signing key or any other
+      # secret unencrypted: the writable plain store is not in its dependency
+      # set (the release is built with no tags).
+      go list -deps ./cmd/spo > release-deps.txt
+      go list -deps -tags plainlayout ./cmd/spo > tagged-deps.txt
+      if grep -e '/test/plainstore' -e '/spo/test/' release-deps.txt; then
+        echo "the release build contains the test-only plain store"
+        exit 1
+      fi
+      grep -q '/internal/adapters/upstreamdir' release-deps.txt \
+        || { echo "the release build lacks the read-only upstream reader"; exit 1; }
+      grep -q '/test/plainstore' tagged-deps.txt \
+        || { echo "the plainlayout tag no longer brings the plain store in: the check above proves nothing"; exit 1; }
+      rm release-deps.txt tagged-deps.txt
       runHook postCheck
+    '';
+    # The installed release binary has no way to write a secret in clear: no
+    # --upstream-layout, no key protect/unprotect, no --plaintext. The help
+    # of the commands that had them is searched for the words.
+    doInstallCheck = true;
+    installCheckPhase = ''
+      runHook preInstallCheck
+      export HOME=$TMPDIR
+      spo=$out/bin/spo
+      refuse() { # the words that must not be in a help text
+        if "$spo" "$@" --help 2>&1 | grep -w -e '--upstream-layout' -e '--plaintext' -e 'unprotect'; then
+          echo "spo $* --help names a plaintext writer"
+          exit 1
+        fi
+      }
+      refuse
+      refuse workspace
+      refuse workspace export
+      refuse workspace import
+      refuse key
+      "$spo" key --help 2>&1 | grep -q 'convert' || { echo "spo key convert is missing"; exit 1; }
+      if "$spo" --upstream-layout version >/dev/null 2>&1; then
+        echo "the release binary accepts --upstream-layout"
+        exit 1
+      fi
+      # (`spo key unprotect x` only prints the help of `key`, as any group does
+      # with an unknown word; the help above has no such command.)
+      if "$spo" key --help 2>&1 | grep -w -e 'protect' -e 'unprotect'; then
+        echo "the release binary has key protect or unprotect"
+        exit 1
+      fi
+      if "$spo" workspace export "$TMPDIR/x" --plaintext >/dev/null 2>&1; then
+        echo "the release binary has workspace export --plaintext"
+        exit 1
+      fi
+      runHook postInstallCheck
     '';
     meta = {
       description = "Stake pool operations from one binary (unwrapped; no toolchain manifest)";
@@ -96,6 +153,20 @@ let
   # unit tests.
   parity = unwrapped.overrideAttrs (old: {
     pname = "spo-parity";
+    # This one is a test run, not the release binary: it is built with the
+    # plainlayout tag, and the release checks of unwrapped do not apply.
+    tags = [ "plainlayout" ];
+    doInstallCheck = false;
+    # A build with the plainlayout tag writes secrets in clear, so its output
+    # must not be a usable program: the install phase writes a log and a marker
+    # and no binary (SPO-Xcustody-INV-001). `taggedNoBinary` below checks it.
+    installPhase = ''
+      runHook preInstall
+      mkdir -p $out
+      if [ -f parity.log ]; then cp parity.log $out/parity.log; fi
+      echo "spo-parity: the tests passed; this build has the plainlayout tag and installs no binary" > $out/PASSED
+      runHook postInstall
+    '';
     # Some upstream scripts read their confirmation from the controlling
     # terminal; the tests drive those through script(1).
     nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.util-linux pkgs.jq pkgs.openssl ];
@@ -108,7 +179,10 @@ let
       # workbench manifest gives the upstream scripts, so both sides of the
       # opcert parity test use one genesis.
       export SPO_PARITY_SHELLEY_GENESIS_PREVIEW=$(${pkgs.jq}/bin/jq -r .networks.preview.common.genesisfile ${workbench.toolchain})
-      go test -count=1 -timeout 30m -v ./test/parity/ | tee parity.log
+      go test -count=1 -timeout 30m -tags plainlayout -v ./test/parity/ | tee parity.log
+      # The gpg paths of the binary (export, import with a password, key
+      # convert) need the toolchain manifest set above.
+      go test -count=1 -timeout 10m -tags plainlayout -run 'TestEncryptedKeysThroughGPG' ./cmd/spo/
       # cardano-signer is a prebuilt binary that cannot run in the sandbox
       # (tools/cardano-signer.nix), so the tests that need it skip here and
       # run in the development loop. Any other skip fails the check.
@@ -124,10 +198,44 @@ let
     '';
   });
 
+  # Every build variant of the binary defined in this file. A new variant is
+  # added here; whether it carries the plainlayout tag is read from the
+  # derivation's own `tags` attribute, not from a second list.
+  variants = { inherit unwrapped parity; };
+  isTagged = d: builtins.elem "plainlayout" (d.tags or [ ]);
+  taggedDerivations = lib.filter isTagged (lib.attrValues variants);
+  # Every output of every tagged derivation (a derivation may have several).
+  taggedOutputs = lib.concatMap (d: map (o: d.${o}) (d.outputs or [ "out" ])) taggedDerivations;
+
+  # No derivation built with the plainlayout tag may install anything that can
+  # be run or that can point at something that can: any file with an execute
+  # bit (for the owner, the group or others), any symbolic link, and a bin or
+  # sbin directory fail the check. The release derivation may not carry the tag.
+  taggedNoBinary =
+    assert lib.assertMsg (taggedDerivations != [ ]) "no variant carries the plainlayout tag: the check below would prove nothing";
+    assert lib.assertMsg (!(isTagged unwrapped)) "the release derivation carries the plainlayout tag";
+    pkgs.runCommand "spo-tagged-no-binary" { } ''
+      status=0
+      for d in ${lib.concatStringsSep " " (map toString taggedOutputs)}; do
+        if [ -e "$d/bin" ] || [ -e "$d/sbin" ]; then
+          echo "$d is built with the plainlayout tag and has a bin or sbin directory"
+          status=1
+        fi
+        found=$(find "$d" \( -type l -o -type f -perm /111 \) -print)
+        if [ -n "$found" ]; then
+          echo "$d is built with the plainlayout tag and holds an executable file or a symbolic link:"
+          echo "$found"
+          status=1
+        fi
+      done
+      [ "$status" = 0 ] || exit 1
+      echo ok > $out
+    '';
+
   package = pkgs.runCommand "spo-${version}"
     {
       nativeBuildInputs = [ pkgs.makeWrapper ];
-      passthru = { inherit toolchain unwrapped parity; tests = unwrapped; };
+      passthru = { inherit toolchain unwrapped parity taggedNoBinary; tests = unwrapped; };
       meta = unwrapped.meta // {
         description = "Stake pool operations from one binary, with sealed keys and multi-party signing";
         platforms = lib.platforms.unix;

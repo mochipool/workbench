@@ -6,12 +6,12 @@ import (
 	"encoding/hex"
 	"testing"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	dassets "github.com/mochipool/workbench/spo/internal/domain/assets"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/domain/tokenmeta"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 // The policy id of domain/tokenmeta (its own native-script encoder) is the one
@@ -41,7 +41,7 @@ func TestTokenmetaPolicyIDAgreesWithLedger(t *testing.T) {
 
 // The vault signs registry messages with the policy key and with nothing else.
 func TestVaultRegistrySigner(t *testing.T) {
-	st, err := fsstore.Open(t.TempDir())
+	st, err := plainstore.OpenTestnet(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

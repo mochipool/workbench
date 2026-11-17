@@ -11,12 +11,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
+	"github.com/mochipool/workbench/spo/internal/adapters/upstreamdir"
 	"github.com/mochipool/workbench/spo/internal/app/catalyst"
 	domcat "github.com/mochipool/workbench/spo/internal/domain/catalyst"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 const (
@@ -66,7 +67,7 @@ func withRegistrations(f *stakeFix, d *recDeriver, reader ports.CalidusKeyReader
 		env.CalidusKeys, env.VotingKeys, env.Mnemonics, env.ColdKeys = d, d, soft, soft
 		env.SignatureSigner = native.VaultSignatures{VaultSigner: native.VaultSigner{Vault: v}}
 		env.Signers = native.NewSignatureSigners(v)
-		env.MetadataFiles, env.MsgEncrypter, env.CalidusReader = fsstore.MetadataFiles{}, native.CIP83{}, reader
+		env.MetadataFiles, env.MsgEncrypter, env.CalidusReader = upstreamdir.MetadataFiles{}, native.CIP83{}, reader
 		env.Absent(CapCalidusRead, "no provider reads Calidus keys")
 		return env, nil
 	}
@@ -333,14 +334,14 @@ func TestMetadataRecordReadsThroughTheWorkspace(t *testing.T) {
 // The recordFiles reader only serves the names it was given.
 func TestRecordFilesServeOnlyNamedRecords(t *testing.T) {
 	dir := t.TempDir()
-	st, _ := fsstore.Open(dir)
+	st, _ := plainstore.OpenTestnet(dir)
 	ref := ports.Ref{Name: "s_1", Kind: ports.VoteRegistration}
 	if err := st.Update(context.Background(), func(w ports.Writer) error { return w.Put(ref, []byte{0xa0}) }); err != nil {
 		t.Fatal(err)
 	}
 	disk := filepath.Join(dir, "plain.json")
 	os.WriteFile(disk, []byte(`{}`), 0o600)
-	r, err := newRecordFiles(st, []string{"s_1.vote-registration.cbor"}, fsstore.MetadataFiles{})
+	r, err := newRecordFiles(st, []string{"s_1.vote-registration.cbor"}, upstreamdir.MetadataFiles{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +367,7 @@ func TestClaimRewardsTakesTheExtras(t *testing.T) {
 	f.deps.Wire = func(st ports.Store, o WireOptions) (*Env, error) {
 		env, err := old(st, o)
 		if env != nil {
-			env.MetadataFiles = fsstore.MetadataFiles{}
+			env.MetadataFiles = upstreamdir.MetadataFiles{}
 		}
 		return env, err
 	}
@@ -386,23 +387,25 @@ func TestClaimRewardsTakesTheExtras(t *testing.T) {
 	}
 }
 
-type fakeQR struct{ png int }
+type fakeQR struct{ payloads int }
 
-func (fakeQR) VotingKeyQRPayload(context.Context, string, domcat.PIN) ([]byte, error) {
+func (q *fakeQR) VotingKeyQRPayload(context.Context, string, domcat.PIN) ([]byte, error) {
+	q.payloads++
 	return []byte("payload"), nil
 }
-func (q *fakeQR) WritePNG(string, []byte) error { q.png++; return nil }
 func (*fakeQR) Terminal([]byte) (string, error) { return "██DRAWING██\n", nil }
 
-// The key-equivalent QR code is drawn in the terminal only when the operator
-// asks (--show) and standard output is a terminal; by default only the PNG is
-// written. A piped or redirected output never gets the drawing. The warning
-// names scrollback, terminal logs and screen sharing and says the PNG and the
-// drawing are key-equivalent under a four-digit PIN.
+// The key-equivalent QR code is drawn on a terminal only. A pipe or a redirect
+// is refused before anything is asked or built, with or without --yes; on a
+// terminal the command states the 10,000-guess risk first, asks (default no),
+// records the display in the audit log, draws on the alternate screen and clears
+// it afterwards. No file is written and the flags of the old file mode are gone.
 //
-// spec: SPO-09a-OUT-007, SPO-09a-SEC-002
-func TestCatalystQRCodeIsDrawnOnlyOnRequestAndOnATerminal(t *testing.T) {
+// spec: SPO-09a-OUT-007, SPO-09a-SEC-002, SPO-Xcustody-INV-001, SPO-Xcustody-IF-004, SPO-Xcustody-PRE-005, SPO-Xcustody-OUT-004
+func TestCatalystQRCodeIsDrawnOnATerminalOnly(t *testing.T) {
 	f := newStakeFix(t)
+	rec := &recAuditor{}
+	f.deps = rec.deps(f.deps)
 	d := &recDeriver{}
 	withRegistrations(f, d, nil)
 	qr := &fakeQR{}
@@ -416,30 +419,67 @@ func TestCatalystQRCodeIsDrawnOnlyOnRequestAndOnATerminal(t *testing.T) {
 	}
 	fd := pipeFD(t, testPhrase+"\n")
 	f.mustRun(t, "catalyst", "key", "new", "v", "--mnemonic-in-fd", itoaFD(fd))
-	run := func(tty bool, extra ...string) string {
+	f.out.Reset()
+	wd := t.TempDir()
+	t.Chdir(wd)
+	run := func(tty bool, lines []string, extra ...string) (string, error) {
 		t.Helper()
 		defer func(o func(io.Writer) bool) { stdoutIsTerminal = o }(stdoutIsTerminal)
 		stdoutIsTerminal = func(io.Writer) bool { return tty }
+		f.out.Reset()
 		pin := pipeFD(t, "4821\n")
-		return f.mustRun(t, append([]string{"catalyst", "key", "qrcode", "v", "--pin-fd", itoaFD(pin), "--out", "x.png"}, extra...)...)
+		err := f.run(t, &scriptTerm{t: t, lines: lines}, append([]string{"catalyst", "key", "qrcode", "v", "--pin-fd", itoaFD(pin)}, extra...)...)
+		return f.out.String(), err
 	}
-	for name, tc := range map[string]struct {
-		tty   bool
-		extra []string
-		draws bool
-	}{"default on a terminal": {true, nil, false}, "--show on a pipe": {false, []string{"--show"}, false}, "default on a pipe": {false, nil, false}, "--show on a terminal": {true, []string{"--show"}, true}} {
-		out := run(tc.tty, tc.extra...)
-		if got := strings.Contains(out, "DRAWING"); got != tc.draws {
-			t.Errorf("%s: drawn = %v\n%s", name, got, out)
+	// A pipe: refused, with and without --yes, nothing built or recorded.
+	for _, extra := range [][]string{nil, {"--yes"}} {
+		out, err := run(false, []string{"y", ""}, extra...)
+		if err == nil || !strings.Contains(err.Error(), "terminal") || strings.Contains(out, "DRAWING") {
+			t.Errorf("pipe %v: %v\n%s", extra, err, out)
 		}
-		mustContain(t, out, "key-equivalent", "four-digit PIN")
 	}
-	out := run(true, "--show")
-	mustContain(t, out, "scrollback", "terminal log", "shared screen")
+	if qr.payloads != 0 || len(rec.ev) != 0 {
+		t.Fatalf("a pipe built %d payloads and recorded %d events", qr.payloads, len(rec.ev))
+	}
+	// Default No: declined and empty answers draw nothing.
+	for _, ans := range []string{"", "n"} {
+		if out, err := run(true, []string{ans}); err == nil || strings.Contains(out, "DRAWING") {
+			t.Errorf("answer %q: %v\n%s", ans, err, out)
+		}
+	}
+	if qr.payloads != 0 || len(rec.ev) != 0 {
+		t.Fatalf("a refusal built %d payloads and recorded %d events", qr.payloads, len(rec.ev))
+	}
+	// Confirmed on a terminal.
+	out, err := run(true, []string{"y", ""})
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	mustContain(t, out, "10,000 guesses", "four-digit PIN", "audit log", "DRAWING")
 	if strings.Contains(out, "4821") {
 		t.Error("the PIN was printed")
 	}
-	if qr.png != 5 {
-		t.Errorf("PNGs written: %d", qr.png)
+	enter, draw, clear, leave := strings.Index(out, "\x1b[?1049h"), strings.Index(out, "DRAWING"), strings.LastIndex(out, "\x1b[2J"), strings.Index(out, "\x1b[?1049l")
+	if enter < 0 || draw < enter || clear < draw || leave < clear {
+		t.Errorf("the drawing is not on the alternate screen and cleared after (%d %d %d %d)", enter, draw, clear, leave)
+	}
+	if len(rec.ev) != 1 || rec.ev[0].Operation != catalyst.QRDisplayOperation || rec.ev[0].Owners[0] != "v" {
+		t.Errorf("audit %+v", rec.ev)
+	}
+	// --yes on a terminal answers the question; the Enter that clears is still asked.
+	if out, err := run(true, []string{""}, "--yes"); err != nil || !strings.Contains(out, "DRAWING") {
+		t.Errorf("--yes: %v\n%s", err, out)
+	}
+	if qr.payloads != 2 || len(rec.ev) != 2 {
+		t.Errorf("%d payloads, %d events", qr.payloads, len(rec.ev))
+	}
+	// The file mode is gone.
+	for _, fl := range []string{"--out", "--show"} {
+		if _, err := run(true, nil, fl, "x.png"); err == nil || !strings.Contains(err.Error(), "unknown flag") {
+			t.Errorf("%s: %v", fl, err)
+		}
+	}
+	if ents, _ := os.ReadDir(wd); len(ents) != 0 {
+		t.Errorf("files were written: %v", ents)
 	}
 }

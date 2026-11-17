@@ -4,7 +4,6 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -53,56 +52,34 @@ func TestCalidusSignThroughCommands(t *testing.T) {
 	}
 }
 
-// spec: SPO-09a-IF-004, SPO-09a-EXT-005, SPO-09a-OUT-007, SPO-09a-PRE-009, SPO-09a-PRE-010, SPO-09a-SEC-002
-// `catalyst key qrcode` takes the PIN from a descriptor, writes a private PNG
-// that it never overwrites, draws the code in the terminal only on request on a
-// terminal (never into a pipe), and never prints the PIN or the key.
+// spec: SPO-09a-IF-004, SPO-09a-EXT-005, SPO-09a-OUT-007, SPO-09a-SEC-002, SPO-Xcustody-INV-001, SPO-Xcustody-IF-004
+// `catalyst key qrcode` in the release binary draws the code on a terminal only:
+// into a pipe it is refused, with or without --yes, before the PIN is read, and
+// it writes no file, whatever flags the old file mode had.
 func TestCatalystQRCodeThroughCommands(t *testing.T) {
 	dir := copyWorkspace(t)
 	var all strings.Builder
 	stepOn(t, dir, &all, "catalyst", "key", "new", "v")
-	png := filepath.Join(t.TempDir(), "v.catalyst-qrcode.png")
-
-	pin := func(p string) []string {
-		f, fd := fdIn(t, p+"\n")
-		t.Cleanup(func() { f.Close() })
-		return []string{"catalyst", "key", "qrcode", "v", "--pin-fd", fd, "--out", png}
+	wd := t.TempDir()
+	t.Chdir(wd)
+	for _, extra := range [][]string{nil, {"--yes"}} {
+		f, fd := fdIn(t, "4821\n")
+		out, err := withPass(t, dir, testPass, append([]string{"catalyst", "key", "qrcode", "v", "--pin-fd", fd}, extra...)...)
+		f.Close()
+		if err == nil || !strings.Contains(err.Error(), "terminal") {
+			t.Errorf("%v: %v\n%s", extra, err, out)
+		}
+		if strings.Contains(out, "█") || strings.Contains(out, "4821") {
+			t.Errorf("the code or the PIN reached a pipe:\n%s", out)
+		}
 	}
-	out := stepOn(t, dir, &all, pin("4821")...)
-	mustHave(t, out, "mode 0600", "key-equivalent")
-	if strings.Contains(out, "█") {
-		t.Error("the QR code was drawn by default, into a pipe")
+	for _, fl := range []string{"--out", "--show"} {
+		if out, err := withPass(t, dir, testPass, "catalyst", "key", "qrcode", "v", fl, "x.png"); err == nil || !strings.Contains(err.Error(), "unknown flag") {
+			t.Errorf("%s: %v\n%s", fl, err, out)
+		}
 	}
-	if strings.Contains(out, "4821") {
-		t.Error("the PIN was printed")
-	}
-	if st, err := os.Stat(png); err != nil || st.Mode().Perm() != 0o600 {
-		t.Fatalf("png: %v %v", st, err)
+	if ents, _ := os.ReadDir(wd); len(ents) != 0 {
+		t.Errorf("a file was written: %v", ents)
 	}
 	notLeaked(t, all.String(), secretHex(t, dir, ports.Ref{Name: "v", Kind: ports.VotingSKey}), "SigningKey")
-
-	// No overwrite, whatever the PIN.
-	if out, err := withPass(t, dir, testPass, pin("1111")...); err == nil || !strings.Contains(err.Error(), "already exists") {
-		t.Errorf("overwrite: %v\n%s", err, out)
-	}
-	// A bad PIN, a missing key and a PIN with nowhere to be read from.
-	other := filepath.Join(t.TempDir(), "o.png")
-	for _, p := range []string{"123", "12345", "12a4"} {
-		f, fd := fdIn(t, p+"\n")
-		if out, err := withPass(t, dir, testPass, "catalyst", "key", "qrcode", "v", "--pin-fd", fd, "--out", other); err == nil || !strings.Contains(err.Error(), "four digits") {
-			t.Errorf("pin %q: %v\n%s", p, err, out)
-		}
-		f.Close()
-	}
-	f, fd := fdIn(t, "1234\n")
-	defer f.Close()
-	if out, err := withPass(t, dir, testPass, "catalyst", "key", "qrcode", "ghost", "--pin-fd", fd, "--out", other); err == nil || !strings.Contains(err.Error(), "voting.skey") {
-		t.Errorf("missing key: %v\n%s", err, out)
-	}
-	if out, err := withPass(t, dir, testPass, "catalyst", "key", "qrcode", "v", "--out", other); err == nil || !strings.Contains(err.Error(), "--pin-fd") {
-		t.Errorf("no PIN source: %v\n%s", err, out)
-	}
-	if _, err := os.Stat(other); err == nil {
-		t.Error("a refusal wrote a file")
-	}
 }

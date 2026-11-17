@@ -16,15 +16,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
+	"github.com/mochipool/workbench/spo/internal/adapters/exportdir"
 	"github.com/mochipool/workbench/spo/internal/adapters/gpg"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
+	"github.com/mochipool/workbench/spo/internal/adapters/upstreamdir"
 	"github.com/mochipool/workbench/spo/internal/app/poolops"
 	"github.com/mochipool/workbench/spo/internal/app/workspace"
 	"github.com/mochipool/workbench/spo/internal/domain/keyfile"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 // wsTTY runs one upstream script on a pseudo terminal made by script(1) and
@@ -174,21 +176,20 @@ func wsPlainCbor(t *testing.T, b []byte) string {
 // is consumed, never with the keystrokes.
 //
 // spec: SPO-Ckey-EXT-001, SPO-Ckey-EXT-002, SPO-Ckey-OUT-001, SPO-Ckey-OUT-002, SPO-Ckey-INV-003, SPO-Ckey-INV-001, SPO-Ckey-SEC-001
-// spec: SPO-Cui-IF-003, SPO-Cui-SEC-001, SPO-01protectKey-OUT-001, SPO-01protectKey-OUT-002, SPO-01protectKey-PR-001, SPO-01protectKey-PR-002, SPO-01protectKey-PR-004, SPO-01protectKey-PR-005, SPO-01protectKey-PR-006
-// spec: SPO-01protectKey-EXT-001, SPO-01protectKey-EXT-002, SPO-01protectKey-PRE-003, SPO-01protectKey-PRE-004
+// spec: SPO-Cui-IF-003, SPO-Cui-SEC-001, SPO-01protectKey-OUT-001, SPO-01protectKey-EXT-001
 func TestKeyProtectionInteroperatesWithUpstreamGpg(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
 	g := e.wsGPG()
 	cases := []struct{ name, typed, stored string }{
-		{"backslash", `Abc\def-12345`, "Abcdef-12345"},
-		{"trailing-space", "Trail space-1A ", "Trail space-1A "},
-		{"plain", "Plain-Passw0rd!", "Plain-Passw0rd!"},
+		{"backslash", `Abc\def-12345-and-long-ok`, "Abcdef-12345-and-long-ok"},
+		{"trailing-space", "Trail space-1A and long enough ", "Trail space-1A and long enough "},
+		{"plain", "Plain-Passw0rd!-And-Long", "Plain-Passw0rd!-And-Long"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			dir := e.upstreamWorkspace(t)
-			store, _ := fsstore.Open(dir)
+			store, _ := plainstore.OpenTestnet(dir)
 
 			// Upstream encrypts; Go decrypts to the identical cborHex.
 			up := "up" + c.name
@@ -232,13 +233,16 @@ func TestKeyProtectionInteroperatesWithUpstreamGpg(t *testing.T) {
 					t.Errorf("the keystrokes with a backslash opened upstream's key (%v): upstream's rule is not as pinned", err)
 				}
 			}
-			// the use case opens it from the keystrokes, by candidates
-			un := workspace.UnprotectKey{Store: store, Vault: store, Decryptor: g, Auditor: &wsAudit{}}
-			if err := un.Run(ctx, ports.Ref{Name: up, Kind: ports.AddrSKey}, wsSec(c.typed), true); err != nil {
-				t.Fatalf("UnprotectKey: %v", err)
+			// the import opens it from the keystrokes, by candidates, into a
+			// store that stands in for the sealed workspace
+			mid := t.TempDir()
+			midFS, _ := plainstore.OpenTestnet(mid)
+			imp := workspace.ImportWorkspace{Source: store, SourceVault: store, Lister: store, Dest: midFS, Decryptor: g, Deriver: wsDeriver{}}
+			if rep, err := imp.Run(ctx, workspace.ImportOptions{Owners: []string{up}, Password: wsSec(c.typed)}); err != nil || rep.Failed() != 0 {
+				t.Fatalf("import with the keystrokes: %v %+v", err, rep)
 			}
-			if wsPlainCbor(t, []byte(readFile(t, dir, up+".skey"))) != cbor {
-				t.Error("UnprotectKey wrote a different key")
+			if wsPlainCbor(t, []byte(readFile(t, mid, up+".skey"))) != cbor {
+				t.Error("the import wrote a different key")
 			}
 
 			// Go encrypts; upstream decrypts.
@@ -247,13 +251,33 @@ func TestKeyProtectionInteroperatesWithUpstreamGpg(t *testing.T) {
 				t.Fatalf("02 exited %d", code)
 			}
 			orig2 := readFile(t, dir, goKey+".skey")
-			prot := workspace.ProtectKey{Store: store, Vault: store, Encryptor: g, Decryptor: g}
-			if err := prot.Run(ctx, ports.Ref{Name: goKey, Kind: ports.AddrSKey}, wsSec(c.typed)); err != nil {
-				t.Fatalf("ProtectKey: %v", err)
+			// the export (the only way a key leaves, always encrypted) writes
+			// it in upstream's form into a destination directory
+			encrypt := func() string {
+				out := t.TempDir()
+				dest, err := exportdir.Open(out)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ex := workspace.ExportWorkspace{Source: store, SourceVault: store, Lister: store, Dest: dest, Encryptor: g, Decryptor: g, Auditor: &wsAudit{}}
+				if rep, err := ex.Run(ctx, workspace.ExportOptions{Owners: []string{goKey}, Password: wsSec(c.typed)}); err != nil || rep.Failed() != 0 {
+					t.Fatalf("export: %v %+v", err, rep)
+				}
+				if mode(t, out, goKey+".skey") != 0o400 {
+					t.Errorf("export left mode %v", mode(t, out, goKey+".skey"))
+				}
+				return readFile(t, out, goKey+".skey")
 			}
-			if mode(t, dir, goKey+".skey") != 0o400 {
-				t.Errorf("ProtectKey left mode %v", mode(t, dir, goKey+".skey"))
+			place := func(content string) {
+				path := filepath.Join(dir, goKey+".skey")
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(content), 0o400); err != nil {
+					t.Fatal(err)
+				}
 			}
+			place(encrypt())
 			// upstream's `enc` refuses a file that is already encrypted, and reads ours
 			if code, _ := e.wsTTY(t, 60*time.Second, dir, []string{"y"}, "01_protectKey.sh", "enc", goKey+".skey"); code == 0 {
 				t.Error("upstream 01_protectKey enc accepted a file the port had encrypted")
@@ -272,9 +296,7 @@ func TestKeyProtectionInteroperatesWithUpstreamGpg(t *testing.T) {
 				t.Errorf("upstream's decrypted file is not in the jq format the port writes:\n%s", after)
 			}
 			// a wrong password: upstream dec exits 1 without retry
-			if err := prot.Run(ctx, ports.Ref{Name: goKey, Kind: ports.AddrSKey}, wsSec(c.typed)); err != nil {
-				t.Fatal(err)
-			}
+			place(encrypt())
 			if code, to := e.wsTTY(t, 60*time.Second, dir, []string{"y", "Wrong-Passw0rd!x"}, "01_protectKey.sh", "dec", goKey+".skey"); code != 1 || to {
 				t.Errorf("upstream dec with a wrong password exited %d (timed out: %v), want 1", code, to)
 			}
@@ -306,7 +328,7 @@ func wsFiles(t *testing.T, dir string) map[string]os.FileMode {
 // export of the import is the original directory, byte for byte.
 //
 // spec: SPO-Pfiles-OUT-001, SPO-Pfiles-OUT-002, SPO-Pfiles-OUT-003, SPO-Pfiles-OUT-010, SPO-Pfiles-OUT-011, SPO-Pfiles-OUT-012, SPO-Pfiles-OUT-013, SPO-Pfiles-OUT-014, SPO-Pfiles-OUT-015
-// spec: SPO-Pfiles-INV-003, SPO-Pfiles-SEC-001, SPO-Pfiles-SEC-002, SPO-Pfiles-IN-003, SPO-Ckey-EXT-002, SPO-Ckey-OUT-002, SPO-Cui-IF-003, SPO-Ckey-IN-001
+// spec: SPO-Pfiles-INV-003, SPO-Pfiles-SEC-001, SPO-Pfiles-IN-003, SPO-Xcustody-OUT-003, SPO-Ckey-EXT-002, SPO-Ckey-OUT-002, SPO-Cui-IF-003, SPO-Ckey-IN-001
 func TestImportRealWorkspaceAndRoundTrip(t *testing.T) {
 	e := setup(t)
 	genesis := previewGenesis(t)
@@ -332,12 +354,12 @@ func TestImportRealWorkspaceAndRoundTrip(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("an operator's note\n"), 0o644)
 	srcBefore := wsFiles(t, dir)
 
-	src, err := fsstore.Open(dir)
+	src, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	dstDir := t.TempDir()
-	dstFS, _ := fsstore.Open(dstDir)
+	dstFS, _ := plainstore.OpenTestnet(dstDir)
 	dst := &wsRecorder{Store: dstFS}
 	led := native.Ledger{}
 	imp := workspace.ImportWorkspace{Source: src, SourceVault: src, Lister: src, Dest: dst, Decryptor: e.wsGPG(), Deriver: wsDeriver{}, Addresses: led}
@@ -357,7 +379,7 @@ func TestImportRealWorkspaceAndRoundTrip(t *testing.T) {
 	}
 	// with the keystrokes of the password: everything
 	dstDir = t.TempDir()
-	dstFS, _ = fsstore.Open(dstDir)
+	dstFS, _ = plainstore.OpenTestnet(dstDir)
 	dst = &wsRecorder{Store: dstFS}
 	imp.Dest = dst
 	pw := wsSec(typed)
@@ -389,7 +411,7 @@ func TestImportRealWorkspaceAndRoundTrip(t *testing.T) {
 	dstFiles := wsFiles(t, dstDir)
 	var names []string
 	for f := range srcBefore {
-		if _, ok := fsstore.RefOf(f); ok {
+		if _, ok := upstreamdir.RefOf(f); ok {
 			names = append(names, f)
 		}
 	}
@@ -415,7 +437,7 @@ func TestImportRealWorkspaceAndRoundTrip(t *testing.T) {
 	}
 	nsec := 0
 	for _, f := range names {
-		if r, ok := fsstore.RefOf(f); ok && r.Kind.Secret() {
+		if r, ok := upstreamdir.RefOf(f); ok && r.Kind.Secret() {
 			nsec++
 		}
 	}
@@ -427,29 +449,66 @@ func TestImportRealWorkspaceAndRoundTrip(t *testing.T) {
 		t.Errorf("imported cold key differs from the key before encryption:\n%q\n%q", got, plainNode)
 	}
 
-	// round trip: export to a fresh directory in plaintext, compare byte for byte
+	// round trip: export to a fresh directory (signing keys encrypted, never
+	// in clear). Every artefact that has a place there is byte for byte the
+	// original, with the original mode; every signing key opens with the
+	// password and is the original key; a mnemonic or other secret is left out.
 	outDir := t.TempDir()
-	outFS, _ := fsstore.Open(outDir)
-	exp := workspace.ExportWorkspace{Source: dstFS, SourceVault: dstFS, Lister: dstFS, Dest: outFS, Auditor: &wsAudit{}}
-	erep, err := exp.Run(ctx, workspace.ExportOptions{PlaintextAcknowledged: true})
+	outDest, err := exportdir.Open(outDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exp := workspace.ExportWorkspace{Source: dstFS, SourceVault: dstFS, Lister: dstFS, Dest: outDest, Encryptor: e.wsGPG(), Decryptor: e.wsGPG(), Auditor: &wsAudit{}}
+	erep, err := exp.Run(ctx, workspace.ExportOptions{Password: wsSec("Exp0rt-Passw0rd!-And-Long")})
 	if err != nil || erep.Failed() != 0 {
 		t.Fatalf("%v %+v", err, erep)
 	}
 	outFiles := wsFiles(t, outDir)
-	if len(outFiles) != len(names) {
-		t.Errorf("exported %d files, want %d", len(outFiles), len(names))
-	}
+	exported := 0
 	for _, f := range names {
-		if outFiles[f] != srcBefore[f] {
-			t.Errorf("%s: mode %v, original %v", f, outFiles[f], srcBefore[f])
-		}
+		ref, _ := upstreamdir.RefOf(f)
 		want := readFile(t, dir, f)
 		if f == "mypool.node.skey" {
 			want = plainNode // the original was encrypted; its plain form is the comparison
 		}
-		if got := readFile(t, outDir, f); got != want {
-			t.Errorf("%s differs after the round trip", f)
+		switch {
+		case ref.Kind.IsSigningKey():
+			exported++
+			if outFiles[f] != 0o400 {
+				t.Errorf("%s: mode %v, want 0400", f, outFiles[f])
+			}
+			enc, perr := keyfile.ParseEncrypted([]byte(readFile(t, outDir, f)))
+			if perr != nil {
+				t.Errorf("%s is not in the encrypted form: %v", f, perr)
+				continue
+			}
+			plain, derr := e.wsGPG().Decrypt(ctx, enc.EncrHex, wsSec("Exp0rt-Passw0rd!-And-Long"))
+			if derr != nil {
+				t.Errorf("%s does not open with the export password: %v", f, derr)
+				continue
+			}
+			plain.Use(func(b []byte) error {
+				if string(b) != wsPlainCbor(t, []byte(want)) {
+					t.Errorf("%s: the exported key is not the original", f)
+				}
+				return nil
+			})
+		case ref.Kind.Secret():
+			if _, ok := outFiles[f]; ok {
+				t.Errorf("%s (a secret that is no signing key) was exported", f)
+			}
+		default:
+			exported++
+			if outFiles[f] != srcBefore[f] {
+				t.Errorf("%s: mode %v, original %v", f, outFiles[f], srcBefore[f])
+			}
+			if got := readFile(t, outDir, f); got != want {
+				t.Errorf("%s differs after the round trip", f)
+			}
 		}
+	}
+	if len(outFiles) != exported {
+		t.Errorf("exported %d files, want %d", len(outFiles), exported)
 	}
 
 	// the imported store works: GenerateKesKey, then IssueOperationalCertificate offline
@@ -487,13 +546,13 @@ func TestMalformedEncryptedKeyFailsFastWhereUpstreamLoops(t *testing.T) {
 	}
 
 	// the port: no gpg process, a typed error in the report
-	src, _ := fsstore.Open(dir)
+	src, _ := plainstore.OpenTestnet(dir)
 	dstDir := t.TempDir()
-	dst, _ := fsstore.Open(dstDir)
+	dst, _ := plainstore.OpenTestnet(dstDir)
 	spawned := 0
 	g := gpg.GPG{Tools: e.tc, Runner: execx.OS{Observe: func(execx.Spawn) { spawned++ }}}
 	imp := workspace.ImportWorkspace{Source: src, SourceVault: src, Lister: src, Dest: dst, Decryptor: g}
-	rep, err := imp.Run(ctx, workspace.ImportOptions{Owners: []string{"mypool"}, Password: wsSec("Str0ng-Passw0rd!")})
+	rep, err := imp.Run(ctx, workspace.ImportOptions{Owners: []string{"mypool"}, Password: wsSec("Str0ng-Passw0rd!-And-Long")})
 	if err != nil || rep.Failed() != 1 {
 		t.Fatalf("%v %+v", err, rep)
 	}

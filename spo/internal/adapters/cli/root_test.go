@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 const skeyHex = "5902c0f00dfeedfacecafebeef"
@@ -28,7 +28,7 @@ func run(t *testing.T, args ...string) (string, error) {
 	root := NewRoot(Deps{
 		Out: &out, Err: &out,
 		Wire:         func(ports.Store, WireOptions) (*Env, error) { return &Env{KesKeys: fakeKeyGen{}}, nil },
-		OpenUpstream: func(dir string) (ports.Store, error) { return fsstore.Open(dir) },
+		OpenUpstream: func(dir string) (ports.Store, error) { return plainstore.OpenTestnet(dir) },
 	})
 	root.SetArgs(append([]string{"--upstream-layout"}, args...))
 	err := root.ExecuteContext(context.Background())

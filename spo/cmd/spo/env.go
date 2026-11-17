@@ -7,7 +7,6 @@ import (
 	"os"
 
 	"github.com/mochipool/workbench/spo/internal/adapters/cli"
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/genesisfile"
 	"github.com/mochipool/workbench/spo/internal/adapters/gpg"
 	"github.com/mochipool/workbench/spo/internal/adapters/httpfetch"
@@ -17,6 +16,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/adapters/qrcode"
 	"github.com/mochipool/workbench/spo/internal/adapters/systemclock"
 	"github.com/mochipool/workbench/spo/internal/adapters/transferfile"
+	"github.com/mochipool/workbench/spo/internal/adapters/upstreamdir"
 	"github.com/mochipool/workbench/spo/internal/app/handles"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
@@ -186,7 +186,7 @@ func wireTo(errw io.Writer, store ports.Store, o cli.WireOptions) (*cli.Env, err
 	env.Sinks = func(dir string) (ports.FileSink, error) { return transferfile.DirSink{Dir: dir}, nil }
 	env.TxViewer = native.TxViewer{}
 	wireParty(env, store)
-	env.MetadataFiles, env.MsgEncrypter, env.PolicyIDs = fsstore.MetadataFiles{}, native.CIP83{}, led
+	env.MetadataFiles, env.MsgEncrypter, env.PolicyIDs = upstreamdir.MetadataFiles{}, native.CIP83{}, led
 	env.VKeyDeriver = native.VKeyDeriver{}
 	env.VKeyEnvelopes, env.VrfVKeys = native.VKeyDeriver{}, native.VRFDeriver{}
 	env.Logos = logoFiles{dir: o.Workspace}
@@ -234,7 +234,7 @@ func wireTo(errw io.Writer, store ports.Store, o cli.WireOptions) (*cli.Env, err
 
 // wireKeyCrypto gives the Env upstream's gpg envelope for signing keys, when
 // the toolchain has gpg. The sealed store needs none of it: gpg is for the keys
-// of an upstream-layout directory that were encrypted by upstream's scripts.
+// that upstream's scripts encrypted (import, key convert) and for export.
 func wireKeyCrypto(env *cli.Env, o cli.WireOptions) {
 	const only = "gpg is needed only to read or write upstream's encrypted signing keys; nothing else here uses it"
 	if len(o.Tools) == 0 || o.Toolchain == nil {

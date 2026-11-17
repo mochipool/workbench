@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/app/catalyst"
 	"github.com/mochipool/workbench/spo/internal/app/poolkey"
@@ -19,6 +18,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/cose"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 // Script-level parity of 15_calidusPoolKey.sh and 09a_catalystVote.sh against
@@ -230,7 +230,7 @@ func (s sourceTip) Tip(context.Context) (chain.Tip, error) {
 
 // The upstream cold key, Calidus key and pool in an upstream workspace and a
 // copy of their files in a port workspace.
-func (e env) poolWorkspaces(t *testing.T) (upDir, portDir string, st *fsstore.Store) {
+func (e env) poolWorkspaces(t *testing.T) (upDir, portDir string, st *plainstore.Store) {
 	t.Helper()
 	upDir = e.upstreamWorkspace(t)
 	for _, run := range [][]string{{"04a_genNodeKeys.sh", "mypool", "cli"}, {"15_calidusPoolKey.sh", "new", "cli", "cal", publicPhrase}} {

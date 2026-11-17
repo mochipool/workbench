@@ -21,8 +21,7 @@ const SingleSourceOperation = "single-source-read"
 // that reads twice, as stake deregister does for the certificate and for the
 // transaction, writes two). A run that had two agreeing sources, or that was
 // refused, writes nothing. The record goes to the workspace's audit log (the
-// sealed store's MAC-chained log, or the .spo-workspace-audit.json file of an
-// upstream-layout directory). When it cannot be written the hook fails and the
+// sealed store's MAC-chained log). When it cannot be written the hook fails and the
 // use case stops with nothing done: an acknowledgement that cannot be recorded
 // is not accepted.
 func (a *app) singleSourceHook(s *session, command string) ports.SingleSourceHook {

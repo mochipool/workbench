@@ -16,7 +16,6 @@ import (
 
 	"github.com/fxamacker/cbor/v2"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/domain/assets"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
@@ -24,6 +23,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 // policyKit is a policy key pair made by cardano-cli, with its script files.
@@ -155,7 +155,7 @@ func TestMintBodiesMatchCardanoCLI(t *testing.T) {
 	params := testParams(t)
 	led := native.Ledger{}
 	keys := e.newKeys(t, false)
-	store, err := fsstore.Open(keys.dir)
+	store, err := plainstore.OpenTestnet(keys.dir)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
@@ -19,6 +18,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 func (e env) fileKeyHash(t *testing.T, path string) [28]byte {
@@ -186,7 +186,7 @@ func TestStakeTransactionsMatchCardanoCLI(t *testing.T) {
 	params := testParams(t)
 	led := native.Ledger{}
 	keys := e.newKeys(t, false)
-	store, err := fsstore.Open(keys.dir)
+	store, err := plainstore.OpenTestnet(keys.dir)
 	if err != nil {
 		t.Fatal(err)
 	}

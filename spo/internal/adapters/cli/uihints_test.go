@@ -11,10 +11,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/platform/uihint"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 func hintRoot(t *testing.T) *cobra.Command {
@@ -92,7 +92,7 @@ func TestUIHintTableMatchesTheTree(t *testing.T) {
 func seedUpstream(t *testing.T) (string, Deps) {
 	t.Helper()
 	dir := t.TempDir()
-	st, err := fsstore.Open(dir)
+	st, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func seedUpstream(t *testing.T) (string, Deps) {
 		t.Fatal(err)
 	}
 	return dir, Deps{Out: &bytes.Buffer{}, Err: &bytes.Buffer{},
-		OpenUpstream: func(d string) (ports.Store, error) { return fsstore.Open(d) }}
+		OpenUpstream: func(d string) (ports.Store, error) { return plainstore.OpenTestnet(d) }}
 }
 
 func TestWorkspaceNamesListsNamesByClassAndNothingElse(t *testing.T) {

@@ -1,4 +1,4 @@
-package fsstore
+package plainstore
 
 import (
 	"context"
@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/mochipool/workbench/spo/internal/adapters/config"
+	"github.com/mochipool/workbench/spo/internal/adapters/upstreamdir"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
@@ -16,14 +18,14 @@ var ctx = context.Background()
 func open(t *testing.T) (*Store, string) {
 	t.Helper()
 	dir := t.TempDir()
-	s, err := Open(dir)
+	s, err := OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return s, dir
 }
 
-// spec: SPO-Pfiles-OUT-013, SPO-Pfiles-INV-003, SPO-04c-INV-001
+// spec: SPO-Pfiles-OUT-013, SPO-Pfiles-INV-003, SPO-04c-INV-001, SPO-Pfiles-SEC-002
 func TestUpstreamNamesAndLockedMode(t *testing.T) {
 	s, dir := open(t)
 	key := secret.Take([]byte(`{"type":"KesSigningKey_ed25519_kes_2^6"}`))
@@ -195,7 +197,7 @@ func TestCertificateArtefactNames(t *testing.T) {
 // spec: SPO-Pfiles-OUT-017, SPO-Pfiles-OUT-018, SPO-Pfiles-OUT-019, SPO-Pfiles-OUT-020, SPO-Pfiles-OUT-021, SPO-Pfiles-OUT-023, SPO-05a-OUT-003, SPO-05d-OUT-001
 func TestPoolArtefactNamesAndModes(t *testing.T) {
 	dir := t.TempDir()
-	st, err := Open(dir)
+	st, err := OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,5 +249,122 @@ func TestPoolArtefactNamesAndModes(t *testing.T) {
 		return w.Delete(ports.Ref{Name: "p", Kind: ports.PoolMetadata})
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Modes of the artefacts that stay unlocked (SPO-Pfiles-INV-004) and of the
+// published metadata (SPO-Pfiles-INV-005); everything else is 0400. The
+// offline transfer bag is not a workspace artefact (SPO-Pfiles-OUT-037): the
+// lister reports it and nothing writes it.
+//
+// spec: SPO-Pfiles-INV-004, SPO-Pfiles-INV-005, SPO-Pfiles-OUT-037
+func TestModesOfUnlockedArtefacts(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := OpenTestnet(dir)
+	want := map[ports.Ref]os.FileMode{
+		{Name: "p", Kind: ports.PoolMetadata}:           0o444,
+		{Name: "p", Kind: ports.PoolExtendedMetadata}:   0o444,
+		{Name: "p", Kind: ports.PoolAdditionalMetadata}: 0o644,
+		{Name: "p_1_ab", Kind: ports.PoolWitnessFile}:   0o644,
+		{Name: "v", Kind: ports.VoteRegistration}:       0o644,
+		{Name: "k", Kind: ports.CalidusRegistration}:    0o644,
+		{Name: "pol", Kind: ports.PolicyScript}:         0o400,
+		{Name: "p", Kind: ports.NodeVKey}:               0o400,
+	}
+	err := st.Update(ctx, func(w ports.Writer) error {
+		for r := range want {
+			if err := w.Put(r, []byte("{}")); err != nil {
+				return err
+			}
+		}
+		return w.PutSecret(ports.Ref{Name: "v", Kind: ports.CatalystQRCode}, secret.Take([]byte("png")))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for r, m := range want {
+		name, _ := upstreamdir.FileName(r)
+		fi, err := os.Stat(filepath.Join(dir, name))
+		if err != nil || fi.Mode().Perm() != m {
+			t.Errorf("%s: %v %v, want %v", name, fi, err, m)
+		}
+	}
+	// upstream leaves the QR code at the process default; it is secret, so it is 0400 here
+	if fi, _ := os.Stat(filepath.Join(dir, "v.catalyst-qrcode.png")); fi == nil || fi.Mode().Perm() != 0o400 {
+		t.Errorf("the secret QR code must be 0400: %v", fi)
+	}
+}
+
+// The plain store refuses mainnet unconditionally: by the network magic, by a
+// directory whose spo.toml names mainnet, and by an spo.toml that cannot be read
+// (the network is then unknown).
+//
+// spec: SPO-Xcustody-SEC-002
+func TestRefusesMainnet(t *testing.T) {
+	if _, err := OpenNetwork(t.TempDir(), MainnetMagic); !errors.Is(err, ErrMainnet) {
+		t.Errorf("the mainnet magic: %v", err)
+	}
+	preview := t.TempDir()
+	if err := os.WriteFile(filepath.Join(preview, "spo.toml"), []byte("network = \"preview\"\nmode = \"offline\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenNetwork(preview, 2); err != nil {
+		t.Errorf("the preview magic: %v", err)
+	}
+	for _, tc := range []struct {
+		name, toml string
+		refused    bool
+	}{
+		{"mainnet", "network = \"mainnet\"\nmode = \"offline\"\n", true},
+		{"preview", "network = \"preview\"\nmode = \"offline\"\n", false},
+		{"unreadable", "this is = = not toml [", true},
+	} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "spo.toml"), []byte(tc.toml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Open(dir)
+		if tc.refused != (err != nil) {
+			t.Errorf("%s: %v", tc.name, err)
+		}
+		if tc.name == "mainnet" && !errors.Is(err, ErrMainnet) {
+			t.Errorf("%s: %v", tc.name, err)
+		}
+		// a refused directory is not written, whatever follows
+		if tc.refused {
+			if ents, _ := os.ReadDir(dir); len(ents) != 1 {
+				t.Errorf("%s: the refused directory was changed: %v", tc.name, ents)
+			}
+		}
+	}
+	// An absent spo.toml is refused too: the network is unknown. Nothing is
+	// written to such a directory.
+	bare := t.TempDir()
+	if _, err := Open(bare); !errors.Is(err, ErrNoNetwork) {
+		t.Errorf("a directory with no spo.toml: %v", err)
+	}
+	if _, err := OpenNetwork(bare, 2); !errors.Is(err, ErrNoNetwork) {
+		t.Errorf("OpenNetwork on a directory with no spo.toml: %v", err)
+	}
+	if ents, _ := os.ReadDir(bare); len(ents) != 0 {
+		t.Errorf("the refused directory was changed: %v", ents)
+	}
+	// The test helper writes a testnet spo.toml and then opens; it does not
+	// rescue a mainnet directory.
+	if _, err := OpenTestnet(bare); err != nil {
+		t.Errorf("the helper: %v", err)
+	}
+	if _, err := config.Load(bare); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the helper left its spo.toml: %v", err)
+	}
+	if _, err := Open(bare); !errors.Is(err, ErrNoNetwork) {
+		t.Errorf("Open after the helper removed its file: %v", err)
+	}
+	main := t.TempDir()
+	if err := os.WriteFile(filepath.Join(main, "spo.toml"), []byte("network = \"mainnet\"\nmode = \"offline\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenTestnet(main); !errors.Is(err, ErrMainnet) {
+		t.Errorf("the helper opened a mainnet directory: %v", err)
 	}
 }

@@ -1,4 +1,4 @@
-package fsstore
+package upstreamdir
 
 import (
 	"context"

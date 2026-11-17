@@ -1,6 +1,6 @@
 // Package partyrig builds workspaces for the multi-party tests: each party is
 // a directory with its own store, its own party identity and its own keys,
-// over the real adapters (fsstore, envelope, partystore, native). Only what
+// over the real adapters (plainstore, envelope, partystore, native). Only what
 // is outside the process is faked: the chain tip and the clock.
 package partyrig
 
@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/mochipool/workbench/spo/internal/adapters/envelope"
-	"github.com/mochipool/workbench/spo/internal/adapters/fsstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/adapters/partystore"
 	"github.com/mochipool/workbench/spo/internal/app/multisig"
@@ -24,6 +23,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/stake"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
 // Magic is the network magic of the rig (preview).
@@ -85,7 +85,7 @@ type Workspace struct {
 	T        *testing.T
 	Name     string
 	Dir      string
-	Store    *fsstore.Store
+	Store    *plainstore.Store
 	Kit      envelope.Kit
 	Registry partystore.Registry
 	Replay   partystore.Replay
@@ -167,7 +167,7 @@ func New(t *testing.T, name string, clock *Clock, ch *Chain) *Workspace {
 func NewWithNode(t *testing.T, name string, clock *Clock, ch *Chain, node *party.NodeKey) *Workspace {
 	t.Helper()
 	dir := t.TempDir()
-	st, err := fsstore.Open(dir)
+	st, err := plainstore.OpenTestnet(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
