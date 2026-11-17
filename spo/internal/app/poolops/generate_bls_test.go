@@ -89,7 +89,7 @@ func TestGenerateBLSKeysRefusesAndIsAtomic(t *testing.T) {
 	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
 		t.Errorf("files left behind: %v", entries)
 	}
-	if _, err := uc.Run(context.Background(), GenerateBLSKeysRequest{Pool: "p", Holder: custody.HolderHardware}); !errors.Is(err, ErrBLSHolder) {
+	if _, err := uc.Run(context.Background(), GenerateBLSKeysRequest{Pool: "p", Place: custody.PlaceHardware}); !errors.Is(err, ErrBLSHolder) {
 		t.Errorf("a hardware holder: %v", err)
 	}
 }

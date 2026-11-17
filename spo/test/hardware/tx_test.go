@@ -23,11 +23,11 @@ import (
 
 // account makes a wallet `name` (payment name.payment, stake name) and funds
 // its base address. hw puts the payment and stake keys on the device.
-func account(t *testing.T, w *world.World, name string, holder custody.Holder, lovelace chain.Lovelace) wallet.WalletGenerated {
+func account(t *testing.T, w *world.World, name string, holder custody.Placement, lovelace chain.Lovelace) wallet.WalletGenerated {
 	t.Helper()
 	uc := wallet.GenerateWalletAccount{Store: w.Store, Payment: native.SoftwareKeys{}, Stake: native.SoftwareKeys{}, Addresses: w.Ledger,
 		NetworkID: w.Network, Hardware: w.Exporter()}
-	res, err := uc.Run(context.Background(), wallet.GenerateWalletRequest{Name: name, Holder: holder, Source: wallet.WalletKeysRandom})
+	res, err := uc.Run(context.Background(), wallet.GenerateWalletRequest{Name: name, Place: holder, Source: wallet.WalletKeysRandom})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,8 +54,8 @@ func TestSendFromHardwarePayerCanonicalisesBeforeDisplay(t *testing.T) {
 	w := world.New(t)
 	w.UseHardware("Ledger", "8.0.8")
 	w.Bodies = world.LegacyInputs{Ledger: w.Ledger}
-	src := account(t, w, "hw", custody.HolderHardware, 50_000_000)
-	dst := account(t, w, "dst", custody.HolderVault, 0)
+	src := account(t, w, "hw", custody.PlaceHardware, 50_000_000)
+	dst := account(t, w, "dst", custody.PlaceVault, 0)
 
 	// The id of the body as first built, to show that it was not the one used.
 	res, err := sender(w).Run(context.Background(), wallet.SendRequest{Source: "hw.payment", Destination: "dst.payment", Amount: "5000000"})
@@ -110,8 +110,8 @@ func TestSendFromHardwarePayerCanonicalisesBeforeDisplay(t *testing.T) {
 func TestHardwarePayerWithoutCanonicalizerIsRefused(t *testing.T) {
 	w := world.New(t)
 	w.UseHardware("Ledger", "8.0.8")
-	src := account(t, w, "hw", custody.HolderHardware, 50_000_000)
-	account(t, w, "dst", custody.HolderVault, 0)
+	src := account(t, w, "hw", custody.PlaceHardware, 50_000_000)
+	account(t, w, "dst", custody.PlaceVault, 0)
 	before := w.HW.Prompts()
 	uc := sender(w)
 	uc.Canonicalizer = nil
@@ -134,7 +134,7 @@ func TestStakeRegistrationAndDelegationOnLedger(t *testing.T) {
 	w := world.New(t)
 	w.UseHardware("Ledger", "8.0.8")
 	w.Bodies = world.LegacyInputs{Ledger: w.Ledger}
-	res := account(t, w, "hw", custody.HolderHardware, 100_000_000)
+	res := account(t, w, "hw", custody.PlaceHardware, 100_000_000)
 	base := stake.Base{Store: w.Store, Addresses: w.Ledger, Params: w.Chain, Tip: w.Chain, Utxos: w.Chain, NetworkID: w.Network, Pipeline: w.Pipeline()}
 	reg := stake.RegisterStakeAddress{Base: base, Certs: w.Ledger, AllowUnverified: true}
 	out, err := reg.Run(context.Background(), stake.RegisterRequest{Stake: "hw", Payer: "hw.payment"})
@@ -170,7 +170,7 @@ func TestPollAnswerWithHardwarePayerAndKeyFileColdKey(t *testing.T) {
 	w := world.New(t)
 	w.UseHardware("Ledger", "8.0.8")
 	w.Bodies = world.LegacyInputs{Ledger: w.Ledger}
-	account(t, w, "hw", custody.HolderHardware, 50_000_000)
+	account(t, w, "hw", custody.PlaceHardware, 50_000_000)
 	if _, err := (poolops.GenerateColdKeys{Store: w.Store, KeyGen: native.SoftwareKeys{}}).Run(ctx, poolops.GenerateColdKeysRequest{Pool: "mypool"}); err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +200,7 @@ func TestHybridWalletStakeRegistrationIsRefused(t *testing.T) {
 	w := world.New(t)
 	w.UseHardware("Ledger", "8.0.8")
 	uc := wallet.GenerateWalletAccount{Store: w.Store, Payment: native.SoftwareKeys{}, Stake: native.SoftwareKeys{}, Addresses: w.Ledger, NetworkID: w.Network, Hardware: w.Exporter()}
-	res, err := uc.Run(context.Background(), wallet.GenerateWalletRequest{Name: "hy", Holder: custody.HolderHardware, StakeHolder: custody.HolderVault})
+	res, err := uc.Run(context.Background(), wallet.GenerateWalletRequest{Name: "hy", Place: custody.PlaceHardware, StakePlace: custody.PlaceVault})
 	if err != nil {
 		t.Fatal(err)
 	}

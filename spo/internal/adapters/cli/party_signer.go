@@ -13,6 +13,7 @@ import (
 
 	"github.com/mochipool/workbench/spo/internal/app/multisig"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
@@ -37,10 +38,9 @@ type storeKeyDirectory struct {
 }
 
 type storeKey struct {
-	role   custody.Role
-	owner  string
-	hash   [28]byte
-	holder custody.Holder
+	role  custody.Role
+	owner string // the store name, for this file only; no key reference carries it
+	hash  [28]byte
 }
 
 // loadStoreKeys reads the verification keys of the store's payment, stake and
@@ -83,14 +83,12 @@ func loadStoreKeys(ctx context.Context, store ports.Store) (*storeKeyDirectory, 
 				continue
 			}
 			sk := storeKey{role: k.role, owner: e.Ref.Name, hash: [28]byte(txbuild.HashKey(key32))}
-			switch hw, _ := r.Exists(ports.Ref{Name: e.Ref.Name, Kind: k.hwsKey}); {
-			case hw:
-				sk.holder = custody.HolderHardware
-			default:
-				if has, _ := r.Exists(ports.Ref{Name: e.Ref.Name, Kind: k.skey}); !has {
-					continue // a verification key with no signing key here is not held
-				}
-				sk.holder = custody.HolderVault
+			// A key is held when a signing key or a hardware signing file is
+			// here; which signer answers is the directory's business.
+			hw, _ := r.Exists(ports.Ref{Name: e.Ref.Name, Kind: k.hwsKey})
+			has, _ := r.Exists(ports.Ref{Name: e.Ref.Name, Kind: k.skey})
+			if !hw && !has {
+				continue // a verification key with no signing key here is not held
 			}
 			d.keys = append(d.keys, sk)
 		}
@@ -103,7 +101,11 @@ func loadStoreKeys(ctx context.Context, store ports.Store) (*storeKeyDirectory, 
 func (d *storeKeyDirectory) FindKey(_ context.Context, role custody.Role, hash [28]byte) (custody.KeyRef, bool, error) {
 	for _, k := range d.keys {
 		if k.role == role && k.hash == hash {
-			return custody.KeyRef{Role: role, Holder: k.holder, Owner: k.owner}, true, nil
+			id, err := identity.NewRef(identity.KindKeyHash, hash[:])
+			if err != nil {
+				return custody.KeyRef{}, false, err
+			}
+			return custody.KeyRef{Role: role, Identity: id}, true, nil
 		}
 	}
 	return custody.KeyRef{}, false, nil
@@ -145,7 +147,23 @@ func (g passphraseGate) Reauthenticate(ctx context.Context, key custody.KeyRef, 
 	if g.note != nil {
 		note = g.note()
 	}
-	fmt.Fprintf(g.a.d.Out, "About to sign with the %s key of %s, over body %x (%s).\n", key.Role, safeText(key.Owner), bodyHash[:], note)
+	// The label the operator gave the key (where one exists) and the key hash: a
+	// name alone does not say which key signs.
+	label := ""
+	if idx, ierr := ports.NewStoreKeyIndex(g.s.Store); ierr == nil {
+		if homes, herr := idx.Homes(ctx, key.Identity); herr == nil {
+			var names []string
+			for _, h := range homes {
+				if h.Role == key.Role {
+					names = append(names, safeText(h.Name))
+				}
+			}
+			if len(names) > 0 {
+				label = " stored as " + strings.Join(names, ", ")
+			}
+		}
+	}
+	fmt.Fprintf(g.a.d.Out, "About to sign with the %s key%s, key hash %s, over body %x (%s).\n", key.Role, label, key.Identity, bodyHash[:], note)
 	flushTypedAhead(g.a.term)
 	typed, err := g.a.term.ReadSecret(ctx, "Type the workspace passphrase again to sign ("+note+"): ")
 	if errors.Is(err, ErrNoTerminal) {
@@ -344,7 +362,16 @@ func (r *partyRun) signer(ctx context.Context, snapshot string, d partyDirs) (mu
 	if err != nil {
 		return multisig.Signer{}, "", err
 	}
-	sg := multisig.Signer{Node: r.node(), Signers: r.env.Signers, Keys: dir, NetworkMagic: magic, Owned: dir.Owned(), Addresses: k.Addresses,
+	idx, err := ports.NewStoreKeyIndex(r.s.Store)
+	if err != nil {
+		return multisig.Signer{}, "", err
+	}
+	// The role history of an identity, from the stored key records, until the
+	// workspace's role-history record exists (ADR 0010 decision 1).
+	history := func(ctx context.Context, id identity.Ref) (custody.RoleHistory, bool, error) {
+		return ports.RoleHistoryOf(ctx, idx, id)
+	}
+	sg := multisig.Signer{Node: r.node(), Signers: r.env.Signers, Keys: dir, History: history, NetworkMagic: magic, Owned: dir.Owned(), Addresses: k.Addresses,
 		Gate: passphraseGate{a: r.a, s: r.s, note: func() string { return r.gateNote }}}
 	// Obligation 3: the resolver is the operator's own provider or a snapshot
 	// the operator named, and nothing else.

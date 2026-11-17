@@ -221,7 +221,7 @@ func (failingAddrs) BuildAddress(uint8, txbuild.KeyHash, *txbuild.KeyHash) (chai
 // OUT-002, IF-003) are waived until the hardware signer adapter exists.
 func TestPaymentAccountHardwareRefusedUpFront(t *testing.T) {
 	uc, g, dir := paymentUC(t)
-	_, err := uc.Run(context.Background(), GeneratePaymentRequest{Name: "w", Holder: custody.HolderHardware})
+	_, err := uc.Run(context.Background(), GeneratePaymentRequest{Name: "w", Place: custody.PlaceHardware})
 	var ue *custody.UnsupportedError
 	if !errors.As(err, &ue) || g.payCalls != 0 || len(dirFiles(t, dir)) != 0 {
 		t.Fatalf("err %v", err)
@@ -413,7 +413,7 @@ func TestGivenMnemonicBufferStaysTheCallers(t *testing.T) {
 // the hardware signer adapter exists.
 func TestWalletHardwareRefusedUpFront(t *testing.T) {
 	uc, g, dir := walletUC(t)
-	_, err := uc.Run(context.Background(), GenerateWalletRequest{Name: "w", Source: WalletKeysRandom, Holder: custody.HolderHardware})
+	_, err := uc.Run(context.Background(), GenerateWalletRequest{Name: "w", Source: WalletKeysRandom, Place: custody.PlaceHardware})
 	var ue *custody.UnsupportedError
 	if !errors.As(err, &ue) || g.payCalls != 0 || len(dirFiles(t, dir)) != 0 {
 		t.Fatalf("err %v", err)

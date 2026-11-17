@@ -54,7 +54,7 @@ func calidusWorld(t *testing.T, vendor, app string) *world.World {
 func coldOnDevice(t *testing.T, w *world.World) {
 	t.Helper()
 	if _, err := (poolops.GenerateColdKeys{Store: w.Store, KeyGen: native.SoftwareKeys{}, Hardware: w.Exporter()}).
-		Run(context.Background(), poolops.GenerateColdKeysRequest{Pool: "p", Holder: custody.HolderHardware}); err != nil {
+		Run(context.Background(), poolops.GenerateColdKeysRequest{Pool: "p", Place: custody.PlaceHardware}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -146,10 +146,17 @@ func TestCalidusRegistrationRefusals(t *testing.T) {
 	}
 	// A Calidus key cannot be made on a device, and no hardware key signs a text.
 	if _, err := (poolkey.GenerateCalidusKey{Store: w.Store, Deriver: native.SoftwareKeys{}, Mnemonics: native.SoftwareKeys{}}).
-		Run(ctx, poolkey.GenerateCalidusKeyRequest{Name: "hwcal", Holder: custody.HolderHardware}); !errors.Is(err, poolkey.ErrHardwareCalidusSuspended) {
+		Run(ctx, poolkey.GenerateCalidusKeyRequest{Name: "hwcal", Place: custody.PlaceHardware}); !errors.Is(err, poolkey.ErrHardwareCalidusSuspended) {
 		t.Errorf("hardware calidus: %v", err)
 	}
-	if _, err := (poolkey.SignWithCalidusKey{Store: w.Store, Signers: w.Signers()}).Run(ctx, "cal", custody.HolderHardware, []byte("x")); !errors.Is(err, poolkey.ErrHardwareCalidusSuspended) {
+	// A hardware signing file alone is no Calidus signing key (the flag that
+	// used to say "on hardware" is gone: the directory decides).
+	if err := w.Store.Update(ctx, func(wr ports.Writer) error {
+		return wr.Put(ports.Ref{Name: "hwonly", Kind: ports.CalidusHwsFile}, []byte("{}"))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (poolkey.SignWithCalidusKey{Store: w.Store, Signers: w.Signers()}).Run(ctx, "hwonly", []byte("x")); !errors.Is(err, poolkey.ErrMissingFile) {
 		t.Errorf("hardware text signing: %v", err)
 	}
 }
@@ -159,7 +166,7 @@ func catalystWorld(t *testing.T) (*world.World, string) {
 	t.Helper()
 	w := world.New(t)
 	w.UseHardware("Ledger", "8.0.8")
-	acc := account(t, w, "hw", custody.HolderHardware, 0)
+	acc := account(t, w, "hw", custody.PlaceHardware, 0)
 	return w, string(acc.PaymentAddress)
 }
 
@@ -172,7 +179,7 @@ func catalystWorld(t *testing.T) (*world.World, string) {
 func TestVotingKeyOnLedger(t *testing.T) {
 	ctx := context.Background()
 	w, _ := catalystWorld(t)
-	res, err := (catalyst.GenerateVotingKey{Store: w.Store, Hardware: w.Exporter()}).Run(ctx, catalyst.GenerateVotingKeyRequest{Name: "v", Holder: custody.HolderHardware, Account: 1, Index: 2})
+	res, err := (catalyst.GenerateVotingKey{Store: w.Store, Hardware: w.Exporter()}).Run(ctx, catalyst.GenerateVotingKeyRequest{Name: "v", Place: custody.PlaceHardware, Account: 1, Index: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,20 +212,20 @@ func TestVotingKeyOnLedger(t *testing.T) {
 		hw.Lazy.Profile()
 		p := hw.Prompts()
 		var ue *custody.UnsupportedError
-		_, err := (catalyst.GenerateVotingKey{Store: w.Store, Hardware: w.Exporter()}).Run(ctx, catalyst.GenerateVotingKeyRequest{Name: "o", Holder: custody.HolderHardware})
+		_, err := (catalyst.GenerateVotingKey{Store: w.Store, Hardware: w.Exporter()}).Run(ctx, catalyst.GenerateVotingKeyRequest{Name: "o", Place: custody.PlaceHardware})
 		if !errors.As(err, &ue) || hw.Prompts() != p || storeHas(t, w, ports.Ref{Name: "o", Kind: ports.VotingVKey}) {
 			t.Errorf("%s: %v", v[0], err)
 		}
 	}
 	var ue *custody.UnsupportedError
-	if _, err := (catalyst.GenerateVotingKey{Store: w.Store}).Run(ctx, catalyst.GenerateVotingKeyRequest{Name: "n", Holder: custody.HolderHardware}); !errors.As(err, &ue) {
+	if _, err := (catalyst.GenerateVotingKey{Store: w.Store}).Run(ctx, catalyst.GenerateVotingKeyRequest{Name: "n", Place: custody.PlaceHardware}); !errors.As(err, &ue) {
 		t.Errorf("no hardware signer: %v", err)
 	}
 	// A hardware key cannot take a mnemonic.
 	m := secret.Take([]byte(publicPhrase))
 	defer m.Destroy()
 	w.UseHardware("Ledger", "8.0.8")
-	if _, err := (catalyst.GenerateVotingKey{Store: w.Store, Hardware: w.Exporter()}).Run(ctx, catalyst.GenerateVotingKeyRequest{Name: "m", Holder: custody.HolderHardware, Mnemonic: m}); err == nil {
+	if _, err := (catalyst.GenerateVotingKey{Store: w.Store, Hardware: w.Exporter()}).Run(ctx, catalyst.GenerateVotingKeyRequest{Name: "m", Place: custody.PlaceHardware, Mnemonic: m}); err == nil {
 		t.Error("a mnemonic for a hardware key")
 	}
 }
@@ -250,7 +257,7 @@ func catalystRegistration(t *testing.T, w *world.World, rewards string) (catalys
 // spec: SPO-09a-EXT-004, SPO-09a-INV-004, SPO-09a-INV-005, SPO-09a-OUT-006
 func TestCatalystRegistrationWithLedgerStakeKey(t *testing.T) {
 	w, payAddr := catalystWorld(t)
-	other := account(t, w, "elsewhere", custody.HolderVault, 0)
+	other := account(t, w, "elsewhere", custody.PlaceVault, 0)
 	res, err := catalystRegistration(t, w, "hw.payment")
 	if err != nil {
 		t.Fatal(err)

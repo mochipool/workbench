@@ -65,6 +65,15 @@ let
       bech32.path = "${bech32}/bin/bech32";
       # Only for importing and exporting upstream `enc` keys (concern X5).
       gpg.path = "${pkgs.gnupg}/bin/gpg";
+      # FIDO2 factors for unlocking a workspace (ADR 0011, decision 8): the
+      # libfido2 command-line tools, driven by adapters/fido2cli. The version
+      # is gated on fido2-token (`-V`); the three tools come from one package.
+      fido2-token = {
+        path = "${pkgs.libfido2}/bin/fido2-token";
+        version = pkgs.libfido2.version;
+      };
+      fido2-cred.path = "${pkgs.libfido2}/bin/fido2-cred";
+      fido2-assert.path = "${pkgs.libfido2}/bin/fido2-assert";
     };
   });
 

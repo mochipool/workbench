@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
-	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	stk "github.com/mochipool/workbench/spo/internal/domain/stake"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
@@ -114,7 +113,7 @@ func TestDeregisterRefusals(t *testing.T) {
 			r.store.files[ports.Ref{Name: "w", Kind: ports.StakingAddr}] = []byte("addr_test_pay\n")
 		}, []error{ErrNotStakeAddress}},
 		{"a hardware stake key", func(r *rig, _ *DeregisterStakeAddress) {
-			r.holder(t, ports.Ref{Name: "w", Kind: ports.StakingSKey}, custody.HolderHardware)
+			r.device(t, ports.Ref{Name: "w", Kind: ports.StakingSKey})
 		}, nil},
 		{"declined", func(r *rig, _ *DeregisterStakeAddress) { r.conf.yes = false }, []error{ErrDeclined}},
 	}

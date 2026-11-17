@@ -18,10 +18,15 @@ func (s signer) Profile() custody.Profile { return s.profile }
 type dir struct{ s signer }
 
 func (d dir) SignerFor(k custody.KeyRef) (ports.Signer, error) {
-	if k.Holder == custody.HolderHardware {
+	if unserved(k) {
 		return nil, errors.New("no hardware signer")
 	}
 	return d.s, nil
+}
+
+// Connected implements ports.SignerDirectory.
+func (d dir) Connected(k custody.KeyRef) ([]ports.ConnectedSigner, error) {
+	return ports.ConnectedVia(d, k)
 }
 
 func draft(k stake.KeyHash) txbuild.Draft {
@@ -39,8 +44,8 @@ func TestPrepareChecksTheSlots(t *testing.T) {
 	k[0], other[0] = 1, 2
 	prof := custody.NewProfile("fake").AllowTx(custody.RolePayment, custody.FeatStakeDelegation).AllowTx(custody.RoleStake, custody.FeatStakeDelegation)
 	p := Pipeline{Signers: dir{signer{prof}}}
-	pay := Slot{Label: "payment", Key: custody.KeyRef{Role: custody.RolePayment, Holder: custody.HolderVault, Owner: "w"}}
-	stk := Slot{Label: "stake", Key: custody.KeyRef{Role: custody.RoleStake, Holder: custody.HolderVault, Owner: "w"}, Hash: txbuild.KeyHash(k)}
+	pay := Slot{Label: "payment", Key: tkey(custody.RolePayment, 1)}
+	stk := Slot{Label: "stake", Key: tkey(custody.RoleStake, 1), Hash: txbuild.KeyHash(k)}
 
 	// A plan whose signers cannot witness (no TxWitnesser): refused as such.
 	if _, err := p.Prepare(draft(k), []Slot{pay, stk}, 2); !errors.Is(err, ErrNoSigner) {
@@ -60,7 +65,7 @@ func TestPrepareChecksTheSlots(t *testing.T) {
 		}
 	}
 	hw := stk
-	hw.Key.Holder = custody.HolderHardware
+	hw.Key = tkey(custody.RoleStake, unservedTag)
 	if _, err := p.Prepare(draft(k), []Slot{pay, hw}, 2); err == nil {
 		t.Error("a hardware holder was planned")
 	}

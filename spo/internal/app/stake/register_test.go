@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
-	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	stk "github.com/mochipool/workbench/spo/internal/domain/stake"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -107,10 +106,10 @@ func TestRegisterRefusalsWriteNothing(t *testing.T) {
 		{"the provider fails", func(r *rig, _ *RegisterStakeAddress) { r.rewards.err = errors.New("connection refused") }, nil, false},
 		{"no reader and no permission to skip the check", func(_ *rig, uc *RegisterStakeAddress) { uc.Rewards = nil }, ErrNoChainReader, false},
 		{"hardware payment key", func(r *rig, _ *RegisterStakeAddress) {
-			r.holder(t, ports.Ref{Name: "w.payment", Kind: ports.AddrSKey}, custody.HolderHardware)
+			r.device(t, ports.Ref{Name: "w.payment", Kind: ports.AddrSKey})
 		}, nil, true},
 		{"hardware stake key", func(r *rig, _ *RegisterStakeAddress) {
-			r.holder(t, ports.Ref{Name: "w", Kind: ports.StakingSKey}, custody.HolderHardware)
+			r.device(t, ports.Ref{Name: "w", Kind: ports.StakingSKey})
 		}, nil, true},
 		{"the stake file holds a payment address", func(r *rig, _ *RegisterStakeAddress) {
 			r.store.files[ports.Ref{Name: "w", Kind: ports.StakingAddr}] = []byte("addr_test_pay\n")

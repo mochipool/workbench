@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/mochipool/workbench/spo/internal/app/keyring"
 	"github.com/mochipool/workbench/spo/internal/app/txflow"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
@@ -154,26 +155,6 @@ func refuseExisting(r ports.Reader, refs ...ports.Ref) error {
 	return nil
 }
 
-// holderOf says who holds the signing key of an artefact pair: the hardware
-// file wins when both exist (SPO-Pfiles-INV-002).
-func holderOf(r ports.Reader, skey, hws ports.Ref) (custody.Holder, error) {
-	h, err := r.Exists(hws)
-	if err != nil {
-		return "", err
-	}
-	if h {
-		return custody.HolderHardware, nil
-	}
-	s, err := r.Exists(skey)
-	if err != nil {
-		return "", err
-	}
-	if s {
-		return custody.HolderVault, nil
-	}
-	return "", fmt.Errorf("%w: %s", ErrNoSigningKey, skey)
-}
-
 func vkeyHash(env []byte) (txbuild.KeyHash, error) {
 	e, err := pool.ParseEnvelope(env)
 	if err != nil {
@@ -236,10 +217,10 @@ type Result struct {
 }
 
 type payer struct {
-	name   string
-	addr   chain.Address
-	hash   txbuild.KeyHash
-	holder custody.Holder
+	name string
+	addr chain.Address
+	hash txbuild.KeyHash
+	key  custody.KeyRef
 }
 
 func (b Base) readPayer(r ports.Reader, pn string) (payer, error) {
@@ -247,11 +228,11 @@ func (b Base) readPayer(r ports.Reader, pn string) (payer, error) {
 	if err != nil {
 		return payer{}, err
 	}
-	holder, err := holderOf(r, ports.Ref{Name: pn, Kind: ports.AddrSKey}, ports.Ref{Name: pn, Kind: ports.AddrHwsFile})
+	key, err := keyring.Held(r, custody.RolePayment, pn, ErrNoSigningKey)
 	if err != nil {
 		return payer{}, err
 	}
-	p := payer{name: pn, addr: chain.Address(firstLine(ab)), holder: holder}
+	p := payer{name: pn, addr: chain.Address(firstLine(ab)), key: key}
 	info, err := b.Addresses.InspectAddress(p.addr)
 	if err != nil {
 		return payer{}, fmt.Errorf("paying address: %w", err)
@@ -323,17 +304,16 @@ func (r txRun) prepareOptions() txflow.PrepareOptions {
 // change output: the payment key and the payer's staking key when it is stored
 // as a hardware file (SPO-21b-INV-006, SPO-23c-INV-006).
 func (b Base) changeKeys(ctx context.Context, r txRun) []custody.KeyRef {
-	if r.payer.holder != custody.HolderHardware {
-		return nil
-	}
-	keys := []custody.KeyRef{{Role: custody.RolePayment, Holder: custody.HolderHardware, Owner: r.payer.name}}
+	keys := []custody.KeyRef{r.payer.key} // only a device witness reads them
 	stem := strings.TrimSuffix(r.payer.name, ".payment")
 	if stem == r.payer.name {
 		return keys
 	}
 	_ = b.Store.View(ctx, func(rd ports.Reader) error {
 		if ok, err := rd.Exists(ports.Ref{Name: stem, Kind: ports.StakingHwsFile}); err == nil && ok {
-			keys = append(keys, custody.KeyRef{Role: custody.RoleStake, Holder: custody.HolderHardware, Owner: stem})
+			if sk, err := keyring.Resolve(rd, custody.RoleStake, stem); err == nil {
+				keys = append(keys, sk)
+			}
 		}
 		return nil
 	})
@@ -341,7 +321,7 @@ func (b Base) changeKeys(ctx context.Context, r txRun) []custody.KeyRef {
 }
 
 func (b Base) slots(r txRun) []txflow.Slot {
-	pay := txflow.Slot{Label: "payment", Key: custody.KeyRef{Role: custody.RolePayment, Holder: r.payer.holder, Owner: r.payer.name}, Hash: r.payer.hash}
+	pay := txflow.Slot{Label: "payment", Key: r.payer.key, Hash: r.payer.hash}
 	return append([]txflow.Slot{pay}, r.signers...)
 }
 

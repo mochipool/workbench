@@ -3,8 +3,6 @@ package hwcli
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
-	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"os"
@@ -83,18 +81,14 @@ func (s *Session) IssueOpCert(ctx context.Context, cold custody.Key[custody.Pool
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrBadDeviceOutput, err)
 	}
-	if !bytes.Equal(oc.KesVKey[:], req.KesVKey) || oc.Counter != req.Counter || oc.KesPeriod != req.KesPeriod {
-		return nil, fmt.Errorf("%w: the certificate is not over the KES key, counter and period asked for", ErrBadDeviceOutput)
+	coldID, err := wantID(cold.Ref(), pub)
+	if err != nil {
+		return nil, err
 	}
-	if !bytes.Equal(oc.ColdVKey[:], pub) {
-		return nil, fmt.Errorf("%w: the certificate is signed by another cold key than the pool's signing file", ErrBadDeviceOutput)
-	}
-	signable := make([]byte, 0, 48)
-	signable = append(signable, oc.KesVKey[:]...)
-	signable = binary.BigEndian.AppendUint64(signable, oc.Counter)
-	signable = binary.BigEndian.AppendUint64(signable, oc.KesPeriod)
-	if !ed25519.Verify(oc.ColdVKey[:], signable, oc.Signature[:]) {
-		return nil, fmt.Errorf("%w: the cold signature does not verify", ErrBadDeviceOutput)
+	if err := custody.VerifyOpCert(custody.OpCert{KesVKey: oc.KesVKey, Counter: oc.Counter, KesPeriod: oc.KesPeriod,
+		ColdVKey: oc.ColdVKey, Signature: oc.Signature},
+		&custody.OpCertAsk{KesVKey: req.KesVKey, Counter: req.Counter, KesPeriod: req.KesPeriod}, coldID); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrBadDeviceOutput, err)
 	}
 	env, _ := pool.ParseEnvelope(raw)
 	return pool.MarshalEnvelope(env), nil
@@ -177,6 +171,18 @@ func (s *Session) witnessKeys(ctx context.Context, keys []custody.KeyRef, body t
 	if err != nil {
 		return nil, err
 	}
+	// The signing files are read, and checked to hold the demanded keys, before
+	// the device is asked anything (a wrong account is refused with no prompt).
+	args := []string{"transaction", "witness", "--tx-file", txFile}
+	contents := make([][]byte, len(keys))
+	for i, key := range keys {
+		hws, content, err := s.signingFile(ctx, sc, key)
+		if err != nil {
+			return nil, err
+		}
+		contents[i] = content
+		args = append(args, "--hw-signing-file", hws)
+	}
 	// Conversion is checked once per body per session: the same body witnessed
 	// by a payment and a stake key asks the tool to transform it once. Only a
 	// body found canonical is remembered.
@@ -190,16 +196,6 @@ func (s *Session) witnessKeys(ctx context.Context, keys []custody.KeyRef, body t
 			return nil, &ports.ErrNotHardwareCanonical{Canonical: canon}
 		}
 		s.markCanonical(ck)
-	}
-	args := []string{"transaction", "witness", "--tx-file", txFile}
-	contents := make([][]byte, len(keys))
-	for i, key := range keys {
-		hws, content, err := s.signingFile(ctx, sc, key)
-		if err != nil {
-			return nil, err
-		}
-		contents[i] = content
-		args = append(args, "--hw-signing-file", hws)
 	}
 	for _, ck := range opt.ChangeKeys {
 		p, _, err := s.signingFile(ctx, sc, ck)
@@ -233,11 +229,17 @@ func (s *Session) witnessKeys(ctx context.Context, keys []custody.KeyRef, body t
 			return nil, fmt.Errorf("%w: %v", ErrBadDeviceOutput, err)
 		}
 		if pub, ok := hwsfilePubKey(contents[i]); ok {
+			if _, err := wantID(keys[i], pub); err != nil {
+				return nil, err
+			}
 			if err := txbuild.VerifyWitness(body, w, txbuild.HashKey(pub)); err != nil {
 				return nil, fmt.Errorf("%w: %s: %v", ErrBadDeviceOutput, keys[i], err)
 			}
-		} else if !ed25519.Verify(w.VKey[:], body.ID[:], w.Signature[:]) {
-			return nil, fmt.Errorf("%w: %v", ErrBadDeviceOutput, txbuild.ErrWitnessSignature)
+		} else {
+			// The adapter knows the key it asked for only through its signing
+			// file's public key. With none, the witness cannot be checked
+			// against the demanded identity, so it is not accepted.
+			return nil, fmt.Errorf("%w: the signing file of %s has no public key, so its witness cannot be checked against the key demanded", ErrBadDeviceOutput, keys[i])
 		}
 		ws[i] = w
 	}

@@ -34,7 +34,7 @@ const MaxDerivationIndex = 1<<31 - 1
 type GenerateKeysRequest struct {
 	// Name is the DRep or committee member name as upstream takes it.
 	Name   string
-	Holder custody.Holder // empty means the vault
+	Place  custody.Placement // empty means the vault
 	Source KeySource
 	// Account and Index select the derivation path of a mnemonic key:
 	// 1852H/1815H/<Account>H/<role>/<Index>. They must be 0 for random keys.
@@ -78,8 +78,7 @@ func (kit keyKit) run(ctx context.Context, st ports.Store, mn ports.MnemonicGene
 	if req.Account > MaxDerivationIndex || req.Index > MaxDerivationIndex {
 		return res, ErrDerivationRange
 	}
-	keyRef := custody.KeyRef{Role: kit.role, Holder: req.Holder, Owner: nm}
-	onDevice := hwkeys.Hardware(keyRef)
+	onDevice := req.Place == custody.PlaceHardware
 	switch {
 	case onDevice:
 		// A hardware key has no mnemonic; the account and index select its path
@@ -109,7 +108,7 @@ func (kit keyKit) run(ctx context.Context, st ports.Store, mn ports.MnemonicGene
 	}
 	// The plan decides before anything else: with no hardware exporter a
 	// hardware holder is refused, with one the device profile is checked.
-	if _, err := hwkeys.Plan(kit.hw, keyRef); err != nil {
+	if _, err := hwkeys.Plan(kit.hw, req.Place, kit.role); err != nil {
 		return res, err
 	}
 	if params != nil {
@@ -161,7 +160,7 @@ func (kit keyKit) run(ctx context.Context, st ports.Store, mn ports.MnemonicGene
 	switch req.Source {
 	case KeysRandom:
 		if onDevice {
-			hk, err := hwkeys.Export(ctx, kit.hw, keyRef, hwkeys.Options{Account: req.Account, Index: req.Index})
+			hk, err := hwkeys.Export(ctx, kit.hw, kit.role, hwkeys.Options{Account: req.Account, Index: req.Index})
 			if err != nil {
 				return res, err
 			}

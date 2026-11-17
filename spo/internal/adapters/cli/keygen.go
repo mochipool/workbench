@@ -37,7 +37,7 @@ hardware signing file (a public key and its path) is stored. ` + hardwareUnteste
 				needs = []Need{CapHardware}
 			}
 			return a.withEnv(cmd, envSpec{needs: needs}, func(ctx context.Context, s *session, env *Env, _ WireOptions) error {
-				req := poolops.GenerateColdKeysRequest{Pool: args[0], Holder: hw.holder(), Index: hw.index}
+				req := poolops.GenerateColdKeysRequest{Pool: args[0], Place: hw.place(), Index: hw.index}
 				if hw.on {
 					a.noteDevice()
 				}
@@ -174,7 +174,7 @@ the stake key in the workspace. Hardware keys have no mnemonic. ` + hardwareUnte
 				if !o.stake {
 					res, err := wallet.GeneratePaymentAccount{
 						Store: s.Store, KeyGen: env.PaymentKeys, Addresses: env.Addresses, NetworkID: env.NetworkID, Hardware: env.Hardware,
-					}.Run(ctx, wallet.GeneratePaymentRequest{Name: args[0], Holder: hw.holder(), Account: o.account, Index: o.index, Multisig: hw.multisig})
+					}.Run(ctx, wallet.GeneratePaymentRequest{Name: args[0], Place: hw.place(), Account: o.account, Index: o.index, Multisig: hw.multisig})
 					if err != nil {
 						return err
 					}
@@ -183,9 +183,9 @@ the stake key in the workspace. Hardware keys have no mnemonic. ` + hardwareUnte
 				}
 				req := wallet.GenerateWalletRequest{Name: args[0], Source: wallet.WalletKeysRandom}
 				if hw.on {
-					req.Holder, req.Multisig, req.Account, req.Index = hw.holder(), hw.multisig, o.account, o.index
+					req.Place, req.Multisig, req.Account, req.Index = hw.place(), hw.multisig, o.account, o.index
 					if hw.hybrid {
-						req.StakeHolder = custody.HolderVault
+						req.StakePlace = custody.PlaceVault
 					}
 				}
 				if o.mnemonic || fdSet {

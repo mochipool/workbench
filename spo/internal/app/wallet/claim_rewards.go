@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/mochipool/workbench/spo/internal/app/keyring"
 	"github.com/mochipool/workbench/spo/internal/app/txflow"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
@@ -146,7 +147,7 @@ func (uc ClaimRewards) Run(ctx context.Context, req ClaimRequest) (ClaimResult, 
 	}
 
 	var stakeAddr chain.StakeAddress
-	var stakeHolder, payHolder custody.Holder
+	var stakeKey, payKey custody.KeyRef
 	var dst, pay resolved
 	destWasName := false
 	if err := uc.Store.View(ctx, func(r ports.Reader) error {
@@ -158,20 +159,12 @@ func (uc ClaimRewards) Run(ctx context.Context, req ClaimRequest) (ClaimResult, 
 			return err
 		}
 		stakeAddr = chain.StakeAddress(strings.TrimSpace(firstLineOf(b)))
-		hws, err := r.Exists(ports.Ref{Name: sn, Kind: ports.StakingHwsFile})
+		var held bool
+		stakeKey, held, err = keyring.ResolveHeld(r, custody.RoleStake, sn)
 		if err != nil {
 			return err
 		}
-		skey, err := r.Exists(ports.Ref{Name: sn, Kind: ports.StakingSKey})
-		if err != nil {
-			return err
-		}
-		switch {
-		case hws:
-			stakeHolder = custody.HolderHardware
-		case skey:
-			stakeHolder = custody.HolderVault
-		default:
+		if !held {
 			return fmt.Errorf("%w: %s", ErrNoStakeKey, sn)
 		}
 		// The destination follows the grammar of 01_sendLovelaces.
@@ -206,20 +199,11 @@ func (uc ClaimRewards) Run(ctx context.Context, req ClaimRequest) (ClaimResult, 
 		default:
 			return ErrNoFeePayer
 		}
-		pskey, err := r.Exists(ports.Ref{Name: pay.name, Kind: ports.AddrSKey})
+		payKey, held, err = keyring.ResolveHeld(r, custody.RolePayment, pay.name)
 		if err != nil {
 			return err
 		}
-		phws, err := r.Exists(ports.Ref{Name: pay.name, Kind: ports.AddrHwsFile})
-		if err != nil {
-			return err
-		}
-		switch {
-		case phws:
-			payHolder = custody.HolderHardware
-		case pskey:
-			payHolder = custody.HolderVault
-		default:
+		if !held {
 			return fmt.Errorf("%w: %s", ErrNoSigningKey, pay.name)
 		}
 		return nil
@@ -261,8 +245,8 @@ func (uc ClaimRewards) Run(ctx context.Context, req ClaimRequest) (ClaimResult, 
 		Confirmer: uc.Confirmer, Submitter: uc.Submitter, Queue: uc.Queue, Approval: txflow.ApprovalPolicy(uc.Approval),
 		Canonicalizer: uc.Canonicalizer}
 	slots := []txflow.Slot{
-		{Label: "payment", Key: custody.KeyRef{Role: custody.RolePayment, Holder: payHolder, Owner: pay.name}, Hash: *pInfo.PaymentKeyHash},
-		{Label: "stake", Key: custody.KeyRef{Role: custody.RoleStake, Holder: stakeHolder, Owner: sn}, Hash: txbuild.KeyHash(stakeHash)},
+		{Label: "payment", Key: payKey, Hash: *pInfo.PaymentKeyHash},
+		{Label: "stake", Key: stakeKey, Hash: txbuild.KeyHash(stakeHash)},
 	}
 	// A hardware holder the plan cannot serve, and a hardware key mixed with a
 	// key-file key (SPO-Ptx-PRE-006), are refused before anything is read from the chain.
@@ -346,7 +330,7 @@ func (uc ClaimRewards) Run(ctx context.Context, req ClaimRequest) (ClaimResult, 
 
 	res, err := pipe.Execute(ctx, txflow.Input{
 		Draft: draft, Params: params, TTL: ttl, Prepared: prep, Witnesses: stake.StakeWitnesses,
-		HardwareChangeKeys: hardwareChangeKeys(ctx, uc.Store, slots[0].Key),
+		HardwareChangeKeys: hardwareChangeKeys(ctx, uc.Store, pay.name, slots[0].Key),
 		Summary: ports.TxSummary{Kind: "rewards withdrawal", Source: pay.name, SourceAddr: pay.addr, Destination: dst.name, DestAddr: dst.addr,
 			Amount: fmt.Sprintf("%d", acct.Withdrawable), Account: sn, StakeAddr: stakeAddr, Withdrawal: acct.Withdrawable,
 			Attachments: draft.AttachmentLines(), Sources: []chain.Source{uc.Rewards.Source()}},

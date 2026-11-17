@@ -20,6 +20,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/assets"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/domain/stake"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
@@ -137,15 +138,34 @@ func (f recFees) EstimateFee(p chain.ProtocolParameters, b txbuild.TxBody, n uin
 	return f.Ledger.EstimateFee(p, b, n)
 }
 
-// pdir serves the vault signer for vault keys only: a hardware or remote
-// holder has no signer here.
-type pdir struct{ s ports.Signer }
+// pdir serves the vault signer for the keys the store holds a signing key
+// for: a key with only a hardware file, or none, has no signer here.
+type pdir struct {
+	s     ports.Signer
+	store ports.Store
+}
 
 func (d pdir) SignerFor(k custody.KeyRef) (ports.Signer, error) {
-	if k.Holder != custody.HolderVault {
-		return nil, fmt.Errorf("no signer for %s", k.Holder)
+	idx, err := ports.NewStoreKeyIndex(d.store)
+	if err != nil {
+		return nil, err
+	}
+	homes, err := idx.Homes(context.Background(), k.Identity)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := ports.HardwareHome(homes, k.Role); ok {
+		return nil, fmt.Errorf("no signer for %s: it is on a device", k)
+	}
+	if _, ok := ports.SecretHome(homes, k.Role); !ok {
+		return nil, fmt.Errorf("no signer for %s", k)
 	}
 	return d.s, nil
+}
+
+// Connected implements ports.SignerDirectory.
+func (d pdir) Connected(k custody.KeyRef) ([]ports.ConnectedSigner, error) {
+	return ports.ConnectedVia(d, k)
 }
 
 type pfixedClock struct{ t time.Time }
@@ -328,7 +348,7 @@ func (r *prig) mustGenerate() GeneratedPool {
 
 func (r *prig) pipeline(queue bool) txflow.Pipeline {
 	signer := native.VaultSigner{Vault: r.store}
-	p := txflow.Pipeline{Signers: pdir{signer}, Min: r.led, Fees: recFees{r.led, r.calls}, Bodies: r.led, Assembler: r.led, Confirmer: r.conf, Canonicalizer: idCanon{}}
+	p := txflow.Pipeline{Signers: pdir{signer, r.store}, Min: r.led, Fees: recFees{r.led, r.calls}, Bodies: r.led, Assembler: r.led, Confirmer: r.conf, Canonicalizer: idCanon{}}
 	if queue {
 		p.Queue = r.queue
 	} else {
@@ -339,13 +359,39 @@ func (r *prig) pipeline(queue bool) txflow.Pipeline {
 
 func (r *prig) register(queue bool, opts ...func(*RegisterPool)) RegisterPool {
 	uc := RegisterPool{Store: r.store, Addresses: r.led, Params: r.chain, Tip: r.chain, Utxos: r.chain, Pipeline: r.pipeline(queue),
-		PoolCerts: r.led, StakeCerts: r.led, TxIDs: r.led, Hasher: r.led, Clock: r.clock}
+		PoolCerts: r.led, StakeCerts: r.led, TxIDs: r.led, Hasher: r.led, Clock: r.clock,
+		Parties: fakeParties{"external": externalFP}}
 	for _, o := range opts {
 		if o != nil {
 			o(&uc)
 		}
 	}
 	return uc
+}
+
+// externalFP is the fingerprint the descriptor's party name "external" resolves to.
+var externalFP = party.Fingerprint{0xe1, 0xe2}
+
+// fakeParties resolves party names to fingerprints; it implements only ByName.
+type fakeParties map[string]party.Fingerprint
+
+func (f fakeParties) ByName(_ ports.Reader, name string) (party.Party, error) {
+	if fp, ok := f[name]; ok {
+		return party.Party{Name: name, Fingerprint: fp}, nil
+	}
+	return party.Party{}, ports.ErrNotFound
+}
+func (fakeParties) ByFingerprint(ports.Reader, party.Fingerprint) (party.Party, error) {
+	return party.Party{}, ports.ErrNotFound
+}
+func (fakeParties) List(ports.Reader) ([]party.Party, error) { return nil, nil }
+func (fakeParties) Put(ports.Writer, party.Party) error      { return nil }
+func (fakeParties) SetScope(ports.Writer, string, party.Scope) (party.Party, error) {
+	return party.Party{}, nil
+}
+func (fakeParties) Revoke(ports.Writer, string) (party.Party, error) { return party.Party{}, nil }
+func (fakeParties) Rotate(ports.Writer, party.Fingerprint, party.Party, party.Party) error {
+	return nil
 }
 
 func (r *prig) importer() ImportWitness {

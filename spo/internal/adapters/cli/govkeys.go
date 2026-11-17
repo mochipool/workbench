@@ -85,7 +85,7 @@ func (a *app) govKeyCommand(use, short, long string, replace bool, needs func(de
 				need = []Need{CapHardware}
 			}
 			return a.withEnv(cmd, envSpec{flags: &cf, needs: need}, func(ctx context.Context, s *session, env *Env, _ WireOptions) error {
-				req := governance.GenerateKeysRequest{Name: args[0], Source: governance.KeysRandom, Replace: o.replace, Holder: hw.holder()}
+				req := governance.GenerateKeysRequest{Name: args[0], Source: governance.KeysRandom, Replace: o.replace, Place: hw.place()}
 				if hw.on {
 					req.Account, req.Index = o.account, o.index
 					a.noteDevice()

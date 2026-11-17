@@ -18,6 +18,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
+	"github.com/mochipool/workbench/spo/internal/ports/porttest"
 	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
@@ -300,11 +301,11 @@ func TestPoolTransactionsMatchCardanoCLI(t *testing.T) {
 	keyRef := func(s string) (custody.KeyRef, string, [28]byte) {
 		switch s {
 		case "cold":
-			return custody.KeyRef{Role: custody.RolePoolCold, Holder: custody.HolderVault, Owner: "pp"}, k.p("pp.node.skey"), id
+			return porttest.Key(t, store, custody.RolePoolCold, "pp"), k.p("pp.node.skey"), id
 		case "pay":
-			return custody.KeyRef{Role: custody.RolePayment, Holder: custody.HolderVault, Owner: "pay"}, k.p("pay.skey"), txbuild.HashKey(rawKey(t, k.p("pay.vkey")))
+			return porttest.Key(t, store, custody.RolePayment, "pay"), k.p("pay.skey"), txbuild.HashKey(rawKey(t, k.p("pay.vkey")))
 		}
-		return custody.KeyRef{Role: custody.RoleStake, Holder: custody.HolderVault, Owner: s}, k.p(s + ".staking.skey"), txbuild.HashKey(rawKey(t, k.p(s+".staking.vkey")))
+		return porttest.Key(t, store, custody.RoleStake, s), k.p(s + ".staking.skey"), txbuild.HashKey(rawKey(t, k.p(s+".staking.vkey")))
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

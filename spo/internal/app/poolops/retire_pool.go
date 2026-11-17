@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/mochipool/workbench/spo/internal/app/keyring"
 	"github.com/mochipool/workbench/spo/internal/app/txflow"
 	"github.com/mochipool/workbench/spo/internal/domain/assets"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
@@ -204,11 +205,11 @@ func (uc RetirePool) Run(ctx context.Context, req RetireRequest) (RetireResult, 
 		return RetireResult{}, fmt.Errorf("payer: %w", err)
 	}
 	var (
-		d      *pool.Descriptor
-		cert   pool.Certificate
-		id     chain.PoolID
-		pay    payer
-		holder custody.Holder
+		d    *pool.Descriptor
+		cert pool.Certificate
+		id   chain.PoolID
+		pay  payer
+		cold custody.KeyRef
 	)
 	if err := uc.Store.View(ctx, func(r ports.Reader) error {
 		var err error
@@ -238,7 +239,7 @@ func (uc RetirePool) Run(ctx context.Context, req RetireRequest) (RetireResult, 
 		if cert.Retirement == nil || cert.Retirement.Pool != id {
 			return fmt.Errorf("%w: it is not a retirement of %s", ErrCertificateMismatch, id.Bech32())
 		}
-		if holder, err = holderOf(r, ports.Ref{Name: name, Kind: ports.NodeSKey}, ports.Ref{Name: name, Kind: ports.NodeHwsFile}); err != nil {
+		if cold, err = keyring.Held(r, custody.RolePoolCold, name, ErrNoSigningKey); err != nil {
 			return fmt.Errorf("%w: %v", ErrNoColdSigner, err)
 		}
 		pay, err = readPayer(r, uc.Addresses, uc.NetworkID, pn)
@@ -248,8 +249,8 @@ func (uc RetirePool) Run(ctx context.Context, req RetireRequest) (RetireResult, 
 	}
 	att := cert.Attachment(0)
 	slots := []txflow.Slot{
-		{Label: "payment", Key: custody.KeyRef{Role: custody.RolePayment, Holder: pay.holder, Owner: pay.name}, Hash: pay.hash},
-		{Label: "pool cold key", Key: custody.KeyRef{Role: custody.RolePoolCold, Holder: holder, Owner: name}, Hash: txbuild.KeyHash(id)},
+		{Label: "payment", Key: pay.key, Hash: pay.hash},
+		{Label: "pool cold key", Key: cold, Hash: txbuild.KeyHash(id)},
 	}
 	// Refuse a holder no signer serves before any chain read (SPO-07b-INV-004),
 	// and a hardware key mixed with a key-file key: "only a hardware cold key can
@@ -372,11 +373,8 @@ func (uc RetirePool) Run(ctx context.Context, req RetireRequest) (RetireResult, 
 	}}, nil
 }
 
-// hwChangeKeys declares a hardware payment key to the device as the owner of the
-// change output (SPO-Ptx-INV-009); nil for any other key.
+// hwChangeKeys declares the payment key to a device witness as the owner of the
+// change output (SPO-Ptx-INV-009); only a device witness reads it.
 func hwChangeKeys(pay custody.KeyRef) []custody.KeyRef {
-	if pay.Holder != custody.HolderHardware {
-		return nil
-	}
 	return []custody.KeyRef{pay}
 }

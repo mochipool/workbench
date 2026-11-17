@@ -16,6 +16,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/porttest"
 )
 
 // cardano-signer as the oracle of the message and registration signing
@@ -140,8 +141,7 @@ func TestCip8SignMatchesCardanoSigner(t *testing.T) {
 		json.Unmarshal(env, &x)
 		return x.CborHex[4:]
 	}
-	signers := native.NewSignatureSigners(st)
-	sg, _ := signers.SignerFor(custody.KeyRef{Role: custody.RolePayment, Holder: custody.HolderVault})
+	var sg ports.Signer = native.VaultSignatures{VaultSigner: native.VaultSigner{Vault: st}}
 	ms := sg.(ports.MessageSigner)
 
 	type kc struct {
@@ -194,7 +194,7 @@ func TestCip8SignMatchesCardanoSigner(t *testing.T) {
 							payload, _ = hex.DecodeString(data.val)
 						}
 						got, err := ms.SignMessage(ctx, ports.MessageRequest{
-							Key:     custody.KeyRef{Role: c.role, Holder: custody.HolderVault, Owner: set.owner},
+							Key:     porttest.Key(t, st, c.role, set.owner),
 							Address: addrBytes(t, c.addr), Payload: payload, Hashed: hashed})
 						if err != nil {
 							t.Fatal(err)
@@ -220,7 +220,7 @@ func TestCip8SignMatchesCardanoSigner(t *testing.T) {
 	}
 	// A key that does not belong to the address is refused by both.
 	_, _, rew := e.buildAddress(t, payV, stkV)
-	_, err = ms.SignMessage(ctx, ports.MessageRequest{Key: custody.KeyRef{Role: custody.RolePayment, Holder: custody.HolderVault, Owner: "ext"},
+	_, err = ms.SignMessage(ctx, ports.MessageRequest{Key: porttest.Key(t, st, custody.RolePayment, "ext"),
 		Address: addrBytes(t, rew), Payload: []byte("x")})
 	if err == nil {
 		t.Error("a payment key signed for a stake address")
@@ -285,8 +285,7 @@ func TestCip36MatchesCardanoSigner(t *testing.T) {
 		pair.SKey.Destroy()
 		votes = append(votes, bech)
 	}
-	signers := native.NewSignatureSigners(st)
-	sg, _ := signers.SignerFor(custody.KeyRef{Role: custody.RoleStake, Holder: custody.HolderVault})
+	var sg ports.Signer = native.VaultSignatures{VaultSigner: native.VaultSigner{Vault: st}}
 	c36 := sg.(ports.Cip36Signer)
 
 	for _, set := range []struct {
@@ -333,7 +332,7 @@ func TestCip36MatchesCardanoSigner(t *testing.T) {
 					copy(d.VotePub[:], pub)
 					reg.Delegations = append(reg.Delegations, d)
 				}
-				got, err := c36.SignCip36(ctx, mustStake(t, custody.KeyRef{Role: custody.RoleStake, Holder: custody.HolderVault, Owner: set.owner}), reg)
+				got, err := c36.SignCip36(ctx, mustStake(t, porttest.Key(t, st, custody.RoleStake, set.owner)), reg)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -412,8 +411,7 @@ func TestCip88MatchesCardanoSigner(t *testing.T) {
 	}()
 	calS, calV := e.signerKey(t, "calidus")
 	_ = calS
-	signers := native.NewSignatureSigners(st)
-	sg, _ := signers.SignerFor(custody.KeyRef{Role: custody.RolePoolCold, Holder: custody.HolderVault})
+	var sg ports.Signer = native.VaultSignatures{VaultSigner: native.VaultSigner{Vault: st}}
 	c88 := sg.(ports.Cip88Signer)
 
 	for _, set := range []struct {
@@ -457,7 +455,7 @@ func TestCip88MatchesCardanoSigner(t *testing.T) {
 				if id, _ := cose.CalidusID(reg.CalidusPub[:]); id != ext.CalidusIDBech {
 					t.Errorf("calidus id %s, tool %s", id, ext.CalidusIDBech)
 				}
-				got, err := c88.SignCip88(ctx, mustCold(t, custody.KeyRef{Role: custody.RolePoolCold, Holder: custody.HolderVault, Owner: set.owner}), reg)
+				got, err := c88.SignCip88(ctx, mustCold(t, porttest.Key(t, st, custody.RolePoolCold, set.owner)), reg)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -490,7 +488,7 @@ func TestCip88MatchesCardanoSigner(t *testing.T) {
 	// The wrong cold key is refused before signing.
 	reg := cose.Cip88{Nonce: 1}
 	reg.PoolID = cose.Blake2b224(mustHex(t, poolV))
-	if _, err := c88.SignCip88(ctx, mustCold(t, custody.KeyRef{Role: custody.RolePoolCold, Holder: custody.HolderVault, Owner: "norm"}), reg); err == nil {
+	if _, err := c88.SignCip88(ctx, mustCold(t, porttest.Key(t, st, custody.RolePoolCold, "norm")), reg); err == nil {
 		t.Error("a cold key signed for another pool's id")
 	}
 }

@@ -49,25 +49,3 @@ func (v VaultRegistry) SignRegistryMessages(ctx context.Context, key custody.Key
 	}
 	return out, nil
 }
-
-// RegistrySigners is a SignerDirectory whose vault signer is VaultRegistry.
-// Hardware and remote holders have no signer here: the plan refuses them.
-type RegistrySigners struct{ Vault ports.Vault }
-
-// SignerFor implements ports.SignerDirectory.
-func (s RegistrySigners) SignerFor(key custody.KeyRef) (ports.Signer, error) {
-	switch key.Holder {
-	case custody.HolderVault, "":
-		return VaultRegistry{VaultSignatures{VaultSigner{Vault: s.Vault}}}, nil
-	case custody.HolderHardware:
-		return nil, errors.New("no hardware signer can sign a token-registry entry")
-	case custody.HolderRemote:
-		return nil, errors.New("no remote signer is configured")
-	}
-	return nil, fmt.Errorf("no signer is configured for holder %q", key.Holder)
-}
-
-var (
-	_ ports.RegistrySigner  = VaultRegistry{}
-	_ ports.SignerDirectory = RegistrySigners{}
-)

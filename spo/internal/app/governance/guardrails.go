@@ -299,7 +299,7 @@ func (b Base) executeScripted(ctx context.Context, in txflow.Input, pr *plutusRu
 	var witnesses []txbuild.Witness
 	for _, sw := range ws {
 		if err := txbuild.VerifyWitness(bal.Body, sw.Witness, sw.Slot.Hash); err != nil {
-			return txflow.Result{}, fmt.Errorf("witness for the %s key of %s: %w", sw.Slot.Key.Role, sw.Slot.Key.Owner, err)
+			return txflow.Result{}, fmt.Errorf("witness for the %s key of %s: %w", sw.Slot.Key.Role, sw.Slot.Key.Identity, err)
 		}
 		witnesses = append(witnesses, sw.Witness)
 	}

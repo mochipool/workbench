@@ -18,7 +18,6 @@ import (
 	"github.com/mochipool/workbench/spo/internal/adapters/transferfile"
 	"github.com/mochipool/workbench/spo/internal/adapters/upstreamdir"
 	"github.com/mochipool/workbench/spo/internal/app/handles"
-	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -32,25 +31,6 @@ func init() { chainCaps = append(chainCaps, cli.GovernanceChainCaps...) }
 // noCalidusReader is why `pool calidus status` is unavailable outside light
 // mode, where the Koios adapter reads the registrations.
 const noCalidusReader = "the Calidus keys registered on chain (CIP-88) are read through Koios in light mode (SPO-15-MODE-002); this mode has no such provider"
-
-// signatureDirectory hands out the vault signer with the signature
-// capabilities, and the token-registry attestation, for a key held in the
-// vault, and leaves every other holder to the directory of the build. A
-// hardware key therefore has no registry signer: its profile does not claim the
-// operation, so a signing plan for a registry entry refuses it before anything
-// is read or written.
-type signatureDirectory struct {
-	vault ports.Vault
-	other ports.SignerDirectory
-}
-
-// SignerFor implements ports.SignerDirectory.
-func (d signatureDirectory) SignerFor(key custody.KeyRef) (ports.Signer, error) {
-	if key.Holder == custody.HolderVault {
-		return native.VaultRegistry{VaultSignatures: native.VaultSignatures{VaultSigner: native.VaultSigner{Vault: d.vault}}}, nil
-	}
-	return d.other.SignerFor(key)
-}
 
 // anchorLimit is the most bytes of an anchor document that is downloaded.
 const anchorLimit = 1 << 20
@@ -156,7 +136,10 @@ func wireTo(errw io.Writer, store ports.Store, o cli.WireOptions) (*cli.Env, err
 		// the qrcode adapter draws it (spec: SPO-09a-EXT-005).
 		env.VotingQR = native.VotingKeyQR{Vault: vault}
 		env.QRCodes = qrcode.Renderer{}
-		env.Signers = signatureDirectory{vault: vault, other: native.Signers{Vault: vault, Hardware: hw}}
+		// One directory of the signers connected now: the vault (with the message,
+		// registration and attestation capabilities) and the attached device. Which
+		// answers for a key is decided by the key's identity (ADR 0010 decision 3).
+		env.Signers = native.Signers{Vault: vault, Hardware: hw}
 	} else {
 		env.Absent(cli.CapSignatures, "the store cannot release signing keys to a signer")
 		env.Absent(cli.CapVotingQR, "the store cannot release signing keys to a signer")

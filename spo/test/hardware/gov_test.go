@@ -27,10 +27,10 @@ func govBase(w *world.World) governance.Base {
 	return governance.Base{Store: w.Store, Addresses: w.Ledger, Params: w.Chain, Tip: w.Chain, Utxos: w.Chain, NetworkID: w.Network, Pipeline: w.Pipeline()}
 }
 
-func drepKey(t *testing.T, w *world.World, name string, holder custody.Holder) governance.DRepKeysGenerated {
+func drepKey(t *testing.T, w *world.World, name string, holder custody.Placement) governance.DRepKeysGenerated {
 	t.Helper()
 	res, err := governance.GenerateDRepKeys{Store: w.Store, Keys: native.SoftwareKeys{}, Hardware: w.Exporter()}.
-		Run(context.Background(), governance.GenerateKeysRequest{Name: name, Holder: holder, Source: governance.KeysRandom})
+		Run(context.Background(), governance.GenerateKeysRequest{Name: name, Place: holder, Source: governance.KeysRandom})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,8 +50,8 @@ func TestDRepRegistrationBothOnLedger(t *testing.T) {
 	w := world.New(t)
 	w.UseHardware("Ledger", "8.0.8")
 	w.Bodies = world.LegacyInputs{Ledger: w.Ledger}
-	account(t, w, "hw", custody.HolderHardware, 700_000_000)
-	drepKey(t, w, "d", custody.HolderHardware)
+	account(t, w, "hw", custody.PlaceHardware, 700_000_000)
+	drepKey(t, w, "d", custody.PlaceHardware)
 	res, err := registerDRep(w).Run(context.Background(), governance.RegisterDRepRequest{DRep: "d", Payer: "hw.payment"})
 	if err != nil {
 		t.Fatal(err)
@@ -78,8 +78,8 @@ func TestUnrestrictedModeIsNeverImplied(t *testing.T) {
 	ctx := context.Background()
 	w := world.New(t)
 	w.UseHardware("Ledger", "8.0.8")
-	account(t, w, "hw", custody.HolderHardware, 700_000_000)
-	drepKey(t, w, "soft", custody.HolderVault)
+	account(t, w, "hw", custody.PlaceHardware, 700_000_000)
+	drepKey(t, w, "soft", custody.PlaceVault)
 
 	before := w.HW.Prompts()
 	_, err := registerDRep(w).Run(ctx, governance.RegisterDRepRequest{DRep: "soft", Payer: "hw.payment"})
@@ -107,8 +107,8 @@ func TestUnrestrictedModeIsNeverImplied(t *testing.T) {
 	// A Trezor has no unrestricted mode: refused upfront, naming the feature.
 	w2 := world.New(t)
 	w2.UseHardware("Trezor", "2.7.2")
-	account(t, w2, "hw", custody.HolderHardware, 700_000_000)
-	drepKey(t, w2, "soft", custody.HolderVault)
+	account(t, w2, "hw", custody.PlaceHardware, 700_000_000)
+	drepKey(t, w2, "soft", custody.PlaceVault)
 	p := w2.HW.Prompts()
 	_, err = registerDRep(w2).Run(ctx, governance.RegisterDRepRequest{DRep: "soft", Payer: "hw.payment", Unrestricted: true})
 	var un *custody.UnsupportedError
@@ -145,8 +145,8 @@ func TestVoteOnLedgerAndRefusedOnOtherVendors(t *testing.T) {
 
 	w := world.New(t)
 	w.UseHardware("Ledger", "8.0.8")
-	account(t, w, "hw", custody.HolderHardware, 50_000_000)
-	d := drepKey(t, w, "d", custody.HolderHardware)
+	account(t, w, "hw", custody.PlaceHardware, 50_000_000)
+	d := drepKey(t, w, "d", custody.PlaceHardware)
 	res, err := (governance.RegisterVote{Base: govBase(w), Votes: w.Ledger}).Run(ctx, vote(w, d))
 	if err != nil {
 		t.Fatal(err)
@@ -158,8 +158,8 @@ func TestVoteOnLedgerAndRefusedOnOtherVendors(t *testing.T) {
 	for _, vendor := range []struct{ name, app string }{{"Trezor", "2.7.2"}, {"Keystone", "1.7.7"}} {
 		w := world.New(t)
 		w.UseHardware("Ledger", "8.0.8") // the keys are made on a Ledger,
-		account(t, w, "hw", custody.HolderHardware, 50_000_000)
-		d := drepKey(t, w, "d", custody.HolderHardware)
+		account(t, w, "hw", custody.PlaceHardware, 50_000_000)
+		d := drepKey(t, w, "d", custody.PlaceHardware)
 		hw := w.UseHardware(vendor.name, vendor.app) // and the vote is tried on another device
 		hw.Lazy.Profile()                            // the version probe is the only call the vendor may see
 		before := hw.Prompts()
@@ -183,8 +183,8 @@ func TestKeptHardwareRefusals(t *testing.T) {
 	ctx := context.Background()
 	w := world.New(t)
 	w.UseHardware("Ledger", "8.0.8")
-	account(t, w, "hw", custody.HolderHardware, 50_000_000)
-	d := drepKey(t, w, "d", custody.HolderVault)
+	account(t, w, "hw", custody.PlaceHardware, 50_000_000)
+	d := drepKey(t, w, "d", custody.PlaceVault)
 	var act dgov.ActionID
 	act.TxID[0] = 9
 	vf, _ := w.Ledger.BuildVoteFile(dgov.Vote{Voter: dgov.Voter{Role: dgov.RoleDRep, Cred: d.Credential}, Action: act, Decision: dgov.No}, "")
@@ -211,8 +211,8 @@ func TestSeveralVotesOnLedgerNeedConsent(t *testing.T) {
 	ctx := context.Background()
 	w := world.New(t)
 	w.UseHardware("Ledger", "8.0.8")
-	account(t, w, "hw", custody.HolderHardware, 50_000_000)
-	d := drepKey(t, w, "d", custody.HolderHardware)
+	account(t, w, "hw", custody.PlaceHardware, 50_000_000)
+	d := drepKey(t, w, "d", custody.PlaceHardware)
 	var names []string
 	for i := 0; i < 2; i++ {
 		var act dgov.ActionID
@@ -262,8 +262,8 @@ func TestDRepUpdateOnLedgerAndKeystone(t *testing.T) {
 		w := world.New(t)
 		w.UseHardware(dev[0], dev[1])
 		w.Bodies = world.LegacyInputs{Ledger: w.Ledger}
-		account(t, w, "hw", custody.HolderHardware, 5_000_000)
-		drepKey(t, w, "d", custody.HolderHardware)
+		account(t, w, "hw", custody.PlaceHardware, 5_000_000)
+		drepKey(t, w, "d", custody.PlaceHardware)
 		uc := governance.RegisterDRep{Base: govBase(w), Certs: w.Ledger, DReps: registeredDRep{}}
 		res, err := uc.Run(context.Background(), governance.RegisterDRepRequest{DRep: "d", Payer: "hw.payment", AllowAnchorClear: true})
 		if err != nil {

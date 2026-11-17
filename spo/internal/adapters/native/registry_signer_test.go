@@ -8,9 +8,11 @@ import (
 
 	dassets "github.com/mochipool/workbench/spo/internal/domain/assets"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/domain/tokenmeta"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/porttest"
 	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
@@ -71,7 +73,7 @@ func TestVaultRegistrySigner(t *testing.T) {
 			t.Errorf("%s can sign a registry entry", r)
 		}
 	}
-	key, err := custody.As[custody.Policy](custody.KeyRef{Role: custody.RolePolicy, Holder: custody.HolderVault, Owner: "tok"})
+	key, err := custody.As[custody.Policy](porttest.Key(t, st, custody.RolePolicy, "tok"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,14 +87,15 @@ func TestVaultRegistrySigner(t *testing.T) {
 	if !ed25519.Verify(raw, msg[:], got[0].Signature[:]) || string(got[0].PublicKey[:]) != string(raw) {
 		t.Error("the attestation does not verify under the policy's verification key")
 	}
-	// A key of another role is refused, and a hardware or remote holder has no signer.
-	pay, _ := custody.As[custody.Payment](custody.KeyRef{Role: custody.RolePayment, Owner: "tok"})
-	_ = pay // typed keys only exist for the role asked; the signer takes custody.Policy
+	// A key the vault does not hold, and the policy key under another role,
+	// have no signer.
 	dir := RegistrySigners{Vault: st}
-	for _, h := range []custody.Holder{custody.HolderHardware, custody.HolderRemote, "other"} {
-		if _, err := dir.SignerFor(custody.KeyRef{Role: custody.RolePolicy, Holder: h, Owner: "tok"}); err == nil {
-			t.Errorf("holder %s has a signer", h)
-		}
+	nobody, _ := identity.KeyHashOf(make([]byte, 32))
+	if _, err := dir.SignerFor(custody.KeyRef{Role: custody.RolePolicy, Identity: nobody}); err == nil {
+		t.Error("a key nobody holds has a signer")
+	}
+	if _, err := dir.SignerFor(custody.KeyRef{Role: custody.RolePayment, Identity: key.Ref().Identity}); err == nil {
+		t.Error("the policy key under the payment role has a signer")
 	}
 }
 

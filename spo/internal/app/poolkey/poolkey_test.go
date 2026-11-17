@@ -2,6 +2,7 @@ package poolkey
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"os"
@@ -196,10 +197,10 @@ func TestGenerateCalidusKeyRefusals(t *testing.T) {
 		t.Errorf("files changed: %v", got)
 	}
 	var ue *custody.UnsupportedError
-	if _, err := r.keyUC().Run(context.Background(), GenerateCalidusKeyRequest{Name: "hw", Holder: custody.HolderHardware}); !errors.Is(err, ErrHardwareCalidusSuspended) {
+	if _, err := r.keyUC().Run(context.Background(), GenerateCalidusKeyRequest{Name: "hw", Place: custody.PlaceHardware}); !errors.Is(err, ErrHardwareCalidusSuspended) {
 		t.Errorf("hardware holder: %v", err)
 	}
-	if _, err := r.keyUC().Run(context.Background(), GenerateCalidusKeyRequest{Name: "rm", Holder: custody.HolderRemote}); !errors.As(err, &ue) {
+	if _, err := r.keyUC().Run(context.Background(), GenerateCalidusKeyRequest{Name: "rm", Place: "remote"}); !errors.As(err, &ue) {
 		t.Errorf("remote holder: %v", err)
 	}
 	if _, err := r.keyUC().Run(context.Background(), GenerateCalidusKeyRequest{Name: "../x"}); !errors.Is(err, ErrBadName) {
@@ -335,6 +336,11 @@ type failingDir struct{}
 
 func (failingDir) SignerFor(custody.KeyRef) (ports.Signer, error) { return failingSigner{}, nil }
 
+// Connected implements ports.SignerDirectory.
+func (d failingDir) Connected(k custody.KeyRef) ([]ports.ConnectedSigner, error) {
+	return ports.ConnectedVia(d, k)
+}
+
 type failingSigner struct{}
 
 func (failingSigner) Profile() custody.Profile {
@@ -358,13 +364,13 @@ func TestRegistrationHardwareColdKeyRefusedUpFront(t *testing.T) {
 	}
 	r.coldKey(t, "p")
 	r.put(t, ports.Ref{Name: "p", Kind: ports.NodeHwsFile}, []byte("{}"))
+	// The hardware file wins beside a key file (SPO-15-INV-002) and, with no device
+	// signer, is refused by the plan. (The old "remote holder" case is gone: a
+	// holder can no longer be named in a request.)
 	n := len(r.files(t))
 	var ue *custody.UnsupportedError
 	if _, err := r.regUC().Run(ctx, CalidusRegistrationRequest{Calidus: "cal", Pool: "p"}); !errors.As(err, &ue) {
 		t.Errorf("hwsfile beside skey: %v", err)
-	}
-	if _, err := r.regUC().Run(ctx, CalidusRegistrationRequest{Calidus: "cal", Pool: "p", Holder: custody.HolderRemote}); !errors.As(err, &ue) {
-		t.Errorf("remote holder: %v", err)
 	}
 	if len(r.files(t)) != n {
 		t.Error("a refused plan wrote a file")
@@ -474,4 +480,47 @@ func TestQueryCalidusResults(t *testing.T) {
 	if err != nil || len(res.Entries) != 3 || res.UniqueIDs != 2 || res.Entries[0].TxHash != "aa" {
 		t.Errorf("entries: %v %+v", err, res)
 	}
+}
+
+// A signer that answers with a valid registration signed by another cold key
+// (and naming that key's pool) is refused: the pool id demanded decides.
+//
+// spec: SPO-Xidentity-SEC-003
+func TestRegistrationFromAnotherColdKeyIsRefused(t *testing.T) {
+	r := newRig(t)
+	ctx := context.Background()
+	m := secret.Take([]byte(phrase))
+	defer m.Destroy()
+	if _, err := r.keyUC().Run(ctx, GenerateCalidusKeyRequest{Name: "cal", Mnemonic: m}); err != nil {
+		t.Fatal(err)
+	}
+	r.coldKey(t, "p")
+	n := len(r.files(t))
+	uc := r.regUC()
+	uc.Signers = impostorDir{}
+	if _, err := uc.Run(ctx, CalidusRegistrationRequest{Calidus: "cal", Pool: "p"}); !errors.Is(err, custody.ErrMessageKey) || len(r.files(t)) != n {
+		t.Errorf("%v, files %d, want %d", err, len(r.files(t)), n)
+	}
+}
+
+type impostorDir struct{}
+
+func (impostorDir) SignerFor(custody.KeyRef) (ports.Signer, error) { return impostorSigner{}, nil }
+
+// Connected implements ports.SignerDirectory.
+func (d impostorDir) Connected(k custody.KeyRef) ([]ports.ConnectedSigner, error) {
+	return ports.ConnectedVia(d, k)
+}
+
+type impostorSigner struct{}
+
+func (impostorSigner) Profile() custody.Profile {
+	return custody.NewProfile("impostor").Allow(custody.RolePoolCold, custody.OpSignCip88)
+}
+
+// SignCip88 registers for the pool of a cold key of its own.
+func (impostorSigner) SignCip88(_ context.Context, _ custody.Key[custody.PoolCold], reg cose.Cip88) (ports.Registration, error) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	reg.PoolID = cose.Blake2b224(pub)
+	return ports.Registration{CBOR: reg.Metadata(pub, ed25519.Sign(priv, reg.ToBeSigned()))}, nil
 }

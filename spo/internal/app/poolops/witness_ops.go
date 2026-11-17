@@ -9,6 +9,8 @@ import (
 	"path"
 	"strings"
 
+	"github.com/mochipool/workbench/spo/internal/app/hwkeys"
+	"github.com/mochipool/workbench/spo/internal/app/keyring"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
@@ -125,13 +127,13 @@ func (uc SignWitnessFile) Run(ctx context.Context, req SignRequest) (SignResult,
 
 	vkeyRef := ports.Ref{Name: owner, Kind: ports.StakingVKey}
 	var vkey []byte
-	var holder custody.Holder
+	var key custody.KeyRef
 	if err := uc.Store.View(ctx, func(r ports.Reader) error {
 		var err error
 		if vkey, err = r.Get(vkeyRef); err != nil {
 			return fmt.Errorf("%s: %w", vkeyRef, err)
 		}
-		holder, err = holderOf(r, ports.Ref{Name: owner, Kind: ports.StakingSKey}, ports.Ref{Name: owner, Kind: ports.StakingHwsFile})
+		key, err = keyring.Held(r, custody.RoleStake, owner, ErrNoSigningKey)
 		return err
 	}); err != nil {
 		return SignResult{}, err
@@ -139,12 +141,18 @@ func (uc SignWitnessFile) Run(ctx context.Context, req SignRequest) (SignResult,
 	if !sameJSON(vkey, tf.SigningVKey) {
 		return SignResult{}, ErrWrongSigningKey
 	}
-	// The vkey's description says hardware, as upstream reads it; the files
-	// found decide too (SPO-Pfiles-INV-002).
-	if d := descriptionOf(vkey); strings.Contains(d, "Hardware") {
-		holder = custody.HolderHardware
+	// Which signer answers is the directory's decision, taken now: a key
+	// that no connected signer holds fails here, before anything is shown or
+	// any prompt (ADR 0010 decision 3). The result says whether it is a device.
+	s, err := uc.Signers.SignerFor(key)
+	if err != nil {
+		return SignResult{}, err
 	}
-	res.Hardware = holder == custody.HolderHardware
+	w, ok := s.(ports.TxWitnesser)
+	if !ok {
+		return SignResult{}, fmt.Errorf("the signer of %s cannot make witnesses", key)
+	}
+	res.Hardware = hwkeys.IsHardware(s)
 
 	// Decode and show the body: the signer never approves what it cannot read.
 	cbor, err := pool.ParseTxEnvelope(tf.TxBody)
@@ -176,7 +184,7 @@ func (uc SignWitnessFile) Run(ctx context.Context, req SignRequest) (SignResult,
 	if uc.Approver == nil {
 		return SignResult{}, ErrNoApprover
 	}
-	ok, err := uc.Approver.ApproveSigning(ctx, tf.SigningName, view)
+	ok, err = uc.Approver.ApproveSigning(ctx, tf.SigningName, view)
 	if err != nil {
 		return SignResult{}, err
 	}
@@ -184,18 +192,14 @@ func (uc SignWitnessFile) Run(ctx context.Context, req SignRequest) (SignResult,
 		return SignResult{}, ErrSigningNotApproved
 	}
 
-	key := custody.KeyRef{Role: custody.RoleStake, Holder: holder, Owner: owner}
-	s, err := uc.Signers.SignerFor(key)
-	if err != nil {
-		return SignResult{}, err
-	}
-	w, ok := s.(ports.TxWitnesser)
-	if !ok {
-		return SignResult{}, fmt.Errorf("the signer of %s cannot make witnesses", key)
-	}
 	wit, err := w.Witness(ctx, key, txbuild.TxBody{CBOR: cbor, ID: id})
 	if err != nil {
 		return SignResult{}, err
+	}
+	// The answer is verified against the demanded key before it is written.
+	idArr := [32]byte(id)
+	if err := custody.VerifyTxWitnessOverTx(cbor, &idArr, wit.VKey, wit.Signature, key.Identity); err != nil {
+		return SignResult{}, fmt.Errorf("the signer's witness does not verify: %w", err)
 	}
 	tf.SignedWitness = pool.WitnessEnvelope(wit)
 	tf.DateSigned = rfc5322(uc.Clock.Now())
@@ -211,14 +215,6 @@ func sameJSON(a, b []byte) bool {
 	ca, _ := json.Marshal(x)
 	cb, _ := json.Marshal(y)
 	return bytes.Equal(ca, cb)
-}
-
-func descriptionOf(env []byte) string {
-	var e struct {
-		Description string `json:"description"`
-	}
-	_ = json.Unmarshal(env, &e)
-	return e.Description
 }
 
 // ---- info ----------------------------------------------------------------------

@@ -14,6 +14,7 @@ import (
 
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -62,6 +63,10 @@ type Signer struct {
 	// it (SPO-Xparty-PRE-006).
 	Signers ports.SignerDirectory
 	Keys    KeyFinder
+	// History returns the recorded roles of a key identity (custody.RoleHistory;
+	// ports.RoleHistoryOf over the workspace's index until the role-history
+	// record exists). nil checks nothing beyond the role the demand names.
+	History func(ctx context.Context, id identity.Ref) (custody.RoleHistory, bool, error)
 	// NetworkMagic is the workspace's network.
 	NetworkMagic uint32
 	// Owned is what this signer owns, as credentials: the key hashes of the
@@ -132,7 +137,6 @@ type storedRequest struct {
 	Slot       int    `json:"slot"`
 	Role       string `json:"role"`
 	KeyHash    string `json:"keyHash"`
-	KeyOwner   string `json:"keyOwner,omitempty"`
 	Operation  string `json:"operation"`
 	BodyHash   string `json:"bodyHash"`
 	Body       []byte `json:"body,omitempty"`
@@ -676,6 +680,17 @@ func (s Signer) onRequest(ctx context.Context, local ports.LocalIdentity, o port
 			reason, refuse = party.RefuseNoKey, true
 		}
 		key = k
+		// ADR 0010 decision 3, enforced again on receipt: a key identity that
+		// was ever recorded in a cold role is never answered over a network
+		// transport, whatever role the demand names. The refusal depends on
+		// what this machine holds, so it is the silent one.
+		if holds && facts.OverNetwork && s.History != nil {
+			// fails closed: a history that cannot be read for certain refuses too
+			h, known, err := s.History(ctx, k.Identity)
+			if err != nil || (known && h.HasColdRole()) {
+				reason, refuse = party.RefuseNoKey, true
+			}
+		}
 	}
 	if !refuse {
 		fl, err := s.resolveFlow(ctx, view, req.KeyRole, facts.OverNetwork)
@@ -703,7 +718,7 @@ func (s Signer) onRequest(ctx context.Context, local ports.LocalIdentity, o port
 		}
 	}
 	q := storedRequest{ID: hexMsg(o.ID()), From: hexFP(o.Sender().Fingerprint), FromName: o.Sender().Name, Collection: hexColl(req.Collection),
-		Slot: int(req.Slot), Role: string(req.KeyRole), KeyHash: hex.EncodeToString(req.KeyHash[:]), KeyOwner: key.Owner,
+		Slot: int(req.Slot), Role: string(req.KeyRole), KeyHash: hex.EncodeToString(req.KeyHash[:]),
 		Operation: req.Operation, BodyHash: hexHash(req.BodyHash), Body: req.TxBody, Aux: req.AuxData, TTL: req.TTLSlot, Magic: req.NetworkMagic,
 		Purpose: req.Purpose, Via: via.String(), ReceivedAt: now.Unix(), Expires: o.Expires().Unix(), State: reqPending}
 	h := Handled{Type: party.TypeSigningRequest, Sender: o.Sender().Fingerprint, HasSender: true, Request: o.ID(), Effect: "stored"}

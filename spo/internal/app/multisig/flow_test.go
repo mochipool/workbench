@@ -1,6 +1,7 @@
 package multisig_test
 
 import (
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -11,10 +12,10 @@ import (
 	"golang.org/x/crypto/blake2b"
 
 	"github.com/mochipool/workbench/spo/internal/adapters/envelope"
-	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/app/multisig"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
@@ -446,7 +447,12 @@ type deviceDir struct{}
 
 func (deviceDir) SignerFor(custody.KeyRef) (ports.Signer, error) { return noDevice{}, nil }
 
-// spec: SPO-Xparty-PRE-006, SPO-Xparty-INV-020, SPO-Xparty-PRE-004, SPO-Xparty-INV-006
+// Connected implements ports.SignerDirectory.
+func (d deviceDir) Connected(k custody.KeyRef) ([]ports.ConnectedSigner, error) {
+	return ports.ConnectedVia(d, k)
+}
+
+// spec: SPO-Xparty-PRE-006, SPO-Xparty-INV-020, SPO-Xparty-PRE-004, SPO-Xparty-INV-006, SPO-Xidentity-PRE-004
 func TestPRE006Refusals(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -473,6 +479,18 @@ func TestPRE006Refusals(t *testing.T) {
 		{"the pool cold key over a network transport", party.RefuseColdKeyOverNetwork, sceneOpt{cold: true, kind: ports.ViaNetwork}, func(s *scene, r *party.SigningRequest) {
 			r.KeyRole, r.KeyHash = custody.RolePoolCold, [28]byte(s.poolID)
 		}, nil},
+		{"a key ever recorded cold, demanded as stake over a network (silent)", party.RefuseNoKey, sceneOpt{kind: ports.ViaNetwork}, nil, func(s *scene) multisig.Signer {
+			sg := s.B.Signer()
+			sg.History = coldHistory(s)
+			return sg
+		}},
+		{"a role history that cannot be read, over a network (fails closed)", party.RefuseNoKey, sceneOpt{kind: ports.ViaNetwork}, nil, func(s *scene) multisig.Signer {
+			sg := s.B.Signer()
+			sg.History = func(context.Context, identity.Ref) (custody.RoleHistory, bool, error) {
+				return custody.RoleHistory{}, false, errors.New("unreadable")
+			}
+			return sg
+		}},
 		{"the signer cannot meet the demand of the body", party.RefuseCannotSign, sceneOpt{}, nil, func(s *scene) multisig.Signer {
 			sg := s.B.Signer()
 			sg.Signers = deviceDir{}
@@ -608,7 +626,7 @@ func TestOpenRefusesASlotWithoutAnEnrolledSigner(t *testing.T) {
 	s := newScene(t, sceneOpt{})
 	mk := func(name, partyName string) multisig.OpenRequest {
 		return multisig.OpenRequest{Name: name, Body: s.body, TTL: s.ttl, Slots: []pool.Slot{{Name: "bob.staking", Role: custody.RoleStake, KeyHash: s.bobHash,
-			Holder: custody.HolderRemote, Party: partyName}}}
+			PartyFingerprint: s.fp(partyName)}}}
 	}
 	other := partyrig.New(t, "other", s.clock, s.chain)
 	// A signer enrolled for another pool is a signer: the Scope of a party is
@@ -662,7 +680,7 @@ func TestOpenRefusesABodyThatDoesNotHashToItsId(t *testing.T) {
 	bad := s.body
 	bad.ID[0] ^= 1
 	_, err := s.C.Coordinator().Open(ctx, multisig.OpenRequest{Name: "bad", Body: bad, TTL: s.ttl, Slots: []pool.Slot{{Name: "bob.staking", Role: custody.RoleStake,
-		KeyHash: s.bobHash, Holder: custody.HolderRemote, Party: "bob"}}})
+		KeyHash: s.bobHash, PartyFingerprint: s.fp("bob")}}})
 	if !errors.Is(err, multisig.ErrBodyHash) {
 		t.Errorf("err = %v", err)
 	}
@@ -677,7 +695,7 @@ func newZed(s *scene) *partyrig.Workspace {
 }
 
 func nativeWitness(s *scene, owner string) (txbuild.Witness, error) {
-	return native.VaultSigner{Vault: s.X.Store}.Witness(ctx, custody.KeyRef{Role: custody.RoleStake, Holder: custody.HolderVault, Owner: owner}, txbuild.TxBody{ID: s.body.ID})
+	return s.X.SignID(custody.RoleStake, owner, s.body.ID), nil
 }
 
 var _ = rand.Reader
@@ -704,5 +722,73 @@ func TestOfflineModeHasNoNetworkTransport(t *testing.T) {
 	res, err := off.RequestSignatures(ctx, multisig.RequestInput{Ref: s.ref}, file.Transport())
 	if err != nil || res[0].Status != multisig.SlotRequested || len(file.Take()) != 1 {
 		t.Fatalf("by file: %+v, %v", res, err)
+	}
+}
+
+// The cold-key rule is keyed on the roles recorded for the key identity, not on
+// the role the slot names: a stake-role slot whose key identity was ever a pool
+// cold key is not requested over a network (and is over a file), where without
+// that history it is.
+//
+// spec: SPO-Xidentity-PRE-004
+func TestARequestForAKeyWithAColdHistoryIsNotCreatedForANetwork(t *testing.T) {
+	s := newScene(t, sceneOpt{kind: ports.ViaNetwork})
+	c := s.C.Coordinator()
+	bobID, err := identity.NewRef(identity.KindKeyHash, s.bobHash[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := custody.NewRoleHistory(bobID, custody.RoleStake)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h, err = h.With(custody.RolePoolCold); err != nil {
+		t.Fatal(err)
+	}
+	c.History = func(_ context.Context, id identity.Ref) (custody.RoleHistory, bool, error) {
+		if id == bobID {
+			return h, true, nil
+		}
+		return custody.RoleHistory{}, false, nil
+	}
+	res, err := c.RequestSignatures(ctx, multisig.RequestInput{Ref: s.ref, Purpose: "x"}, s.cb.Transport())
+	if err != nil || len(res) != 1 || res[0].Status != multisig.SlotRefused || !errors.Is(res[0].Err, multisig.ErrColdKeyOverNetwork) {
+		t.Fatalf("a cold-history identity over a network: %+v %v", res, err)
+	}
+	file := partyrig.NewPipe(ports.ViaFile)
+	file.Down = true
+	if res, err := c.RequestSignatures(ctx, multisig.RequestInput{Ref: s.ref, Purpose: "x"}, file.Transport()); err != nil || res[0].Status != multisig.SlotRequested {
+		t.Fatalf("by file: %+v %v", res, err)
+	}
+	// With no such history the same slot goes over the network.
+	s2 := newScene(t, sceneOpt{kind: ports.ViaNetwork})
+	if res := s2.request(); res[0].Status != multisig.SlotRequested {
+		t.Errorf("no history: %+v", res)
+	}
+}
+
+// coldHistory says the signer holds bob's stake key hash as a pool cold key too
+// (the same verification key stored as `node` and as `staking`).
+func coldHistory(s *scene) func(context.Context, identity.Ref) (custody.RoleHistory, bool, error) {
+	bobID, _ := identity.NewRef(identity.KindKeyHash, s.bobHash[:])
+	h, _ := custody.NewRoleHistory(bobID, custody.RoleStake)
+	h, _ = h.With(custody.RolePoolCold)
+	return func(_ context.Context, id identity.Ref) (custody.RoleHistory, bool, error) {
+		return h, id == bobID, nil
+	}
+}
+
+// The same request over the file transport is not refused by the history rule:
+// the carried-file transport remains allowed (ADR 0005, ADR 0010 decision 3).
+//
+// spec: SPO-Xidentity-PRE-004
+func TestAColdHistoryKeyRequestedByFileIsAccepted(t *testing.T) {
+	s := newScene(t, sceneOpt{})
+	env := s.forgedRequest(nil)
+	sg := s.B.Signer()
+	sg.History = coldHistory(s)
+	h, err := sg.Handle(ctx, ports.FileReceived(env))
+	if err != nil || h.Refused || h.Effect != "stored" {
+		t.Fatalf("handled = %+v, %v", h, err)
 	}
 }

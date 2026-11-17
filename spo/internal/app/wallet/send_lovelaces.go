@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/mochipool/workbench/spo/internal/app/hwkeys"
+	"github.com/mochipool/workbench/spo/internal/app/keyring"
 	"github.com/mochipool/workbench/spo/internal/app/txflow"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
@@ -247,7 +249,7 @@ func (uc SendLovelaces) Run(ctx context.Context, req SendRequest) (SendResult, e
 		return SendResult{}, fmt.Errorf("source: %w", err)
 	}
 	var src, dst resolved
-	var holder custody.Holder
+	var payKey custody.KeyRef
 	if err := uc.Store.View(ctx, func(r ports.Reader) error {
 		// spec: SPO-Ptx-IN-001, SPO-Ptx-IN-002, SPO-01sendLovelaces-IN-001, SPO-Pfiles-INV-002
 		addr, ok, err := readAddress(r, srcName)
@@ -258,20 +260,11 @@ func (uc SendLovelaces) Run(ctx context.Context, req SendRequest) (SendResult, e
 			return fmt.Errorf("%w: %s.addr", ErrNoSourceAddress, srcName)
 		}
 		src = resolved{name: srcName, addr: addr}
-		skey, err := r.Exists(ports.Ref{Name: srcName, Kind: ports.AddrSKey})
-		if err != nil {
+		var held bool
+		if payKey, held, err = keyring.ResolveHeld(r, custody.RolePayment, srcName); err != nil {
 			return err
 		}
-		hws, err := r.Exists(ports.Ref{Name: srcName, Kind: ports.AddrHwsFile})
-		if err != nil {
-			return err
-		}
-		switch {
-		case hws: // the hardware file wins when both exist (SPO-Pfiles-INV-002)
-			holder = custody.HolderHardware
-		case skey:
-			holder = custody.HolderVault
-		default:
+		if !held {
 			return fmt.Errorf("%w: %s", ErrNoSigningKey, srcName)
 		}
 		dst, err = uc.resolveDestination(r, req.Destination)
@@ -363,7 +356,7 @@ func (uc SendLovelaces) Run(ctx context.Context, req SendRequest) (SendResult, e
 	if err != nil {
 		return SendResult{}, err
 	}
-	keyRef := custody.KeyRef{Role: custody.RolePayment, Holder: holder, Owner: src.name}
+	keyRef := payKey
 	slots := []custody.Slot{{
 		Label:  "payment",
 		Key:    keyRef,
@@ -396,7 +389,7 @@ func (uc SendLovelaces) Run(ctx context.Context, req SendRequest) (SendResult, e
 			return SendResult{}, ErrNoSigner
 		}
 		witnessers[sl.Key] = wt
-		hardware = hardware || sl.Key.Holder == custody.HolderHardware
+		hardware = hardware || hwkeys.IsHardware(signer)
 	}
 	if hardware && uc.Canonicalizer == nil {
 		return SendResult{}, txflow.ErrNoCanonicalizer
@@ -469,26 +462,34 @@ func (uc SendLovelaces) Run(ctx context.Context, req SendRequest) (SendResult, e
 	// Stage 9: witnesses from the planned signers, each checked against
 	// the body and the key the address names before anything is assembled.
 	var witnesses []txbuild.Witness
+	// Two slots for one key (a co-signer key that is the payer's key) need one
+	// witness: the second is not asked for, and no required slot is dropped (its
+	// key has signed).
+	done := map[custody.KeyRef]bool{}
 	for _, slot := range plan.Slots() {
+		if done[slot.Key] {
+			continue
+		}
+		done[slot.Key] = true
 		var w txbuild.Witness
 		var err error
 		witnesser := witnessers[slot.Key]
-		if hw, isHW := witnesser.(ports.HardwareWitnesser); isHW && slot.Key.Holder == custody.HolderHardware {
+		if hw, isHW := witnesser.(ports.HardwareWitnesser); isHW {
 			// The change keys let the device recognise the change output when the
 			// body has two outputs (SPO-01sendLovelaces-EXT-002).
 			var change []custody.KeyRef
 			if len(bal.Spec.Outputs) == 2 {
-				change = hardwareChangeKeys(ctx, uc.Store, slot.Key)
+				change = hardwareChangeKeys(ctx, uc.Store, src.name, slot.Key)
 			}
 			w, err = hw.WitnessWith(ctx, slot.Key, bal.Body, ports.HardwareTxOptions{ChangeKeys: change})
 		} else {
 			w, err = witnesser.Witness(ctx, slot.Key, bal.Body)
 		}
 		if err != nil {
-			return SendResult{}, fmt.Errorf("witness for the %s key of %s: %w", slot.Key.Role, slot.Key.Owner, err)
+			return SendResult{}, fmt.Errorf("witness for the %s key of %s: %w", slot.Key.Role, slot.Key.Identity, err)
 		}
 		if err := txbuild.VerifyWitness(bal.Body, w, witnessHash[slot.Key]); err != nil {
-			return SendResult{}, fmt.Errorf("witness for the %s key of %s: %w", slot.Key.Role, slot.Key.Owner, err)
+			return SendResult{}, fmt.Errorf("witness for the %s key of %s: %w", slot.Key.Role, slot.Key.Identity, err)
 		}
 		witnesses = append(witnesses, w)
 	}

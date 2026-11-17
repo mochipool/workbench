@@ -22,6 +22,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/porttest"
 	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
@@ -224,7 +225,7 @@ func TestOpCertMatchesCardanoCLI(t *testing.T) {
 	coldRaw, _ := cold.Key32()
 	kesEnv, _ := pool.ParseEnvelope([]byte(readFile(t, dir, "kes.vkey")))
 	kesRaw, _ := kesEnv.Key32()
-	key, _ := coldKeyRef("mypool")
+	key := coldKeyRef(t, store, "mypool")
 
 	for _, counter := range []uint64{0, 23, 24, 255, 256, 300, 65536, 70000, 1 << 32} {
 		for _, period := range []uint64{0, 23, 24, 988, 65535, 70000} {
@@ -285,6 +286,11 @@ func TestOpCertMatchesCardanoCLI(t *testing.T) {
 	}
 }
 
-func coldKeyRef(owner string) (custody.Key[custody.PoolCold], error) {
-	return custody.As[custody.PoolCold](custody.KeyRef{Role: custody.RolePoolCold, Holder: custody.HolderVault, Owner: owner})
+func coldKeyRef(t *testing.T, st ports.Store, owner string) custody.Key[custody.PoolCold] {
+	t.Helper()
+	k, err := custody.As[custody.PoolCold](porttest.Key(t, st, custody.RolePoolCold, owner))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
 }

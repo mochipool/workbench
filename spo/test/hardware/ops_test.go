@@ -132,7 +132,7 @@ func TestStakeDeregistrationOnLedger(t *testing.T) {
 	w := world.New(t)
 	w.UseHardware("Ledger", "8.0.8")
 	w.Bodies = world.LegacyInputs{Ledger: w.Ledger}
-	account(t, w, "hw", custody.HolderHardware, 50_000_000)
+	account(t, w, "hw", custody.PlaceHardware, 50_000_000)
 	acct := accountReader{deposit: 2_000_000}
 	gen := stake.GenerateDeregistrationCertificate{Store: w.Store, Addresses: w.Ledger, Certs: w.Ledger, Account: acct, Sources: stake.SingleSourceAcknowledged, OnSingle: noopSingle, NetworkID: w.Network}
 	if _, err := gen.Run(ctx, "hw"); err != nil {
@@ -161,7 +161,7 @@ func TestVoteDelegationOnLedger(t *testing.T) {
 	w := world.New(t)
 	w.UseHardware("Ledger", "8.0.8")
 	w.Bodies = world.LegacyInputs{Ledger: w.Ledger}
-	account(t, w, "hw", custody.HolderHardware, 50_000_000)
+	account(t, w, "hw", custody.PlaceHardware, 50_000_000)
 	if _, err := (stake.GenerateVoteDelegationCertificate{Store: w.Store, Certs: w.Ledger, Params: w.Chain}).Run(ctx, stake.VoteDelegationRequest{Target: "always-abstain", Delegator: "hw"}); err != nil {
 		t.Fatal(err)
 	}
@@ -191,9 +191,9 @@ func TestPoolRetirementWithLedgerColdKey(t *testing.T) {
 		w.UseHardware(dev[0], dev[1])
 		w.Bodies = world.LegacyInputs{Ledger: w.Ledger}
 		w.Chain.Params.PoolRetireMaxEpoch = 18
-		account(t, w, "hw", custody.HolderHardware, 50_000_000)
+		account(t, w, "hw", custody.PlaceHardware, 50_000_000)
 		if _, err := (poolops.GenerateColdKeys{Store: w.Store, KeyGen: native.SoftwareKeys{}, Hardware: w.Exporter()}).
-			Run(ctx, poolops.GenerateColdKeysRequest{Pool: "mypool", Holder: custody.HolderHardware}); err != nil {
+			Run(ctx, poolops.GenerateColdKeysRequest{Pool: "mypool", Place: custody.PlaceHardware}); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(w.Dir, "mypool.pool.json"), []byte(hwPoolDescriptor), 0o600); err != nil {
@@ -231,11 +231,11 @@ func (f fakeCommittee) CommitteeMemberByHot(context.Context, dgov.Credential) (c
 	return f.member, nil
 }
 
-func committeeKeys(t *testing.T, w *world.World, cold custody.Holder) {
+func committeeKeys(t *testing.T, w *world.World, cold custody.Placement) {
 	t.Helper()
 	ctx := context.Background()
 	if _, err := (governance.GenerateCommitteeColdKeys{Store: w.Store, Keys: native.SoftwareKeys{}, Hardware: w.Exporter()}).
-		Run(ctx, governance.GenerateKeysRequest{Name: "cc", Holder: cold, Source: governance.KeysRandom}); err != nil {
+		Run(ctx, governance.GenerateKeysRequest{Name: "cc", Place: cold, Source: governance.KeysRandom}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := (governance.GenerateCommitteeHotKeys{Store: w.Store, Keys: native.SoftwareKeys{}, Hardware: w.Exporter()}).
@@ -254,8 +254,8 @@ func TestCommitteeAuthorizationAndResignationOnDevice(t *testing.T) {
 		w := world.New(t)
 		w.UseHardware(dev[0], dev[1])
 		w.Bodies = world.LegacyInputs{Ledger: w.Ledger}
-		account(t, w, "hw", custody.HolderHardware, 50_000_000)
-		committeeKeys(t, w, custody.HolderHardware)
+		account(t, w, "hw", custody.PlaceHardware, 50_000_000)
+		committeeKeys(t, w, custody.PlaceHardware)
 		base := govBase(w)
 
 		auth := governance.AuthorizeCommitteeHotKey{Base: base, Certs: w.Ledger, Committee: fakeCommittee{member: chain.None[dgov.CommitteeMember]()}}
@@ -288,8 +288,8 @@ func TestCommitteeAuthorizationAndResignationOnDevice(t *testing.T) {
 	// A Trezor has no committee cold key: refused before the device is asked.
 	w := world.New(t)
 	w.UseHardware("Ledger", "8.0.8")
-	account(t, w, "hw", custody.HolderHardware, 50_000_000)
-	committeeKeys(t, w, custody.HolderHardware)
+	account(t, w, "hw", custody.PlaceHardware, 50_000_000)
+	committeeKeys(t, w, custody.PlaceHardware)
 	hw := w.UseHardware("Trezor", "2.7.2")
 	hw.Lazy.Profile()
 	before := hw.Prompts()
@@ -310,9 +310,9 @@ func TestMintWithLedgerPolicyKey(t *testing.T) {
 	w := world.New(t)
 	w.UseHardware("Ledger", "8.0.8")
 	w.Bodies = world.LegacyInputs{Ledger: w.Ledger}
-	account(t, w, "hw", custody.HolderHardware, 50_000_000)
+	account(t, w, "hw", custody.PlaceHardware, 50_000_000)
 	pol, err := (assets.GeneratePolicy{Store: w.Store, KeyGen: native.SoftwareKeys{}, Policies: w.Ledger, Hardware: w.Exporter(), PolicyIDer: w.HW.Lazy}).
-		Run(ctx, assets.GeneratePolicyRequest{Name: "pol", Holder: custody.HolderHardware})
+		Run(ctx, assets.GeneratePolicyRequest{Name: "pol", Place: custody.PlaceHardware})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,8 +340,8 @@ func TestSendAssetsFromLedger(t *testing.T) {
 	w := world.New(t)
 	w.UseHardware("Ledger", "8.0.8")
 	w.Bodies = world.LegacyInputs{Ledger: w.Ledger}
-	src := account(t, w, "hw", custody.HolderHardware, 0)
-	account(t, w, "dst", custody.HolderVault, 0)
+	src := account(t, w, "hw", custody.PlaceHardware, 0)
+	account(t, w, "dst", custody.PlaceVault, 0)
 	var pid [28]byte
 	pid[0] = 7
 	var txid chain.TxID
@@ -372,7 +372,7 @@ func TestClaimRewardsOnLedger(t *testing.T) {
 	w := world.New(t)
 	w.UseHardware("Ledger", "8.0.8")
 	w.Bodies = world.LegacyInputs{Ledger: w.Ledger}
-	account(t, w, "hw", custody.HolderHardware, 50_000_000)
+	account(t, w, "hw", custody.PlaceHardware, 50_000_000)
 	uc := wallet.ClaimRewards{Store: w.Store, Signers: w.Signers(), Utxos: w.Chain, Params: w.Chain, Tip: w.Chain, Addresses: w.Ledger, Min: w.Ledger, Fees: w.Ledger,
 		Bodies: w.Bodies, Assembler: w.Ledger, Confirmer: w.Conf, Rewards: accountReader{deposit: 2_000_000, withdraw: 7_000_000, voteDeleg: true}, Submitter: w.Chain,
 		NetworkID: w.Network, Canonicalizer: w.Canonicalizer()}

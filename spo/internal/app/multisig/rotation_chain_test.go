@@ -33,7 +33,7 @@ func (s *scene) bobRotatesAndCoordAccepts() party.Fingerprint {
 	if h, err := s.C.Coordinator().Handle(ctx, partyrig.Received(env, ports.ViaFile)); err != nil || h.Effect != "rotation-pending" {
 		s.t.Fatalf("announcement: %+v, %v", h, err)
 	}
-	if _, err := s.C.Node().AcceptRotation(ctx, "bob", s.coordTyped(done.New)); err != nil {
+	if _, err := s.C.Node().AcceptRotation(ctx, "bob", s.coordTyped(done.New), s.C.Coordinator().OnRotate); err != nil {
 		s.t.Fatalf("accepting the rotation to %s: %v", done.New, err)
 	}
 	return done.New

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/mochipool/workbench/spo/internal/app/keyring"
 
 	"github.com/mochipool/workbench/spo/internal/domain/cose"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
@@ -36,32 +37,30 @@ type CalidusSignature struct {
 // `.calidus` suffix and a leading `./` are dropped, SPO-15-IF-003).
 //
 // spec: SPO-15-IF-006, SPO-15-EXT-006, SPO-15-OUT-006
-func (uc SignWithCalidusKey) Run(ctx context.Context, calidus string, holder custody.Holder, text []byte) (res CalidusSignature, err error) {
+func (uc SignWithCalidusKey) Run(ctx context.Context, calidus string, text []byte) (res CalidusSignature, err error) {
 	if uc.Store == nil || uc.Signers == nil {
 		return res, ErrNotConfigured
-	}
-	if holder == custody.HolderHardware {
-		return res, ErrHardwareCalidusSuspended
 	}
 	cal, err := calidusName(calidus)
 	if err != nil {
 		return res, err
 	}
-	var have bool
+	var ref custody.KeyRef
 	if err := uc.Store.View(ctx, func(r ports.Reader) error {
-		var err error
-		have, err = r.Exists(ports.Ref{Name: cal, Kind: ports.CalidusSKey})
+		have, err := r.Exists(ports.Ref{Name: cal, Kind: ports.CalidusSKey})
+		if err != nil {
+			return err
+		}
+		if !have {
+			// A Calidus key cannot be made on a device (SPO-15-PRE-002): a hardware
+			// signing file alone is no signing key.
+			return fmt.Errorf("%w: %s", ErrMissingFile, ports.Ref{Name: cal, Kind: ports.CalidusSKey})
+		}
+		ref, err = keyring.Resolve(r, custody.RoleCalidus, cal)
 		return err
 	}); err != nil {
 		return res, err
 	}
-	if !have {
-		return res, fmt.Errorf("%w: %s", ErrMissingFile, ports.Ref{Name: cal, Kind: ports.CalidusSKey})
-	}
-	if holder == "" {
-		holder = custody.HolderVault
-	}
-	ref := custody.KeyRef{Role: custody.RoleCalidus, Holder: holder, Owner: cal}
 	if _, err := ports.PlanSignatures(uc.Signers, []custody.Slot{{
 		Label: "sign a text with the Calidus key", Key: ref,
 		Demand: custody.Demand{Role: custody.RoleCalidus, Operation: custody.OpSignText},
@@ -86,6 +85,10 @@ func (uc SignWithCalidusKey) Run(ctx context.Context, calidus string, holder cus
 	}
 	if sig == (ports.TextSignature{}) {
 		return res, errors.New("the signer returned no signature") // SPO-15-OUT-006
+	}
+	// The answer is verified against the demanded Calidus key before anything is returned.
+	if err := custody.VerifyText(text, sig.PublicKey, sig.Signature, ref.Identity); err != nil {
+		return res, fmt.Errorf("the signer's answer does not verify: %w", err)
 	}
 	id, err := cose.CalidusID(sig.PublicKey[:])
 	if err != nil {

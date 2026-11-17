@@ -23,6 +23,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
+	"github.com/mochipool/workbench/spo/internal/ports/porttest"
 	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
@@ -327,10 +328,10 @@ func TestMintBodiesMatchCardanoCLI(t *testing.T) {
 			}
 			var skeyArgs []string
 			for _, i := range tc.policies {
-				sign("", pol[i].skey, custody.KeyRef{Role: custody.RolePolicy, Holder: custody.HolderVault, Owner: pol[i].name}, pol[i].name)
+				sign("", pol[i].skey, porttest.Key(t, store, custody.RolePolicy, pol[i].name), pol[i].name)
 				skeyArgs = append(skeyArgs, "--signing-key-file", p(pol[i].name+".policy.skey"))
 			}
-			sign("", keys.skeyBytes, custody.KeyRef{Role: custody.RolePayment, Holder: custody.HolderVault, Owner: "w"}, "pay")
+			sign("", keys.skeyBytes, porttest.Key(t, store, custody.RolePayment, "w"), "pay")
 			skeyArgs = append(skeyArgs, "--signing-key-file", p("w.skey"))
 
 			asm := []string{"transaction", "assemble", "--tx-body-file", p("b.txbody"), "--out-file", p("a.tx")}

@@ -103,7 +103,7 @@ func TestObligation2OwnedIsTheStoresOwnKeysOnly(t *testing.T) {
 	}
 	for role, h := range map[custody.Role]txbuildHash{custody.RoleStake: stakeH, custody.RolePayment: payH, custody.RolePoolCold: coldH} {
 		k, ok, err := d.FindKey(context.Background(), role, [28]byte(h))
-		if err != nil || !ok || k.Role != role || k.Holder != custody.HolderVault {
+		if err != nil || !ok || k.Role != role || k.Identity.IsZero() {
 			t.Errorf("%s: %+v %v %v", role, k, ok, err)
 		}
 	}

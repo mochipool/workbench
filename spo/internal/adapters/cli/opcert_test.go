@@ -3,6 +3,9 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/binary"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +14,7 @@ import (
 
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/ports"
 	"github.com/mochipool/workbench/spo/test/plainstore"
 )
@@ -20,13 +24,37 @@ type cliIssuer struct{}
 func (cliIssuer) Profile() custody.Profile {
 	return custody.NewProfile("fake").Allow(custody.RolePoolCold, custody.OpIssueOpCert)
 }
-func (cliIssuer) IssueOpCert(context.Context, custody.Key[custody.PoolCold], ports.OpCertRequest) ([]byte, error) {
-	return []byte("opcert\n"), nil
+
+// cliCold is the cold key of the workspace these tests write.
+var cliCold = ed25519.NewKeyFromSeed([]byte("0123456789abcdef0123456789abcdef"))
+
+func (cliIssuer) IssueOpCert(_ context.Context, _ custody.Key[custody.PoolCold], req ports.OpCertRequest) ([]byte, error) {
+	m := append([]byte(nil), req.KesVKey...)
+	m = binary.BigEndian.AppendUint64(m, req.Counter)
+	m = binary.BigEndian.AppendUint64(m, req.KesPeriod)
+	head := func(major byte, n uint64) []byte {
+		if n < 24 {
+			return []byte{major<<5 | byte(n)}
+		}
+		return binary.BigEndian.AppendUint16([]byte{major<<5 | 25}, uint16(n))
+	}
+	b := []byte{0x82, 0x84}
+	b = append(append(b, head(2, 32)...), req.KesVKey...)
+	b = append(b, head(0, req.Counter)...)
+	b = append(b, head(0, req.KesPeriod)...)
+	b = append(append(b, head(2, 64)...), ed25519.Sign(cliCold, m)...)
+	b = append(append(b, head(2, 32)...), cliCold.Public().(ed25519.PublicKey)...)
+	return pool.MarshalEnvelope(pool.Envelope{Type: pool.TypeOpCert, CborHex: hex.EncodeToString(b)}), nil
 }
 
 type cliDir struct{}
 
 func (cliDir) SignerFor(custody.KeyRef) (ports.Signer, error) { return cliIssuer{}, nil }
+
+// Connected implements ports.SignerDirectory.
+func (d cliDir) Connected(k custody.KeyRef) ([]ports.ConnectedSigner, error) {
+	return ports.ConnectedVia(d, k)
+}
 
 type cliTip struct{}
 
@@ -131,7 +159,7 @@ func runWith(t *testing.T, d Deps, args ...string) error {
 func seedPool(t *testing.T, dir string) {
 	t.Helper()
 	w := func(n, c string) { os.WriteFile(filepath.Join(dir, n), []byte(c), 0o400) }
-	w("p.node.vkey", `{"type":"StakePoolVerificationKey_ed25519","cborHex":"5820`+strings.Repeat("11", 32)+`"}`)
+	w("p.node.vkey", `{"type":"StakePoolVerificationKey_ed25519","cborHex":"5820`+hex.EncodeToString(cliCold.Public().(ed25519.PublicKey))+`"}`)
 	w("p.node.skey", "x")
 	w("p.kes.counter", "000\n")
 	w("p.kes.counter-next", "000\n")

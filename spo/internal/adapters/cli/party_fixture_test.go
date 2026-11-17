@@ -331,7 +331,7 @@ func newPsceneMeta(t *testing.T, metaURL string) *pscene {
 	ttl := uint64(1500)
 	body := partyrig.Body(t, ttl, cert.Attachment(500_000_000))
 	s.bodyID = body.ID
-	slots := []pool.Slot{{Name: "bob.staking", Role: custody.RoleStake, KeyHash: s.hash, Holder: custody.HolderRemote, Party: "bob"}}
+	slots := []pool.Slot{{Name: "bob.staking", Role: custody.RoleStake, KeyHash: s.hash, PartyFingerprint: s.C.FingerprintOf("bob")}}
 	s.ref, err = s.C.Coordinator().Open(context.Background(), multisig.OpenRequest{Name: "reg1", Body: body, TTL: ttl, Slots: slots, Local: txflow.Prepared{}})
 	if err != nil {
 		t.Fatal(err)
@@ -391,14 +391,14 @@ func openRegistration(t *testing.T, c *partyrig.Workspace, poolID chain.PoolID, 
 	}
 	ttl := uint64(1500)
 	body := partyrig.Body(t, ttl, cert.Attachment(500_000_000))
-	slot := pool.Slot{Name: "bob.staking", Role: custody.RoleStake, KeyHash: txbuild.KeyHash(bob), Holder: custody.HolderRemote, Party: "bob"}
+	slot := pool.Slot{Name: "bob.staking", Role: custody.RoleStake, KeyHash: txbuild.KeyHash(bob), PartyFingerprint: c.FingerprintOf("bob")}
 	if cold {
-		slot = pool.Slot{Name: "mypool.node", Role: custody.RolePoolCold, KeyHash: txbuild.KeyHash(poolID), Holder: custody.HolderRemote, Party: "bob"}
+		slot = pool.Slot{Name: "mypool.node", Role: custody.RolePoolCold, KeyHash: txbuild.KeyHash(poolID), PartyFingerprint: c.FingerprintOf("bob")}
 	}
 	name := "reg1"
 	if len(nameAndParty) == 2 {
-		name, slot.Party = nameAndParty[0], nameAndParty[1]
-		slot.Name = slot.Party + ".staking"
+		name, slot.PartyFingerprint = nameAndParty[0], c.FingerprintOf(nameAndParty[1])
+		slot.Name = nameAndParty[1] + ".staking"
 	}
 	ref, err := c.Coordinator().Open(context.Background(), multisig.OpenRequest{Name: name, Body: body, TTL: ttl, Slots: []pool.Slot{slot}, Local: txflow.Prepared{}})
 	if err != nil {

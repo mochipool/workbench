@@ -20,9 +20,12 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/mochipool/workbench/spo/internal/app/hwkeys"
+	"github.com/mochipool/workbench/spo/internal/app/keyring"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/cose"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -69,8 +72,8 @@ type GenerateCalidusKey struct {
 // GenerateCalidusKeyRequest names the key.
 type GenerateCalidusKeyRequest struct {
 	// Name has a leading `./` dropped (SPO-15-IF-002).
-	Name   string
-	Holder custody.Holder // empty means the vault
+	Name  string
+	Place custody.Placement // empty means the vault
 	// Account and Index select 1852H/1815H/<Account>H/0/<Index>; the upstream
 	// script has no such option and uses 0 and 0.
 	Account, Index uint32
@@ -102,10 +105,10 @@ func (uc GenerateCalidusKey) Run(ctx context.Context, req GenerateCalidusKeyRequ
 	}
 	// A hardware or remote holder is refused before anything else
 	// (SPO-15-PRE-002: upstream suspends the hardware path).
-	if req.Holder == custody.HolderHardware {
+	if req.Place == custody.PlaceHardware {
 		return res, ErrHardwareCalidusSuspended
 	}
-	if _, err := custody.PlanGeneration(custody.KeyRef{Role: custody.RoleCalidus, Holder: req.Holder, Owner: nm}); err != nil {
+	if _, err := custody.PlanGeneration(req.Place, custody.RoleCalidus); err != nil {
 		return res, err
 	}
 	refs := []ports.Ref{
@@ -218,9 +221,6 @@ type CalidusRegistrationRequest struct {
 	// loses `.skey` or `.hwsfile`, then `.node`, and a leading `./`
 	// (SPO-15-IF-003).
 	Calidus, Pool string
-	// Holder of the cold key; empty infers it as upstream does: a
-	// `.node.hwsfile` wins over a `.node.skey` (SPO-15-INV-002).
-	Holder custody.Holder
 	// Nonce is the registration nonce; 0 chooses the default. Upstream
 	// accepts a given nonce only above zero (SPO-15-IF-004).
 	Nonce uint64
@@ -265,6 +265,8 @@ func (uc GenerateCalidusRegistration) Run(ctx context.Context, req CalidusRegist
 	}
 	var calVKey, nodeVKey, idBech, idHex []byte
 	var haveSKey, haveHws bool
+	var cold custody.KeyRef
+	var coldErr error
 	err = uc.Store.View(ctx, func(r ports.Reader) error {
 		var err error
 		if calVKey, err = r.Get(ports.Ref{Name: cal, Kind: ports.CalidusVKey}); err != nil {
@@ -287,6 +289,12 @@ func (uc GenerateCalidusRegistration) Run(ctx context.Context, req CalidusRegist
 			return b
 		}
 		idBech, idHex, nodeVKey = optional(ports.PoolIDBechFile), optional(ports.PoolIDFile), optional(ports.NodeVKey)
+		if !haveSKey && !haveHws {
+			return nil
+		}
+		// The name is resolved once, here, to the identity of the cold key.
+		// (its refusal is reported once the pool id is known)
+		cold, coldErr = keyring.Resolve(r, custody.RolePoolCold, pl)
 		return nil
 	})
 	if err != nil {
@@ -294,13 +302,6 @@ func (uc GenerateCalidusRegistration) Run(ctx context.Context, req CalidusRegist
 	}
 	if !haveSKey && !haveHws {
 		return res, ErrNoColdSigner
-	}
-	holder := req.Holder
-	if holder == "" {
-		holder = custody.HolderVault
-		if haveHws {
-			holder = custody.HolderHardware // upstream's order: the hardware flow wins (SPO-15-INV-002)
-		}
 	}
 	calPub, err := cose.VKeyFromEnvelope(calVKey)
 	if err != nil {
@@ -311,8 +312,10 @@ func (uc GenerateCalidusRegistration) Run(ctx context.Context, req CalidusRegist
 		return res, err
 	}
 
+	if coldErr != nil {
+		return res, coldErr
+	}
 	// The signing plan: the cold key must be able to sign a Calidus registration.
-	cold := custody.KeyRef{Role: custody.RolePoolCold, Holder: holder, Owner: pl}
 	if _, err := ports.PlanSignatures(uc.Signers, []custody.Slot{{
 		Label: "sign the Calidus registration", Key: cold,
 		Demand: custody.Demand{Role: custody.RolePoolCold, Operation: custody.OpSignCip88},
@@ -346,7 +349,7 @@ func (uc GenerateCalidusRegistration) Run(ctx context.Context, req CalidusRegist
 		}
 	}
 	reg := cose.Cip88{PoolID: pid, CalidusPub: calPub, Nonce: nonce}
-	if holder == custody.HolderHardware && uc.BeforeDevice != nil {
+	if hwkeys.IsHardware(sg) && uc.BeforeDevice != nil {
 		ph := reg.PayloadHash()
 		dh := cose.Blake2b224(ph[:])
 		pb, err := chain.Bech32Encode("pool", pid[:])
@@ -367,7 +370,12 @@ func (uc GenerateCalidusRegistration) Run(ctx context.Context, req CalidusRegist
 	}
 	// The signer's answer is checked before it is stored: a signer that
 	// returns something that does not verify is a failure, not a file.
-	if _, err := cose.VerifyCip88(signed.CBOR); err != nil {
+	// ... and under the pool's cold key, the identity that was demanded.
+	demanded, err := identity.NewRef(identity.KindKeyHash, pid[:])
+	if err != nil {
+		return res, err
+	}
+	if _, err := custody.VerifyCip88(signed.CBOR, demanded); err != nil {
 		return res, fmt.Errorf("the signer's registration does not verify: %w", err)
 	}
 	file, err := cose.RegistrationFile(signed.JSON)

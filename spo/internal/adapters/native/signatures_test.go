@@ -9,8 +9,10 @@ import (
 
 	"github.com/mochipool/workbench/spo/internal/domain/cose"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/porttest"
 	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
@@ -111,15 +113,11 @@ func TestVaultSignaturesProfile(t *testing.T) {
 	if err := ports.CheckSignatureSigner(onlyClaims{}); err == nil {
 		t.Error("a signer claiming OpSignCip88 without the interface passed")
 	}
-	// The directory: the vault, not other holders.
+	// The directory answers for the keys the vault holds and for no other.
 	dir := NewSignatureSigners(st)
-	if _, err := dir.SignerFor(custody.KeyRef{Role: custody.RoleStake, Holder: custody.HolderVault}); err != nil {
-		t.Error(err)
-	}
-	for _, h := range []custody.Holder{custody.HolderHardware, custody.HolderRemote, "x"} {
-		if _, err := dir.SignerFor(custody.KeyRef{Role: custody.RoleStake, Holder: h}); err == nil {
-			t.Errorf("holder %s found a signer", h)
-		}
+	nobody, _ := identity.KeyHashOf(make([]byte, 32))
+	if _, err := dir.SignerFor(custody.KeyRef{Role: custody.RoleStake, Identity: nobody}); err == nil {
+		t.Error("a key nobody holds found a signer")
 	}
 }
 
@@ -142,6 +140,9 @@ func TestVaultSignaturesSignMessage(t *testing.T) {
 	}
 	defer pair.SKey.Destroy()
 	if err := st.Update(context.Background(), func(w ports.Writer) error {
+		if err := w.Put(ports.Ref{Name: "w", Kind: ports.StakingVKey}, pair.VKey); err != nil {
+			return err
+		}
 		return w.PutSecret(ports.Ref{Name: "w", Kind: ports.StakingSKey}, pair.SKey)
 	}); err != nil {
 		t.Fatal(err)
@@ -150,7 +151,7 @@ func TestVaultSignaturesSignMessage(t *testing.T) {
 	h := cose.Blake2b224(pub)
 	reward := append([]byte{0xe0}, h[:]...)
 	s := VaultSignatures{VaultSigner{Vault: st}}
-	ref := custody.KeyRef{Role: custody.RoleStake, Holder: custody.HolderVault, Owner: "w"}
+	ref := porttest.Key(t, st, custody.RoleStake, "w")
 	for _, hashed := range []bool{false, true} {
 		sm, err := s.SignMessage(context.Background(), ports.MessageRequest{Key: ref, Address: reward, Payload: []byte("hi"), Hashed: hashed})
 		if err != nil {
@@ -168,13 +169,13 @@ func TestVaultSignaturesSignMessage(t *testing.T) {
 	if _, err := s.SignMessage(context.Background(), ports.MessageRequest{Key: ref, Address: otherAddr, Payload: []byte("hi")}); err != cose.ErrAddressMismatch {
 		t.Errorf("foreign address: %v", err)
 	}
-	if _, err := s.SignMessage(context.Background(), ports.MessageRequest{Key: custody.KeyRef{Role: custody.RoleDRep, Holder: custody.HolderVault, Owner: "w"}, Address: reward}); err == nil {
+	if _, err := s.SignMessage(context.Background(), ports.MessageRequest{Key: custody.KeyRef{Role: custody.RoleDRep, Identity: ref.Identity}, Address: reward}); err == nil {
 		t.Error("a drep key signed a message")
 	}
 	if _, err := s.SignMessage(context.Background(), ports.MessageRequest{Key: ref, Payload: []byte("hi")}); err == nil {
 		t.Error("a message without an address")
 	}
-	if _, err := s.SignMessage(context.Background(), ports.MessageRequest{Key: custody.KeyRef{Role: custody.RoleStake, Holder: custody.HolderVault, Owner: "missing"}, Address: reward}); err == nil {
+	if _, err := s.SignMessage(context.Background(), ports.MessageRequest{Key: custody.KeyRef{Role: custody.RoleStake, Identity: nobodyID(t)}, Address: reward}); err == nil {
 		t.Error("a missing key signed")
 	}
 	// A registration is not signed with the wrong key.
@@ -184,4 +185,14 @@ func TestVaultSignaturesSignMessage(t *testing.T) {
 	if _, err := s.SignCip36(context.Background(), k, reg); err == nil || !strings.Contains(err.Error(), "not the registration's stake key") {
 		t.Errorf("foreign stake key: %v", err)
 	}
+}
+
+// nobodyID is an identity no test vault holds.
+func nobodyID(t *testing.T) identity.Ref {
+	t.Helper()
+	id, err := identity.KeyHashOf(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/porttest"
 )
 
 // ---- fakes -----------------------------------------------------------------
@@ -41,6 +42,15 @@ type memStore struct {
 	files   map[ports.Ref][]byte
 	secrets map[ports.Ref][]byte
 	writes  int
+}
+
+// List implements ports.SourceLister: every stored file.
+func (s *memStore) List(context.Context) (ports.SourceListing, error) {
+	var l ports.SourceListing
+	for r := range s.files {
+		l.Entries = append(l.Entries, ports.SourceEntry{Ref: r})
+	}
+	return l, nil
 }
 
 type memView struct{ s *memStore }
@@ -158,7 +168,8 @@ type fakeSigner struct {
 
 func (s *fakeSigner) Profile() custody.Profile { return custody.NewProfile("fake") }
 func (s *fakeSigner) Witness(_ context.Context, key custody.KeyRef, body txbuild.TxBody) (txbuild.Witness, error) {
-	s.l.add("witness " + string(key.Role) + " " + key.Owner)
+	s.l.add("witness " + string(key.Role) + " " + map[custody.Role]string{custody.RolePayment: "w.payment", custody.RoleDRep: "d",
+		custody.RoleCommitteeCold: "m", custody.RoleCommitteeHot: "h", custody.RolePoolCold: "mypool"}[key.Role])
 	k := s.keys[key.Role]
 	var w txbuild.Witness
 	copy(w.VKey[:], k.Public().(ed25519.PublicKey))
@@ -166,14 +177,10 @@ func (s *fakeSigner) Witness(_ context.Context, key custody.KeyRef, body txbuild
 	return w, nil
 }
 
-type fakeDir struct{ signer *fakeSigner }
-
-func (d fakeDir) SignerFor(k custody.KeyRef) (ports.Signer, error) {
-	if k.Holder != custody.HolderVault {
-		return nil, errors.New("no hardware signer is configured")
-	}
-	// Profile of the fake: everything is witnessed.
-	return fullSigner{d.signer}, nil
+// fakeDir serves the fake signer for the keys whose signing key the store
+// holds. Profile of the fake: everything is witnessed.
+func fakeDir(st ports.Store, s *fakeSigner) ports.SignerDirectory {
+	return porttest.VaultOnly(st, fullSigner{s})
 }
 
 // fullSigner claims every operation on every role.
@@ -320,6 +327,7 @@ func newRig(t *testing.T) *rig {
 	r.store = &memStore{l: l, secrets: map[ports.Ref][]byte{}, files: map[ports.Ref][]byte{
 		{Name: "w.payment", Kind: ports.AddrFile}: []byte("addr_test_pay\n"),
 		{Name: "w.payment", Kind: ports.AddrSKey}: nil,
+		{Name: "w.payment", Kind: ports.AddrVKey}: vkeyEnvelope(pubs[custody.RolePayment]),
 		{Name: "d", Kind: ports.DRepVKey}:         vkeyEnvelope(pubs[custody.RoleDRep]),
 		{Name: "d", Kind: ports.DRepSKey}:         nil,
 		{Name: "m", Kind: ports.CCColdVKey}:       vkeyEnvelope(pubs[custody.RoleCommitteeCold]),
@@ -340,7 +348,7 @@ func newRig(t *testing.T) *rig {
 	r.conf = &fakeConfirmer{l: l, yes: true}
 	r.queue = &fakeQueue{l: l}
 	r.base = Base{Store: r.store, Addresses: r.insp, Params: r.chain, Tip: r.chain, Utxos: r.chain, NetworkID: ports.NetworkTestnet,
-		Pipeline: txflow.Pipeline{Signers: fakeDir{r.signer}, Min: r.ledger, Fees: r.ledger, Bodies: r.ledger, Assembler: r.ledger,
+		Pipeline: txflow.Pipeline{Signers: fakeDir(r.store, r.signer), Min: r.ledger, Fees: r.ledger, Bodies: r.ledger, Assembler: r.ledger,
 			Confirmer: r.conf, Queue: r.queue}}
 	return r
 }

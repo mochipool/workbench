@@ -16,25 +16,14 @@ func SoftwareGenerator() Profile {
 	return p
 }
 
-// PlanGeneration builds the plan for generating keys, before anything is
-// generated or written. Keys for the vault holder are met by the software
-// generators; a key for any other holder is refused with an
-// *UnsupportedError, because no generator is configured for it (the
-// hardware signer adapter does not exist yet; ADR 0008). A use case never
-// has a hardware branch: it calls this first and stops on an error.
-func PlanGeneration(keys ...KeyRef) (Plan, error) {
-	slots := make([]Slot, len(keys))
-	for i, k := range keys {
-		slots[i] = Slot{Label: "generate " + string(k.Role) + " key", Key: k,
-			Demand: Demand{Role: k.Role, Operation: OpExportVKey}}
-	}
-	soft := SoftwareGenerator()
-	return NewPlan(slots, func(k KeyRef) (Profile, error) {
-		if k.Holder == HolderVault || k.Holder == "" {
-			return soft, nil
-		}
-		return Profile{}, fmt.Errorf("no signer is configured that can generate keys held by %s", k.Holder)
-	})
+// PlanGeneration builds the plan for generating keys of the roles at a
+// placement, before anything is generated or written. The vault placement is
+// met by the software generators; any other is refused with an
+// *UnsupportedError, because no generator is configured for it (ADR 0008). A
+// use case never has a hardware branch: it calls this first and stops on an
+// error. A key being generated has no identity yet, so the plan names roles.
+func PlanGeneration(place Placement, roles ...Role) (Plan, error) {
+	return PlanGenerationWith(nil, place, roles...)
 }
 
 // ErrMnemonicWords means a mnemonic does not have 24 words.

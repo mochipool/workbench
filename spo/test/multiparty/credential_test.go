@@ -287,7 +287,7 @@ func TestOversizedAuxiliaryDataIsRefusedBothEnds(t *testing.T) {
 	// The coordinator: a collection of this body is not sealed into a request.
 	c := f.C.Coordinator()
 	_, err := c.Open(ctx, multisig.OpenRequest{Name: "big", Body: body, TTL: 1500, Slots: []pool.Slot{{Name: "pay", Role: custody.RolePayment,
-		KeyHash: f.payHash, Holder: custody.HolderRemote, Party: "bobparty"}}})
+		KeyHash: f.payHash, PartyFingerprint: f.C.FingerprintOf("bobparty")}}})
 	if err == nil || !strings.Contains(err.Error(), "maxTxSize") {
 		t.Fatalf("a collection with an oversized transaction: %v", err)
 	}

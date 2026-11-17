@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/mochipool/workbench/spo/internal/app/keyring"
 	"github.com/mochipool/workbench/spo/internal/app/opcounter"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
@@ -110,7 +112,7 @@ type issueSnapshot struct {
 	coldVKey []byte
 	kesVKey  []byte
 	counter  []byte // raw counter file; nil when absent
-	hw       bool   // cold key held by a hardware wallet
+	coldKey  custody.KeyRef
 }
 
 // Run issues the certificate and, only when everything succeeded, stores it
@@ -144,11 +146,7 @@ func (uc IssueOperationalCertificate) Run(ctx context.Context, poolName string, 
 	}
 
 	// Who holds the cold key, and can they sign? Asked before any effect.
-	holder := custody.HolderVault
-	if snap.hw {
-		holder = custody.HolderHardware
-	}
-	ref := custody.KeyRef{Role: custody.RolePoolCold, Holder: holder, Owner: poolName}
+	ref := snap.coldKey
 	cold, err := custody.As[custody.PoolCold](ref)
 	if err != nil {
 		return OpCertIssued{}, err
@@ -160,7 +158,7 @@ func (uc IssueOperationalCertificate) Run(ctx context.Context, poolName string, 
 	}}); err != nil {
 		return OpCertIssued{}, err
 	}
-	signer, err := uc.Signers.SignerFor(ref)
+	signer, err := ports.SignerForOperation(uc.Signers, ref, custody.OpIssueOpCert)
 	if err != nil {
 		return OpCertIssued{}, err
 	}
@@ -197,6 +195,11 @@ func (uc IssueOperationalCertificate) Run(ctx context.Context, poolName string, 
 	cert, err := issuer.IssueOpCert(ctx, cold, ports.OpCertRequest{KesVKey: snap.kesVKey, Counter: counter, KesPeriod: period})
 	if err != nil {
 		return OpCertIssued{}, fmt.Errorf("issue operational certificate: %w", err)
+	}
+	// Whoever signed, the certificate is accepted only if it is over the KES
+	// key, counter and period asked for and made by the demanded cold key.
+	if err := verifyIssued(cert, snap.coldVKey, snap.kesVKey, counter, period); err != nil {
+		return OpCertIssued{}, fmt.Errorf("the signer's operational certificate does not verify: %w", err)
 	}
 
 	var vk [32]byte
@@ -286,7 +289,6 @@ func loadIssueSnapshot(r ports.Reader, poolName string) (issueSnapshot, error) {
 	var s issueSnapshot
 	has := func(k ports.Kind) (bool, error) { return r.Exists(ports.Ref{Name: poolName, Kind: k}) }
 
-	// SPO-04d-INV-004: a software key wins over a hardware file.
 	skey, err := has(ports.NodeSKey)
 	if err != nil {
 		return s, err
@@ -298,7 +300,10 @@ func loadIssueSnapshot(r ports.Reader, poolName string) (issueSnapshot, error) {
 	if !skey && !hws {
 		return s, ErrNoColdKey
 	}
-	s.hw = !skey
+	// SPO-04d-INV-004: with both stored, the directory prefers the vault.
+	if s.coldKey, err = keyring.Resolve(r, custody.RolePoolCold, poolName); err != nil {
+		return s, fmt.Errorf("%w: %v", ErrNoColdVKey, err)
+	}
 
 	vkeyFile, err := r.Get(ports.Ref{Name: poolName, Kind: ports.NodeVKey})
 	if errors.Is(err, ports.ErrNotFound) {
@@ -390,4 +395,21 @@ func (uc CreateIssueCounter) Run(ctx context.Context, poolName string, value uin
 		copy(vk[:], raw)
 		return w.Put(ref, pool.IssueCounter{Next: value, ColdVKey: vk}.Envelope())
 	})
+}
+
+// verifyIssued checks a returned operational certificate with custody's
+// verifier against the demanded cold key (by identity) and the demanded KES
+// key, counter and period.
+func verifyIssued(cert, coldVKey, kesVKey []byte, counter, period uint64) error {
+	oc, err := pool.ParseOpCert(cert)
+	if err != nil {
+		return err
+	}
+	want, err := identity.KeyHashOf(coldVKey)
+	if err != nil {
+		return err
+	}
+	return custody.VerifyOpCert(custody.OpCert{KesVKey: oc.KesVKey, Counter: oc.Counter, KesPeriod: oc.KesPeriod,
+		ColdVKey: oc.ColdVKey, Signature: oc.Signature},
+		&custody.OpCertAsk{KesVKey: kesVKey, Counter: counter, KesPeriod: period}, want)
 }

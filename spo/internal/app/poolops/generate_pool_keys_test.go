@@ -161,8 +161,8 @@ func TestColdKeyGenerationFailureLeavesNothing(t *testing.T) {
 func TestColdKeysHardwareHolderRefusedUpFront(t *testing.T) {
 	st, dir := newDir(t)
 	kg := &fakeColdGen{}
-	for _, h := range []custody.Holder{custody.HolderHardware, custody.HolderRemote} {
-		_, err := GenerateColdKeys{Store: st, KeyGen: kg}.Run(context.Background(), GenerateColdKeysRequest{Pool: "mypool", Holder: h})
+	for _, h := range []custody.Placement{custody.PlaceHardware, "remote"} {
+		_, err := GenerateColdKeys{Store: st, KeyGen: kg}.Run(context.Background(), GenerateColdKeysRequest{Pool: "mypool", Place: h})
 		var ue *custody.UnsupportedError
 		if !errors.As(err, &ue) {
 			t.Fatalf("holder %s: err = %v", h, err)
@@ -213,7 +213,7 @@ func TestVrfKeysRefuseToOverwrite(t *testing.T) {
 func TestVrfKeysHardwareHolderRefusedUpFront(t *testing.T) {
 	st, dir := newDir(t)
 	kg := &fakeVrfGen{}
-	_, err := GenerateVrfKeys{Store: st, KeyGen: kg}.Run(context.Background(), GenerateVrfKeysRequest{Pool: "mypool", Holder: custody.HolderHardware})
+	_, err := GenerateVrfKeys{Store: st, KeyGen: kg}.Run(context.Background(), GenerateVrfKeysRequest{Pool: "mypool", Place: custody.PlaceHardware})
 	var ue *custody.UnsupportedError
 	if !errors.As(err, &ue) || kg.calls != 0 || len(files(t, dir)) != 0 {
 		t.Fatalf("err %v", err)

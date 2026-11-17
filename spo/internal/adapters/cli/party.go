@@ -18,6 +18,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/app/parties"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
@@ -65,7 +66,13 @@ func (r *partyRun) coordinator() (multisig.Coordinator, error) {
 	if err != nil {
 		return multisig.Coordinator{}, err
 	}
-	return multisig.Coordinator{Node: r.node(), TxIDs: r.env.TxIDs, NetworkMagic: magic}, nil
+	c := multisig.Coordinator{Node: r.node(), TxIDs: r.env.TxIDs, NetworkMagic: magic}
+	if idx, err := ports.NewStoreKeyIndex(r.s.Store); err == nil {
+		c.History = func(ctx context.Context, id identity.Ref) (custody.RoleHistory, bool, error) {
+			return ports.RoleHistoryOf(ctx, idx, id)
+		}
+	}
+	return c, nil
 }
 
 // party runs fn with the sealed workspace open. The needs are checked, and the

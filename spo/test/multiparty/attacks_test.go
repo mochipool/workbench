@@ -80,7 +80,10 @@ func bobAnswers(t *testing.T, w *world, reqs [][]byte, via ports.TransportKind) 
 	return bob, got[0]
 }
 
-// spec: SPO-Xparty-INV-010, SPO-Xparty-PRE-002, SPO-Xparty-PRE-005
+// A remote answer made by another key than the one demanded is refused: the slot
+// names the key identity it needs, and the answer is verified against it.
+//
+// spec: SPO-Xparty-INV-010, SPO-Xparty-PRE-002, SPO-Xparty-PRE-005, SPO-Xidentity-SEC-005
 func TestAttackResponseFromAnEnrolledPartyThatIsNotTheSlotsSigner(t *testing.T) {
 	w, _, _ := requested(t)
 	x := partyrig.New(t, "xavier", w.clock, w.chain.Chain)
@@ -89,10 +92,7 @@ func TestAttackResponseFromAnEnrolledPartyThatIsNotTheSlotsSigner(t *testing.T) 
 	x.Enroll(w.C, "coordinator", []party.Role{party.RoleCoordinator}, []string{w.bech})
 	before := w.snapshot()
 	c := w.collection()
-	wit, err := native.VaultSigner{Vault: x.Store}.Witness(ctx, custody.KeyRef{Role: custody.RoleStake, Holder: custody.HolderVault, Owner: "xavier"}, txbuild.TxBody{ID: c.Body.ID})
-	if err != nil {
-		t.Fatal(err)
-	}
+	wit := x.SignID(custody.RoleStake, "xavier", c.Body.ID)
 	env := partyrig.Seal(t, x, w.C, party.SigningResponse{Collection: multisig.CollectionID(poolRef, c), Slot: party.SlotID(slotIndex(t, w, "bob.staking")),
 		Request: party.MessageID{1}, Witness: party.EncodeWitness(wit.VKey, wit.Signature)}, time.Hour)
 	h, err := w.C.Coordinator().Handle(ctx, ports.FileReceived(env))
@@ -217,7 +217,7 @@ func TestAttackRevokedParty(t *testing.T) {
 	if w.snapshot() != after {
 		t.Error("the collection changed")
 	}
-	if s, _ := w.collection().Slot("bob.staking"); s.Filled() || s.Party != "" {
+	if s, _ := w.collection().Slot("bob.staking"); s.Filled() || s.Assigned() {
 		t.Errorf("the slot of the revoked party is %+v: want empty and unassigned", s)
 	}
 	// And it is not requested again.
@@ -245,6 +245,11 @@ func (c counting) Witness(ctx context.Context, k custody.KeyRef, b txbuild.TxBod
 type countingDir struct{ s counting }
 
 func (d countingDir) SignerFor(custody.KeyRef) (ports.Signer, error) { return d.s, nil }
+
+// Connected implements ports.SignerDirectory.
+func (d countingDir) Connected(k custody.KeyRef) ([]ports.ConnectedSigner, error) {
+	return ports.ConnectedVia(d, k)
+}
 
 // A signer asked to sign a body with a key of the map it cannot decode refuses
 // and never touches its key.

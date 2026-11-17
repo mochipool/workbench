@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/mochipool/workbench/spo/internal/app/hwkeys"
+	"github.com/mochipool/workbench/spo/internal/app/keyring"
 	"github.com/mochipool/workbench/spo/internal/app/txflow"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
@@ -113,9 +115,9 @@ func (d drepReads) read(ctx context.Context, id chain.DRepID, harmful bool) (dre
 
 // drepInputs is what the store holds for a DRep.
 type drepInputs struct {
-	name   string
-	hash   stake.KeyHash
-	holder custody.Holder
+	name string
+	hash stake.KeyHash
+	key  custody.KeyRef
 }
 
 func readDRep(r ports.Reader, nm string) (drepInputs, error) {
@@ -127,15 +129,15 @@ func readDRep(r ports.Reader, nm string) (drepInputs, error) {
 	if err != nil {
 		return drepInputs{}, fmt.Errorf("%s.drep.vkey: %w", nm, err)
 	}
-	holder, err := holderOf(r, ports.Ref{Name: nm, Kind: ports.DRepSKey}, ports.Ref{Name: nm, Kind: ports.DRepHwsFile})
+	key, err := keyring.Held(r, custody.RoleDRep, nm, ErrNoSigningKey)
 	if err != nil {
 		return drepInputs{}, err
 	}
-	return drepInputs{name: nm, hash: stake.KeyHash(h), holder: holder}, nil
+	return drepInputs{name: nm, hash: stake.KeyHash(h), key: key}, nil
 }
 
 func (d drepInputs) slot() txflow.Slot {
-	return txflow.Slot{Label: "drep", Key: custody.KeyRef{Role: custody.RoleDRep, Holder: d.holder, Owner: d.name}, Hash: txbuild.KeyHash(d.hash)}
+	return txflow.Slot{Label: "drep", Key: d.key, Hash: txbuild.KeyHash(d.hash)}
 }
 
 func (d drepInputs) chainID() chain.DRepID { return chain.DRepID{Hash: d.hash} }
@@ -235,7 +237,7 @@ func (uc RegisterDRep) Run(ctx context.Context, req RegisterDRepRequest) (Result
 	// plan is made again for the real certificate before any device prompt.
 	probe := stake.Certificate{Spec: stake.Spec{Kind: stake.CertDRepRegistration, Stake: dr.hash, Deposit: 1}}
 	run := txRun{payer: pay, signers: []txflow.Slot{dr.slot()}, certs: []stake.Certificate{probe}, message: req.Message, extras: req.Extras, pass: req.Passphrase, unrestricted: req.Unrestricted}
-	if err := drepUnrestricted(&run, pay, dr); err != nil {
+	if err := drepUnrestricted(uc.Pipeline.Signers, &run, pay, dr); err != nil {
 		return Result{}, err
 	}
 	if err := uc.early(run); err != nil {
@@ -372,7 +374,7 @@ func (uc RetireDRep) Run(ctx context.Context, req RetireDRepRequest) (Result, er
 	}
 	probe := stake.Certificate{Spec: stake.Spec{Kind: stake.CertDRepRetirement, Stake: dr.hash, Deposit: 1}}
 	run := txRun{payer: pay, signers: []txflow.Slot{dr.slot()}, certs: []stake.Certificate{probe}, message: req.Message, extras: req.Extras, pass: req.Passphrase, unrestricted: req.Unrestricted}
-	if err := drepUnrestricted(&run, pay, dr); err != nil {
+	if err := drepUnrestricted(uc.Pipeline.Signers, &run, pay, dr); err != nil {
 		return Result{}, err
 	}
 	if err := uc.early(run); err != nil {
@@ -617,8 +619,8 @@ func (uc CheckDRep) resolve(ctx context.Context, word string) (governance.Creden
 // key files, key-file payer with a hardware DRep) the mode is not used.
 //
 // spec: SPO-21b-PR-001, SPO-21b-SEC-003, SPO-21b-INV-006, SPO-21d-INV-004
-func drepUnrestricted(run *txRun, pay payer, dr drepInputs) error {
-	needs := pay.holder == custody.HolderHardware && dr.holder != custody.HolderHardware
+func drepUnrestricted(dir ports.SignerDirectory, run *txRun, pay payer, dr drepInputs) error {
+	needs := hwkeys.OnDevice(dir, pay.key) && !hwkeys.OnDevice(dir, dr.key)
 	if needs && !run.unrestricted {
 		return ErrUnrestrictedNeeded
 	}

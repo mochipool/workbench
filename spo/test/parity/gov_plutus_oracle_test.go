@@ -18,6 +18,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/porttest"
 	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
@@ -116,7 +117,8 @@ func TestGovGuardrailTransactionsMatchCardanoCLI(t *testing.T) {
 		{"an info action after it", []string{"treasury", "info"}, nil},
 		{"a message", []string{"treasury"}, []string{"guardrails", "test"}},
 	}
-	signer := native.VaultSigner{Vault: mustStore(t, keys.dir)}
+	st2 := mustStore(t, keys.dir)
+	signer := native.VaultSigner{Vault: st2}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var props []txbuild.ProposalAttachment
@@ -187,7 +189,7 @@ func TestGovGuardrailTransactionsMatchCardanoCLI(t *testing.T) {
 				t.Errorf("fee: go %d (size %d + units %d), cardano-cli %d", got, size, script, wantFee)
 			}
 			// The assembled transaction with the payment witness.
-			w, err := signer.Witness(ctx, custody.KeyRef{Role: custody.RolePayment, Holder: custody.HolderVault, Owner: "w"}, body)
+			w, err := signer.Witness(ctx, porttest.Key(t, st2, custody.RolePayment, "w"), body)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -210,7 +212,7 @@ func TestGovGuardrailTransactionsMatchCardanoCLI(t *testing.T) {
 	}
 }
 
-func mustStore(t *testing.T, dir string) ports.Vault {
+func mustStore(t *testing.T, dir string) *plainstore.Store {
 	t.Helper()
 	s, err := plainstore.OpenTestnet(dir)
 	if err != nil {

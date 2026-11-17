@@ -7,8 +7,11 @@ import (
 	"io"
 	"strings"
 
+	"github.com/mochipool/workbench/spo/internal/app/hwkeys"
+	"github.com/mochipool/workbench/spo/internal/app/keyring"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
@@ -23,6 +26,9 @@ type poolConfirmer struct {
 	a     *app
 	store ports.Store
 	ids   ports.TxIDCalculator
+	// labels names a co-signer party by its fingerprint for display (nil: the
+	// fingerprint is shown). Display only: nothing is routed by a label.
+	labels partyLabeler
 }
 
 func isPoolKind(kind string) bool {
@@ -33,7 +39,7 @@ func (c poolConfirmer) Confirm(ctx context.Context, sum ports.TxSummary) (bool, 
 	if !isPoolKind(sum.Kind) {
 		return terminalConfirmer{c.a}.Confirm(ctx, sum)
 	}
-	printPoolSummary(ctx, c.a.d.Out, c.store, c.ids, sum)
+	printPoolSummary(ctx, c.a.d.Out, c.store, c.ids, sum, c.labels)
 	q := "Sign and " + routeVerb(sum.Route) + " this transaction? [y/N] "
 	if sum.Stage == "body" {
 		q = "Build this transaction and collect its witnesses? Nothing is signed or sent yet. [y/N] "
@@ -54,6 +60,21 @@ type slotInfo struct {
 	name, role, holder string
 	// signed is nil when no collection says.
 	signed *bool
+	// key is the key the slot demands, resolved from the stored verification key,
+	// and storeName the name it is stored under. A slot with a key is described by
+	// the signer directory that will sign (partyLabeler.describe), not by which
+	// files exist under the name.
+	key       custody.KeyRef
+	haveKey   bool
+	storeName string
+}
+
+// withKey records the key the slot demands.
+func (s slotInfo) withKey(r ports.Reader, role custody.Role, name string) slotInfo {
+	if k, err := keyring.Resolve(r, role, name); err == nil {
+		s.key, s.haveKey, s.storeName = k, true, name
+	}
+	return s
 }
 
 func hasArtefact(r ports.Reader, ref ports.Ref) bool {
@@ -75,9 +96,9 @@ func holderText(r ports.Reader, name string, skey, hws ports.Kind) string {
 // poolSlots lists the signatures of a registration (cold key, payer, every
 // owner: SPO-05c-INV-005) or of a retirement (payer, cold key), with who
 // holds each.
-func poolSlots(r ports.Reader, d *pool.Descriptor, poolN, payer string, retire bool, coll *pool.Collection) []slotInfo {
-	cold := slotInfo{name: poolN + ".node", role: string(custody.RolePoolCold), holder: holderText(r, poolN, ports.NodeSKey, ports.NodeHwsFile)}
-	pay := slotInfo{name: payer, role: string(custody.RolePayment), holder: holderText(r, payer, ports.AddrSKey, ports.AddrHwsFile)}
+func poolSlots(r ports.Reader, d *pool.Descriptor, poolN, payer string, retire bool, coll *pool.Collection, labels ...partyLabeler) []slotInfo {
+	cold := slotInfo{name: poolN + ".node", role: string(custody.RolePoolCold), holder: holderText(r, poolN, ports.NodeSKey, ports.NodeHwsFile)}.withKey(r, custody.RolePoolCold, poolN)
+	pay := slotInfo{name: payer, role: string(custody.RolePayment), holder: holderText(r, payer, ports.AddrSKey, ports.AddrHwsFile)}.withKey(r, custody.RolePayment, payer)
 	if retire {
 		return []slotInfo{pay, cold}
 	}
@@ -87,6 +108,7 @@ func poolSlots(r ports.Reader, d *pool.Descriptor, poolN, payer string, retire b
 			s := slotInfo{name: o.Name + ".staking", role: string(custody.RoleStake)}
 			if o.IsLocal() {
 				s.holder = holderText(r, o.Name, ports.StakingSKey, ports.StakingHwsFile)
+				s = s.withKey(r, custody.RoleStake, o.Name)
 			} else {
 				s.holder = "signs elsewhere (" + o.Witness + ")"
 			}
@@ -98,8 +120,12 @@ func poolSlots(r ports.Reader, d *pool.Descriptor, poolN, payer string, retire b
 			if sl, ok := coll.Slot(out[i].name); ok {
 				f := sl.Filled()
 				out[i].signed = &f
-				if sl.Holder == custody.HolderRemote && sl.Party != "" {
-					out[i].holder = "remote party " + sl.Party
+				if sl.Assigned() {
+					var lab partyLabeler
+					if len(labels) > 0 {
+						lab = labels[0]
+					}
+					out[i].holder = "remote party " + lab.label(r, sl.PartyFingerprint)
 				}
 			}
 		}
@@ -124,7 +150,7 @@ func printSlots(w io.Writer, slots []slotInfo) {
 // printPoolSummary writes the summary of a pool registration or retirement.
 // It holds names, ids, amounts, URLs and hashes and no key material, and
 // never the registration protection key.
-func printPoolSummary(ctx context.Context, w io.Writer, store ports.Store, ids ports.TxIDCalculator, s ports.TxSummary) {
+func printPoolSummary(ctx context.Context, w io.Writer, store ports.Store, ids ports.TxIDCalculator, s ports.TxSummary, labels ...partyLabeler) {
 	title := map[string]string{
 		"pool registration":    "Pool registration: first registration (pays the pool deposit)",
 		"pool re-registration": "Pool re-registration: an update of a registered pool (no deposit)",
@@ -152,9 +178,12 @@ func printPoolSummary(ctx context.Context, w io.Writer, store ports.Store, ids p
 			if ids != nil {
 				coll, _ = d.Collection(ids.TransactionID)
 			}
-			slots = poolSlots(r, d, s.Account, s.Source, s.Kind == "pool retirement", coll)
+			slots = poolSlots(r, d, s.Account, s.Source, s.Kind == "pool retirement", coll, labels...)
 			return nil
 		})
+		if len(labels) > 0 {
+			labels[0].describe(ctx, store, slots) // after the view: the directory reads the store itself
+		}
 	}
 	if s.Kind == "pool retirement" {
 		if d != nil {
@@ -254,4 +283,88 @@ func printPoolSummary(ctx context.Context, w io.Writer, store ports.Store, ids p
 		fmt.Fprintf(w, "  NOTE         %s\n", shown(n))
 	}
 	fmt.Fprintln(w)
+}
+
+// partyLabeler names a party by its fingerprint for display: the label the
+// operator gave it in the registry. A fingerprint with no entry (or no
+// registry) is shown as the fingerprint. It is display only; a slot is routed
+// by the fingerprint, never by a label (ADR 0010 decision 4).
+type partyLabeler struct {
+	reg     ports.PartyRegistry
+	signers ports.SignerDirectory
+}
+
+func (l partyLabeler) label(r ports.Reader, fp party.Fingerprint) string {
+	if l.reg != nil && r != nil {
+		if p, err := l.reg.ByFingerprint(r, fp); err == nil && p.Name != "" {
+			return safeText(p.Name)
+		}
+	}
+	return fp.String()
+}
+
+func labelerOf(env *Env) partyLabeler {
+	l := partyLabeler{}
+	if env != nil && env.Party != nil {
+		l.reg = env.Party.Registry
+	}
+	if env != nil {
+		l.signers = env.Signers
+	}
+	return l
+}
+
+// describe says who signs each slot that has a key, by asking the signer
+// directory that will sign: the answer shown to the operator is the plan's. A
+// key that answers through another name (one verification key stored under two
+// names) says so and names the record that signs. It must be called outside any
+// store view.
+func (l partyLabeler) describe(ctx context.Context, store ports.Store, slots []slotInfo) {
+	if l.signers == nil {
+		return
+	}
+	var idx ports.KeyIndex
+	if store != nil {
+		if x, err := ports.NewStoreKeyIndex(store); err == nil {
+			idx = x
+		}
+	}
+	for i := range slots {
+		s := &slots[i]
+		if !s.haveKey || strings.HasPrefix(s.holder, "signs elsewhere") || strings.HasPrefix(s.holder, "remote party") {
+			continue
+		}
+		conn, err := l.signers.Connected(s.key)
+		var text string
+		switch {
+		case err != nil:
+			text = "NOT signable here: " + err.Error()
+		case len(conn) == 0 && hwkeys.OnDevice(l.signers, s.key):
+			text = "hardware wallet (none connected)"
+		case len(conn) == 0:
+			text = "NOT in this workspace"
+		case hwkeys.IsHardware(conn[0].Signer):
+			text = "hardware wallet"
+		case conn[0].Deferred:
+			text = "signs elsewhere (a co-signer)"
+		default:
+			text = "this workspace"
+		}
+		// the record that signs, when it is stored under another name
+		if idx != nil && len(conn) > 0 {
+			if homes, err := idx.Homes(ctx, s.key.Identity); err == nil {
+				var h ports.KeyHome
+				var ok bool
+				if hwkeys.IsHardware(conn[0].Signer) {
+					h, ok = ports.HardwareHome(homes, s.key.Role)
+				} else {
+					h, ok = ports.SecretHome(homes, s.key.Role)
+				}
+				if ok && h.Name != s.storeName {
+					text += fmt.Sprintf(" (the key stored as %s answers for it)", safeText(h.Name))
+				}
+			}
+		}
+		s.holder = text
+	}
 }

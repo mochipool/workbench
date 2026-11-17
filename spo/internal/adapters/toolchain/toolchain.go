@@ -106,7 +106,13 @@ var probes = map[ports.ToolName]probe{
 	ports.CardanoNode:   {[]string{"version"}, 1},
 	ports.CardanoHWCLI:  {[]string{"version"}, 5},
 	ports.CardanoSigner: {[]string{"--version"}, 1},
+	// `fido2-token -V` prints the libfido2 version alone ("1.17.0"), on stderr
+	// (tools/fido2-token.c: fprintf(stderr, ...)); see probeOnStderr.
+	ports.FIDO2Token: {[]string{"-V"}, 0},
 }
+
+// probeOnStderr lists the tools that report their version on stderr.
+var probeOnStderr = map[ports.ToolName]bool{ports.FIDO2Token: true}
 
 // Toolchain checks each tool once, on first use.
 type Toolchain struct {
@@ -159,7 +165,11 @@ func (t *Toolchain) Tool(ctx context.Context, name ports.ToolName) (ports.Tool, 
 		if err != nil {
 			return ports.Tool{}, fmt.Errorf("%w: %s did not report a version: %v", ErrVersion, name, err)
 		}
-		have := word(res.Stdout, p.word)
+		report := res.Stdout
+		if probeOnStderr[name] {
+			report = res.Stderr
+		}
+		have := word(report, p.word)
 		switch {
 		case have == "":
 			return ports.Tool{}, fmt.Errorf("%w: %s reported no readable version", ErrVersion, name)

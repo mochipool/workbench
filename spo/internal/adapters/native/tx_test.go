@@ -3,6 +3,7 @@ package native
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/porttest"
 	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
@@ -172,12 +174,31 @@ func TestInspectAddress(t *testing.T) {
 
 // ---- witnesses ----------------------------------------------------------------
 
+// vkeyFile is a verification key envelope of a raw key.
+func vkeyFile(pub []byte) string {
+	return `{"type":"PaymentVerificationKeyShelley_ed25519","description":"x","cborHex":"5820` + hex.EncodeToString(pub) + `"}`
+}
+
+// vaultDir writes files in a directory store. A signing key file that has no
+// verification key beside it gets one of a key made from its name, so each key
+// of the vault has its own identity (a key is found by identity now).
 func vaultDir(t *testing.T, files map[string]string) *plainstore.Store {
 	t.Helper()
 	dir := t.TempDir()
 	for n, c := range files {
 		if err := os.WriteFile(filepath.Join(dir, n), []byte(c), 0o400); err != nil {
 			t.Fatal(err)
+		}
+	}
+	for n := range files {
+		if stem, ok := strings.CutSuffix(n, ".skey"); ok {
+			if _, have := files[stem+".vkey"]; !have {
+				sum := sha256.Sum256([]byte(n))
+				pub := ed25519.NewKeyFromSeed(sum[:]).Public().(ed25519.PublicKey)
+				if err := os.WriteFile(filepath.Join(dir, stem+".vkey"), []byte(vkeyFile(pub)), 0o400); err != nil {
+					t.Fatal(err)
+				}
+			}
 		}
 	}
 	st, err := plainstore.OpenTestnet(dir)
@@ -195,8 +216,9 @@ func someBody(t *testing.T) txbuild.TxBody {
 	return b
 }
 
-func keyRef(role custody.Role, owner string) custody.KeyRef {
-	return custody.KeyRef{Role: role, Holder: custody.HolderVault, Owner: owner}
+func keyRef(t *testing.T, st ports.Store, role custody.Role, owner string) custody.KeyRef {
+	t.Helper()
+	return porttest.Key(t, st, role, owner)
 }
 
 // A normal and an extended payment key, and a stake key, witness a body; the
@@ -218,7 +240,8 @@ func TestVaultSignerWitnesses(t *testing.T) {
 	extJSON, _ := json.Marshal(ext)
 	pub := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
 
-	vault := vaultDir(t, map[string]string{"n.skey": normal, "e.skey": string(extJSON), "s.staking.skey": stake})
+	vault := vaultDir(t, map[string]string{"n.skey": normal, "e.skey": string(extJSON), "s.staking.skey": stake,
+		"n.vkey": vkeyFile(pub), "e.vkey": vkeyFile(xprv.PublicKey()), "s.staking.vkey": vkeyFile(pub)})
 	signer := VaultSigner{Vault: vault}
 	body := someBody(t)
 	for _, tc := range []struct {
@@ -228,9 +251,9 @@ func TestVaultSignerWitnesses(t *testing.T) {
 		hash  txbuild.KeyHash
 		check bool
 	}{
-		{"normal payment key", keyRef(custody.RolePayment, "n"), pub, txbuild.HashKey(pub), true},
-		{"extended payment key", keyRef(custody.RolePayment, "e"), xprv.PublicKey(), txbuild.HashKey(xprv.PublicKey()), true},
-		{"stake key of a wallet", keyRef(custody.RoleStake, "s"), pub, txbuild.HashKey(pub), true},
+		{"normal payment key", keyRef(t, vault, custody.RolePayment, "n"), pub, txbuild.HashKey(pub), true},
+		{"extended payment key", keyRef(t, vault, custody.RolePayment, "e"), xprv.PublicKey(), txbuild.HashKey(xprv.PublicKey()), true},
+		{"stake key of a wallet", keyRef(t, vault, custody.RoleStake, "s"), pub, txbuild.HashKey(pub), true},
 	} {
 		w, err := signer.Witness(context.Background(), tc.key, body)
 		if err != nil {
@@ -245,8 +268,8 @@ func TestVaultSignerWitnesses(t *testing.T) {
 		}
 	}
 	// Ed25519 is deterministic: the same body gives the same witness.
-	w1, _ := signer.Witness(context.Background(), keyRef(custody.RolePayment, "n"), body)
-	w2, _ := signer.Witness(context.Background(), keyRef(custody.RolePayment, "n"), body)
+	w1, _ := signer.Witness(context.Background(), keyRef(t, vault, custody.RolePayment, "n"), body)
+	w2, _ := signer.Witness(context.Background(), keyRef(t, vault, custody.RolePayment, "n"), body)
 	if w1 != w2 {
 		t.Error("two witnesses over the same body differ")
 	}
@@ -268,12 +291,15 @@ func TestVaultSignerRefusals(t *testing.T) {
 		"badext.skey":  `{"type":"PaymentExtendedSigningKeyShelley_ed25519_bip32","description":"x","cborHex":"5880` + strings.Repeat("22", 128) + `"}`,
 		"kes.skey":     `{"type":"KesSigningKey_ed25519_kes_2^6","description":"x","cborHex":"5820` + seed + `"}`,
 		"notjson.skey": `not json`,
+		// a verification key and no signing key in the vault
+		"nokey.vkey": vkeyFile(make([]byte, 32)),
 	}
-	signer := VaultSigner{Vault: vaultDir(t, files)}
+	vault := vaultDir(t, files)
+	signer := VaultSigner{Vault: vault}
 	body := someBody(t)
-	for name, want := range map[string]string{"nokey": "open the payment signing key", "stakey": "unsupported signing key type", "enc": "gpg-encrypted",
+	for name, want := range map[string]string{"nokey": "holds no signing key", "stakey": "unsupported signing key type", "enc": "gpg-encrypted",
 		"short": "not a", "badext": "does not match", "kes": "unsupported signing key type", "notjson": "not a text envelope"} {
-		_, err := signer.Witness(context.Background(), keyRef(custody.RolePayment, name), body)
+		_, err := signer.Witness(context.Background(), keyRef(t, vault, custody.RolePayment, name), body)
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s: %v, want %q", name, err, want)
 			continue
@@ -283,7 +309,7 @@ func TestVaultSignerRefusals(t *testing.T) {
 		}
 	}
 	// A role the vault signer does not witness with.
-	if _, err := signer.Witness(context.Background(), keyRef(custody.RoleKES, "good"), body); err == nil {
+	if _, err := signer.Witness(context.Background(), custody.KeyRef{Role: custody.RoleKES, Identity: keyRef(t, vault, custody.RolePayment, "good").Identity}, body); err == nil {
 		t.Error("a KES key witnessed a transaction")
 	}
 }
@@ -326,5 +352,51 @@ func TestAssemble(t *testing.T) {
 	signed, err := Ledger{}.Assemble(body, []txbuild.Witness{w})
 	if err != nil || signed.ID != body.ID || len(signed.CBOR) <= len(body.CBOR) {
 		t.Errorf("%v", err)
+	}
+}
+
+// The vault signer is handed the body and rebuilds what it signs from it: a
+// transaction id that is not the id of the bytes it was given is refused, and
+// the signature is over the id of the bytes, never over a hash handed over
+// (ADR 0010 decision 3). A key found by identity that is not the demanded key
+// is refused too.
+//
+// spec: SPO-Xidentity-SEC-006
+func TestVaultSignerSignsTheIdOfTheBodyItIsHanded(t *testing.T) {
+	seed := make([]byte, 32)
+	for i := range seed {
+		seed[i] = byte(3 * i)
+	}
+	pub := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
+	vault := vaultDir(t, map[string]string{
+		"n.skey": `{"type":"PaymentSigningKeyShelley_ed25519","description":"","cborHex":"5820` + hex.EncodeToString(seed) + `"}`,
+		"n.vkey": vkeyFile(pub)})
+	signer := VaultSigner{Vault: vault}
+	key := keyRef(t, vault, custody.RolePayment, "n")
+	body := someBody(t)
+	forged := body
+	forged.ID[0] ^= 1 // an id that is not the id of the bytes
+	if _, err := signer.Witness(context.Background(), key, forged); err == nil {
+		t.Error("a witness was made over an id that is not the id of the body")
+	}
+	w, err := signer.Witness(context.Background(), key, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := txbuild.VerifyWitness(body, w, txbuild.HashKey(pub)); err != nil {
+		t.Error(err)
+	}
+	// a body with no bytes cannot be witnessed
+	if _, err := signer.Witness(context.Background(), key, txbuild.TxBody{ID: body.ID}); err == nil {
+		t.Error("a witness was made with no body to read")
+	}
+	// the key found for the identity is the key demanded: a vault file whose
+	// verification key is another key's is refused
+	other := vaultDir(t, map[string]string{
+		"n.skey": `{"type":"PaymentSigningKeyShelley_ed25519","description":"","cborHex":"5820` + hex.EncodeToString(seed) + `"}`,
+		"n.vkey": vkeyFile(make([]byte, 32))})
+	if _, err := (VaultSigner{Vault: other}).Witness(context.Background(), keyRef(t, other, custody.RolePayment, "n"), body); err == nil ||
+		!strings.Contains(err.Error(), "another key") {
+		t.Errorf("a vault key that is not the demanded key: %v", err)
 	}
 }

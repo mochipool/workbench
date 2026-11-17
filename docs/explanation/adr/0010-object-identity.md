@@ -1,6 +1,6 @@
 # ADR 0010: Objects are identified by hash, names are labels
 
-Status: proposed. Refines [ADR 0003](./0003-vault-and-store.md) (lookup tags), [ADR 0005](./0005-party-envelope-and-signing-policy.md) (party envelope) and [ADR 0008](./0008-capability-typed-ports.md) (which signer answers). Prepares [ADR 0011](./0011-key-custody-and-unlock.md).
+Status: accepted (owner, 2026-11-17). Refines [ADR 0003](./0003-vault-and-store.md) (lookup tags), [ADR 0005](./0005-party-envelope-and-signing-policy.md) (party envelope) and [ADR 0008](./0008-capability-typed-ports.md) (which signer answers). Prepares [ADR 0011](./0011-key-custody-and-unlock.md).
 
 ## Amends
 
@@ -147,6 +147,8 @@ Handles (decision 5) and remote announcements (decision 3) are built with the se
 ADR 0012 (draft) builds on this record.
 
 ## Open questions
+
+The owner accepted this record on 2026-11-17. The entries marked unconfirmed remain open.
 
 * Whether the VRF, KES, BLS and Catalyst hash lengths above match the ledger and the CIPs; none was checked against a primary source here.
 * The Calidus id derivation (CIP-88) and the CIP-0129 status are unconfirmed.

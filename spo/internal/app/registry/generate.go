@@ -11,9 +11,12 @@ import (
 	"unicode/utf8"
 
 	"github.com/mochipool/workbench/spo/internal/app/assets"
+	"github.com/mochipool/workbench/spo/internal/app/keyring"
 	dassets "github.com/mochipool/workbench/spo/internal/domain/assets"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
+	"github.com/mochipool/workbench/spo/internal/domain/cose"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/domain/tokenmeta"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
@@ -156,13 +159,11 @@ func (uc GenerateTokenMetadata) Run(ctx context.Context, req GenerateRequest) (G
 	var script []byte
 	var idHex string
 	var recBytes []byte
-	var haveRec, hws bool
+	var haveRec, hasVKey bool
+	var keyRef custody.KeyRef
+	var policyVKey [32]byte
 	if err := uc.Store.View(ctx, func(r ports.Reader) error {
-		// The hardware file is looked at before the signing key (SPO-12a-IN-002).
 		var err error
-		if hws, err = r.Exists(ports.Ref{Name: policyName, Kind: ports.PolicyHwsFile}); err != nil {
-			return err
-		}
 		get := func(k ports.Kind) ([]byte, error) {
 			v, err := r.Get(ports.Ref{Name: policyName, Kind: k})
 			if errors.Is(err, ports.ErrNotFound) {
@@ -178,14 +179,24 @@ func (uc GenerateTokenMetadata) Run(ctx context.Context, req GenerateRequest) (G
 		if script, err = get(ports.PolicyScript); err != nil {
 			return err
 		}
-		if !hws {
-			ok, err := r.Exists(ports.Ref{Name: policyName, Kind: ports.PolicySKey})
-			if err != nil {
-				return err
+		// The policy key's identity is resolved once, here; which signer
+		// answers for it is the directory's business (SPO-12a-IN-002).
+		var held bool
+		if keyRef, held, err = keyring.ResolveHeld(r, custody.RolePolicy, policyName); err != nil {
+			return err
+		}
+		if !held {
+			return fmt.Errorf("%w: %s.policy.skey is missing", ErrPolicyFiles, policyName)
+		}
+		// The policy's verification key, when the store has one, is the
+		// identity demanded of the signer (hasVKey).
+		if vk, err := r.Get(ports.Ref{Name: policyName, Kind: ports.PolicyVKey}); err == nil {
+			if policyVKey, err = cose.VKeyFromEnvelope(vk); err != nil {
+				return fmt.Errorf("%s.policy.vkey: %w", policyName, err)
 			}
-			if !ok {
-				return fmt.Errorf("%w: %s.policy.skey is missing", ErrPolicyFiles, policyName)
-			}
+			hasVKey = true
+		} else if !errors.Is(err, ports.ErrNotFound) {
+			return err
 		}
 		recBytes, err = r.Get(recRef)
 		switch {
@@ -199,12 +210,6 @@ func (uc GenerateTokenMetadata) Run(ctx context.Context, req GenerateRequest) (G
 		return Generated{}, err
 	}
 
-	// The holder is the device when a hardware file exists (SPO-Pfiles-INV-002).
-	holder := custody.HolderVault
-	if hws {
-		holder = custody.HolderHardware
-	}
-	keyRef := custody.KeyRef{Role: custody.RolePolicy, Holder: holder, Owner: policyName}
 	if _, err := ports.PlanSignatures(uc.Signers, []custody.Slot{{
 		Label: "sign the token-registry entry", Key: keyRef,
 		Demand: custody.Demand{Role: custody.RolePolicy, Operation: custody.OpSignRegistryEntry},
@@ -290,13 +295,23 @@ func (uc GenerateTokenMetadata) Run(ctx context.Context, req GenerateRequest) (G
 	if err != nil {
 		return Generated{}, err
 	}
+	demanded, err := demandedPolicyKeys(hasVKey, policyVKey, script)
+	if err != nil {
+		return Generated{}, err
+	}
 	entry, err := tokenmeta.Build(ctx, subject, script, f, seq, func(ctx context.Context, msgs [][32]byte) ([]tokenmeta.Attestation, error) {
 		got, err := signer.SignRegistryMessages(ctx, key, msgs)
 		if err != nil {
 			return nil, fmt.Errorf("sign the registry entry: %w", err)
 		}
+		if len(got) != len(msgs) {
+			return nil, fmt.Errorf("%w: %d attestations for %d messages", tokenmeta.ErrSigner, len(got), len(msgs))
+		}
 		out := make([]tokenmeta.Attestation, len(got))
 		for i, a := range got {
+			if err := verifyAttestation(msgs[i], a, demanded); err != nil {
+				return nil, fmt.Errorf("%w: attestation %d: %v", tokenmeta.ErrSigner, i, err)
+			}
 			out[i] = tokenmeta.Attestation{PublicKey: a.PublicKey, Signature: a.Signature}
 		}
 		return out, nil
@@ -318,4 +333,39 @@ func (uc GenerateTokenMetadata) Run(ctx context.Context, req GenerateRequest) (G
 		return Generated{}, err
 	}
 	return Generated{Record: recRef, Subject: subject, Sequence: seq, Entry: entry, File: file}, nil
+}
+
+// demandedPolicyKeys is the set of identities the policy signer may answer
+// with: the policy's own verification key when the workspace holds it, else
+// the key hashes of the policy script's signature leaves.
+func demandedPolicyKeys(hasVKey bool, vkey [32]byte, script []byte) ([]identity.Ref, error) {
+	if hasVKey {
+		id, err := identity.KeyHashOf(vkey[:])
+		return []identity.Ref{id}, err
+	}
+	hashes, err := tokenmeta.PolicyKeyHashes(script)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]identity.Ref, 0, len(hashes))
+	for _, h := range hashes {
+		id, err := identity.NewRef(identity.KindKeyHash, h[:])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+// verifyAttestation accepts an attestation only through custody's verifier,
+// against one of the demanded identities.
+func verifyAttestation(msg [32]byte, a ports.RegistryAttestation, demanded []identity.Ref) error {
+	err := custody.ErrMessageKey
+	for _, want := range demanded {
+		if err = custody.VerifyRegistryAttestation(msg, a.PublicKey, a.Signature, want); err == nil {
+			return nil
+		}
+	}
+	return err
 }

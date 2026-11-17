@@ -13,7 +13,6 @@ import (
 	"github.com/mochipool/workbench/spo/internal/app/poolops"
 	"github.com/mochipool/workbench/spo/internal/app/wallet"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
-	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	dpoll "github.com/mochipool/workbench/spo/internal/domain/poll"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/domain/txparam"
@@ -173,7 +172,6 @@ func TestAnswerRefusals(t *testing.T) {
 	if len(r.w.Chain.Submitted) != 0 || len(r.w.Conf.Seen) != 0 {
 		t.Error("a refusal reached the confirmation or the chain")
 	}
-	_ = custody.HolderVault
 }
 
 func hashOf(vkeyEnvelope []byte) (txbuild.KeyHash, error) {

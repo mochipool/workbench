@@ -20,37 +20,12 @@ import (
 // cold key. It embeds VaultSigner, so it still issues operational
 // certificates and witnesses transactions, and its Profile is the union.
 //
-// To compose it into the signer directory, return VaultSignatures{VaultSigner{Vault: v}}
-// from Signers.SignerFor for HolderVault in place of VaultSigner: it implements
-// every interface VaultSigner does. Until then NewSignatureSigners is a
-// directory of its own.
-//
 // bursa.SignData is not used: it always writes {"hashed": false} and cannot
 // carry a hashed payload, so the COSE structures are written by domain/cose
 // and only the signature is made here (the bytes are compared with
 // cardano-signer in spo/test/parity).
 type VaultSignatures struct {
 	VaultSigner
-}
-
-// NewSignatureSigners returns a directory whose vault signer has the message
-// and registration capabilities.
-func NewSignatureSigners(v ports.Vault) SignatureSigners { return SignatureSigners{Vault: v} }
-
-// SignatureSigners is a SignerDirectory of VaultSignatures.
-type SignatureSigners struct{ Vault ports.Vault }
-
-// SignerFor implements ports.SignerDirectory.
-func (s SignatureSigners) SignerFor(key custody.KeyRef) (ports.Signer, error) {
-	switch key.Holder {
-	case custody.HolderVault, "":
-		return VaultSignatures{VaultSigner{Vault: s.Vault}}, nil
-	case custody.HolderHardware:
-		return nil, errors.New("no hardware signer is configured")
-	case custody.HolderRemote:
-		return nil, errors.New("no remote signer is configured")
-	}
-	return nil, fmt.Errorf("no signer is configured for holder %q", key.Holder)
 }
 
 // Profile implements ports.Signer: the vault's profile and the message
@@ -77,7 +52,7 @@ func signWith(lk *bursa.LoadedKey, msg []byte) ([]byte, error) {
 
 // openKey loads the signing key of a vault key reference for the role.
 func (v VaultSignatures) openKey(ctx context.Context, key custody.KeyRef) (*bursa.LoadedKey, error) {
-	ref, err := witnessRef(key)
+	ref, err := v.secretRef(ctx, key)
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +61,15 @@ func (v VaultSignatures) openKey(ctx context.Context, key custody.KeyRef) (*burs
 		return nil, fmt.Errorf("open the %s signing key: %w", key.Role, err)
 	}
 	defer env.Destroy()
-	return loadSigningKey(key.Role, env)
+	lk, err := loadSigningKey(key.Role, env)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkIdentity(key, lk.VKey); err != nil {
+		wipe(lk.SKey)
+		return nil, err
+	}
+	return lk, nil
 }
 
 // SignMessage implements ports.MessageSigner: a CIP-8 COSE_Sign1 and COSE_Key
@@ -130,5 +113,4 @@ var (
 	_ ports.Cip88Signer     = VaultSignatures{}
 	_ ports.OpCertIssuer    = VaultSignatures{}
 	_ ports.TxWitnesser     = VaultSignatures{}
-	_ ports.SignerDirectory = SignatureSigners{}
 )

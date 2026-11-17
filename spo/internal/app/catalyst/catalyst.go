@@ -23,9 +23,11 @@ import (
 	"strings"
 
 	"github.com/mochipool/workbench/spo/internal/app/hwkeys"
+	"github.com/mochipool/workbench/spo/internal/app/keyring"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/cose"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -91,8 +93,8 @@ type GenerateVotingKey struct {
 
 // GenerateVotingKeyRequest names the key.
 type GenerateVotingKeyRequest struct {
-	Name   string
-	Holder custody.Holder // empty means the vault
+	Name  string
+	Place custody.Placement // empty means the vault
 	// Account and Index select 1694H/1815H/<Account>H/0/<Index>; upstream
 	// fixes both at 0 (its port note asks for parameters).
 	Account, Index uint32
@@ -115,8 +117,7 @@ func (uc GenerateVotingKey) Run(ctx context.Context, req GenerateVotingKeyReques
 	if err != nil {
 		return res, err
 	}
-	key := custody.KeyRef{Role: custody.RoleCatalystVote, Holder: req.Holder, Owner: nm}
-	onDevice := hwkeys.Hardware(key)
+	onDevice := req.Place == custody.PlaceHardware
 	if uc.Store == nil || (!onDevice && (uc.Deriver == nil || (req.Mnemonic == nil && uc.Mnemonics == nil))) {
 		return res, ErrNotConfigured
 	}
@@ -126,7 +127,7 @@ func (uc GenerateVotingKey) Run(ctx context.Context, req GenerateVotingKeyReques
 	// A device that cannot hold the key (a Trezor, a Keystone), a missing
 	// hardware signer and every other holder are refused before any tool or
 	// file is touched (ADR 0008).
-	if _, err := hwkeys.Plan(uc.Hardware, key); err != nil {
+	if _, err := hwkeys.Plan(uc.Hardware, req.Place, custody.RoleCatalystVote); err != nil {
 		return res, err
 	}
 	refs := []ports.Ref{
@@ -137,7 +138,7 @@ func (uc GenerateVotingKey) Run(ctx context.Context, req GenerateVotingKeyReques
 		return res, err
 	}
 	if onDevice {
-		return uc.runOnDevice(ctx, nm, key, req, refs)
+		return uc.runOnDevice(ctx, nm, req, refs)
 	}
 	var words *ports.Secret
 	defer func() { words.Destroy() }()
@@ -188,11 +189,11 @@ func (uc GenerateVotingKey) Run(ctx context.Context, req GenerateVotingKeyReques
 // 1694H/1815H/<account>H/0/<index>, and the verification key and the hardware
 // signing file are stored (SPO-09a-EXT-002, SPO-09a-OUT-004). Nothing of the
 // device's reaches the workspace but those two files.
-func (uc GenerateVotingKey) runOnDevice(ctx context.Context, nm string, key custody.KeyRef, req GenerateVotingKeyRequest, refs []ports.Ref) (res VotingKeyGenerated, err error) {
+func (uc GenerateVotingKey) runOnDevice(ctx context.Context, nm string, req GenerateVotingKeyRequest, refs []ports.Ref) (res VotingKeyGenerated, err error) {
 	if req.Mnemonic != nil {
 		return res, errors.New("a hardware voting key has no mnemonic: it is made on the device")
 	}
-	hk, err := hwkeys.Export(ctx, uc.Hardware, key, hwkeys.Options{Account: req.Account, Index: req.Index})
+	hk, err := hwkeys.Export(ctx, uc.Hardware, custody.RoleCatalystVote, hwkeys.Options{Account: req.Account, Index: req.Index})
 	if err != nil {
 		return res, err
 	}
@@ -280,8 +281,6 @@ type RegistrationRequest struct {
 	Stake string
 	// Rewards is an address name, or a payment address (SPO-09a-IN-004).
 	Rewards string
-	// Holder of the stake key; empty infers it: a `.staking.hwsfile` wins.
-	Holder custody.Holder
 	// Nonce overrides the default (the current slot); 0 uses the default.
 	Nonce uint64
 	// Purpose is the voting purpose; 0 is Catalyst.
@@ -329,6 +328,7 @@ func (uc GenerateRegistration) Run(ctx context.Context, req RegistrationRequest)
 	var stakeVKey []byte
 	var rewards chain.Address
 	var keys []ResolvedKey
+	var stake, rewardsKey custody.KeyRef
 	err = uc.Store.View(ctx, func(r ports.Reader) error {
 		var err error
 		if haveSKey, err = r.Exists(ports.Ref{Name: sn, Kind: ports.StakingSKey}); err != nil {
@@ -346,6 +346,9 @@ func (uc GenerateRegistration) Run(ctx context.Context, req RegistrationRequest)
 			}
 			return err
 		}
+		if stake, err = keyring.Resolve(r, custody.RoleStake, sn); err != nil {
+			return err
+		}
 		if rewards, err = uc.rewardsAddress(r, req.Rewards); err != nil {
 			return err
 		}
@@ -355,6 +358,11 @@ func (uc GenerateRegistration) Run(ctx context.Context, req RegistrationRequest)
 		if strings.TrimSuffix(rewardsKeyName, ".payment") == sn && (ports.Ref{Name: rewardsKeyName, Kind: ports.AddrHwsFile}).Validate() == nil {
 			if haveRewardsHws, err = r.Exists(ports.Ref{Name: rewardsKeyName, Kind: ports.AddrHwsFile}); err != nil {
 				return err
+			}
+			if haveRewardsHws {
+				if rewardsKey, err = keyring.Resolve(r, custody.RolePayment, rewardsKeyName); err != nil {
+					return err
+				}
 			}
 		}
 		for _, d := range req.Delegation {
@@ -372,13 +380,6 @@ func (uc GenerateRegistration) Run(ctx context.Context, req RegistrationRequest)
 	if !haveSKey && !haveHws { // SPO-09a-PRE-003
 		return res, ErrNoStakeSigner
 	}
-	holder := req.Holder
-	if holder == "" {
-		holder = custody.HolderVault
-		if haveHws {
-			holder = custody.HolderHardware
-		}
-	}
 	stakePub, err := cose.VKeyFromEnvelope(stakeVKey)
 	if err != nil {
 		return res, fmt.Errorf("the stake verification key: %w", err)
@@ -395,7 +396,6 @@ func (uc GenerateRegistration) Run(ctx context.Context, req RegistrationRequest)
 		return res, err
 	}
 
-	stake := custody.KeyRef{Role: custody.RoleStake, Holder: holder, Owner: sn}
 	if _, err := ports.PlanSignatures(uc.Signers, []custody.Slot{{
 		Label: "sign the Catalyst registration", Key: stake,
 		Demand: custody.Demand{Role: custody.RoleStake, Operation: custody.OpSignCip36},
@@ -428,16 +428,21 @@ func (uc GenerateRegistration) Run(ctx context.Context, req RegistrationRequest)
 		reg.Nonce = tip.Slot
 	}
 	var signed ports.Registration
-	if hs, ok := signer.(ports.HardwareCip36Signer); ok && holder == custody.HolderHardware && haveRewardsHws {
-		pay := custody.KeyRef{Role: custody.RolePayment, Holder: custody.HolderHardware, Owner: rewardsKeyName}
-		signed, err = hs.SignCip36With(ctx, key, reg, ports.Cip36HardwareOptions{RewardsKey: &pay})
+	if hs, ok := signer.(ports.HardwareCip36Signer); ok && haveRewardsHws {
+		signed, err = hs.SignCip36With(ctx, key, reg, ports.Cip36HardwareOptions{RewardsKey: &rewardsKey})
 	} else {
 		signed, err = signer.SignCip36(ctx, key, reg)
 	}
 	if err != nil {
 		return res, fmt.Errorf("sign the registration: %w", err)
 	}
-	if _, err := cose.VerifyCip36(signed.CBOR); err != nil {
+	// The registration must verify under the stake key that was demanded: a
+	// signer that answers with a valid registration of another key is refused.
+	demanded, err := identity.KeyHashOf(reg.StakePub[:])
+	if err != nil {
+		return res, err
+	}
+	if _, err := custody.VerifyCip36(signed.CBOR, demanded); err != nil {
 		return res, fmt.Errorf("the signer's registration does not verify: %w", err)
 	}
 	ref := ports.Ref{Name: sn + "_" + uc.Clock.Now().Format("060102150405"), Kind: ports.VoteRegistration}

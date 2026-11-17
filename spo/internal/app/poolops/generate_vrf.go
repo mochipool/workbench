@@ -18,8 +18,8 @@ type GenerateVrfKeys struct {
 
 // GenerateVrfKeysRequest names the pool and who holds the signing key.
 type GenerateVrfKeysRequest struct {
-	Pool   string
-	Holder custody.Holder // empty means the vault
+	Pool  string
+	Place custody.Placement // empty means the vault
 }
 
 // VrfKeysGenerated is the result. It carries no signing key.
@@ -30,7 +30,7 @@ type VrfKeysGenerated struct {
 
 // Run generates the pair. Both files are written together or not at all.
 func (uc GenerateVrfKeys) Run(ctx context.Context, req GenerateVrfKeysRequest) (VrfKeysGenerated, error) {
-	if _, err := custody.PlanGeneration(custody.KeyRef{Role: custody.RoleVRF, Holder: req.Holder, Owner: req.Pool}); err != nil {
+	if _, err := custody.PlanGeneration(req.Place, custody.RoleVRF); err != nil {
 		return VrfKeysGenerated{}, err
 	}
 	if err := uc.Store.View(ctx, func(r ports.Reader) error { return vrfPlan(r, req.Pool) }); err != nil {

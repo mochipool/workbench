@@ -287,24 +287,24 @@ func ValidHardwarePath(p string) bool {
 	return true
 }
 
-// PlanGenerationWith is PlanGeneration with a signer for hardware keys: a key
-// held in the vault is met by the software generators, any other holder by the
-// profile profileOf returns for it (the hardware signer's). A use case calls it
-// instead of PlanGeneration when a hardware signer is configured.
-func PlanGenerationWith(profileOf func(KeyRef) (Profile, error), keys ...KeyRef) (Plan, error) {
-	slots := make([]Slot, len(keys))
-	for i, k := range keys {
-		slots[i] = Slot{Label: "generate " + string(k.Role) + " key", Key: k,
-			Demand: Demand{Role: k.Role, Operation: OpExportVKey}}
+// PlanGenerationWith is PlanGeneration with a signer for hardware keys: the
+// vault placement is met by the software generators, the hardware placement by
+// the profile profileOf returns. A use case calls it instead of PlanGeneration
+// when a hardware signer is configured.
+func PlanGenerationWith(profileOf func(Placement) (Profile, error), place Placement, roles ...Role) (Plan, error) {
+	slots := make([]Slot, len(roles))
+	for i, r := range roles {
+		slots[i] = Slot{Label: "generate " + string(r) + " key", Key: KeyRef{Role: r},
+			Demand: Demand{Role: r, Operation: OpExportVKey}}
 	}
 	soft := SoftwareGenerator()
-	return NewPlan(slots, func(k KeyRef) (Profile, error) {
-		if k.Holder == HolderVault || k.Holder == "" {
+	return NewPlan(slots, func(KeyRef) (Profile, error) {
+		if place == PlaceVault || place == "" {
 			return soft, nil
 		}
-		if k.Holder == HolderHardware && profileOf != nil {
-			return profileOf(k)
+		if place == PlaceHardware && profileOf != nil {
+			return profileOf(place)
 		}
-		return Profile{}, fmt.Errorf("no signer is configured that can generate keys held by %s", k.Holder)
+		return Profile{}, fmt.Errorf("no signer is configured that can generate keys held by %s", place)
 	})
 }

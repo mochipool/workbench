@@ -1,14 +1,11 @@
 package txbuild
 
 import (
-	"bytes"
-	"crypto/ed25519"
-	"errors"
-	"fmt"
-
 	"golang.org/x/crypto/blake2b"
 
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
+	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 )
 
 // TxBody is an unsigned transaction as the ledger adapter built it: the
@@ -51,22 +48,26 @@ func HashKey(vkey []byte) KeyHash {
 	return out
 }
 
-// Witness verification refusals.
+// Witness verification refusals. They are custody's: the one verifier of a
+// transaction witness lives there (ADR 0010, decision 3).
 var (
-	ErrWitnessKey       = errors.New("the witness is made with a key the address does not use")
-	ErrWitnessSignature = errors.New("the witness signature does not verify over the transaction id")
+	ErrWitnessKey       = custody.ErrWitnessKey
+	ErrWitnessSignature = custody.ErrWitnessSignature
 )
 
 // VerifyWitness checks a witness before it is assembled: the signature must
 // verify over the body's id and the key must hash to the credential the
 // signer was supposed to hold. A signer that returns another key's
-// witness, or a corrupt one, is caught here and not by the node.
+// witness, or a corrupt one, is caught here and not by the node. It is
+// custody.VerifyTxWitness with the credential as an identity.
 func VerifyWitness(body TxBody, w Witness, want KeyHash) error {
-	if got := HashKey(w.VKey[:]); !bytes.Equal(got[:], want[:]) {
-		return fmt.Errorf("%w: key hash %x, wanted %x", ErrWitnessKey, got[:], want[:])
+	return custody.VerifyTxWitness(body.ID, w.VKey, w.Signature, mustKeyIdentity(want))
+}
+
+func mustKeyIdentity(h KeyHash) identity.Ref {
+	r, err := identity.NewRef(identity.KindKeyHash, h[:])
+	if err != nil {
+		panic(err) // a KeyHash is always 28 bytes
 	}
-	if !ed25519.Verify(ed25519.PublicKey(w.VKey[:]), body.ID[:], w.Signature[:]) {
-		return ErrWitnessSignature
-	}
-	return nil
+	return r
 }

@@ -57,7 +57,7 @@ func TestPaymentAccountOnLedger(t *testing.T) {
 	w := world.New(t)
 	w.UseHardware("Ledger", "8.0.8")
 	uc := wallet.GeneratePaymentAccount{Store: w.Store, KeyGen: native.SoftwareKeys{}, Addresses: w.Ledger, NetworkID: w.Network, Hardware: w.Exporter()}
-	res, err := uc.Run(context.Background(), wallet.GeneratePaymentRequest{Name: "pay", Holder: custody.HolderHardware, Account: 3, Index: 7})
+	res, err := uc.Run(context.Background(), wallet.GeneratePaymentRequest{Name: "pay", Place: custody.PlaceHardware, Account: 3, Index: 7})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestPaymentAccountOnLedger(t *testing.T) {
 		t.Errorf("path: %s", got)
 	}
 	// hwmulti: purpose 1854H.
-	if _, err := uc.Run(context.Background(), wallet.GeneratePaymentRequest{Name: "multi", Holder: custody.HolderHardware, Multisig: true}); err != nil {
+	if _, err := uc.Run(context.Background(), wallet.GeneratePaymentRequest{Name: "multi", Place: custody.PlaceHardware, Multisig: true}); err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Join(w.HW.Last("address", "key-gen"), " "); !strings.Contains(got, "--path 1854H/1815H/0H/0/0") {
@@ -90,7 +90,7 @@ func TestPaymentAccountOnLedger(t *testing.T) {
 func TestGenerationRefusedUpfront(t *testing.T) {
 	w := world.New(t)
 	uc := wallet.GeneratePaymentAccount{Store: w.Store, KeyGen: native.SoftwareKeys{}, Addresses: w.Ledger, NetworkID: w.Network}
-	_, err := uc.Run(context.Background(), wallet.GeneratePaymentRequest{Name: "pay", Holder: custody.HolderHardware})
+	_, err := uc.Run(context.Background(), wallet.GeneratePaymentRequest{Name: "pay", Place: custody.PlaceHardware})
 	var un *custody.UnsupportedError
 	if err == nil || !strings.Contains(err.Error(), "no signer is configured that can generate keys held by hardware") {
 		t.Fatalf("no exporter: %v (%T)", err, err)
@@ -100,7 +100,7 @@ func TestGenerationRefusedUpfront(t *testing.T) {
 	w2 := world.New(t)
 	w2.UseHardware("Trezor", "2.7.2")
 	cold := poolops.GenerateColdKeys{Store: w2.Store, KeyGen: native.SoftwareKeys{}, Hardware: w2.Exporter()}
-	_, err = cold.Run(context.Background(), poolops.GenerateColdKeysRequest{Pool: "p", Holder: custody.HolderHardware})
+	_, err = cold.Run(context.Background(), poolops.GenerateColdKeysRequest{Pool: "p", Place: custody.PlaceHardware})
 	if !errors.As(err, &un) {
 		t.Fatalf("a Trezor holds no pool cold key: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestWalletOnLedgerAndHybrid(t *testing.T) {
 	w.UseHardware("Ledger", "8.0.8")
 	uc := wallet.GenerateWalletAccount{Store: w.Store, Payment: native.SoftwareKeys{}, Stake: native.SoftwareKeys{}, Addresses: w.Ledger,
 		NetworkID: w.Network, Hardware: w.Exporter()}
-	res, err := uc.Run(context.Background(), wallet.GenerateWalletRequest{Name: "hw", Holder: custody.HolderHardware, Account: 2, Index: 5})
+	res, err := uc.Run(context.Background(), wallet.GenerateWalletRequest{Name: "hw", Place: custody.PlaceHardware, Account: 2, Index: 5})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,14 +146,14 @@ func TestWalletOnLedgerAndHybrid(t *testing.T) {
 		t.Errorf("paths %v", paths)
 	}
 	// Hybrid: hardware payment, stake key in the vault.
-	if _, err := uc.Run(context.Background(), wallet.GenerateWalletRequest{Name: "hy", Holder: custody.HolderHardware, StakeHolder: custody.HolderVault, Multisig: true}); err != nil {
+	if _, err := uc.Run(context.Background(), wallet.GenerateWalletRequest{Name: "hy", Place: custody.PlaceHardware, StakePlace: custody.PlaceVault, Multisig: true}); err != nil {
 		t.Fatal(err)
 	}
 	if !has(w, "hy.payment", ports.AddrHwsFile) || !has(w, "hy", ports.StakingSKey) || has(w, "hy", ports.StakingHwsFile) {
 		t.Error("hybrid files")
 	}
 	// A software payment key with a hardware stake key is not a type of 03a.
-	if _, err := uc.Run(context.Background(), wallet.GenerateWalletRequest{Name: "bad", StakeHolder: custody.HolderHardware}); err == nil {
+	if _, err := uc.Run(context.Background(), wallet.GenerateWalletRequest{Name: "bad", StakePlace: custody.PlaceHardware}); err == nil {
 		t.Error("software payment with hardware stake was accepted")
 	}
 }
@@ -169,7 +169,7 @@ func TestColdAndGovernanceKeysOnLedger(t *testing.T) {
 	w.UseHardware("Ledger", "8.0.8")
 	ctx := context.Background()
 	cold, err := poolops.GenerateColdKeys{Store: w.Store, KeyGen: native.SoftwareKeys{}, Hardware: w.Exporter()}.
-		Run(ctx, poolops.GenerateColdKeysRequest{Pool: "pool", Holder: custody.HolderHardware, Index: 4})
+		Run(ctx, poolops.GenerateColdKeysRequest{Pool: "pool", Place: custody.PlaceHardware, Index: 4})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestColdAndGovernanceKeysOnLedger(t *testing.T) {
 
 	soft := native.SoftwareKeys{}
 	drep, err := governance.GenerateDRepKeys{Store: w.Store, Keys: soft, Hardware: w.Exporter()}.
-		Run(ctx, governance.GenerateKeysRequest{Name: "d", Holder: custody.HolderHardware, Source: governance.KeysRandom, Account: 1, Index: 2})
+		Run(ctx, governance.GenerateKeysRequest{Name: "d", Place: custody.PlaceHardware, Source: governance.KeysRandom, Account: 1, Index: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,14 +202,14 @@ func TestColdAndGovernanceKeysOnLedger(t *testing.T) {
 		t.Error("drep artefacts")
 	}
 	if _, err := (governance.GenerateCommitteeHotKeys{Store: w.Store, Keys: soft, Hardware: w.Exporter()}).
-		Run(ctx, governance.GenerateKeysRequest{Name: "h", Holder: custody.HolderHardware, Source: governance.KeysRandom}); err != nil {
+		Run(ctx, governance.GenerateKeysRequest{Name: "h", Place: custody.PlaceHardware, Source: governance.KeysRandom}); err != nil {
 		t.Fatal(err)
 	}
 	if !has(w, "h", ports.CCHotHwsFile) || !has(w, "h", ports.CCHotHash) {
 		t.Error("hot key artefacts")
 	}
 	if _, err := (governance.GenerateCommitteeColdKeys{Store: w.Store, Keys: soft, Hardware: w.Exporter()}).
-		Run(ctx, governance.GenerateKeysRequest{Name: "c", Holder: custody.HolderHardware, Source: governance.KeysRandom}); err != nil {
+		Run(ctx, governance.GenerateKeysRequest{Name: "c", Place: custody.PlaceHardware, Source: governance.KeysRandom}); err != nil {
 		t.Fatal(err)
 	}
 	if !has(w, "c", ports.CCColdHwsFile) {
@@ -245,7 +245,7 @@ func TestOpCertWithHardwareColdKey(t *testing.T) {
 	w := world.New(t)
 	w.UseHardware("Ledger", "8.0.8")
 	if _, err := (poolops.GenerateColdKeys{Store: w.Store, KeyGen: native.SoftwareKeys{}, Hardware: w.Exporter()}).
-		Run(ctx, poolops.GenerateColdKeysRequest{Pool: "pool", Holder: custody.HolderHardware}); err != nil {
+		Run(ctx, poolops.GenerateColdKeysRequest{Pool: "pool", Place: custody.PlaceHardware}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := (poolops.GenerateKesKey{Store: w.Store, KeyGen: native.KeyGen{}}).Run(ctx, "pool"); err != nil {
@@ -282,12 +282,12 @@ func TestDeviceFailureDuringExportStoresNothing(t *testing.T) {
 		w.HW.Lazy.Profile()
 		w.HW.Set("action", action)
 		_, err := poolops.GenerateColdKeys{Store: w.Store, KeyGen: native.SoftwareKeys{}, Hardware: w.Exporter()}.
-			Run(ctx, poolops.GenerateColdKeysRequest{Pool: "p", Holder: custody.HolderHardware})
+			Run(ctx, poolops.GenerateColdKeysRequest{Pool: "p", Place: custody.PlaceHardware})
 		if err == nil {
 			t.Fatalf("%s: no error", action)
 		}
 		_, err2 := wallet.GeneratePaymentAccount{Store: w.Store, KeyGen: native.SoftwareKeys{}, Addresses: w.Ledger, NetworkID: w.Network, Hardware: w.Exporter()}.
-			Run(ctx, wallet.GeneratePaymentRequest{Name: "pay", Holder: custody.HolderHardware})
+			Run(ctx, wallet.GeneratePaymentRequest{Name: "pay", Place: custody.PlaceHardware})
 		if err2 == nil {
 			t.Fatalf("%s: no error for the payment key", action)
 		}
@@ -313,7 +313,7 @@ func TestGovernanceKeysPathsAndVendors(t *testing.T) {
 	for _, vendor := range []struct{ name, app string }{{"Ledger", "8.0.8"}, {"Keystone", "1.7.7"}} {
 		w := world.New(t)
 		w.UseHardware(vendor.name, vendor.app)
-		req := governance.GenerateKeysRequest{Name: "c", Holder: custody.HolderHardware, Source: governance.KeysRandom, Account: 2, Index: 3}
+		req := governance.GenerateKeysRequest{Name: "c", Place: custody.PlaceHardware, Source: governance.KeysRandom, Account: 2, Index: 3}
 		if _, err := (governance.GenerateCommitteeColdKeys{Store: w.Store, Keys: soft, Hardware: w.Exporter()}).Run(ctx, req); err != nil {
 			t.Fatalf("%s: %v", vendor.name, err)
 		}
@@ -330,7 +330,7 @@ func TestGovernanceKeysPathsAndVendors(t *testing.T) {
 	}
 	w := world.New(t)
 	w.UseHardware("Trezor", "2.7.2")
-	req := governance.GenerateKeysRequest{Name: "x", Holder: custody.HolderHardware, Source: governance.KeysRandom}
+	req := governance.GenerateKeysRequest{Name: "x", Place: custody.PlaceHardware, Source: governance.KeysRandom}
 	_, e1 := governance.GenerateDRepKeys{Store: w.Store, Keys: soft, Hardware: w.Exporter()}.Run(ctx, req)
 	_, e2 := governance.GenerateCommitteeColdKeys{Store: w.Store, Keys: soft, Hardware: w.Exporter()}.Run(ctx, req)
 	_, e3 := governance.GenerateCommitteeHotKeys{Store: w.Store, Keys: soft, Hardware: w.Exporter()}.Run(ctx, req)
@@ -355,7 +355,7 @@ func TestPolicyOnLedgerAsksTheDeviceForTheId(t *testing.T) {
 	w := world.New(t)
 	w.UseHardware("Ledger", "8.0.8")
 	uc := assets.GeneratePolicy{Store: w.Store, KeyGen: native.SoftwareKeys{}, Policies: w.Ledger, Tip: w.Chain, Hardware: w.Exporter(), PolicyIDer: w.HW.Lazy}
-	res, err := uc.Run(ctx, assets.GeneratePolicyRequest{Name: "pol", Holder: custody.HolderHardware})
+	res, err := uc.Run(ctx, assets.GeneratePolicyRequest{Name: "pol", Place: custody.PlaceHardware})
 	if err != nil {
 		t.Fatal(err)
 	}

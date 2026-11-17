@@ -2,9 +2,24 @@ package custody
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 )
+
+// holder is a test device for a key: the first byte of the identity says which
+// signer answers. A key reference carries no holder (ADR 0010).
+type holder byte
+
+const (
+	HolderVault    holder = 1
+	HolderHardware holder = 2
+	HolderRemote   holder = 3
+)
+
+func (h holder) String() string { return [...]string{"", "vault", "hardware", "remote"}[h] }
 
 var allRoles = []Role{RolePayment, RoleStake, RolePoolCold, RoleDRep, RoleCommitteeCold, RoleCommitteeHot, RolePolicy, RoleCalidus, RoleCatalystVote}
 
@@ -28,7 +43,7 @@ func oldDevice() Profile {
 }
 
 func profiles(k KeyRef) (Profile, error) {
-	switch k.Holder {
+	switch holder(k.Identity.Hash()[0]) {
 	case HolderVault:
 		return software(), nil
 	case HolderHardware:
@@ -37,17 +52,25 @@ func profiles(k KeyRef) (Profile, error) {
 	return Profile{}, errors.New("no signer is configured for this key")
 }
 
-func key(role Role, holder Holder) KeyRef { return KeyRef{Role: role, Holder: holder, Owner: "alice"} }
+func key(role Role, h holder) KeyRef {
+	hash := make([]byte, 28)
+	hash[0] = byte(h)
+	id, err := identity.NewRef(identity.KindKeyHash, hash)
+	if err != nil {
+		panic(err)
+	}
+	return KeyRef{Role: role, Identity: id}
+}
 
 func TestSameWorkflowDifferentHolders(t *testing.T) {
 	// One workflow: a pool registration with an owner stake witness and a payer.
-	slots := func(owner, payer Holder) []Slot {
+	slots := func(owner, payer holder) []Slot {
 		return []Slot{
 			{"owner witness", key(RoleStake, owner), Demand{RoleStake, OpWitnessTx, NewFeatures(FeatPoolRegistrationOwner)}},
 			{"fee payer", key(RolePayment, payer), Demand{RolePayment, OpWitnessTx, NewFeatures(FeatPoolRegistrationOwner)}},
 		}
 	}
-	for _, c := range [][2]Holder{{HolderVault, HolderVault}, {HolderHardware, HolderVault}, {HolderHardware, HolderHardware}} {
+	for _, c := range [][2]holder{{HolderVault, HolderVault}, {HolderHardware, HolderVault}, {HolderHardware, HolderHardware}} {
 		plan, err := NewPlan(slots(c[0], c[1]), profiles)
 		if err != nil || len(plan.Slots()) != 2 {
 			t.Errorf("owner=%s payer=%s: %v", c[0], c[1], err)
@@ -108,5 +131,29 @@ func TestProfilesAreImmutable(t *testing.T) {
 	_ = base.Allow(RolePayment, OpWitnessTx)
 	if base.Check(Demand{RolePayment, OpWitnessTx, nil}) == "" {
 		t.Fatal("Allow changed the receiver")
+	}
+}
+
+// A key reference is a role and an identity: it prints both, and it carries no
+// holder, owner, device or party (ADR 0010 decision 3). Two references to the
+// same key are equal, whoever answers for it.
+//
+// spec: SPO-Xidentity-IF-001
+func TestKeyRefIsRoleAndIdentityOnly(t *testing.T) {
+	k := key(RoleStake, HolderVault)
+	if got := k.String(); !strings.Contains(got, "stake") || !strings.Contains(got, k.Identity.String()) {
+		t.Errorf("String %q", got)
+	}
+	if k != key(RoleStake, HolderVault) {
+		t.Error("the same key is two references")
+	}
+	if k == key(RoleStake, HolderHardware) || k == key(RolePayment, HolderVault) {
+		t.Error("two keys, or one key in two roles, are one reference")
+	}
+	typ := reflect.TypeOf(k)
+	for i := 0; i < typ.NumField(); i++ {
+		if n := typ.Field(i).Name; n != "Role" && n != "Identity" {
+			t.Errorf("KeyRef has the field %s", n)
+		}
 	}
 }

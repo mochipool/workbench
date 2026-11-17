@@ -51,14 +51,6 @@ func (l *Lazy) Profile() custody.Profile {
 	return s.Profile()
 }
 
-// SignerFor implements ports.SignerDirectory for hardware keys.
-func (l *Lazy) SignerFor(key custody.KeyRef) (ports.Signer, error) {
-	if key.Holder != custody.HolderHardware {
-		return nil, fmt.Errorf("the hardware signer holds only hardware keys, not %s", key)
-	}
-	return l, nil
-}
-
 func (l *Lazy) ExportHardwareKey(ctx context.Context, key custody.KeyRef, path string) (ports.HardwareKey, error) {
 	s, err := l.Session(ctx)
 	if err != nil {
@@ -144,7 +136,7 @@ func (l *Lazy) PolicyID(ctx context.Context, key custody.Key[custody.Policy], sc
 }
 
 var (
-	_ ports.SignerDirectory        = (*Lazy)(nil)
+	_ ports.Signer                 = (*Lazy)(nil)
 	_ ports.HardwareKeyExporter    = (*Lazy)(nil)
 	_ ports.OpCertIssuer           = (*Lazy)(nil)
 	_ ports.HardwareWitnesser      = (*Lazy)(nil)

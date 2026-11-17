@@ -2,6 +2,7 @@ package catalyst
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -190,7 +191,7 @@ func TestGenerateVotingKeyRefusals(t *testing.T) {
 		t.Errorf("hwsfile: %v", err)
 	}
 	var ue *custody.UnsupportedError
-	if _, err := r.keyUC().Run(context.Background(), GenerateVotingKeyRequest{Name: "x", Holder: custody.HolderHardware}); !errors.As(err, &ue) {
+	if _, err := r.keyUC().Run(context.Background(), GenerateVotingKeyRequest{Name: "x", Place: custody.PlaceHardware}); !errors.As(err, &ue) {
 		t.Errorf("hardware: %v", err)
 	}
 	if got := len(r.files(t)); got != n+1 {
@@ -403,6 +404,11 @@ type failingDir struct{}
 
 func (failingDir) SignerFor(custody.KeyRef) (ports.Signer, error) { return failingSigner{}, nil }
 
+// Connected implements ports.SignerDirectory.
+func (d failingDir) Connected(k custody.KeyRef) ([]ports.ConnectedSigner, error) {
+	return ports.ConnectedVia(d, k)
+}
+
 type failingSigner struct{}
 
 func (failingSigner) Profile() custody.Profile {
@@ -410,4 +416,44 @@ func (failingSigner) Profile() custody.Profile {
 }
 func (failingSigner) SignCip36(context.Context, custody.Key[custody.Stake], cose.Cip36) (ports.Registration, error) {
 	return ports.Registration{}, errors.New("device gone")
+}
+
+// A signer that answers with a valid, self-consistent registration of another
+// stake key is refused: the registration must verify under the key demanded.
+//
+// spec: SPO-Xidentity-SEC-003
+func TestRegistrationFromAnotherKeyIsRefused(t *testing.T) {
+	r := newRig(t)
+	r.stakeAccount(t, "w")
+	n := len(r.files(t))
+	deleg, _ := ParseDelegation(strings.Repeat("ab", 32))
+	uc := r.regUC()
+	uc.Signers = impostorDir{}
+	_, err := uc.Run(context.Background(), RegistrationRequest{Delegation: deleg, Stake: "w", Rewards: enterprise("addr_test", 0x60)})
+	if !errors.Is(err, custody.ErrMessageKey) || len(r.files(t)) != n {
+		t.Errorf("%v, files %d, want %d", err, len(r.files(t)), n)
+	}
+}
+
+type impostorDir struct{}
+
+func (impostorDir) SignerFor(custody.KeyRef) (ports.Signer, error) { return impostorSigner{}, nil }
+
+// Connected implements ports.SignerDirectory.
+func (d impostorDir) Connected(k custody.KeyRef) ([]ports.ConnectedSigner, error) {
+	return ports.ConnectedVia(d, k)
+}
+
+type impostorSigner struct{}
+
+func (impostorSigner) Profile() custody.Profile {
+	return custody.NewProfile("impostor").Allow(custody.RoleStake, custody.OpSignCip36)
+}
+
+// SignCip36 registers and signs with a key of its own, not the demanded one.
+func (impostorSigner) SignCip36(_ context.Context, _ custody.Key[custody.Stake], reg cose.Cip36) (ports.Registration, error) {
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	copy(reg.StakePub[:], pub)
+	h := reg.SigningHash()
+	return ports.Registration{CBOR: reg.Metadata(ed25519.Sign(priv, h[:]))}, nil
 }

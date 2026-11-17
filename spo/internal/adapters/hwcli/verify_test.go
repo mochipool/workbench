@@ -22,7 +22,7 @@ func (r *rig) misbehave(how string) {
 // The adapter does not trust what the tool wrote: each of its own checks has a
 // test where the tool breaks it and the adapter refuses.
 
-// spec: SPO-Ptx-EXT-005, SPO-Ptx-INV-009, SPO-Chw-INV-002
+// spec: SPO-Ptx-EXT-005, SPO-Ptx-INV-009, SPO-Chw-INV-002, SPO-Xidentity-SEC-004
 func TestAWitnessThatDoesNotVerifyOverTheBodyIDIsRefused(t *testing.T) {
 	for _, c := range []struct {
 		how  string
@@ -49,7 +49,7 @@ func TestAWitnessThatDoesNotVerifyOverTheBodyIDIsRefused(t *testing.T) {
 	}
 }
 
-// spec: SPO-04d-EXT-004, SPO-04d-OUT-002, SPO-04d-PR-003, SPO-Chw-INV-002
+// spec: SPO-04d-EXT-004, SPO-04d-OUT-002, SPO-04d-PR-003, SPO-Chw-INV-002, SPO-Xidentity-SEC-002
 func TestAnOpCertThatIsNotWhatWasAskedForIsRefused(t *testing.T) {
 	kes := bytes.Repeat([]byte{0x42}, 32)
 	req := ports.OpCertRequest{KesVKey: kes, Counter: 7, KesPeriod: 300}
@@ -188,7 +188,7 @@ func TestARefusedPlanOnlyProbesTheDeviceOnce(t *testing.T) {
 		{"Ledger", "8.0.8", custody.Slot{Label: "calidus", Key: hwKey(custody.RoleCalidus, "c"), Demand: custody.Demand{Role: custody.RoleCalidus, Operation: custody.OpExportVKey}}},
 	} {
 		r := newRig(t, c.vendor, c.app)
-		dir := native.Signers{Hardware: lazyFor(r)}
+		dir := native.Signers{Keys: hwIndex{}, Hardware: lazyFor(r)}
 		for i := 0; i < 3; i++ { // a command plans more than once
 			var ue *custody.UnsupportedError
 			if _, err := ports.PlanSignatures(dir, []custody.Slot{c.slot}); !errors.As(err, &ue) {

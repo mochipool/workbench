@@ -449,7 +449,7 @@ func TestTailcatColdKeyRequestIsRefusedByBothEnds(t *testing.T) {
 	}
 	body := partyrig.Body(t, 1000+500, cert.Attachment(0))
 	ref, err := coord.Open(ctx, multisig.OpenRequest{Name: "retire-other", Body: body, TTL: 1500, Slots: []pool.Slot{{Name: "otherpool.node", Role: custody.RolePoolCold,
-		KeyHash: txbuild.KeyHash(w.otherID), Holder: custody.HolderRemote, Party: "bobparty"}}})
+		KeyHash: txbuild.KeyHash(w.otherID), PartyFingerprint: w.C.FingerprintOf("bobparty")}}})
 	if err != nil {
 		t.Fatal(err)
 	}

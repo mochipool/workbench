@@ -55,6 +55,14 @@ func (s *Session) signingFile(ctx context.Context, sc *scratch, key custody.KeyR
 	if err != nil {
 		return "", nil, fmt.Errorf("read the hardware signing file of the %s: %w", key, err)
 	}
+	// The file must hold the demanded key BEFORE the device is asked anything: a
+	// file of another account is refused with no prompt (the answer is verified
+	// again against the demanded identity).
+	if pub, ok := hwsfilePubKey(content); ok {
+		if _, err := wantID(key, pub); err != nil {
+			return "", nil, err
+		}
+	}
 	sc.n++
 	path, err = sc.put(fmt.Sprintf("key%d.hwsfile", sc.n), content)
 	return path, content, err

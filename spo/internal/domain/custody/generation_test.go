@@ -6,16 +6,14 @@ import (
 	"testing"
 )
 
-func TestPlanGenerationRefusesNonVaultHolders(t *testing.T) {
-	if _, err := PlanGeneration(KeyRef{Role: RolePayment, Holder: HolderVault, Owner: "w"}, KeyRef{Role: RoleStake, Owner: "w"}); err != nil {
+func TestPlanGenerationRefusesUnwiredPlacements(t *testing.T) {
+	if _, err := PlanGeneration(PlaceVault, RolePayment, RoleStake); err != nil {
 		t.Fatal(err)
 	}
-	for _, h := range []Holder{HolderHardware, HolderRemote} {
-		_, err := PlanGeneration(KeyRef{Role: RolePayment, Holder: HolderVault, Owner: "w"}, KeyRef{Role: RoleStake, Holder: h, Owner: "w"})
-		var ue *UnsupportedError
-		if !errors.As(err, &ue) || len(ue.Problems) != 1 || ue.Problems[0].Slot.Key.Role != RoleStake {
-			t.Fatalf("%s: %v", h, err)
-		}
+	_, err := PlanGeneration(PlaceHardware, RoleStake)
+	var ue *UnsupportedError
+	if !errors.As(err, &ue) || len(ue.Problems) != 1 || ue.Problems[0].Slot.Key.Role != RoleStake {
+		t.Fatalf("%v", err)
 	}
 }
 

@@ -99,7 +99,7 @@ already has one outstanding; the old request's answer is then refused as stale.`
 				w := a.d.Out
 				var requested, refused int
 				for _, s := range res {
-					fmt.Fprintf(w, "  slot %-28s %-14s %s", s.Name, s.Party, s.Status)
+					fmt.Fprintf(w, "  slot %-28s %-14s %s", s.Name, r.partyLabel(ctx, s.Party), s.Status)
 					if s.Err != nil {
 						fmt.Fprintf(w, "  %s", safeText(s.Err.Error()))
 					}
@@ -160,7 +160,7 @@ by file only (request export). Not available in offline mode.`,
 				}
 				var queued, refused int
 				for _, s := range res {
-					fmt.Fprintf(a.d.Out, "  slot %-28s %-14s %s", s.Name, s.Party, s.Status)
+					fmt.Fprintf(a.d.Out, "  slot %-28s %-14s %s", s.Name, r.partyLabel(ctx, s.Party), s.Status)
 					if s.Err != nil {
 						fmt.Fprintf(a.d.Out, "  %s", safeText(s.Err.Error()))
 					}
@@ -666,4 +666,22 @@ func printHandled(w io.Writer, h multisig.Handled) {
 	default:
 		fmt.Fprintf(w, "%s%s: %s\n", h.Type, who, h.Effect)
 	}
+}
+
+// partyLabel is the label of the party with a fingerprint, for display; "-" for
+// a slot assigned to no party. Slots are routed by fingerprint, never by label.
+func (r *partyRun) partyLabel(ctx context.Context, fp party.Fingerprint) string {
+	if fp == (party.Fingerprint{}) {
+		return "-"
+	}
+	out := fp.String()
+	if r.kit() != nil && r.kit().Registry != nil {
+		_ = r.s.Store.View(ctx, func(rd ports.Reader) error {
+			if p, err := r.kit().Registry.ByFingerprint(rd, fp); err == nil && p.Name != "" {
+				out = safeText(p.Name)
+			}
+			return nil
+		})
+	}
+	return out
 }

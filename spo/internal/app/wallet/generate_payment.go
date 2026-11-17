@@ -45,8 +45,8 @@ type GeneratePaymentAccount struct {
 // GeneratePaymentRequest names the account. Name takes the forms of
 // SPO-Pfiles-IN-001 (`w`, `w.addr`, `./w.addr`).
 type GeneratePaymentRequest struct {
-	Name   string
-	Holder custody.Holder // empty means the vault
+	Name  string
+	Place custody.Placement // empty means the vault
 	// Account and Index are the hardware account and address index of
 	// 1852H|1854H/1815H/<Account>H/0/<Index> (SPO-02-IF-003); Multisig selects
 	// 1854H (`hwmulti`). They apply to a hardware holder only.
@@ -73,12 +73,11 @@ func (uc GeneratePaymentAccount) Run(ctx context.Context, req GeneratePaymentReq
 	if req.Account > MaxDerivationIndex || req.Index > MaxDerivationIndex {
 		return PaymentAccountGenerated{}, ErrDerivationRange
 	}
-	key := custody.KeyRef{Role: custody.RolePayment, Holder: req.Holder, Owner: name}
-	onDevice := hwkeys.Hardware(key)
+	onDevice := req.Place == custody.PlaceHardware
 	if !onDevice && (req.Account != 0 || req.Index != 0 || req.Multisig) {
 		return PaymentAccountGenerated{}, fmt.Errorf("%w: account, index and multisig are for hardware keys", ErrOptionNotUsed)
 	}
-	if _, err := hwkeys.Plan(uc.Hardware, key); err != nil {
+	if _, err := hwkeys.Plan(uc.Hardware, req.Place, custody.RolePayment); err != nil {
 		return PaymentAccountGenerated{}, err
 	}
 	check := func(r ports.Reader) error {
@@ -90,7 +89,7 @@ func (uc GeneratePaymentAccount) Run(ctx context.Context, req GeneratePaymentReq
 	var pair ports.KeyPair
 	var hwsfile []byte
 	if onDevice {
-		hk, err := hwkeys.Export(ctx, uc.Hardware, key, hwkeys.Options{Account: req.Account, Index: req.Index, Multisig: req.Multisig})
+		hk, err := hwkeys.Export(ctx, uc.Hardware, custody.RolePayment, hwkeys.Options{Account: req.Account, Index: req.Index, Multisig: req.Multisig})
 		if err != nil {
 			return PaymentAccountGenerated{}, err
 		}

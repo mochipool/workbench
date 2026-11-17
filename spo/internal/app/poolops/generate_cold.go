@@ -39,8 +39,8 @@ type GenerateColdKeys struct {
 
 // GenerateColdKeysRequest names the pool and who holds the signing key.
 type GenerateColdKeysRequest struct {
-	Pool   string
-	Holder custody.Holder // empty means the vault
+	Pool  string
+	Place custody.Placement // empty means the vault
 	// Index is the cold key index of the hardware path 1853H/1815H/0H/<Index>H
 	// (SPO-04a-IF-003, SPO-04a-INV-002); a hardware holder only.
 	Index uint32
@@ -58,15 +58,14 @@ type ColdKeysGenerated struct {
 //
 // spec: SPO-04a-IF-001, SPO-04a-IF-003, SPO-04a-PRE-001, SPO-04a-INV-002, SPO-04a-EXT-003, SPO-04a-EXT-004
 func (uc GenerateColdKeys) Run(ctx context.Context, req GenerateColdKeysRequest) (ColdKeysGenerated, error) {
-	key := custody.KeyRef{Role: custody.RolePoolCold, Holder: req.Holder, Owner: req.Pool}
-	onDevice := hwkeys.Hardware(key)
+	onDevice := req.Place == custody.PlaceHardware
 	if !onDevice && req.Index != 0 {
 		return ColdKeysGenerated{}, errors.New("the cold key index is for a hardware key")
 	}
 	if req.Index > 2147483647 {
 		return ColdKeysGenerated{}, errors.New("the cold key index is at most 2147483647")
 	}
-	if _, err := hwkeys.Plan(uc.Hardware, key); err != nil {
+	if _, err := hwkeys.Plan(uc.Hardware, req.Place, custody.RolePoolCold); err != nil {
 		return ColdKeysGenerated{}, err
 	}
 	// Check before generating, so a refusal creates nothing.
@@ -76,7 +75,7 @@ func (uc GenerateColdKeys) Run(ctx context.Context, req GenerateColdKeysRequest)
 	var pair ports.KeyPair
 	var hwsfile []byte
 	if onDevice {
-		hk, err := hwkeys.Export(ctx, uc.Hardware, key, hwkeys.Options{Index: req.Index})
+		hk, err := hwkeys.Export(ctx, uc.Hardware, custody.RolePoolCold, hwkeys.Options{Index: req.Index})
 		if err != nil {
 			return ColdKeysGenerated{}, err
 		}

@@ -1,6 +1,6 @@
 # ADR 0011: Key custody and unlock
 
-Status: proposed. Extends [ADR 0003](./0003-vault-and-store.md) (key slots) and uses the data classes of [ADR 0004](./0004-data-classification.md). Pairs with [ADR 0010](./0010-object-identity.md).
+Status: accepted (owner, 2026-11-17). Extends [ADR 0003](./0003-vault-and-store.md) (key slots) and uses the data classes of [ADR 0004](./0004-data-classification.md). Pairs with [ADR 0010](./0010-object-identity.md).
 
 ## Amends
 
@@ -194,6 +194,8 @@ Build now: ADR 0011 decisions 1-2 (plaintext paths removed, plain store test-onl
 
 ## Open questions
 
+The owner accepted this record on 2026-11-17 with every recommendation below as written: the node-delivery exception, `strict` as an opt-in, the recovery composite under `hardware`, no synced passkeys in the first version, Vault or KMS only together with FIDO2 under `hardware`, `standard` as the local default, and the libfido2 command-line tools. The Catalyst QR code stays terminal-only. The entries marked unconfirmed remain open.
+
 * The node-delivery exception. Recommended: accept it, limited as in decision 2; needs the owner's decision.
 * Workspaces with no recovery slot (`strict`). Recommended: allowed, opt-in, with a typed warning; needs the owner's decision.
 * Recovery under `hardware`. Chosen above: the recovery key AND a second authenticator. The alternative, splitting the recovery key between two enrolled factors, is not chosen; needs the owner's decision.
@@ -202,7 +204,7 @@ Build now: ADR 0011 decisions 1-2 (plaintext paths removed, plain store test-onl
 * A `standard` workspace is password-only and so does not meet R3: whoever holds a copy can guess the passphrase offline. Recommended: keep it as the local default, with a printed warning on every filesystem backup; the owner may instead want a third policy between `standard` and `hardware`; needs the owner's decision.
 * The CTAP2 library. Recommended: drive the libfido2 command-line tools first, secrets through file descriptors, and no pure-Go CTAP library on the unlock path before an audit; needs the owner's decision.
 * The WebAuthn `prf` specification body (the salt derivation was confirmed through MDN only), and the section number of `hmac-secret` in the final CTAP 2.1 and 2.2 texts, are to be read before the slot format is frozen.
-* The options of `fido2-assert` for hmac-secret and the nixpkgs attribute that ships the tools: unconfirmed. The AWS KMS module needed: unconfirmed. Which authenticators report `FIDO_2_1_PRE` (YubiKey before 5.7): unconfirmed. The `systemd-creds` options for TPM binding, its fallback without a TPM, and whether its credential directory is always `ramfs`: unconfirmed. Whether symbols of a stripped Go binary suffice for the release check: unconfirmed.
+* Confirmed on 2026-11-17, from the man pages and the source of libfido2 1.17.0 (nixpkgs `libfido2`, outputs `out` and `man`) and the source of 1.16.0, the version the flake's nixpkgs pins and the release ships (the tool behaviour used here is the same in both, except that `fido2-cred -t` is 1.17.0 only); none of it was run against a device. The nixpkgs attribute is `libfido2`, which ships `fido2-token`, `fido2-cred` and `fido2-assert` in `bin` (the man pages are in the `man` output). `fido2-assert(1)`, DESCRIPTION and INPUT FORMAT: `-h` enables hmac-secret, `-t up=false` and `-v` (PIN and verification) exist, the hmac salt is the fourth input line as one base64 blob, and the hmac secret is the sixth output line (the fifth for a non-resident credential). Not in the man page, read in `src/assert.c`: `fido_assert_set_hmac_salt` accepts 32 or 64 bytes, so two salts are one 64-byte blob and the output is one blob of the same length; the real tool refuses a 33-byte salt (run with a path that is no device). `fido2-cred(1)`: `-h` and `-c <level>` set hmac-secret and credProtect, and the authenticator data (a base64 CBOR byte string around the raw data) carries the extension map; `-t` is accepted by `fido2-cred` from 1.17.0 only, so the adapter uses `-v` and `-q`. PIN: `fido2-assert(1)` and `fido2-cred(1)` say, in DESCRIPTION, that a tty is used to obtain the PIN when one is available and stdin otherwise; the source (`openbsd-compat/readpassphrase.c`) opens `/dev/tty` first, so a PIN on stdin reaches the tool only from a process with no controlling terminal, which `adapters/fido2cli` arranges. `fido2-token(1)`: `-I` prints `version strings:` and `extension strings:`, `-L` lists devices, and `-V` prints the version on stderr (observed). The options of `fido2-assert` for hmac-secret and the nixpkgs attribute that ships the tools are therefore no longer open. The AWS KMS module needed: unconfirmed. Which authenticators report `FIDO_2_1_PRE` (YubiKey before 5.7): unconfirmed. The `systemd-creds` options for TPM binding, its fallback without a TPM, and whether its credential directory is always `ramfs`: unconfirmed. Whether symbols of a stripped Go binary suffice for the release check: unconfirmed.
 * The mnemonic display and Catalyst QR export paths are to be checked against the rule in decision 1.
 
 ADR 0012 (draft) builds on this record.

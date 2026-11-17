@@ -18,6 +18,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
+	"github.com/mochipool/workbench/spo/internal/ports/porttest"
 	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
@@ -197,8 +198,12 @@ func TestStakeTransactionsMatchCardanoCLI(t *testing.T) {
 	if err := os.WriteFile(p("w.staking.skey"), skeyRaw, 0o400); err != nil {
 		t.Fatal(err)
 	}
-	payKey := custody.KeyRef{Role: custody.RolePayment, Holder: custody.HolderVault, Owner: "w"}
-	stakeKey := custody.KeyRef{Role: custody.RoleStake, Holder: custody.HolderVault, Owner: "w"}
+	vkeyRaw, _ := os.ReadFile(p("s.vkey")) // the verification key beside it (found by identity)
+	if err := os.WriteFile(p("w.staking.vkey"), vkeyRaw, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	payKey := porttest.Key(t, store, custody.RolePayment, "w")
+	stakeKey := porttest.Key(t, store, custody.RoleStake, "w")
 	stakeAddr := chain.StakeAddress(strings.TrimSpace(e.cli(t, lits("stake-address", "build", "--testnet-magic", "2", "--stake-verification-key-file", p("s.vkey"))...)))
 	stakeHash := stake.KeyHash(e.fileKeyHash(t, p("s.vkey")))
 

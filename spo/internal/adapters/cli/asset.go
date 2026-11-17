@@ -169,7 +169,7 @@ script. ` + hardwareUntested,
 				}
 				res, err := appassets.GeneratePolicy{Store: s.Store, KeyGen: env.PaymentKeys, Policies: env.PolicyIDs, Tip: env.Tip,
 					Hardware: env.Hardware, PolicyIDer: env.PolicyIDer}.
-					Run(ctx, appassets.GeneratePolicyRequest{Name: args[0], Lifetime: lifetime, Holder: hw.holder()})
+					Run(ctx, appassets.GeneratePolicyRequest{Name: args[0], Lifetime: lifetime, Place: hw.place()})
 				if err != nil {
 					return err
 				}

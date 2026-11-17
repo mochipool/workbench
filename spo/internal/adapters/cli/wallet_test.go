@@ -145,6 +145,9 @@ func newSendFixture(t *testing.T) *sendFixture {
 	}
 	os.WriteFile(filepath.Join(f.dir, "w.addr"), []byte(testnetAddr(f.seed)+"\n"), 0o600)
 	os.WriteFile(filepath.Join(f.dir, "w.skey"), []byte(`{"type":"PaymentSigningKeyShelley_ed25519","description":"","cborHex":"5820`+hex.EncodeToString(f.seed)+`"}`), 0o400)
+	// a key is found in the vault by the identity of its verification key
+	pub := ed25519.NewKeyFromSeed(f.seed).Public().(ed25519.PublicKey)
+	os.WriteFile(filepath.Join(f.dir, "w.vkey"), []byte(`{"type":"PaymentVerificationKeyShelley_ed25519","description":"","cborHex":"5820`+hex.EncodeToString(pub)+`"}`), 0o400)
 	cfgs := map[string]WorkspaceConfig{f.dir: {Network: "preview", Mode: ModeOffline}}
 	f.deps = Deps{
 		Out: &f.out, Err: &f.out, Config: memConfig(cfgs),

@@ -29,7 +29,7 @@ const maxWitnessFile = 1 << 20
 // always asked, and the summary is the pool summary.
 func (a *app) poolPipeline(s *session, env *Env) txflow.Pipeline {
 	p := a.pipeline(s, env, false)
-	p.Confirmer = poolConfirmer{a: a, store: s.Store, ids: env.TxIDs}
+	p.Confirmer = poolConfirmer{a: a, store: s.Store, ids: env.TxIDs, labels: labelerOf(env)}
 	return p
 }
 
@@ -276,7 +276,7 @@ pool witness status say so.`,
 					TxIDs: env.TxIDs, Hasher: env.MetadataHasher, Clock: env.Clock,
 					Pools: env.Pools, Metadata: env.Metadata, Attach: env.Attach, Files: env.MetadataFiles, Encrypter: env.MsgEncrypter,
 					// Tickers stays nil in every mode: the lookup is not built (hazard H6).
-					NetworkID: env.NetworkID, AllowUnverified: f.allowUnverified, AllowPending: f.allowPending,
+					NetworkID: env.NetworkID, AllowUnverified: f.allowUnverified, AllowPending: f.allowPending, Parties: partyRegistryOf(env),
 				}
 				uc.CrossCheck = env.PoolCross
 				if f.singleSource {
@@ -312,7 +312,7 @@ func (a *app) reportRegister(ctx context.Context, s *session, env *Env, wo WireO
 			_ = s.Store.View(ctx, func(r ports.Reader) error {
 				coll, _ := d.Collection(env.TxIDs.TransactionID)
 				pn, _ := payerWord(args[1])
-				for _, sl := range poolSlots(r, d, name, pn, false, coll) {
+				for _, sl := range poolSlots(r, d, name, pn, false, coll, labelerOf(env)) {
 					for _, m := range res.Missing {
 						if m == sl.name {
 							slots = append(slots, sl)
@@ -321,6 +321,7 @@ func (a *app) reportRegister(ctx context.Context, s *session, env *Env, wo WireO
 				}
 				return nil
 			})
+			labelerOf(env).describe(ctx, s.Store, slots)
 		}
 		fmt.Fprintf(w, "\nWitness collection %d (%s) is open: waiting for %d signature(s).\n", res.CollectionID, res.Type, len(res.Missing))
 		for _, sl := range slots {
@@ -476,9 +477,10 @@ a witness is replaced only with --overwrite.`,
 				}
 				var slots []slotInfo
 				_ = s.Store.View(ctx, func(r ports.Reader) error {
-					slots = poolSlots(r, d, name, coll.PayName, false, coll)
+					slots = poolSlots(r, d, name, coll.PayName, false, coll, labelerOf(env))
 					return nil
 				})
+				labelerOf(env).describe(ctx, s.Store, slots)
 				missing := 0
 				for _, sl := range slots {
 					if sl.signed != nil && !*sl.signed {
@@ -637,4 +639,13 @@ protocol's maximum before a fee is spent.`,
 	cmd.Flags().BoolVar(&f.yes, "yes", false, "not accepted: this command is always asked")
 	addSettleFlags(cmd, &f.chain, true)
 	return cmd
+}
+
+// partyRegistryOf is the party registry of the Env, or nil when the build has
+// no party stack: a descriptor's co-signer is then resolved to no fingerprint.
+func partyRegistryOf(env *Env) ports.PartyRegistry {
+	if env != nil && env.Party != nil {
+		return env.Party.Registry
+	}
+	return nil
 }

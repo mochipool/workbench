@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/mochipool/workbench/spo/internal/app/keyring"
 	"github.com/mochipool/workbench/spo/internal/app/wallet"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
@@ -107,6 +108,7 @@ func (uc SubmitPollAnswer) Run(ctx context.Context, req SubmitRequest) (SubmitRe
 	// checked by the payment use case. A key held on a hardware wallet is
 	// refused; the verification key gives the hash the body lists.
 	var coldHash txbuild.KeyHash
+	var coldKey custody.KeyRef
 	var poolID chain.PoolID
 	if err := uc.Send.Store.View(ctx, func(r ports.Reader) error {
 		hws, err := r.Exists(ports.Ref{Name: stem, Kind: ports.NodeHwsFile})
@@ -132,6 +134,9 @@ func (uc SubmitPollAnswer) Run(ctx context.Context, req SubmitRequest) (SubmitRe
 			return err
 		}
 		coldHash = txbuild.HashKey(env)
+		if coldKey, err = keyring.Resolve(r, custody.RolePoolCold, stem); err != nil {
+			return err
+		}
 		poolID, err = chain.PoolIDOf(env)
 		return err
 	}); err != nil {
@@ -140,7 +145,7 @@ func (uc SubmitPollAnswer) Run(ctx context.Context, req SubmitRequest) (SubmitRe
 
 	sr := wallet.SendRequest{Source: req.Payer, Destination: req.Destination, Amount: req.Amount,
 		Message: req.Message, Extras: req.Extras, Passphrase: req.Passphrase,
-		CoSign: &wallet.CoSigner{Label: "pool cold key", Key: custody.KeyRef{Role: custody.RolePoolCold, Holder: custody.HolderVault, Owner: stem},
+		CoSign: &wallet.CoSigner{Label: "pool cold key", Key: coldKey,
 			Hash: coldHash, RequiredSigner: true}}
 	if req.Answer != nil {
 		sr.ExtraFiles = []txbuild.MetadataFile{{Name: req.Answer.FileName, Format: txbuild.MetadataCBOR, Data: req.Answer.CBOR}}

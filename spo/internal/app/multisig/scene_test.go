@@ -34,6 +34,7 @@ var coordNode = party.NodeKey{0xc0, 1}
 // cold is set, for the pool cold key as well.
 type scene struct {
 	t       *testing.T
+	fps     map[string]party.Fingerprint
 	clock   *partyrig.Clock
 	chain   *partyrig.Chain
 	C, B, X *partyrig.Workspace
@@ -57,6 +58,23 @@ type sceneOpt struct {
 
 // bobNodeKey is bob's tailcat node key when sceneOpt.bobNode is set.
 var bobNodeKey = party.NodeKey{0xb0, 2}
+
+// fp is the fingerprint of the party the scene enrolled under a name; a name
+// no party has gets a fingerprint nobody holds (an unenrolled party).
+func (s *scene) fp(name string) party.Fingerprint {
+	if name == "" {
+		return party.Fingerprint{}
+	}
+	if fp, ok := s.fps[name]; ok {
+		return fp
+	}
+	for _, p := range registry(s.t, s.C) {
+		if p.Name == name {
+			return p.Fingerprint
+		}
+	}
+	return party.Fingerprint{0xde, 0xad, byte(len(name))}
+}
 
 func newScene(t *testing.T, o sceneOpt) *scene {
 	t.Helper()
@@ -84,8 +102,9 @@ func newScene(t *testing.T, o sceneOpt) *scene {
 		}
 	}
 	s.bech = s.poolID.Bech32()
-	s.C.Enroll(s.B, "bob", []party.Role{party.RoleSigner}, []string{s.bech})
-	s.C.Enroll(s.X, "xav", []party.Role{party.RoleSigner}, []string{s.bech})
+	s.fps = map[string]party.Fingerprint{}
+	s.fps["bob"] = s.C.Enroll(s.B, "bob", []party.Role{party.RoleSigner}, []string{s.bech}).Fingerprint
+	s.fps["xav"] = s.C.Enroll(s.X, "xav", []party.Role{party.RoleSigner}, []string{s.bech}).Fingerprint
 	s.B.Enroll(s.C, "coord", []party.Role{party.RoleCoordinator}, []string{s.bech})
 	s.X.Enroll(s.C, "coord", []party.Role{party.RoleCoordinator}, []string{s.bech})
 
@@ -98,9 +117,9 @@ func newScene(t *testing.T, o sceneOpt) *scene {
 	}
 	s.ttl = 1000 + o.ttl
 	s.body = partyrig.Body(t, s.ttl, cert.Attachment(500_000_000))
-	slots := []pool.Slot{{Name: "bob.staking", Role: custody.RoleStake, KeyHash: s.bobHash, Holder: custody.HolderRemote, Party: "bob"}}
+	slots := []pool.Slot{{Name: "bob.staking", Role: custody.RoleStake, KeyHash: s.bobHash, PartyFingerprint: s.fp("bob")}}
 	if o.cold {
-		slots = append(slots, pool.Slot{Name: "mypool.node", Role: custody.RolePoolCold, KeyHash: txbuild.KeyHash(s.poolID), Holder: custody.HolderRemote, Party: "bob"})
+		slots = append(slots, pool.Slot{Name: "mypool.node", Role: custody.RolePoolCold, KeyHash: txbuild.KeyHash(s.poolID), PartyFingerprint: s.fp("bob")})
 	}
 	s.ref, err = s.C.Coordinator().Open(ctx, multisig.OpenRequest{Name: "reg1", Body: s.body, TTL: s.ttl, Slots: slots, Local: txflow.Prepared{}})
 	if err != nil {
@@ -254,11 +273,7 @@ func (s *scene) sealFrom(from, to *partyrig.Workspace, body party.Body, now, exp
 // witnessOver signs an arbitrary id with a key of bob's vault.
 func (s *scene) witnessOver(id [32]byte) txbuild.Witness {
 	s.t.Helper()
-	w, err := native.VaultSigner{Vault: s.B.Store}.Witness(ctx, custody.KeyRef{Role: custody.RoleStake, Holder: custody.HolderVault, Owner: "bob"}, txbuild.TxBody{ID: id})
-	if err != nil {
-		s.t.Fatal(err)
-	}
-	return w
+	return s.B.SignID(custody.RoleStake, "bob", id)
 }
 
 // cid is the wire id of the stored collection.

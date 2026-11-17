@@ -216,7 +216,7 @@ type RotationAccepted struct {
 // fingerprint as typed by the operator; nothing else accepts a rotation.
 //
 // spec: SPO-Xparty-INV-032, SPO-Xparty-INV-033, SPO-Xparty-PR-006
-func (n Node) AcceptRotation(ctx context.Context, name string, a party.RotationAcceptance) (RotationAccepted, error) {
+func (n Node) AcceptRotation(ctx context.Context, name string, a party.RotationAcceptance, hooks ...func(w ports.Writer, retired, next party.Party) error) (RotationAccepted, error) {
 	var res RotationAccepted
 	now := n.Clock.Now()
 	err := n.Store.Update(ctx, func(w ports.Writer) error {
@@ -249,6 +249,13 @@ func (n Node) AcceptRotation(ctx context.Context, name string, a party.RotationA
 			return err
 		}
 		res.Retired, res.Party = retired, next
+		// What is assigned to the old identity follows the rotation, in the same
+		// transaction (a coordinator moves the open slots of its collections).
+		for _, h := range hooks {
+			if err := h(w, retired, next); err != nil {
+				return err
+			}
+		}
 		st.Rotations = slices.Delete(st.Rotations, pi, pi+1)
 		res.ClosedRequests = closeRequestsFrom(&st, hexFP(old.Fingerprint), ClosedRotated)
 		if err := writeJSON(w, signerRef, st); err != nil {

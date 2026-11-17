@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/mochipool/workbench/spo/internal/app/keyring"
 	"github.com/mochipool/workbench/spo/internal/app/txflow"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
@@ -21,9 +22,9 @@ var ErrHashFileMismatch = errors.New("the .hash file does not hold the hash of t
 
 // coldInputs is what the store holds for a committee member's cold key.
 type coldInputs struct {
-	name   string
-	hash   stake.KeyHash
-	holder custody.Holder
+	name string
+	hash stake.KeyHash
+	key  custody.KeyRef
 }
 
 func hashOfFile(r ports.Reader, nm string, vk, hf ports.Kind) (stake.KeyHash, error) {
@@ -54,15 +55,15 @@ func readCold(r ports.Reader, nm string) (coldInputs, error) {
 	if err != nil {
 		return coldInputs{}, err
 	}
-	holder, err := holderOf(r, ports.Ref{Name: nm, Kind: ports.CCColdSKey}, ports.Ref{Name: nm, Kind: ports.CCColdHwsFile})
+	key, err := keyring.Held(r, custody.RoleCommitteeCold, nm, ErrNoSigningKey)
 	if err != nil {
 		return coldInputs{}, err
 	}
-	return coldInputs{name: nm, hash: h, holder: holder}, nil
+	return coldInputs{name: nm, hash: h, key: key}, nil
 }
 
 func (c coldInputs) slot() txflow.Slot {
-	return txflow.Slot{Label: "committee cold key", Key: custody.KeyRef{Role: custody.RoleCommitteeCold, Holder: c.holder, Owner: c.name}, Hash: txbuild.KeyHash(c.hash)}
+	return txflow.Slot{Label: "committee cold key", Key: c.key, Hash: txbuild.KeyHash(c.hash)}
 }
 
 func (c coldInputs) cred() governance.Credential { return governance.Credential{Hash: c.hash} }
