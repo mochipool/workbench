@@ -420,13 +420,17 @@ func (d *Descriptor) Collection(idOf func(cbor []byte) (chain.TxID, error)) (*Co
 	}
 	t, _ := o.text("type")
 	c.Type = RegistrationType(t)
-	c.PayName, _ = o.text("regPayName")
+	rn, err := o.registrationNames()
+	if err != nil {
+		return nil, err
+	}
+	c.PayName = rn.Pay
 	pa, _ := num("regPayAmount")
 	pr, _ := num("regPayReturn")
 	c.PayAmount, c.PayReturn = chain.Lovelace(pa), chain.Lovelace(pr)
 	hw, _ := o.text("hardwareWalletIncluded")
 	c.HardwareWalletIncluded = hw == "yes"
-	c.MetadataFiles, _ = o.text("metadataFilesList")
+	c.MetadataFiles = rn.MetadataFiles
 	cbor, err := ParseTxEnvelope(o.vals["txBody"])
 	if err != nil {
 		return nil, fmt.Errorf("%w: txBody: %v", ErrBadCollection, err)

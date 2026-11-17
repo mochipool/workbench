@@ -75,6 +75,7 @@ type UpstreamSource interface {
 	ports.Store
 	ports.Vault
 	ports.SourceLister
+	ports.SourceTree
 }
 
 // WorkspaceConfig mirrors spo.toml (see adapters/config).

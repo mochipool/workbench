@@ -203,18 +203,44 @@ func (edDeriver) DeriveVerificationKey(_ context.Context, env *ports.Secret) ([]
 	return out, err
 }
 
-// addrInspector maps "addr_<hex of key hash>" to its payment key hash.
+// addrInspector maps "addr_<hex of key hash>" to its payment key hash,
+// "addr_<payment hash>_<stake hash>" to a base address and "stake_<hex>" to a
+// reward address.
 type addrInspector struct{}
 
-func (addrInspector) InspectAddress(a chain.Address) (ports.AddressInfo, error) {
-	h, ok := strings.CutPrefix(string(a), "addr_")
+func hash28(h string) (*txbuild.KeyHash, bool) {
 	b, err := hex.DecodeString(h)
-	if !ok || err != nil || len(b) != 28 {
-		return ports.AddressInfo{}, errors.New("not an address")
+	if err != nil || len(b) != 28 {
+		return nil, false
 	}
 	var kh txbuild.KeyHash
 	copy(kh[:], b)
-	return ports.AddressInfo{PaymentKeyHash: &kh}, nil
+	return &kh, true
+}
+
+func (addrInspector) InspectAddress(a chain.Address) (ports.AddressInfo, error) {
+	if h, ok := strings.CutPrefix(string(a), "stake_"); ok {
+		kh, ok := hash28(h)
+		if !ok {
+			return ports.AddressInfo{}, errors.New("not an address")
+		}
+		return ports.AddressInfo{Kind: ports.AddrReward, StakeKeyHash: kh}, nil
+	}
+	h, ok := strings.CutPrefix(string(a), "addr_")
+	pay, stake, _ := strings.Cut(h, "_")
+	kh, ok2 := hash28(pay)
+	if !ok || !ok2 {
+		return ports.AddressInfo{}, errors.New("not an address")
+	}
+	info := ports.AddressInfo{Kind: ports.AddrEnterprise, PaymentKeyHash: kh}
+	if stake != "" {
+		sh, ok := hash28(stake)
+		if !ok {
+			return ports.AddressInfo{}, errors.New("not an address")
+		}
+		info.Kind, info.StakeKeyHash = ports.AddrBase, sh
+	}
+	return info, nil
 }
 
 type auditLog struct {

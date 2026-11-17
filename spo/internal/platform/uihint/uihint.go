@@ -24,6 +24,15 @@ const (
 	// that output when the operator leaves the command.
 	SensitiveOutput = "spo.ui/sensitive-output"
 
+	// Guided marks a command that the TUI also offers a guided flow for
+	// (the value names the flow, see GuidedImport). The flow builds the
+	// command's own arguments; it adds no behaviour.
+	Guided = "spo.ui/guided"
+
+	// GuidedImport is the value of Guided for a command that imports from
+	// one or more folders (`workspace import`).
+	GuidedImport = "import-folders"
+
 	// Global marks a persistent flag of the root that the driver fixes for
 	// its whole session (the workspace directory, the layout), so it is not
 	// offered again in each command's form.

@@ -194,3 +194,31 @@ func FileName(r ports.Ref) (string, error) {
 }
 
 var _ ports.SourceLister = (*Store)(nil)
+
+// Subdirs implements ports.SourceTree: the real (not symbolic link)
+// directories inside the directory, hidden ones left out, sorted by name.
+//
+// spec: SPO-Xmulti-SEC-001
+func (s *Store) Subdirs(ctx context.Context) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ents, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, e := range ents {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		n := e.Name()
+		if strings.HasPrefix(n, ".") || e.Type()&os.ModeSymlink != 0 || !e.IsDir() {
+			continue
+		}
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+var _ ports.SourceTree = (*Store)(nil)

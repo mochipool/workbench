@@ -44,6 +44,16 @@ These are driven by metadata on the commands (see [ADR 0009](../explanation/adr/
 * **File picker.** `ctrl+o` on a field that takes a path opens a keyboard picker that starts in the workspace directory. `up` `down` `enter` move and open, `left` goes up, `.` (`ctrl+a` when typing a new file name) shows or hides hidden entries, `s` chooses the current directory when a directory is wanted, `esc` cancels. A field that takes a new file also takes a typed name. Where the command names an extension, other files are not listed. A symbolic link is listed with its target (`name -> target`); it is followed or chosen only on a second `enter`, after the target was shown. The picker lists names; it never opens or reads a file.
 * **Exclusions.** Where a command declares flags mutually exclusive, required together, or one required (cobra's `MarkFlags...`), the form marks the flags: a field that conflicts with one already given is greyed (`not with --x`) and takes no input until the other is cleared, a flag that needs a partner says `needed with --x`, and `Run` is refused with the reason before the command starts. Cobra still validates when the command runs.
 
+### Guided import
+
+`workspace import` has a guided flow, opened with `ctrl+g` on its form. It builds the same request the command line builds; it holds no import logic (the screens show what the command's own `--dry-run --format json` prints). Spec: [Xmulti](../../spec/extensions/Xmulti.md), IF-003.
+
+1. **Folders.** `a` types a path, `o` or `ctrl+o` opens the picker (directories only; `s` chooses the folder shown), `d` removes the folder under the cursor, `+` and `-` set the depth (0 to 4), `enter` reads the folders. More than one folder can be added.
+2. **Owners found**, per folder, with their kind and whether they would be imported or why not (`[-]` cannot be selected). Nothing is selected at first. `space` toggles, `a` selects every owner that can be imported, `n` none, `r` gives the owner another name, `enter` asks the command for the plan.
+3. **Summary.** The owners with the name each is stored under, every change to a pool descriptor (pool, field, old to new), and the equivalent `spo workspace import ...` command line. `enter` or `y` runs the import (disabled while the plan would fail), `m` asks for a path and has the command write the manifest of the choices to a new file, `esc` goes back. When two selected owners would be stored under one name the command refuses the selection and the flow asks for a new name for one of them.
+
+The passphrase, and the password of upstream-encrypted keys, are asked in the same hidden modals as for any command (the passphrase once for the plan and again for the import: each is a separate command run). The two runs do not share an opened workspace: the TUI keeps neither the passphrase nor an open session between commands (the workspace is open only while a command runs), so reusing one would mean the TUI holding the passphrase or the session, which it does not do.
+
 **Run.** The command's output streams into a scrolling pane, with its questions answered in a modal. When it returns, the pane shows `done` or `spo: <error>`, exactly the message the CLI prints. `esc` goes back to the menu, `e` back to the form with your values, `up` `down` `PgUp` `PgDn` scroll, `q` quits.
 
 ## Prompts and secrets

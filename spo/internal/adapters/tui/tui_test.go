@@ -114,7 +114,7 @@ func newHarness(t *testing.T) *harness {
 
 var specialKeys = map[string]bool{"enter": true, "esc": true, "tab": true, "down": true, "up": true, "ctrl+c": true,
 	"ctrl+r": true, "pgup": true, "pgdown": true, "backspace": true, "right": true, "left": true, "space": true, "shift+tab": true,
-	"ctrl+n": true, "ctrl+o": true, "ctrl+a": true, "home": true, "end": true}
+	"ctrl+n": true, "ctrl+o": true, "ctrl+a": true, "ctrl+g": true, "home": true, "end": true}
 
 func (h *harness) press(keys ...string) {
 	for _, k := range keys {

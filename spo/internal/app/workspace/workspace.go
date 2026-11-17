@@ -46,6 +46,8 @@ const (
 	StatusSkipped Status = "skipped"
 	// StatusFailed means it could not be processed; its owner was not written.
 	StatusFailed Status = "failed"
+	// StatusPlanned means a dry run found it would be written.
+	StatusPlanned Status = "planned"
 )
 
 // ArtefactReport is the outcome for one artefact. Reason and Note are fixed
@@ -57,6 +59,9 @@ type ArtefactReport struct {
 	// Note carries a remark on a done artefact: a check that could not be
 	// made, or that the key was kept in upstream's encrypted form.
 	Note string
+	// To is the reference the artefact is stored under when the owner is
+	// imported under another name; zero when it is the same as Ref.
+	To ports.Ref
 }
 
 // OwnerReport is the outcome for one pool or wallet. A destination is
@@ -66,6 +71,36 @@ type OwnerReport struct {
 	Written   bool
 	Reason    string // why nothing was written, when it was not
 	Artefacts []ArtefactReport
+
+	// The fields below are set by a selective import (ImportWorkspace.Import).
+	// Kind is "pool", "wallet" or "other"; Dir the source directory; Final the
+	// name the owner is stored under; Would reports, in a dry run, that the
+	// owner would be written. Rewrites lists the descriptor fields changed
+	// (SPO-Xmulti-OUT-003). The strings are taken from the source: print them
+	// through a text-safe writer.
+	Kind     OwnerKind
+	Dir      string
+	Final    string
+	Would    bool
+	Rewrites []Rewrite
+	// Collision: refused because another selected owner has the same stored
+	// name.
+	Collision bool
+}
+
+// Rewrite is one field of a pool descriptor changed on import.
+type Rewrite struct {
+	Pool  string // the pool, by its final name
+	Field string
+	Old   string
+	New   string
+}
+
+// FoundOwner is an owner discovered in a source directory and not selected.
+type FoundOwner struct {
+	Kind      OwnerKind
+	Name, Dir string
+	Artefacts []ports.Ref
 }
 
 // Report is the result of an import or an export.
@@ -77,13 +112,20 @@ type Report struct {
 	Unknown []ports.SourceUnknown
 	// Warnings are remarks about the run as a whole.
 	Warnings []string
+	// DryRun: nothing was written; Owners say what would be.
+	DryRun bool
+	// Extended: the request was a selective import, so a table shows the
+	// source directory and the stored name.
+	Extended bool
+	// Found lists the owners discovered and not selected.
+	Found []FoundOwner
 }
 
 // Failed counts the owners that were not written.
 func (r *Report) Failed() int {
 	n := 0
 	for _, o := range r.Owners {
-		if !o.Written {
+		if !o.Written && !(r.DryRun && o.Would) {
 			n++
 		}
 	}
@@ -94,11 +136,11 @@ func (r *Report) Failed() int {
 func (r *Report) Done() int {
 	n := 0
 	for _, o := range r.Owners {
-		if !o.Written {
+		if !o.Written && !(r.DryRun && o.Would) {
 			continue
 		}
 		for _, a := range o.Artefacts {
-			if a.Status == StatusDone {
+			if a.Status == StatusDone || a.Status == StatusPlanned {
 				n++
 			}
 		}

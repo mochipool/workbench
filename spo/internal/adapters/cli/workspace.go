@@ -13,7 +13,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mochipool/workbench/spo/internal/app/workspace"
-	"github.com/mochipool/workbench/spo/internal/domain/keyfile"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -65,6 +64,10 @@ func artefactName(r ports.Ref) string {
 // printWorkspaceReport writes the report as a table: owner, artefact, status,
 // reason. It holds names, kinds and the use case's reasons, no key material.
 func printWorkspaceReport(w io.Writer, rep *workspace.Report, protection func(ports.Ref) string) {
+	if rep.Extended {
+		printSelectiveReport(w, rep)
+		return
+	}
 	fmt.Fprintf(w, "%-20s %-40s %-8s %s\n", "OWNER", "ARTEFACT", "STATUS", "REASON")
 	for _, o := range rep.Owners {
 		if len(o.Artefacts) == 0 {
@@ -96,83 +99,57 @@ func printWorkspaceReport(w io.Writer, rep *workspace.Report, protection func(po
 	}
 }
 
-// ---- import ----
-
-func (a *app) workspaceImportCommand() *cobra.Command {
-	var (
-		owners        []string
-		passFD        int
-		keepEncrypted bool
-		overwrite     bool
-	)
-	cmd := &cobra.Command{
-		Use:   "import <dir> [--owner NAME]... [--password-fd N] [--keep-encrypted] [--overwrite]",
-		Short: "Bring the pools and wallets of an upstream-layout directory into the sealed workspace",
-		Long: `Read <dir> (never changed) and store what it holds in the sealed workspace,
-checking each signing key against its verification key and each address against
-its keys. An owner is imported whole or not at all: one failed artefact leaves
-the owner out. Names that are not pools or wallets of the catalogue are listed
-and ignored.
-
-A key that upstream encrypted needs its password: --password-fd N reads it from a
-descriptor, else it is asked for without echo when such a key is met. --keep-encrypted
-imports it in upstream's encrypted form without decrypting. An existing artefact
-is kept and its owner refused unless --overwrite.
-
-The result is a table of owner, artefact, status and reason; it never shows key
-material. The exit status is not zero when any owner failed.`,
-		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if a.upstream {
-				return errors.New("workspace import writes into a sealed workspace; it does not apply with --upstream-layout")
+// printSelectiveReport is the table of a selective import: the folder and the
+// stored name of each owner, the owners found and not selected, and every
+// descriptor rewrite (SPO-Xmulti-OUT-009). Names, folders and values come from
+// the sources and go through shown (SPO-Xmulti-SEC-004).
+func printSelectiveReport(w io.Writer, rep *workspace.Report) {
+	fmt.Fprintf(w, "%-16s %-6s %-30s %-16s %-34s %-8s %s\n", "OWNER", "KIND", "FOLDER", "STORED AS", "ARTEFACT", "STATUS", "REASON")
+	for _, o := range rep.Owners {
+		if len(o.Artefacts) == 0 {
+			fmt.Fprintf(w, "%-16s %-6s %-30s %-16s %-34s %-8s %s\n", shown(o.Owner), o.Kind, shown(o.Dir), shown(o.Final), "-", "failed", shown(o.Reason))
+		}
+		for _, ar := range o.Artefacts {
+			why := ar.Reason
+			if why == "" {
+				why = ar.Note
+			} else if ar.Note != "" {
+				why += "; " + ar.Note
 			}
-			if a.d.OpenUpstreamSource == nil {
-				return errors.New("the upstream layout is not available in this build")
-			}
-			spec := envSpec{needs: []Need{CapVKeyDerive, CapAddress}}
-			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, _ WireOptions) error {
-				src, err := a.d.OpenUpstreamSource(args[0])
-				if err != nil {
-					return err
-				}
-				if sameDir(args[0], a.workspace) {
-					return fmt.Errorf("%s is the workspace itself", args[0])
-				}
-				pw, err := a.importPassword(ctx, src, env, passFD, keepEncrypted)
-				if err != nil {
-					return err
-				}
-				defer pw.Destroy()
-				uc := workspace.ImportWorkspace{Source: src, SourceVault: src, Lister: src, Dest: s.Store,
-					Decryptor: env.KeyDecryptor, Deriver: env.VKeyDeriver, Addresses: env.AddressInspector}
-				rep, err := uc.Run(ctx, workspace.ImportOptions{Owners: owners, Password: pw, KeepEncrypted: keepEncrypted, Overwrite: overwrite})
-				if rep != nil {
-					printWorkspaceReport(a.d.Out, rep, nil)
-					fmt.Fprintf(a.d.Out, "\n%d owner(s) of %d imported, %d artefact(s) written.\n", len(rep.Owners)-rep.Failed(), len(rep.Owners), rep.Done())
-				}
-				if err != nil {
-					return err
-				}
-				if n := rep.Failed(); n > 0 {
-					return fmt.Errorf("%d owner(s) were not imported; nothing of them was written", n)
-				}
-				return nil
-			})
-		},
+			fmt.Fprintf(w, "%-16s %-6s %-30s %-16s %-34s %-8s %s\n", shown(o.Owner), o.Kind, shown(o.Dir), shown(o.Final), artefactName(ar.Ref), statusText(ar.Status), shown(why))
+		}
 	}
-	cmd.Flags().StringArrayVar(&owners, "owner", nil, "import only this pool or wallet (repeatable; default: all)")
-	cmd.Flags().IntVar(&passFD, "password-fd", -1, "read the password of upstream's encrypted keys from this inherited file descriptor (trailing newline stripped); there is no password flag or variable")
-	cmd.Flags().BoolVar(&keepEncrypted, "keep-encrypted", false, "import upstream-encrypted keys in their encrypted form instead of decrypting them (no password, no gpg)")
-	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "replace artefacts that already exist in the workspace (default: refuse the owner)")
-	return cmd
+	for _, f := range rep.Found {
+		fmt.Fprintf(w, "%-16s %-6s %-30s %-16s %-34s %-8s %s\n", shown(f.Name), f.Kind, shown(f.Dir), "-", "-", "found", "not selected")
+	}
+	n := 0
+	for _, o := range rep.Owners {
+		n += len(o.Rewrites)
+	}
+	if n > 0 {
+		fmt.Fprintln(w, "\ndescriptor rewrites (pool, field, old -> new):")
+		for _, o := range rep.Owners {
+			for _, r := range o.Rewrites {
+				fmt.Fprintf(w, "  %s: %s: %s -> %s\n", shown(r.Pool), shown(r.Field), quotedText(r.Old), quotedText(r.New))
+			}
+		}
+	}
+	for _, u := range rep.Unknown {
+		fmt.Fprintf(w, "%-16s %-6s %-30s %-16s %-34s %-8s %s\n", "-", "-", "-", "-", shown(u.File), "ignored", shown(u.Reason))
+	}
+	for _, x := range rep.Warnings {
+		fmt.Fprintf(w, "warning: %s\n", shown(x))
+	}
 }
+
+// ---- import ---- (the command is in workspace_import.go)
 
 // importPassword returns the password of the encrypted keys, or nil when the
 // source holds none that needs it. A descriptor is read when given; otherwise
 // the source is looked at, and the password is asked for without echo only if an
 // encrypted key is met and the import is to decrypt it. gpg is required before
 // the password is asked for.
-func (a *app) importPassword(ctx context.Context, src UpstreamSource, env *Env, fd int, keep bool) (*ports.Secret, error) {
+func (a *app) importPassword(ctx context.Context, count func() (int, error), env *Env, fd int, keep bool) (*ports.Secret, error) {
 	if keep && fd < 0 {
 		return nil, nil
 	}
@@ -185,7 +162,7 @@ func (a *app) importPassword(ctx context.Context, src UpstreamSource, env *Env, 
 		}
 		return readFDSecret(fd, "the password of the encrypted keys")
 	}
-	n, err := encryptedKeys(ctx, src)
+	n, err := count()
 	if err != nil {
 		return nil, err
 	}
@@ -204,33 +181,6 @@ func (a *app) importPassword(ctx context.Context, src UpstreamSource, env *Env, 
 
 func withGPGNote(err error) error {
 	return &explained{msg: err.Error() + "\n" + gpgNote + "; without it, pass --keep-encrypted to import such a key undecrypted", err: err}
-}
-
-// encryptedKeys counts the signing keys of the source that are in upstream's
-// encrypted form.
-func encryptedKeys(ctx context.Context, src UpstreamSource) (int, error) {
-	l, err := src.List(ctx)
-	if err != nil {
-		return 0, err
-	}
-	n := 0
-	for _, e := range l.Entries {
-		if !e.Ref.Kind.IsSigningKey() {
-			continue
-		}
-		buf, err := src.Open(ctx, e.Ref)
-		if err != nil {
-			continue // the import reports it
-		}
-		_ = buf.Use(func(b []byte) error {
-			if info, cerr := keyfile.Classify(b); cerr == nil && info.Form == keyfile.FormEncrypted {
-				n++
-			}
-			return nil
-		})
-		buf.Destroy()
-	}
-	return n, nil
 }
 
 // ---- export ----

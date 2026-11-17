@@ -62,6 +62,7 @@ const (
 	scMenu screen = iota
 	scForm
 	scRun
+	scImport
 )
 
 type segKind int
@@ -105,6 +106,12 @@ type runState struct {
 	follow     bool
 	sensitive  bool
 	fds        []int
+	// quiet hides the output while the run is going (the guided import reads
+	// it as data); onDone runs when the command returns; onLeave replaces
+	// "back to the menu" when the operator leaves the finished run.
+	quiet   bool
+	onDone  func(*model, *runState)
+	onLeave func(*model)
 }
 
 type (
@@ -142,6 +149,7 @@ type model struct {
 	names  nameState
 	unlock *promptState // the passphrase modal that lets the names be listed
 	picker *picker      // the file picker, when open
+	imp    *importFlow  // the guided import, when open
 
 	run    *runState
 	runSeq int
@@ -190,6 +198,8 @@ func (m *model) paste(s string) {
 		if m.picker.typing() {
 			m.picker.name.insert(strings.NewReplacer("/", "").Replace(s))
 		}
+	case m.screen == scImport && m.imp != nil:
+		m.imp.paste(s)
 	case m.screen == scForm && m.form.cursor < len(m.form.fields):
 		f := m.form.fields[m.form.cursor]
 		if m.form.blockedBy(f) != "" {
@@ -300,6 +310,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			r.cancel()
 			r.follow = true
 			m.closeFDs(r)
+			if r.onDone != nil {
+				r.onDone(m, r)
+			}
 		}
 	case namesMsg:
 		m.namesDone(msg)
@@ -325,6 +338,7 @@ func (m *model) Wipe() {
 	}
 	m.names.reset()
 	m.picker = nil
+	m.imp = nil
 	if m.form != nil {
 		m.form.wipe()
 	}
@@ -348,6 +362,8 @@ func (m *model) key(k keyInput) (tea.Model, tea.Cmd) {
 	switch m.screen {
 	case scForm:
 		return m.formKey(k)
+	case scImport:
+		return m.importKey(k)
 	case scRun:
 		return m.runKey(k)
 	}
@@ -499,6 +515,11 @@ func (m *model) formKey(k keyInput) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "ctrl+r":
 		return m.startRun()
+	case "ctrl+g":
+		if fm.node.cmd.Annotations[uihint.Guided] == uihint.GuidedImport {
+			m.openImport(fm.node)
+		}
+		return m, nil
 	case "enter":
 		if fm.cursor == last {
 			return m.startRun()
@@ -564,15 +585,21 @@ func (m *model) startRun() (tea.Model, tea.Cmd) {
 		args = append(append(args, "--"), pos...)
 	}
 
+	m.launch(fm.node, cmdline, args, fds)
+	return m, nil
+}
+
+// launch runs a command of the tree in its own goroutine and shows the run.
+func (m *model) launch(n *node, cmdline string, args []string, fds []int) *runState {
 	m.runSeq++
 	ctx, cancel := context.WithCancel(context.Background())
-	r := &runState{id: m.runSeq, node: fm.node, cmdline: cmdline, cancel: cancel, follow: true, fds: fds,
-		sensitive: fm.node.cmd.Annotations[uihint.SensitiveOutput] == "true"}
+	r := &runState{id: m.runSeq, node: n, cmdline: cmdline, cancel: cancel, follow: true, fds: fds,
+		sensitive: n.cmd.Annotations[uihint.SensitiveOutput] == "true"}
 	m.run = r
 	m.screen = scRun
 	m.notice = ""
 	go m.execute(ctx, r.id, args)
-	return m, nil
+	return r
 }
 
 // feedPipe makes a pipe holding the secret and a newline, closes the write
@@ -763,6 +790,12 @@ func (m *model) runKey(k keyInput) (tea.Model, tea.Cmd) {
 // leaveRun returns to the menu (or the form to edit it again), and drops the
 // output, wiping it first; for a command marked sensitive that is the point.
 func (m *model) leaveRun(toForm bool) {
+	if r := m.run; r != nil && r.onLeave != nil && !toForm {
+		back := r.onLeave
+		m.dropRun()
+		back(m)
+		return
+	}
 	m.dropRun()
 	m.screen = scMenu
 	if toForm {
