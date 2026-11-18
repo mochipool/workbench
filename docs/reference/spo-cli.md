@@ -101,6 +101,23 @@ spo store backups --sink URL [--pin <workspace id>:ck:<key hash>] [--below SEQ]
 
 Lists the backups of this workspace id in the sink, newest first (sequence, size, SHA-256, object name, and whether a checkpoint sits beside it). With `--pin` it also reads the checkpoints (at most 16) and says whether each verifies against the pinned key hash. SPO-Xbackup-OUT-016. A name under the workspace's prefix that does not parse is listed as `unrecognised (ignored)`. It asks for no passphrase and downloads nothing. Names that a sink supplied are printed quoted, with control and non-printable characters escaped.
 
+### `store convert`
+
+```
+spo store convert --to-layout DIR [--no-checkpoint] [--adopt-layout] [--checkpoint-device PATH] [--checkpoint-pin-fd N]
+```
+
+ADR 0012 stage 3, work package 3 ([Xlayout](../../spec/extensions/Xlayout.md); how-to: [Convert a workspace to a sealed layout](../how-to/convert-to-a-sealed-layout.md)). Writes the workspace into the local directory `DIR` as sealed, padded, content-named objects (`objects/<aa>/<hash>`), the manifest, the plaintext slots object and a head note (`heads/<sequence, 20 digits>`). The workspace file is not changed and stays the only writable store; nothing is retired. Only the direction workspace to layout exists: there is no verifier, read-only open or import yet.
+
+| Option | Meaning |
+| --- | --- |
+| `--to-layout DIR` | Required. An absolute or relative path or `dir:/absolute/path`. Empty or new, or already a layout of this workspace. Not the workspace directory or inside or above it, owned by you, not group- or world-writable. An `s3://` URL is refused. |
+| `--no-checkpoint` | Do not sign the head although the workspace has a checkpoint key. |
+| `--adopt-layout` | Trust an existing layout in `DIR` that this machine has no pin for, when the workspace has NO checkpoint key. With a key it never overrides a head that fails verification. The tool prints what it trusts (sequence, audit sequence, hash, time) before it records the pin. |
+| `--checkpoint-device PATH`, `--checkpoint-pin-fd N` | The checkpoint authenticator and where its PIN is read, as for `store backup`. |
+
+The workspace is unlocked as for any command (`--passphrase-fd`; `--fido2-device`, `--fido2-pin-fd` for `hardware` and `strict`); `--unlock recovery-composite` is refused. Every refusal that needs no secret is made before anything is asked (anything in `DIR` that is not a layout's regular file, including a FIFO or a link, is refused by name). Every object a head will name is read and hashed in the run, and a file with the wrong content under an object's name refuses the export (a fresh directory is the remedy); a signature file counts only when it verifies against the checkpoint key; heads above this machine's pin are chained onto only when they link, leave no gap and (with a key) verify. Every head built on must be this workspace's history (audit position and MAC; epoch and recovery key since the last rotation). An export interrupted between a head and its signature is completed by the re-run under strict conditions (OUT-019). SPO-Xlayout-PRE-018, PRE-019, OUT-019, INV-018 to INV-023. A single-writer lock (`DIR/.spo-export.lock`) is held for the whole run. Objects are put first (each create-if-absent and read back), then the manifest, then the head; an object that is already there is found, not written again, and with nothing changed since the newest head no head is written ("already up to date"). With a checkpoint key the head note is signed (namespace `spo/head-provisional/v1`) after everything else succeeded and put as `heads/<sequence>.sig`; a signing failure writes no head. Output: counts of objects written and reused, the head sequence and hash, `Pin: <workspace id>:layout:<sequence>:<head hash>` (also kept forward-only in `workspace.spo.layout-<16 hex>.pin` beside the workspace file), `Long-lived pin:` when signed, the advice that an unsigned head protects against accidents only, and a paragraph on what a reader of the directory sees. SPO-Xlayout-IF-001, OUT-014 to OUT-018, PRE-013 to PRE-017, SEC-006, SEC-007, INV-012 to INV-014.
+
 ### `store restore`
 
 ```

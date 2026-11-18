@@ -232,4 +232,4 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 | [`25a_genAction`](../upstream/scripts/25a_genAction.md) | Generate a governance action file | governance | 75 | draft |
 | [`25b_regAction`](../upstream/scripts/25b_regAction.md) | Submit governance actions | governance, transaction-construction | 71 | draft |
 
-Totals: 76 specs, 2784 requirements, 96 use cases.
+Totals: 76 specs, 2812 requirements, 96 use cases.

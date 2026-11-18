@@ -5,9 +5,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -326,5 +328,85 @@ func TestDirStaleSweepIgnoresSymlinksAndDirectories(t *testing.T) {
 	}
 	if st, err := os.Lstat(dirNamed); err != nil || !st.IsDir() {
 		t.Error("the directory was removed")
+	}
+}
+
+// plant makes a non-regular file of the kind at path.
+func plant(t *testing.T, kind, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	switch kind {
+	case "fifo":
+		if err := syscall.Mkfifo(path, 0o600); err != nil {
+			t.Skip("no fifo here: ", err)
+		}
+	case "symlink":
+		target := filepath.Join(filepath.Dir(path), "target-file")
+		os.WriteFile(target, []byte("data"), 0o600)
+		if err := os.Symlink(target, path); err != nil {
+			t.Fatal(err)
+		}
+	case "directory":
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	case "socket":
+		l, err := net.Listen("unix", path)
+		if err != nil {
+			t.Skip("no unix socket here: ", err)
+		}
+		t.Cleanup(func() { l.Close() })
+	}
+}
+
+// within runs f and fails the test if it does not return in time: the cases
+// below used to block for ever.
+func within(t *testing.T, what string, f func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { f(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s did not return within 5 seconds", what)
+	}
+}
+
+// A name that holds a FIFO, a link, a directory or a socket is refused by every
+// operation, at once, and never read or waited on.
+//
+// spec: SPO-Xlayout-PRE-018
+func TestANonRegularFileUnderAnObjectNameIsRefusedWithoutBlocking(t *testing.T) {
+	for _, kind := range []string{"fifo", "symlink", "directory", "socket"} {
+		t.Run(kind, func(t *testing.T) {
+			s, root := newStore(t)
+			plant(t, kind, filepath.Join(root, "objects", "ab", "obj"))
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			within(t, "Get", func() {
+				if rc, err := s.Get(ctx, "objects/ab/obj"); err == nil {
+					rc.Close()
+					t.Error("Get opened it")
+				}
+			})
+			within(t, "GetRange", func() {
+				if rc, err := s.GetRange(ctx, "objects/ab/obj", 0); err == nil {
+					rc.Close()
+					t.Error("GetRange opened it")
+				}
+			})
+			within(t, "Has", func() {
+				if ok, err := s.Has(ctx, "objects/ab/obj"); err == nil || ok {
+					t.Errorf("Has: %v %v", ok, err)
+				}
+			})
+			within(t, "Put", func() {
+				if err := put(s, "objects/ab/obj", "data"); err == nil {
+					t.Error("Put over it succeeded")
+				}
+			})
+		})
 	}
 }

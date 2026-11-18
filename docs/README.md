@@ -38,6 +38,7 @@ Operator workflows:
 * [Rotate KES keys](./how-to/rotate-kes-keys.md)
 * [Unlock slots, the unlock policy, rotation and node export](./how-to/slots-policy-and-rotation.md)
 * [Back up to a sink: a directory or an S3 bucket](./how-to/back-up-to-a-sink.md)
+* [Convert a workspace to a sealed layout](./how-to/convert-to-a-sealed-layout.md)
 * [Claim rewards air-gapped](./how-to/claim-rewards-air-gapped.md)
 * [Update pool parameters](./how-to/update-pool-parameters.md)
 * [Import pools and wallets kept in separate folders](./how-to/import-multi-folder-layout.md)

@@ -465,9 +465,7 @@ implemented = ["12a", "12b", "0x", "13b", "Chw", "Ctx", "Xparty", "Ckey", "01pro
 "SPO-12a-IN-001" = "the external tool `token-metadata-creator` and its `cardanometa` path setting are not ported: the registry entry is built and signed natively (domain/tokenmeta, signed through ports.RegistrySigner, ADR 0007), so no tool is searched for"
 "SPO-0x-OUT-013" = "true by construction, not tested: the use case holds no submitter port, so no certificate is submitted; they are inputs for the registration use cases"
 
-# Xlayout: requirements on the later exporter and verifier (work packages after the format); nothing in the pure layout can check them.
-"SPO-Xlayout-INV-007" = "binds the exporter and verifier of a later work package: a record object's id and version equal its manifest page entry"
-"SPO-Xlayout-INV-008" = "binds the exporter and verifier of a later work package: an audit object's sequence number equals its manifest page entry"
-"SPO-Xlayout-INV-009" = "binds the exporter and verifier of a later work package: the last audit MAC and sequence number equal the root's"
-"SPO-Xlayout-INV-010" = "binds the exporter and verifier of a later work package: the anchor and number of a record body equal those in its sealed owner blob, and the lookup tag is recomputed on import"
-"SPO-Xlayout-INV-011" = "binds the exporter and verifier of a later work package: the slots object's slot-set hash equals the newest slot-table audit row and its epoch MAC verifies"
+# Xlayout: the exporter (work package 3) is built and cites INV-007 to INV-011. What binds the importer and the
+# verifier, later work packages, is waived until they exist.
+"SPO-Xlayout-INV-015" = "binds the importer, a later work package: the lookup tag import writes is recomputed from the anchor and number of the body (the exporter checks the same equality before it seals; import does not exist yet)"
+"SPO-Xlayout-INV-016" = "binds the verifier, a later work package: it checks INV-007 to INV-011 and INV-017 on the objects it reads (the exporter's tests check them on what it writes)"

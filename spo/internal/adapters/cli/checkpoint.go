@@ -310,6 +310,11 @@ func (a *app) signingFor(ctx context.Context, s *session, f *checkpointFlags) (*
 	if err != nil || rec == nil {
 		return nil, err
 	}
+	return a.signingWith(rec, f)
+}
+
+// signingWith builds the signing of a head or a backup from the key record.
+func (a *app) signingWith(rec *checkpoint.KeyRecord, f *checkpointFlags) (*backupsink.Signing, error) {
 	sf, err := a.signer()
 	if err != nil {
 		return nil, fmt.Errorf("this workspace has a checkpoint key but %w (use --no-checkpoint to back up without a checkpoint)", err)

@@ -87,7 +87,7 @@ func (a *app) deliverUnknownRekey(ctx context.Context, key *secret.Buffer, fd in
 
 func (a *app) storeCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "store", Short: "Check, back up and manage the sealed workspace"}
-	cmd.AddCommand(a.storeVerify(), a.storeBackup(), a.storeBackups(), a.storeRestore(), a.storeSlots(), a.storePassphrase(), a.storeRecoveryKey(), a.storeRecover())
+	cmd.AddCommand(a.storeVerify(), a.storeBackup(), a.storeBackups(), a.storeRestore(), a.storeConvert(), a.storeSlots(), a.storePassphrase(), a.storeRecoveryKey(), a.storeRecover())
 	return cmd
 }
 
