@@ -485,6 +485,7 @@ one in mode offline (change it with: spo mode set).`,
 						return err
 					}
 				}
+				a.restoredKeyHash = report.CheckpointKeyHash
 				a.printCounterReport(report)
 				fmt.Fprintf(a.d.Out, "Restored %s from %s after verifying it.\n", a.workspaceFile(), label)
 				return nil
@@ -536,6 +537,13 @@ func (a *app) lazyCurrentRecovery(recKeyInFD, pinFD int, device string) *FactorO
 
 // printCounterReport tells what the counter rule did.
 func (a *app) printCounterReport(r RestoreReport) {
+	if r.CheckpointKeyCarried {
+		fmt.Fprintf(a.d.Out, "The backup held no checkpoint key, so the restore carried the checkpoint key of the replaced workspace into the restored one (key hash %s; an audited write).\n", hex.EncodeToString(r.CheckpointKeyHash))
+	}
+	if r.CheckpointKeyReplaced != nil {
+		fmt.Fprintf(a.d.Err, "warning: the backup holds a DIFFERENT checkpoint key (hash %s) than the workspace it replaced (hash %s). The backup's key was kept, because it is what that file was sealed with. Pins made with the replaced key no longer match new backups: record the long-lived pin of the key now in use (spo workspace checkpoint-key show).\n", hex.EncodeToString(r.CheckpointKeyHash), hex.EncodeToString(r.CheckpointKeyReplaced))
+		fmt.Fprintf(a.d.Out, "The checkpoint key of the replaced workspace (hash %s) is not in the restored one.\n", hex.EncodeToString(r.CheckpointKeyReplaced))
+	}
 	if len(r.Carried) > 0 {
 		fmt.Fprintln(a.d.Out, "The backup is older than the workspace it replaces. A restore never lowers a counter, so these were carried forward from the replaced workspace (each is an audited write in the restored workspace):")
 		for _, c := range r.Carried {

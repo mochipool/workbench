@@ -39,6 +39,10 @@ type VerifyResult struct {
 	// Notices are things that are not failures but the operator should know,
 	// such as history that predates a rekey and cannot be verified.
 	Notices []string
+	// CheckpointKey says a checkpoint key record is present; CheckpointKeyHash is
+	// its key hash (nil when it does not parse).
+	CheckpointKey     bool
+	CheckpointKeyHash []byte
 }
 
 type chainState struct {
@@ -688,6 +692,26 @@ func verifyFile(path string, cred credential, payloads bool) (VerifyResult, erro
 					ve.Problems = append(ve.Problems, fmt.Sprintf("cold record %s: %s", p.Record, p.Why))
 				}
 				err = ve
+			}
+		}
+	}
+	if err == nil && !s.legacy {
+		// the checkpoint key record (ADR 0012 stage 2): present, and with --deep
+		// parsed strictly
+		raw, kerr := readCheckpointKey(context.Background(), s)
+		switch {
+		case kerr != nil:
+			err = fmt.Errorf("%w: reading the checkpoint key record: %w", ErrVerify, kerr)
+		case raw != nil:
+			res.CheckpointKey = true
+			res.CheckpointKeyHash = checkpointKeyHash(raw)
+			if payloads {
+				if perr := checkpointKeyProblem(raw); perr != nil {
+					ve := &VerifyError{Problems: []string{perr.Error()}}
+					err = ve
+				}
+			} else {
+				res.Notices = append(res.Notices, "a checkpoint key record is present (it is not decrypted by this check; --deep parses it)")
 			}
 		}
 	}

@@ -295,7 +295,8 @@ func restore(backupPath, destPath string, cred credential, o RestoreOptions) (er
 			return err
 		}
 	}
-	if _, err = verifyFile(tmpPath, cred, false); err != nil {
+	vres, err := verifyFile(tmpPath, cred, false)
+	if err != nil {
 		return fmt.Errorf("sqlitestore: backup does not verify: %w", err)
 	}
 	ws, head, err := inspectFile(ctx, tmpPath)
@@ -406,8 +407,15 @@ func restore(backupPath, destPath string, cred credential, o RestoreOptions) (er
 		return err
 	}
 	os.Remove(sidecarPath(dest))
-	if o.Report != nil && plan != nil {
-		*o.Report = plan.report
+	if o.Report != nil {
+		var rep RestoreReport
+		if plan != nil {
+			rep = plan.report
+		}
+		if rep.KeyHash == nil && !rep.KeyCarried {
+			rep.KeyHash = vres.CheckpointKeyHash // the file's own key, when none was carried
+		}
+		*o.Report = rep
 	}
 	return syncDir(filepath.Dir(dest))
 }

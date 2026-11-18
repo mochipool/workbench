@@ -364,6 +364,9 @@ func restoreOptionsReporting(o cli.RestoreOptions) (sqlitestore.RestoreOptions, 
 		if o.Report == nil {
 			return
 		}
+		o.Report.CheckpointKeyHash = rep.KeyHash
+		o.Report.CheckpointKeyCarried = rep.KeyCarried
+		o.Report.CheckpointKeyReplaced = rep.KeyReplaced
 		o.Report.LowerAccepted = rep.LowerAccepted
 		o.Report.HeadAhead = rep.HeadAhead
 		for _, c := range rep.Carried {

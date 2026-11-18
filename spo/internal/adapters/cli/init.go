@@ -205,6 +205,9 @@ you to confirm that first. Mode offline configures no provider.`,
 				}
 				os.Remove(a.initPendingPath()) // the rotation committed: the workspace is complete
 				fmt.Fprintf(a.d.Out, "Created workspace in %s: network %s, mode %s, policy %s.\n", a.workspace, cfg.Network, cfg.Mode, policy)
+				if n := noCheckpointKeyNotice(policy); n != "" {
+					fmt.Fprintln(a.d.Out, n)
+				}
 				if newKey != nil {
 					defer newKey.Destroy()
 					if derr := a.deliverRecoveryKey(ctx, newKey, rkFD); derr != nil {

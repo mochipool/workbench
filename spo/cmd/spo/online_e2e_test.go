@@ -574,7 +574,10 @@ func TestOnlineUnreachableNodeIsUnknownAndBounded(t *testing.T) {
 	}
 	start = time.Now()
 	out, err = r.run("pool", "opcert", "counter", hex.EncodeToString(pool[:]))
-	if err == nil || !strings.Contains(out+err.Error(), "did not finish in 1s") {
+	// Two one-second bounds race here: the query as a whole and the handshake
+	// inside it. Either one firing is the bounded "unknown" this test is about.
+	if err == nil || !(strings.Contains(out+err.Error(), "did not finish in 1s") ||
+		strings.Contains(out+err.Error(), "did not complete within 1s")) {
 		t.Fatalf("%v\n%s", err, out)
 	}
 	if d := time.Since(start); d > 5*time.Second {

@@ -458,3 +458,25 @@ func (a *app) verifyCheckpointPair(backupFile, checkpointFile, pinText string) e
 	}
 	return nil
 }
+
+// noCheckpointKeyNotice is the line init and migrate print for a workspace of a
+// policy that may use an S3 sink (hardware, strict): a new workspace, and a
+// migrated one, has no checkpoint key by construction. Empty for other policies.
+func noCheckpointKeyNotice(policy string) string {
+	if policy != "hardware" && policy != "strict" {
+		return ""
+	}
+	return "No checkpoint key is enrolled: backups to a sink are not signed and a long-lived pin cannot restore them. Enroll one with: spo workspace checkpoint-key enroll --checkpoint-device DEVICE"
+}
+
+// pinKeyLine says whether the checkpoint key of a restored file is the one the
+// long-lived pin names; ok is false for a warning.
+func pinKeyLine(pinHash, restored []byte) (line string, ok bool) {
+	switch {
+	case restored == nil:
+		return "warning: the restored workspace has no checkpoint key (or its record does not parse): new backups from it are not signed, and no checkpoint will verify against this pin until a key is enrolled (spo workspace checkpoint-key enroll).", false
+	case !bytesEqual(pinHash, restored):
+		return fmt.Sprintf("warning: the restored workspace's checkpoint key hash %s is not the pin's %s: new backups from it will be signed by another key and do not verify against this pin.", hex.EncodeToString(restored), hex.EncodeToString(pinHash)), false
+	}
+	return "The restored workspace's checkpoint key hash is the pin's: new backups from it verify against this pin.", true
+}

@@ -523,6 +523,10 @@ func TestInitUnderTheHardwarePolicy(t *testing.T) {
 	if len(term.asked) != 0 {
 		t.Errorf("init under hardware asked the terminal: %q", term.asked)
 	}
+	// a hardware workspace may use an S3 sink: init says no checkpoint key is enrolled
+	if !strings.Contains(out, "No checkpoint key is enrolled") || !strings.Contains(out, "spo workspace checkpoint-key enroll") {
+		t.Errorf("init under hardware does not say that no checkpoint key is enrolled:\n%s", out)
+	}
 	if !recoveryKeyRE.MatchString(strings.TrimSpace(contents(rf))) {
 		t.Error("no recovery key was written")
 	}

@@ -254,8 +254,15 @@ type RestoreOptions struct {
 
 // RestoreReport says what a restore did about the counter rule.
 type RestoreReport struct {
-	Carried       []CarriedCounter
-	LowerAccepted bool
+	// CheckpointKeyHash is the hash of the restored file's checkpoint key ("" when
+	// it has none); CheckpointKeyCarried says the replaced workspace's key was
+	// carried into it; CheckpointKeyReplaced is the hash of the replaced
+	// workspace's key when the backup holds a different one (the backup's is kept).
+	CheckpointKeyHash     []byte
+	CheckpointKeyCarried  bool
+	CheckpointKeyReplaced []byte
+	Carried               []CarriedCounter
+	LowerAccepted         bool
 	// HeadAhead: the replaced workspace's head file was ahead of its file; the
 	// counters in the file were carried as a floor.
 	HeadAhead bool

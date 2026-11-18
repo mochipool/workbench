@@ -48,8 +48,17 @@ import (
 // counter (both values). They happen before the swap, so nothing is written to the
 // destination before it.
 
-// RestoreReport says what a restore did about the counter rule.
+// RestoreReport says what a restore did about the counter rule and the
+// checkpoint key.
 type RestoreReport struct {
+	// KeyHash is the hash of the checkpoint key of the restored file (nil: none).
+	KeyHash []byte
+	// KeyCarried: the backup held no checkpoint key and the replaced workspace's
+	// was carried into the restored copy.
+	KeyCarried bool
+	// KeyReplaced is the hash of the replaced workspace's checkpoint key when the
+	// backup holds a different one (the backup's is kept).
+	KeyReplaced []byte
 	// Carried lists the counters written from the replaced workspace into the
 	// restored one.
 	Carried []CarriedCounter
@@ -342,14 +351,42 @@ func prepareCounters(ctx context.Context, dest, tmpPath string, cred credential,
 	if err != nil {
 		return nil, err
 	}
+	// the checkpoint key record: carried when the backup holds none, reported when
+	// the backup holds another (the backup's is kept: it is what that file was
+	// sealed with)
+	liveCK, err := readCheckpointKey(ctx, st)
+	if err != nil {
+		return nil, fmt.Errorf("the checkpoint key of the workspace to be replaced could not be read: %w", err)
+	}
+	bakCK, err := readCheckpointKey(ctx, bst)
+	if err != nil {
+		return nil, fmt.Errorf("the checkpoint key of the backup could not be read: %w", err)
+	}
 	// the destination's head is always recorded, so that the swap can see that it
 	// moved on since its counters were read
 	plan := &counterPlan{destHead: &liveHead}
-	if len(carries) > 0 {
-		extra := make([][]any, 0, len(carries))
+	var ckCarry []byte
+	var ckDiffers [][]any
+	switch {
+	case liveCK != nil && bakCK == nil:
+		ckCarry = liveCK
+		plan.report.KeyCarried = true
+		plan.report.KeyHash = checkpointKeyHash(liveCK)
+	case liveCK != nil && bakCK != nil:
+		lh, bh := checkpointKeyHash(liveCK), checkpointKeyHash(bakCK)
+		if !bytes.Equal(lh, bh) {
+			plan.report.KeyReplaced = lh
+			ckDiffers = [][]any{keyEvent("checkpoint-key-differs", bh, lh)}
+		}
+	}
+	if len(carries) > 0 || ckCarry != nil {
+		extra := make([][]any, 0, len(carries)+1)
 		for _, c := range carries {
 			extra = append(extra, []any{"counter-carried", c.note.Kind, c.note.Pool, c.note.Live, c.note.Backup, "carried forward from the replaced workspace"})
 			plan.report.Carried = append(plan.report.Carried, c.note)
+		}
+		if ckCarry != nil {
+			extra = append(extra, keyEvent("checkpoint-key-carried", checkpointKeyHash(ckCarry)))
 		}
 		if err := bst.updateExtra(ctx, func(w ports.Writer) error {
 			for _, c := range carries {
@@ -357,9 +394,18 @@ func prepareCounters(ctx context.Context, dest, tmpPath string, cred credential,
 					return err
 				}
 			}
+			if ckCarry != nil {
+				return putCheckpointKey(ctx, w, ckCarry)
+			}
 			return nil
 		}, extra); err != nil {
-			return nil, fmt.Errorf("the counters could not be carried into the restored copy: %w", err)
+			return nil, fmt.Errorf("the counters and the checkpoint key could not be carried into the restored copy: %w", err)
+		}
+		plan.carried = true
+	}
+	if ckDiffers != nil {
+		if err := bst.auditNote(ctx, ckDiffers); err != nil {
+			return nil, err
 		}
 		plan.carried = true
 	}
