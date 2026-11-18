@@ -13,9 +13,9 @@ Run it again and only what changed is written. A record that did not change has 
 ## What it is not
 
 * **It is not a second workspace.** You cannot open it, write to it or sign with it. The SQLite file (`workspace.spo`) stays the only store you can write to. Nothing was retired, renamed or marked.
-* **It does not replace `store backup`.** A backup is the whole sealed file and restores with `store restore`. A layout cannot be restored yet.
+* **It does not replace `store backup`.** A backup is the whole sealed file and restores with `store restore`. A layout is read back with `store verify --layout` and `store convert --from-layout` (below).
 * **It cannot sign with a cold key.** Cold-role records are carried exactly as they are stored. Nothing here opens one.
-* **Verify, read-only open and import do not exist yet.** They arrive in later work packages of stage 3. Until then nothing in this tool reads a layout back, and the only checks of one are the tests of this repository and the read-back each run makes of what it wrote.
+* **There is no read-only open yet.** `spo -C DIR` on a layout arrives in a later work package. To work from a layout you import it into a workspace first.
 
 ## Before you run it
 
@@ -79,3 +79,50 @@ A signature file counts only after it verifies against the workspace's checkpoin
 The order is: the slots object, the records, the audit rows, the manifest pages, the manifest root, and last the head. A head is never written before what it names. A stopped run (a full disk, a lost lock, Ctrl-C, a failed signature) leaves the newest earlier head complete. If the run stopped between putting the head and putting its signature, run the same command again: it signs that head and puts only the signature, provided the workspace has not changed since, the head is the only one above the pin, and the head's time is sane (not before the pinned head's, not more than five minutes ahead). If the workspace changed since, that head can never be signed and the directory cannot be extended: use a fresh directory. Otherwise run the same command again: objects already there are found, not written again. The tool never deletes or replaces anything in the directory; a file in `heads/` that is not a valid head, or a signature with no head, blocks the directory: move it away yourself or use a fresh directory.
 
 Only one export can run on a directory at a time: the command holds a lock file (`.spo-export.lock`) in it and a second one is refused. The directory is checked again before every write; if it is replaced meanwhile (moved, or swapped for a link), the run stops and writes no head.
+
+## Check a layout: `store verify --layout`
+
+```
+spo -C ws store verify --layout /srv/spo-layout --pin PIN [--at SEQ] [--locked]
+```
+
+It changes nothing: not the directory, not any workspace. **A pin is required.** Without one the command refuses and says how to get one: it never checks a layout by trusting the directory. There are three forms, and they prove different things.
+
+| Pin | What it proves |
+| --- | --- |
+| `<workspace id>:layout:<sequence>:<head hash>` (what the export printed) | That head, and through the `previous` hashes the chain below it. It does **not** authenticate a later head. If the pinned head names a checkpoint key, every later head must be signed by that same key; if it names none, later heads are accepted as chained by hash only and the output says nothing authenticates them (`--at <that sequence>` uses only the pinned head). |
+| `<workspace id>:ck:<key hash>[:<minimum sequence>]` (the long-lived pin) | Every head from 1 to the one used carries a signature of that key. With no minimum sequence it proves the head is authentic, not that it is the newest; with one, an older copy is refused. |
+| `local` | The pin this machine keeps beside the workspace file for a layout it exported itself. It is read as an exact pin. |
+
+The check has two passes.
+
+* **The locked pass asks for nothing.** It walks the heads by number, checks the pin, the links, the workspace id and the signatures, fetches the slots object and the manifest root by hash, checks their sizes, epoch and hashes, and runs the unlock-policy check on the slot table. It says what it proved and what it cannot: it cannot open a sealed object, so it does not know that the records are what the head says. `--locked` stops here and touches no authenticator.
+* **The unlocked pass** opens the manifest and every object with the credential of the workspace (the passphrase of a `standard` workspace; the daily authenticator of `hardware` and `strict`, never a passphrase, never the recovery composite). It checks every object against its manifest entry, each record's anchor and number against its owner blob, the last audit row against the manifest root, the slot table against the newest slot-table audit row and the epoch MAC. It then writes the rows into a private scratch store file, which has to pass the store's own full verification (the audit chain, every record hash it recorded, the policy), and removes the file. No record is decrypted and no cold-role factor is asked for.
+
+**The slot table decides the credential, so the pin must vouch for it.** With an exact pin (or `local`) the pinned head's slots object is fetched and checked, and a later head's table is used only if its policy is not weaker, its recovery key is the same and it names only this workspace's own authenticator RP id. Otherwise the check refuses before asking for anything and says to pin a newer head, use a key pin or use `--at <pinned sequence>`. **After a rotation that changes the recovery key or lowers the policy, take a newer pin.** A signature counts only for a key the pin vouches for, and a later head that names a key the pinned head did not is refused: after you enrol a checkpoint key, pin the first head that names it, or use the key pin. With an exact pin the output says the head used is the newest the directory offers, not necessarily the newest there is: a head deleted above the pin cannot be detected.
+
+**A head that fails stops the check.** The command names it, says why, names the newest head below it that did verify, and says that you may use that one with `--at SEQ` if you accept that state; the pin still has to accept it. A directory with junk in the next head's name is such a case. `--at` naming a head that is not in the directory is refused.
+
+**Limits.** At most 100,000 heads; an object is at most 4 MiB; a manifest that claims more than 100,000 records or 500,000 audit rows is refused before anything is fetched; at most eight objects are read at once. A layout at those limits needs under 1 GiB of memory (the snapshot is held in memory, up to 256 MiB of fields, twice while the scratch file is written and read back). Measured on a layout with 50,000 audit rows and 200 records (199 MiB, warm cache): checking the objects took about 0.3 s and 81 MiB of heap, and writing and verifying the scratch file 0.75 s and 205 MiB; the whole process peaked at 271 MiB. The worst case at the limits (about 600,000 rows) is estimated, not measured.
+
+## Recover on a new machine from only the layout and a pin
+
+You need the directory (a copy of it is enough), the pin, and the credential of the workspace: the passphrase, or the daily authenticator. Nothing else from the old machine.
+
+```
+spo -C newws store verify --layout /media/backup/spo-layout --pin PIN
+spo -C newws store convert --from-layout /media/backup/spo-layout --pin PIN --network mainnet
+spo -C newws store verify --deep
+```
+
+The first command is optional (the second runs the same checks). The second writes `workspace.spo` and `spo.toml` (a layout does not hold `spo.toml`, so `--network` is needed in an empty directory; the mode is offline) and records the pin beside the new workspace file, so that `store convert --to-layout` from the new machine continues the layout's chain. Cold-role records are carried exactly as stored; to sign with one you need the cold factor, as always.
+
+## Import a layout: `store convert --from-layout`
+
+```
+spo -C ws store convert --from-layout DIR --pin PIN [--at SEQ] [--force] [--allow-older] ...
+```
+
+It runs both passes, then installs the verified scratch file with the same path as `store restore`, so every rule of a restore applies: an existing workspace needs `--force`; an older layout, or one that has diverged, needs `--allow-older` and the operational certificate and KES counters of the replaced workspace are carried forward, never lowered; a weaker unlock policy is refused without `--allow-weaker-policy` and the current recovery credential; a layout of another workspace needs `--allow-other-workspace`. A failed or refused import leaves the workspace as it was. The layout is not changed and is not retired: the workspace file is the only store you can write to. A refusal that needs no secret is made before anything is asked, including flags that belong to the other direction. The pin of the head used is recorded beside the new workspace only when that head's note is one the workspace would have written; otherwise the output says the next export needs a fresh directory or `--adopt-layout`. Into an empty directory no counter is compared, and the output says so and names `spo pool opcert counter POOL`.
+
+**Authenticator touches.** Under `hardware` and `strict` the daily authenticator is presented once to open the layout's slot table, once more for the store's verification of the scratch file, and once more by the restore: `store verify --layout` asks for two touches (the PIN is read once), an import for three. (Counted by the end-to-end test with the repository's FIDO2 stand-in.) A `standard` workspace types its passphrase once. The three could be merged only if the store's verification and the restore accepted an already-derived key; that is not done, because the restore verifies its own private copy on purpose.

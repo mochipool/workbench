@@ -78,6 +78,11 @@ func Open(root, workspaceFile string) (*Dir, error) {
 		return nil, err
 	}
 	wsDir, err := filepath.EvalSymlinks(filepath.Dir(wsAbs))
+	if errors.Is(err, fs.ErrNotExist) {
+		// a machine with no workspace yet (reading a layout to import it): the pin
+		// file would sit where the workspace will be
+		wsDir, err = filepath.Dir(wsAbs), nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -147,6 +152,18 @@ func Open(root, workspaceFile string) (*Dir, error) {
 		return nil, err
 	}
 	return d, nil
+}
+
+// OpenExisting is Open for a layout that must already be there: it never creates
+// the directory. It is what the reader of a layout uses (store verify --layout,
+// store convert --from-layout).
+func OpenExisting(root, workspaceFile string) (*Dir, error) {
+	// a name that is not a directory is refused by Open (the directory is opened
+	// with O_DIRECTORY)
+	if _, err := os.Stat(root); err != nil {
+		return nil, fmt.Errorf("the layout directory %s cannot be read: %w", root, err)
+	}
+	return Open(root, workspaceFile)
 }
 
 // Close releases the directory descriptor.

@@ -3,6 +3,9 @@ package layout_test
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/mochipool/workbench/spo/internal/domain/identity"
@@ -166,5 +169,68 @@ func TestSlotsObjectRefusals(t *testing.T) {
 				t.Errorf("%s: encoded and parsed", name)
 			}
 		}
+	}
+}
+
+// The slots object is plaintext, decoded from the directory before anything is
+// known about it, so its size is bounded: 64 slots (the snapshot limit) of 4 KiB.
+//
+// spec: SPO-Xlayout-PRE-027
+func TestTheSlotsObjectHasAStatedSizeBound(t *testing.T) {
+	if layout.MaxSlotsObject != 256<<10 || !layout.IsBucket(layout.MaxSlotsObject) {
+		t.Fatalf("layout.MaxSlotsObject %d", layout.MaxSlotsObject)
+	}
+	pub := bytes.Repeat([]byte{9}, 32)
+	hash := sha256.Sum256(pub)
+	meta := layout.Meta{WorkspaceID: bytes.Repeat([]byte{1}, 16), StoreFormat: 3, Policy: "hardware", KeyEpoch: bytes.Repeat([]byte{2}, 16), EpochMAC: bytes.Repeat([]byte{3}, 32), CreatedAt: 5, RecoveryPub: pub, RecoveryPubHash: hash[:]}
+	mk := func(n, factors int) layout.SlotsObject {
+		so := layout.SlotsObject{Meta: meta}
+		for i := 0; i < n; i++ {
+			id := make([]byte, 16)
+			id[0], id[1] = byte(i>>8), byte(i)
+			so.Slots = append(so.Slots, layout.Slot{ID: id, Kind: "fido2-hmac", KeyCommit: make([]byte, 32), Nonce: make([]byte, 24), WrappedKey: make([]byte, 48), Bound: 1, Factors: bytes.Repeat([]byte{7}, factors)})
+		}
+		return so
+	}
+	// the largest legal table (64 slots, 3 KiB of factors each) fits and round-trips
+	big := mk(64, 3<<10)
+	stored, err := layout.EncodeSlotsObject(meta.KeyEpoch, big)
+	if err != nil || len(stored) > layout.MaxSlotsObject {
+		t.Fatalf("the largest legal table: %v (%d bytes)", err, len(stored))
+	}
+	if _, _, err := layout.ParseSlotsObject(stored); err != nil {
+		t.Fatal(err)
+	}
+	// one that would not fit is refused by the writer
+	if _, err := layout.EncodeSlotsObject(meta.KeyEpoch, mk(64, 4<<10)); err == nil {
+		t.Fatal("a slots object above the bound was written")
+	}
+	// and by the reader before it decodes anything: a 4 MiB object of nils
+	huge := make([]byte, layout.MaxBucket)
+	huge[0] = layout.FormatSlots
+	copy(huge[1:], meta.KeyEpoch)
+	n := layout.MaxBucket - layout.HeaderSize - 4
+	binary.BigEndian.PutUint32(huge[layout.HeaderSize:], uint32(n))
+	body := huge[layout.HeaderSize+4:]
+	body[0] = 0x83 // array(3)
+	body[1] = 0x6b // "spo/slots/1"
+	copy(body[2:], "spo/slots/1")
+	body[13] = 0x80
+	body[14] = 0x9a // an array of a million nils
+	binary.BigEndian.PutUint32(body[15:], 1_000_000)
+	for i := 19; i < 19+1_000_000 && i < len(body); i++ {
+		body[i] = 0xf6
+	}
+	var perr error
+	var a, b runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&a)
+	_, _, perr = layout.ParseSlotsObject(huge)
+	runtime.ReadMemStats(&b)
+	if perr == nil || !strings.Contains(perr.Error(), "larger than") {
+		t.Fatalf("%v", perr)
+	}
+	if grew := b.TotalAlloc - a.TotalAlloc; grew > 1<<20 {
+		t.Errorf("%d bytes allocated to refuse an oversized slots object", grew)
 	}
 }

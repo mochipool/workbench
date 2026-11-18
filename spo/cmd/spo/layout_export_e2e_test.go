@@ -393,11 +393,15 @@ func sshKeygenOK(t *testing.T, pubLine string, note, sig []byte) bool {
 // countingRunner counts the calls the factor source makes of its tools.
 type countingRunner struct {
 	execx.Runner
-	n atomic.Int32
+	n       atomic.Int32
+	asserts atomic.Int32 // calls of fido2-assert: one for each touch of the authenticator
 }
 
 func (c *countingRunner) Run(ctx context.Context, cmd execx.Cmd) (execx.Result, error) {
 	c.n.Add(1)
+	if filepath.Base(cmd.Path) == "fido2-assert" {
+		c.asserts.Add(1)
+	}
 	return c.Runner.Run(ctx, cmd)
 }
 

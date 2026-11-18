@@ -24,13 +24,33 @@ const layoutUnsignedAdvice = "This head is not signed. It is protected against a
 const layoutLaterWork = "This directory is a sealed copy to keep, not a second workspace: the SQLite workspace file stays the only store you can write to, and nothing here signs with a cold key. Checking the layout, opening it read-only and importing it back arrive in later work."
 
 func (a *app) storeConvert() *cobra.Command {
-	var toLayout string
+	var toLayout, fromLayout, pinText string
+	var at uint64
 	var noCheckpoint, adopt bool
 	var cf checkpointFlags
+	rf := restoreFlags{recInFD: -1, recPinFD: -1}
 	cmd := &cobra.Command{
-		Use:   "convert --to-layout DIR [--no-checkpoint] [--checkpoint-device DEV --checkpoint-pin-fd N]",
-		Short: "Write the workspace into a directory as sealed, padded objects (ADR 0012 stage 3)",
-		Long: `Write the workspace into the local directory DIR as sealed objects: every record
+		Use:   "convert (--to-layout DIR | --from-layout DIR --pin PIN [--at SEQ]) [--no-checkpoint] [--checkpoint-device DEV --checkpoint-pin-fd N] [--force] [--network N]",
+		Short: "Convert between the workspace and a sealed, padded object layout in a directory (ADR 0012 stage 3)",
+		Long: `--from-layout DIR --pin PIN: check the layout in DIR (see "store verify --layout") and
+import it as the workspace. The rows rebuilt from the objects are written to a
+private scratch store file that passes the store's own full verification, and that
+file is installed by the same path as "store restore", so every rule of a restore
+applies: an older layout needs --allow-older, a weaker unlock policy is refused
+without --allow-weaker-policy, a layout of another workspace needs
+--allow-other-workspace, the operational certificate and KES counters of a
+workspace it replaces are never lowered, and an existing workspace needs --force.
+The layout is not changed and not retired; the workspace file stays the only store
+you can write to. No record is opened: cold-role records are carried byte for byte.
+A standard workspace is opened with its passphrase, a hardware or strict workspace
+with its daily authenticator; a passphrase never opens a hardware or strict
+workspace and --unlock recovery-composite is refused. The imported workspace
+records the layout pin beside the workspace file, so a later --to-layout continues
+the chain. --pin is required (the exact pin of a head, the long-lived pin of the
+checkpoint key, or "local"); --at SEQ uses an older head than the newest. spo.toml
+is not part of a layout: when it is missing, --network writes a new one.
+
+--to-layout DIR: write the workspace into the local directory DIR as sealed objects: every record
 and audit row as one object of a fixed bucket size (4 KiB to 4 MiB), the manifest
 that lists them, the slots object, and a head note that names the manifest. The
 workspace file is not changed and stays the only store you can write to. No
@@ -60,9 +80,27 @@ head is signed, the long-lived pin <workspace id>:ck:<key hash>. A forward-only 
 of the layout pin is kept beside the workspace file. ` + headAdvice,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) (err error) {
+			switch {
+			case toLayout != "" && fromLayout != "":
+				return errors.New("give --to-layout or --from-layout, not both")
+			case fromLayout != "":
+				if noCheckpoint || adopt || cmd.Flags().Changed("checkpoint-device") || cmd.Flags().Changed("checkpoint-pin-fd") {
+					return errors.New("--no-checkpoint, --adopt-layout and the checkpoint flags go with --to-layout")
+				}
+				return a.convertFromLayout(cmd.Context(), fromLayout, pinText, at, cmd.Flags().Changed("at"), &rf)
+			}
+			for _, n := range []string{"pin", "at", "force", "allow-older", "allow-other-workspace", "allow-weaker-policy", "accept-lower-counters", "network", "recovery-key-in-fd", "recovery-pin-fd", "current-recovery-device"} {
+				if cmd.Flags().Changed(n) {
+					return fmt.Errorf("--%s goes with --from-layout; it does nothing with --to-layout (nothing was asked)", n)
+				}
+			}
 			return a.convertToLayout(cmd.Context(), toLayout, noCheckpoint, adopt, &cf)
 		},
 	}
+	cmd.Flags().StringVar(&fromLayout, "from-layout", "", "import the sealed layout in this local directory (an absolute or relative path, or dir:/absolute/path) as the workspace; needs --pin")
+	cmd.Flags().StringVar(&pinText, "pin", "", "with --from-layout: the pin of the layout: <workspace id>:layout:<sequence>:<head hash> (what --to-layout printed), <workspace id>:ck:<checkpoint key hash>[:<minimum sequence>], or local (the pin this machine keeps for a layout it exported)")
+	cmd.Flags().Uint64Var(&at, "at", 0, "with --from-layout: use this head instead of the newest one that verifies (it must satisfy the pin)")
+	rf.bind(cmd)
 	cmd.Flags().StringVar(&toLayout, "to-layout", "", "the local directory to write the sealed layout to (an absolute or relative path, or dir:/absolute/path)")
 	cmd.Flags().BoolVar(&noCheckpoint, "no-checkpoint", false, "do not sign the head although the workspace has a checkpoint key")
 	cmd.Flags().BoolVar(&adopt, "adopt-layout", false, "trust an existing layout in DIR that this machine has no pin for (see the how-to); needed only when the workspace has no checkpoint key that verifies every head")

@@ -42,6 +42,9 @@ type Deps struct {
 	// refuses a directory that is the workspace directory or inside it and one
 	// whose permissions are loose. Nil where it is not available.
 	OpenLayoutDir func(dir, workspaceFile string) (layoutexport.Dir, error)
+	// LayoutRead reads a sealed layout back: `store verify --layout` and `store
+	// convert --from-layout`. Nil where it is not available.
+	LayoutRead LayoutReadOps
 	// Factors is the FIDO2 factor source (ADR 0011). Nil where the binary cannot
 	// reach one: a command that needs a factor then fails before any prompt.
 	Factors ports.FactorSource
@@ -333,6 +336,31 @@ type SealedOps struct {
 	// snapshot, an object sealer and the record references, for `store convert
 	// --to-layout`. Nil where it is not available.
 	ExportMaterial func(ctx context.Context, path string, pass *secret.Buffer, factors *FactorOpen) (ExportTaken, error)
+}
+
+// LayoutReadOps are what the layout reader needs of the adapters.
+type LayoutReadOps struct {
+	// Open opens an EXISTING layout directory for reading (it never creates one),
+	// refusing what the exporter's directory refuses: anything but regular files,
+	// a directory that is the workspace directory, another user's or writable by
+	// others. workspaceFile fixes where this machine's pin of the directory is
+	// kept.
+	Open func(dir, workspaceFile string) (LayoutDir, error)
+	// Tables runs the store's unlock-policy check on a slot table, with no secret.
+	Tables ports.SlotTableChecker
+	// Credential binds the credential the command holds (the passphrase of a
+	// standard workspace, or the factors of a hardware or strict one) to the
+	// unlock of a layout's slot table and to the writing of the scratch store
+	// file. It asks for nothing by itself.
+	Credential func(pass *secret.Buffer, factors *FactorOpen) (ports.LayoutKeyOpener, ports.SnapshotFileWriter)
+}
+
+// LayoutDir is an opened layout directory: its objects and this machine's pin of
+// it.
+type LayoutDir struct {
+	Reader ports.ObjectReader
+	Pins   ports.LayoutPins
+	Close  func() error
 }
 
 // ExportTaken is what ExportMaterial returns: the material of the exporter

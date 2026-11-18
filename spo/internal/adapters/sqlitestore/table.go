@@ -124,29 +124,41 @@ func loadTable(ctx context.Context, q dbq, ws []byte, format uint64) (*table, er
 		if mem.Int64 < 0 || mem.Int64 > 1<<32-1 || passes.Int64 < 0 || passes.Int64 > 1<<32-1 || lanes.Int64 < 0 || lanes.Int64 > 255 {
 			s.KDF = seal.KDFParams{} // out of range values wrap: zero is refused as weak
 		}
-		ts.id, ts.kind, ts.bound = s.ID, s.Kind, bound.Int64 == 1
-		switch s.Kind {
-		case seal.SlotPassphrase, seal.SlotRecovery:
-			if ts.bound {
-				s.Binding = &seal.SlotBinding{Policy: string(t.policy), RecoveryPubKeyHash: rec}
-			}
-			ts.ps = s
-		case seal.SlotFIDO2HMAC, seal.SlotComposite:
-			fl, err := seal.DecodeFactors(factors)
-			if err != nil {
-				return nil, fmt.Errorf("%w: slot %x: %v", ErrCorrupt, s.ID, err)
-			}
-			ts.fs = seal.FactorSlot{
-				Spec: seal.SlotSpec{FormatVersion: seal.StoreFormat, GenesisNonce: ws, SlotID: s.ID, Kind: s.Kind,
-					Factors: fl, RecoveryPubKeyHash: rec, Policy: string(t.policy)},
-				Commit: s.Commit, Nonce: s.Nonce, Wrapped: s.Wrapped,
-			}
-		default:
-			return nil, fmt.Errorf("%w: slot kind %q", ErrCorrupt, s.Kind)
+		ts, err := buildTSlot(t, ws, s, bound.Int64 == 1, rec, factors)
+		if err != nil {
+			return nil, err
 		}
 		t.slots = append(t.slots, ts)
 	}
 	return t, rows.Err()
+}
+
+// buildTSlot turns the columns of one slot row into a tslot of table t (whose
+// policy it binds). It is the one place a row is parsed: the file reader and the
+// layout reader (layoutkeys.go) both use it.
+func buildTSlot(t *table, ws []byte, s seal.Slot, bound bool, rec, factors []byte) (tslot, error) {
+	var ts tslot
+	ts.id, ts.kind, ts.bound = s.ID, s.Kind, bound
+	switch s.Kind {
+	case seal.SlotPassphrase, seal.SlotRecovery:
+		if ts.bound {
+			s.Binding = &seal.SlotBinding{Policy: string(t.policy), RecoveryPubKeyHash: rec}
+		}
+		ts.ps = s
+	case seal.SlotFIDO2HMAC, seal.SlotComposite:
+		fl, err := seal.DecodeFactors(factors)
+		if err != nil {
+			return ts, fmt.Errorf("%w: slot %x: %v", ErrCorrupt, s.ID, err)
+		}
+		ts.fs = seal.FactorSlot{
+			Spec: seal.SlotSpec{FormatVersion: seal.StoreFormat, GenesisNonce: ws, SlotID: s.ID, Kind: s.Kind,
+				Factors: fl, RecoveryPubKeyHash: rec, Policy: string(t.policy)},
+			Commit: s.Commit, Nonce: s.Nonce, Wrapped: s.Wrapped,
+		}
+	default:
+		return ts, fmt.Errorf("%w: slot kind %q", ErrCorrupt, s.Kind)
+	}
+	return ts, nil
 }
 
 // check runs domain/unlock on the table.
