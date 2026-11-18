@@ -214,6 +214,11 @@ var (
 	ErrLocked = errors.New("workspace is locked")
 	// ErrOtherWorkspace: the backup is of a different workspace.
 	ErrOtherWorkspace = errors.New("backup of another workspace")
+	// ErrCountersNeedCredential: the workspace a restore would replace cannot be
+	// opened with the credential given for the backup, so its counters cannot be
+	// compared. The message names the recovery flags. It is a credential problem:
+	// the restore refused before replacing anything, and a verified download is kept.
+	ErrCountersNeedCredential = errors.New("the counters of the workspace to be replaced cannot be compared")
 	// ErrOlderBackup: the backup is older than, or diverged from, the workspace.
 	ErrOlderBackup = errors.New("backup older than the workspace")
 )
@@ -248,6 +253,9 @@ type RestoreOptions struct {
 type RestoreReport struct {
 	Carried       []CarriedCounter
 	LowerAccepted bool
+	// HeadAhead: the replaced workspace's head file was ahead of its file; the
+	// counters in the file were carried as a floor.
+	HeadAhead bool
 }
 
 // CarriedCounter is one counter carried forward from the replaced workspace.

@@ -142,6 +142,15 @@ func newDeps(out, errw io.Writer, term cli.Terminal) cli.Deps {
 
 func toHead(h sqlitestore.Head) cli.Head { return cli.Head{Seq: h.Seq, MAC: h.MAC} }
 
+// credentialRefusal is the store's refusal for a destination whose credential was
+// not presented, kept whole (message and chain) and also matching
+// cli.ErrCountersNeedCredential.
+type credentialRefusal struct{ err error }
+
+func (e *credentialRefusal) Error() string        { return e.err.Error() }
+func (e *credentialRefusal) Unwrap() error        { return e.err }
+func (e *credentialRefusal) Is(target error) bool { return target == cli.ErrCountersNeedCredential }
+
 // mapStoreErr maps the sealed store's sentinel errors to the command tree's,
 // which turns each into advice. Anything else passes through.
 func mapStoreErr(err error) error {
@@ -160,6 +169,8 @@ func mapStoreErr(err error) error {
 		return cli.ErrOtherWorkspace
 	case errors.Is(err, sqlitestore.ErrOlderBackup):
 		return cli.ErrOlderBackup
+	case errors.Is(err, sqlitestore.ErrCountersNeedCredential):
+		return &credentialRefusal{err}
 	case errors.Is(err, sqlitestore.ErrOutcomeUnknown):
 		return fmt.Errorf("%w (%v)", cli.ErrOutcomeUnknown, err)
 	}
@@ -343,6 +354,7 @@ func restoreOptionsReporting(o cli.RestoreOptions) (sqlitestore.RestoreOptions, 
 			return
 		}
 		o.Report.LowerAccepted = rep.LowerAccepted
+		o.Report.HeadAhead = rep.HeadAhead
 		for _, c := range rep.Carried {
 			o.Report.Carried = append(o.Report.Carried, cli.CarriedCounter{Pool: c.Pool, Kind: c.Kind, Live: c.Live, Backup: c.Backup})
 		}

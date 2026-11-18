@@ -52,7 +52,7 @@ func (a *app) openScratch() (ports.Scratch, error) {
 // keepsDownload says a restore refusal is not about the downloaded file: the
 // verified file is kept so that a re-run does not download it again.
 func keepsDownload(err error) bool {
-	for _, k := range []error{ErrWrongPassphrase, ErrWrongRecoveryKey, ErrBadRecoveryKey, ErrLocked, ErrNoTerminal, context.Canceled,
+	for _, k := range []error{ErrWrongPassphrase, ErrWrongRecoveryKey, ErrBadRecoveryKey, ErrLocked, ErrNoTerminal, ErrCountersNeedCredential, context.Canceled,
 		ports.ErrFactorNoDevice, ports.ErrFactorNoCredential, ports.ErrFactorPIN, ports.ErrFactorPINBlocked, ports.ErrFactorTimeout, ports.ErrFactorUPRefused} {
 		if errors.Is(err, k) {
 			return true

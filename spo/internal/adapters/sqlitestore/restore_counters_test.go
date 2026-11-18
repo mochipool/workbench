@@ -645,11 +645,11 @@ func TestRolledBackDestinationCountersAreUnknown(t *testing.T) {
 	os.Remove(path + "-wal")
 	os.Remove(path + "-shm")
 	err := restoreOlder(t, backup, path, RestoreOptions{})
-	if !errors.Is(err, ErrCountersUnknown) || !strings.Contains(err.Error(), "older than its head file") {
+	if !errors.Is(err, ErrCountersUnknown) || !strings.Contains(err.Error(), "older than its head file") || strings.Contains(err.Error(), "really lost") {
 		t.Fatalf("%v", err)
 	}
 	var rep RestoreReport
-	if err := restoreOlder(t, backup, path, RestoreOptions{AcceptLowerCounters: true, Report: &rep}); err != nil || !rep.LowerAccepted {
+	if err := restoreOlder(t, backup, path, RestoreOptions{AcceptLowerCounters: true, Report: &rep}); err != nil || !rep.HeadAhead {
 		t.Fatalf("%v %+v", err, rep)
 	}
 }
@@ -737,4 +737,169 @@ func (b *budgetSource) Assert(ctx context.Context, req ports.AssertRequest) (por
 	}
 	b.left--
 	return b.FactorSource.Assert(ctx, req)
+}
+
+// R1: a credential that does not open the destination is always a refusal, with
+// or without --allow-older, also for a backup that contains the destination's head.
+//
+// spec: SPO-Xbackup-PRE-012
+func TestCredentialProblemRefusesEvenForABackupThatContainsTheHead(t *testing.T) {
+	s, path, rec := scratchPresented(t)
+	putCounters(t, s, "poolA", cstate{issue: 3, kesCur: 1, kesNext: 2})
+	s.Close()
+	dest := cloneWS(t, path) // the live workspace: counter 3
+	s = openPlain(t, path)
+	presentStd(t, s, rec)
+	putCounters(t, s, "poolA", cstate{issue: 1, kesCur: 1, kesNext: 2}) // lowered by --counter 0
+	if _, err := s.ChangePassphraseRekey(ctx, passphrase("changed after the clone")); err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(t.TempDir(), "b.bak")
+	if err := s.Backup(ctx, backup); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	before, _ := os.ReadFile(dest)
+	err := RestoreWithOptions(backup, dest, passphrase("changed after the clone"), RestoreOptions{Overwrite: true})
+	if err == nil || errors.Is(err, ErrCountersUnknown) || !strings.Contains(err.Error(), "--recovery-key-in-fd") || strings.Contains(err.Error(), "--accept-lower-counters") {
+		t.Fatalf("a backup that contains the head but whose credential does not open the destination: %v", err)
+	}
+	if after, _ := os.ReadFile(dest); !bytes.Equal(before, after) {
+		t.Fatal("the destination changed")
+	}
+}
+
+// R1: another workspace (--allow-other-workspace) whose credential does not open
+// the destination asks for the destination's own recovery key and never names the
+// flag.
+//
+// spec: SPO-Xbackup-PRE-012
+func TestAnotherWorkspaceOverADestinationItDoesNotOpenNeedsItsRecoveryKey(t *testing.T) {
+	a, _, _ := scratch(t)
+	backup := filepath.Join(t.TempDir(), "other.bak")
+	a.Backup(ctx, backup)
+	a.Close()
+	// another workspace whose passphrase differs
+	other := filepath.Join(t.TempDir(), "other.db")
+	p1 := passphrase("a quite different passphrase")
+	rk, err := Init(other, p1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rk.Destroy()
+	o, err := Open(other, passphrase("a quite different passphrase"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup2 := filepath.Join(t.TempDir(), "other2.bak")
+	o.Backup(ctx, backup2)
+	o.Close()
+	b, pathB, _ := scratch(t)
+	putCounters(t, b, "poolA", cstate{issue: 9, kesCur: 1, kesNext: 2})
+	b.Close()
+	err = RestoreWithOptions(backup2, pathB, passphrase("a quite different passphrase"), RestoreOptions{Overwrite: true, AllowOtherWorkspace: true})
+	if err == nil || errors.Is(err, ErrCountersUnknown) || !strings.Contains(err.Error(), "--recovery-key-in-fd") || strings.Contains(err.Error(), "--accept-lower-counters") {
+		t.Fatalf("%v", err)
+	}
+}
+
+// R2: a keyless attacker rewrites the head file to a higher sequence. The intact
+// file unlocks; its counters are a floor that is always carried, also under
+// --accept-lower-counters, and the refusal does not call the workspace lost.
+//
+// spec: SPO-Xbackup-PRE-013
+func TestForgedHeadFileDoesNotLetTheFlagLowerAnIntactWorkspace(t *testing.T) {
+	for _, allowOlder := range []bool{true, false} {
+		path, backup := crig(t, map[string]cstate{"poolA": {issue: 3, kesCur: 1, kesNext: 2}}, map[string]cstate{"poolA": {issue: 9, kesCur: 1, kesNext: 2}})
+		ws, own, err := InspectHead(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		forged := encodeHead(ws, Head{Seq: own.Seq + 50, MAC: own.MAC})
+		if err := os.WriteFile(headPath(path), forged, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		o := RestoreOptions{Overwrite: true, AllowOlder: allowOlder}
+		err = RestoreWithOptions(backup, path, pw(), o)
+		if !errors.Is(err, ErrCountersUnknown) || strings.Contains(err.Error(), "really lost") || !strings.Contains(err.Error(), "head file") {
+			t.Fatalf("allowOlder=%v: %v", allowOlder, err)
+		}
+		var rep RestoreReport
+		o.AcceptLowerCounters, o.Report = true, &rep
+		err = RestoreWithOptions(backup, path, pw(), o)
+		if !allowOlder {
+			// the counter rule passed with the flag; the older backup is then refused as such
+			if !errors.Is(err, ErrOlderBackup) {
+				t.Fatalf("without --allow-older: %v", err)
+			}
+			ar, aerr := OpenWithOptions(path, pw(), OpenOptions{AcceptRollback: true})
+			if aerr != nil {
+				t.Fatal(aerr)
+			}
+			got, _ := readC(t, ar, "poolA")
+			ar.Close()
+			if got.issue != 9 {
+				t.Fatalf("%+v", got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("allowOlder=%v with the flag: %v", allowOlder, err)
+		}
+		if got, _ := readC(t, openPlain(t, path), "poolA"); got.issue != 9 || !rep.HeadAhead || len(rep.Carried) != 1 {
+			t.Fatalf("allowOlder=%v: the intact file's counter was lowered or not reported: %+v %+v", allowOlder, got, rep)
+		}
+	}
+}
+
+// R2: a genuine rollback is the same case: the file's counters are carried as a
+// floor under the flag, with the warning that the true counters may be higher.
+//
+// spec: SPO-Xbackup-PRE-013
+func TestGenuineRollbackCarriesTheFileCountersAsAFloor(t *testing.T) {
+	s, path, _ := scratch(t)
+	putCounters(t, s, "poolA", cstate{issue: 5, kesCur: 1, kesNext: 2})
+	s.Close()
+	older := cloneWS(t, path)
+	olderBytes, _ := os.ReadFile(older)
+	s = openPlain(t, path)
+	putCounters(t, s, "poolA", cstate{issue: 9, kesCur: 1, kesNext: 2})
+	s.Close()
+	// the backup has a lower counter, taken from another history
+	s2, _, _ := scratch(t)
+	putCounters(t, s2, "poolA", cstate{issue: 2, kesCur: 1, kesNext: 2})
+	backup := filepath.Join(t.TempDir(), "b.bak")
+	s2.Backup(ctx, backup)
+	s2.Close()
+	os.WriteFile(path, olderBytes, 0o600) // the file goes back to counter 5; the head file records the newer state
+	os.Remove(path + "-wal")
+	os.Remove(path + "-shm")
+	var rep RestoreReport
+	if err := RestoreWithOptions(backup, path, pw(), RestoreOptions{Overwrite: true, AllowOtherWorkspace: true, AllowOlder: true, AcceptLowerCounters: true, Report: &rep}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := readC(t, openPlain(t, path), "poolA"); got.issue != 5 || !rep.HeadAhead {
+		t.Fatalf("the rolled-back file's counter was not carried as a floor: %+v %+v", got, rep)
+	}
+}
+
+// R3: "the backup holds that waiting KES key" means the same key, not the same
+// number: with different key material at that number the next number moves.
+//
+// spec: SPO-Xbackup-PRE-011
+func TestAWaitingKesKeyWithOtherMaterialIsNotHeld(t *testing.T) {
+	s, path, _ := scratch(t)
+	putCounters(t, s, "poolA", cstate{issue: 1, kesCur: 1, kesNext: 1})
+	put(t, s, rf("poolA", ports.KesVKey, 1), "key material of the backup")
+	backup := filepath.Join(t.TempDir(), "b.bak")
+	s.Backup(ctx, backup)
+	put(t, s, rf("poolA", ports.KesVKey, 1), "different key material of the live workspace") // diverged history
+	s.Close()
+	if err := restoreOlder(t, backup, path, RestoreOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := readC(t, openPlain(t, path), "poolA")
+	if got.kesNext != 2 {
+		t.Fatalf("restored kes %d/%d: the next key would reuse number 1 with other material", got.kesCur, got.kesNext)
+	}
 }

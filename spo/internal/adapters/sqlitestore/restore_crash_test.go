@@ -46,8 +46,9 @@ func TestRestoreCrashBetweenSwapAndHeadFile(t *testing.T) {
 	if _, err := Open(path, pass()); !errors.Is(err, ErrRolledBack) {
 		t.Fatalf("an open after the crash: %v, want ErrRolledBack", err)
 	}
-	// a restore without --allow-older is refused the same way as any older backup
-	if err := RestoreWithOptions(backup, path, pass(), RestoreOptions{Overwrite: true}); !errors.Is(err, ErrOlderBackup) {
+	// a restore without --allow-older is refused: by the counter rule first (the
+	// file is older than its head file and no sidecar explains it)
+	if err := RestoreWithOptions(backup, path, pass(), RestoreOptions{Overwrite: true}); !errors.Is(err, ErrCountersUnknown) {
 		t.Fatalf("a re-run without AllowOlder: %v", err)
 	}
 	// without the sidecar a real crash leaves, the file is older than its head
