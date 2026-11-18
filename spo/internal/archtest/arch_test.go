@@ -110,6 +110,9 @@ func TestConfinedImports(t *testing.T) {
 		// The terminal UI library and its text-width helper (ADR 0009).
 		"github.com/charmbracelet":      module + "/internal/adapters/tui",
 		"github.com/mattn/go-runewidth": module + "/internal/adapters/tui",
+		// The AWS SDK: only the S3 backup sink adapter (ADR 0012 stage 1).
+		"github.com/aws/aws-sdk-go-v2": module + "/internal/adapters/objstore/s3",
+		"github.com/aws/smithy-go":     module + "/internal/adapters/objstore/s3",
 	}
 	for _, p := range load(t) {
 		for _, imp := range p.Imports {
@@ -139,6 +142,57 @@ func TestTUIIsDrivenThroughTheCommandTreeOnly(t *testing.T) {
 				t.Errorf("%s imports %s: the TUI reaches commands only through the cobra tree it is handed", p.ImportPath, imp)
 			case imp == tui && !strings.HasPrefix(p.ImportPath, module+"/cmd/"):
 				t.Errorf("%s imports the TUI; only the composition root may", p.ImportPath)
+			}
+		}
+	}
+}
+
+// ADR 0012 stage 1: the backup use case reaches a sink only through the object
+// ports, and the AWS modules are imported only by the S3 adapter.
+//
+// spec: SPO-Xbackup-INV-002
+func TestBackupSinkUseCaseImportsNoAdapter(t *testing.T) {
+	uc := module + "/internal/app/backupsink"
+	seen := false
+	for _, p := range load(t) {
+		if p.ImportPath != uc {
+			continue
+		}
+		seen = true
+		for _, imp := range p.Imports {
+			if strings.HasPrefix(imp, module+"/internal/adapters") || strings.HasPrefix(imp, "github.com/aws/") {
+				t.Errorf("%s imports %s", uc, imp)
+			}
+		}
+	}
+	if !seen {
+		t.Fatal("the backupsink package was not found")
+	}
+	// and no package but the S3 adapter reaches the AWS modules, with or without
+	// the confinement table
+	s3 := module + "/internal/adapters/objstore/s3"
+	for _, p := range load(t) {
+		for _, imp := range p.Imports {
+			if strings.HasPrefix(imp, "github.com/aws/") && p.ImportPath != s3 {
+				t.Errorf("%s imports %s; only %s may", p.ImportPath, imp, s3)
+			}
+		}
+	}
+}
+
+// ADR 0012 stage 1 (F14): a use case does not touch the file system. It gets
+// scratch space through ports.Scratch. No non-test package under internal/app
+// imports "os".
+//
+// spec: SPO-Xbackup-INV-002
+func TestUseCasesDoNotImportOS(t *testing.T) {
+	for _, p := range load(t) {
+		if !strings.HasPrefix(p.ImportPath, module+"/internal/app/") {
+			continue
+		}
+		for _, imp := range p.Imports {
+			if imp == "os" {
+				t.Errorf("%s imports os; a use case reaches files through a port", p.ImportPath)
 			}
 		}
 	}

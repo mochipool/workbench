@@ -3,6 +3,7 @@ package sqlitestore
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -120,10 +121,24 @@ func inspectFile(ctx context.Context, path string) (ws []byte, h Head, err error
 	return ws, h, err
 }
 
+// InspectHead reads the workspace id and the chain head of the file at path
+// without a key, read-only. It is what a backup file says about itself.
+func InspectHead(path string) (ws []byte, h Head, err error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, Head{}, err
+	}
+	return inspectFile(context.Background(), abs)
+}
+
 // RestoreOptions are the choices of RestoreWithOptions.
 type RestoreOptions struct {
 	// Overwrite lets the restore replace an existing destination.
 	Overwrite bool
+	// ExpectedSHA256, when set, is the SHA-256 the backup file must have. It is
+	// checked on the restore's own private copy before anything else is done
+	// with it, so the bytes installed are the bytes that were hashed.
+	ExpectedSHA256 []byte
 	// AllowOlder lets it replace a workspace with a backup that is older than
 	// the workspace (the workspace's last recorded state is not in the
 	// backup's chain). Without it such a restore fails with ErrOlderBackup.
@@ -200,6 +215,23 @@ func RestoreWithRecoveryOptions(backupPath, destPath string, recovery *secret.Bu
 	return restore(backupPath, destPath, credential{kind: seal.SlotRecovery, buf: raw}, o)
 }
 
+// checkCopyHash re-reads the private copy and compares its SHA-256.
+func checkCopyHash(path string, want []byte) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return err
+	}
+	if !bytes.Equal(h.Sum(nil), want) {
+		return ErrBackupHash
+	}
+	return nil
+}
+
 func restore(backupPath, destPath string, cred credential, o RestoreOptions) (err error) {
 	ctx := context.Background()
 	src, err := filepath.Abs(backupPath)
@@ -251,6 +283,11 @@ func restore(backupPath, destPath string, cred credential, o RestoreOptions) (er
 	if err = tmp.Close(); err != nil {
 		return err
 	}
+	if o.ExpectedSHA256 != nil {
+		if err = checkCopyHash(tmpPath, o.ExpectedSHA256); err != nil {
+			return err
+		}
+	}
 	if _, err = verifyFile(tmpPath, cred, false); err != nil {
 		return fmt.Errorf("sqlitestore: backup does not verify: %w", err)
 	}
@@ -301,6 +338,18 @@ func restore(backupPath, destPath string, cred credential, o RestoreOptions) (er
 	if err = clearDestSides(dest); err != nil {
 		return err
 	}
+	// Announce the head file before the swap. A crash between the swap and the
+	// head file leaves the new file beside the old head file; the sidecar lets the
+	// next open settle that when it names the file's own head (adoptSidecar).
+	swapped := false
+	if err = withHeadLock(dest, func() error { return replaceHeadAt(sidecarPath(dest), ws, head) }); err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil && !swapped {
+			os.Remove(sidecarPath(dest))
+		}
+	}()
 	if o.Overwrite {
 		err = os.Rename(tmpPath, dest)
 	} else {
@@ -312,11 +361,26 @@ func restore(backupPath, destPath string, cred credential, o RestoreOptions) (er
 	if err != nil {
 		return err
 	}
+	swapped = true
+	if afterSwap != nil {
+		if err = afterSwap(); err != nil {
+			return err
+		}
+	}
 	if err = writeHeadFile(dest, ws, head); err != nil {
 		return err
 	}
+	os.Remove(sidecarPath(dest))
 	return syncDir(filepath.Dir(dest))
 }
+
+// afterSwap, when set, runs right after the new file is in place and before the
+// head file is written; an error stops the restore there, which is what a crash
+// at that point looks like (a test sets it).
+var afterSwap func() error
+
+// ErrBackupHash: the backup's bytes are not the ones that were hashed.
+var ErrBackupHash = errors.New("sqlitestore: the backup file is not the file whose SHA-256 was expected; nothing was installed")
 
 // afterPolicyCheck, when set, runs between the policy check and the lock (a test
 // changes the destination there).

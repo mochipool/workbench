@@ -81,7 +81,7 @@ let
     pname = "spo-unwrapped";
     inherit version;
     src = lib.cleanSource ../spo;
-    vendorHash = "sha256-HzNiNP+Ryjd5TRn+0hXoo66G8qz+F+1Bx6aCed1VChw=";
+    vendorHash = "sha256-PsMNy89IZaot0kUXmL3PASHiR5RG1iaewM23uMSzX6Q=";
     env.CGO_ENABLED = 0;
     # `spo` opens workspaces. The block producer's start-up helper `spo-node-keys`
     # (ADR 0011 decision 2), the only plaintext writer of a signing key, is its own
@@ -185,7 +185,7 @@ let
     pname = "spo-node-keys";
     inherit version;
     src = lib.cleanSource ../spo;
-    vendorHash = "sha256-HzNiNP+Ryjd5TRn+0hXoo66G8qz+F+1Bx6aCed1VChw=";
+    vendorHash = "sha256-PsMNy89IZaot0kUXmL3PASHiR5RG1iaewM23uMSzX6Q=";
     env.CGO_ENABLED = 0;
     subPackages = [ "cmd/spo-node-keys" ];
     ldflags = [ "-s" "-w" ];

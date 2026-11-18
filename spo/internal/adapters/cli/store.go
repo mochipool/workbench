@@ -85,7 +85,7 @@ func (a *app) deliverUnknownRekey(ctx context.Context, key *secret.Buffer, fd in
 
 func (a *app) storeCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "store", Short: "Check, back up and manage the sealed workspace"}
-	cmd.AddCommand(a.storeVerify(), a.storeBackup(), a.storeRestore(), a.storeSlots(), a.storePassphrase(), a.storeRecoveryKey(), a.storeRecover())
+	cmd.AddCommand(a.storeVerify(), a.storeBackup(), a.storeBackups(), a.storeRestore(), a.storeSlots(), a.storePassphrase(), a.storeRecoveryKey(), a.storeRecover())
 	return cmd
 }
 
@@ -202,19 +202,35 @@ writing anything.
 }
 
 func (a *app) storeBackup() *cobra.Command {
-	return &cobra.Command{
-		Use:   "backup <dest>",
+	var sinkURL string
+	cmd := &cobra.Command{
+		Use:   "backup [<dest>] [--sink <URL>]",
 		Short: "Write a consistent copy of the workspace, then verify the copy",
 		Long: `Write a copy of workspace.spo to <dest>, which must not exist (mode 0600).
 The copy is already sealed and opens with the same passphrase and recovery
 key. It is then verified and the head of the backup printed.
 
+With --sink URL the verified copy is sent to a sink instead of <dest>: URL is
+s3://bucket/prefix or dir:/absolute/path. Exactly one of <dest> and --sink is
+given. An S3 sink needs a workspace with the hardware or strict policy and a
+bucket with versioning and Object Lock in COMPLIANCE mode with a default
+retention, reached with short-lived credentials (the rules are checked before
+a byte is sent). The object is read back and compared before the command
+reports success, and a pin is printed: keep it somewhere other than the sink,
+restore needs it. Running the command again after an interruption is safe.
+
 A backup made before a passphrase change or a new recovery key still opens
 with the passphrase and the recovery key of its own time.
 
 ` + headAdvice,
-		Args: cobra.ExactArgs(1),
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
+			if (len(args) == 1) == (sinkURL != "") {
+				return errors.New("give exactly one of <dest> and --sink URL")
+			}
+			if sinkURL != "" {
+				return a.backupToSink(cmd, sinkURL)
+			}
 			s, err := a.openSealed(cmd.Context())
 			if err != nil {
 				return err
@@ -238,6 +254,8 @@ with the passphrase and the recovery key of its own time.
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&sinkURL, "sink", "", "send the verified backup to a sink: s3://bucket/prefix or dir:/absolute/path (instead of <dest>)")
+	return cmd
 }
 
 // standardBackupWarning is printed after a filesystem backup of a standard
@@ -263,6 +281,7 @@ func (a *app) verifyCopy(s *session, path string) (VerifyReport, error) {
 
 func (a *app) storeRestore() *cobra.Command {
 	var (
+		sinkURL, pinText    string
 		force, older, other bool
 		weaker              bool
 		network             string
@@ -270,7 +289,7 @@ func (a *app) storeRestore() *cobra.Command {
 		curRecDevice        string
 	)
 	restore := &cobra.Command{
-		Use:   "restore <backup> [--force] [--allow-older] [--allow-weaker-policy ...] [--network N]",
+		Use:   "restore [<backup>] [--sink <URL> --pin <PIN>] [--force] [--allow-older] [--allow-weaker-policy ...] [--network N]",
 		Short: "Replace the workspace with a backup, after verifying it",
 		Long: `Verify <backup> with its passphrase, then install it as workspace.spo in the
 workspace directory. An existing workspace is refused unless --force is given.
@@ -288,12 +307,45 @@ allows it, and only together with the CURRENT workspace's recovery credential
 never loosened. A backup of a hardware or strict workspace is verified through
 its FIDO2 factors (the daily authenticator, as at unlock), not a passphrase.
 
+With --sink URL and --pin PIN the backup is first downloaded from a sink (the
+pin is the one "store backup --sink" printed: workspace id, head, and the file's
+SHA-256). The file is used only if all of them match what it says itself; then
+the same restore runs on it, with every refusal below. An interrupted download
+is resumed by running the command again with the same pin. --allow-older is
+refused with --sink: an older backup would lower the operational-certificate
+counters, which a restore does not guard against yet.
+
 spo.toml is not part of a backup: when it is missing, --network writes a new
 one in mode offline (change it with: spo mode set).`,
-		Args: cobra.ExactArgs(1),
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if a.upstream {
 				return errors.New(errUpstreamStore)
+			}
+			if sinkURL == "" && pinText != "" {
+				return errors.New("--pin goes with --sink")
+			}
+			if sinkURL == "" && len(args) != 1 {
+				return errors.New("give a <backup> file, or --sink URL with --pin PIN")
+			}
+			if sinkURL != "" {
+				if len(args) != 0 {
+					return errors.New("give either a <backup> file or --sink URL, not both")
+				}
+				if older {
+					return errors.New(errSinkOlder)
+				}
+				// every combination that can be checked without the file is checked
+				// before anything is downloaded
+				if other && !force {
+					return errors.New("--allow-other-workspace replaces an existing workspace and needs --force")
+				}
+				if exists(a.workspaceFile()) && !force {
+					return fmt.Errorf("a workspace already exists in %s; pass --force to replace it (nothing was downloaded)", a.workspace)
+				}
+				if pinText == "" {
+					return errors.New("--sink needs --pin PIN: the pin that store backup --sink printed (a restore without a pin is refused)")
+				}
 			}
 			haveCfg := exists(a.configPath())
 			if !haveCfg && network == "" {
@@ -307,65 +359,76 @@ one in mode offline (change it with: spo mode set).`,
 				}
 				cfg = WorkspaceConfig{Network: p.Name, Mode: ModeOffline}
 			}
-			byFactors := false
-			if a.d.Sealed.Describe != nil {
-				bi, err := a.d.Sealed.Describe(args[0])
-				if err != nil {
-					return fmt.Errorf("the backup cannot be read as a workspace: %w", err)
-				}
-				byFactors = bi.Policy == "hardware" || bi.Policy == "strict"
+			if weaker && !force {
+				return errors.New("--allow-weaker-policy replaces an existing workspace and needs --force")
 			}
-			ropts := RestoreOptions{Overwrite: force, AllowOlder: older, AllowOtherWorkspace: other, AllowWeakerPolicy: weaker}
-			if weaker {
-				if !force {
-					return errors.New("--allow-weaker-policy replaces an existing workspace and needs --force")
+			run := func(backupPath, label string, sha []byte) error {
+				byFactors := false
+				if a.d.Sealed.Describe != nil {
+					bi, err := a.d.Sealed.Describe(backupPath)
+					if err != nil {
+						return fmt.Errorf("the backup cannot be read as a workspace: %w", err)
+					}
+					byFactors = bi.Policy == "hardware" || bi.Policy == "strict"
 				}
-				cur, cleanup, err := a.currentRecoveryForRestore(cmd.Context(), recInFD, recPinFD, curRecDevice)
-				if err != nil {
+				ropts := RestoreOptions{ExpectedSHA256: sha, Overwrite: force, AllowOlder: older, AllowOtherWorkspace: other, AllowWeakerPolicy: weaker}
+				if weaker {
+					if !force {
+						return errors.New("--allow-weaker-policy replaces an existing workspace and needs --force")
+					}
+					cur, cleanup, err := a.currentRecoveryForRestore(cmd.Context(), recInFD, recPinFD, curRecDevice)
+					if err != nil {
+						return err
+					}
+					defer cleanup()
+					ropts.CurrentRecovery = cur
+				}
+				var pass *secret.Buffer
+				if byFactors {
+					if a.d.Factors == nil || a.d.Sealed.RestoreFactors == nil {
+						return errors.New("the backup is of a workspace that unlocks through FIDO2 factors, and this binary has no FIDO2 factor source (the libfido2 tools are not in the toolchain manifest): nothing was asked")
+					}
+				} else {
+					var err error
+					if pass, err = a.readPassphrase(cmd.Context()); err != nil {
+						return err
+					}
+					defer pass.Destroy()
+				}
+				if err := os.MkdirAll(a.workspace, 0o700); err != nil {
 					return err
 				}
-				defer cleanup()
-				ropts.CurrentRecovery = cur
-			}
-			var pass *secret.Buffer
-			if byFactors {
-				if a.d.Factors == nil || a.d.Sealed.RestoreFactors == nil {
-					return errors.New("the backup is of a workspace that unlocks through FIDO2 factors, and this binary has no FIDO2 factor source (the libfido2 tools are not in the toolchain manifest): nothing was asked")
+				if other {
+					fmt.Fprintln(a.d.Err, "warning: --allow-other-workspace: the current workspace file is replaced by one that is not its own history.")
 				}
-			} else {
-				var err error
-				if pass, err = a.readPassphrase(cmd.Context()); err != nil {
-					return err
+				if weaker {
+					fmt.Fprintln(a.d.Err, "warning: --allow-weaker-policy: the restored workspace has a weaker unlock policy than the one it replaces.")
 				}
-				defer pass.Destroy()
-			}
-			if err := os.MkdirAll(a.workspace, 0o700); err != nil {
-				return err
-			}
-			if other {
-				fmt.Fprintln(a.d.Err, "warning: --allow-other-workspace: the current workspace file is replaced by one that is not its own history.")
-			}
-			if weaker {
-				fmt.Fprintln(a.d.Err, "warning: --allow-weaker-policy: the restored workspace has a weaker unlock policy than the one it replaces.")
-			}
-			var rerr error
-			if byFactors {
-				rerr = a.d.Sealed.RestoreFactors(args[0], a.workspaceFile(), a.factorOpen(), ropts)
-			} else {
-				rerr = a.d.Sealed.Restore(args[0], a.workspaceFile(), pass, ropts)
-			}
-			if rerr != nil {
-				return rerr
-			}
-			if !haveCfg {
-				if err := a.d.Config.Create(a.workspace, cfg); err != nil {
-					return err
+				var rerr error
+				if byFactors {
+					rerr = a.d.Sealed.RestoreFactors(backupPath, a.workspaceFile(), a.factorOpen(), ropts)
+				} else {
+					rerr = a.d.Sealed.Restore(backupPath, a.workspaceFile(), pass, ropts)
 				}
+				if rerr != nil {
+					return rerr
+				}
+				if !haveCfg {
+					if err := a.d.Config.Create(a.workspace, cfg); err != nil {
+						return err
+					}
+				}
+				fmt.Fprintf(a.d.Out, "Restored %s from %s after verifying it.\n", a.workspaceFile(), label)
+				return nil
 			}
-			fmt.Fprintf(a.d.Out, "Restored %s from %s after verifying it.\n", a.workspaceFile(), args[0])
-			return nil
+			if sinkURL == "" {
+				return run(args[0], args[0], nil)
+			}
+			return a.restoreFromSink(cmd, sinkURL, pinText, run)
 		},
 	}
+	restore.Flags().StringVar(&sinkURL, "sink", "", "restore from a sink instead of a file: s3://bucket/prefix or dir:/absolute/path (needs --pin)")
+	restore.Flags().StringVar(&pinText, "pin", "", "the pin that store backup --sink printed (workspace id:head sequence:head hash:file sha256), with --sink")
 	restore.Flags().BoolVar(&force, "force", false, "replace an existing workspace")
 	restore.Flags().BoolVar(&older, "allow-older", false, "allow a backup that is older than the workspace or has diverged from it (discards the changes made since)")
 	restore.Flags().BoolVar(&other, "allow-other-workspace", false, "DANGEROUS: allow a backup of a different workspace to replace this one; the current workspace and everything in it is lost (needs --force)")

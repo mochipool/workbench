@@ -184,6 +184,16 @@ How to port a use case (the pattern `GenerateKesKey` sets):
 
 Where to go next: the **Not built** list above. Running the node-socket checklist against a preview node comes first, then a recorded Koios `/ogmios` answer and a local Plutus evaluator.
 
+## Backup sink (ADR 0012 stage 1)
+
+`spo store backup --sink URL`, `spo store backups --sink URL` and `spo store restore --sink URL --pin PIN` move the existing sealed backup file to and from a directory (`dir:/abs/path`) or an S3 bucket (`s3://bucket/prefix`). No new cryptography. Code: ports `spo/internal/ports/objects.go`; use case `spo/internal/app/backupsink` (no `os`: scratch space is `ports.Scratch`, adapter `spo/internal/adapters/scratchdir`); adapters `spo/internal/adapters/objstore/{dir,s3}`; commands `spo/internal/adapters/cli/store_sink.go`; wiring `openSink` in `spo/cmd/spo/wiring.go`; the S3 fake with fault injection `spo/test/fakes3`. Spec [Xbackup](../../spec/extensions/Xbackup.md); how-to [Back up to a sink](../how-to/back-up-to-a-sink.md); design choices in "Implementation notes, stage 1" at the end of ADR 0012.
+
+**Nothing was run against a real bucket.** The S3 adapter was tested only against the in-process fake, including dropped connections, a lost response, a stalled download, a corrupted body, expired credentials and credentials from the SDK's real chain (a `credential_process` with an expiry, and environment keys, which are refused). Real Object Lock behaviour, the SDK's `CanExpire` for SSO, Roles Anywhere and web identity, and any S3-compatible store are unconfirmed (concern S6). The AWS modules entered `go.mod` (the `tailscale.com` dependency already pulled the SDK in indirectly) and `go get` raised a few of their versions; both `vendorHash` values in `tools/spo.nix` were updated.
+
+Known gap, not built: **`store restore --allow-older` can lower the operational-certificate and KES counters** (`checkReplace` returns early on `AllowOlder`; restore has no counter rule). ADR 0012 decision 9 says restore keeps the larger value; the code does not (concern S5). `store restore --sink` therefore refuses `--allow-older`. No earlier sentence in this page claimed otherwise.
+
+Restore install crash window (fixed in the stage-1 fix round): the restore writes `<file>.head.next` before the swap and removes it after the head file; an open adopts it when it names the file's own verified head (notice on stderr), and ignores and reports one that does not. Tests build the crashed states for an older and a newer backup and a forged sidecar (`TestRestoreCrashAdoptsTheSidecarForOlderAndNewerBackups`, `TestRestoreCrashForgedSidecarDoesNotSuppressTheRollbackError`). `store restore --sink` still refuses `--allow-older` (concern S5).
+
 ## Owners, labels and the identity-keyed store (ADR 0010 decisions 2 and 4)
 
 Read [Xidentity](../../spec/extensions/Xidentity.md), "Owners, labels and the identity-keyed store" (INV-017 to INV-026, IF-003 to IF-005, PRE-006), and [how to migrate a workspace](../how-to/migrate-a-workspace.md). The shape:

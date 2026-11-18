@@ -13,9 +13,13 @@ import (
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/adapters/native/n2c"
 	"github.com/mochipool/workbench/spo/internal/adapters/nodeage"
+	objdir "github.com/mochipool/workbench/spo/internal/adapters/objstore/dir"
+	objs3 "github.com/mochipool/workbench/spo/internal/adapters/objstore/s3"
+	"github.com/mochipool/workbench/spo/internal/adapters/scratchdir"
 	"github.com/mochipool/workbench/spo/internal/adapters/sqlitestore"
 	"github.com/mochipool/workbench/spo/internal/adapters/storeaudit"
 	"github.com/mochipool/workbench/spo/internal/adapters/upstreamdir"
+	"github.com/mochipool/workbench/spo/internal/app/backupsink"
 	"github.com/mochipool/workbench/spo/internal/platform/seal"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -39,6 +43,8 @@ func newDeps(out, errw io.Writer, term cli.Terminal) cli.Deps {
 			}
 			return ""
 		},
+		OpenSink:    openSink,
+		OpenScratch: func(dir string) (ports.Scratch, error) { return scratchdir.Open(dir) },
 		Sealed: cli.SealedOps{
 			Init: func(path string, pass *secret.Buffer) (*secret.Buffer, error) {
 				k, err := sqlitestore.Init(path, pass)
@@ -66,7 +72,11 @@ func newDeps(out, errw io.Writer, term cli.Terminal) cli.Deps {
 				r, err := sqlitestore.VerifyFilePayloads(path, pass)
 				return cli.VerifyReport{Head: toHead(r.Head), Notices: r.Notices}, mapStoreErr(err)
 			},
-			Describe:          describe,
+			Describe: describe,
+			InspectHead: func(path string) ([]byte, cli.Head, error) {
+				id, h, err := sqlitestore.InspectHead(path)
+				return id, toHead(h), mapStoreErr(err)
+			},
 			OpenFactors:       openFactors,
 			VerifyFileFactors: verifyFileFactors,
 			Migrate: func(path string, pass *secret.Buffer, o cli.MigrateOptions) (cli.MigrateReport, error) {
@@ -308,10 +318,32 @@ func (w sealedStore) Slots(ctx context.Context) ([]cli.Slot, error) {
 
 // restoreOptions maps the command tree's restore choices to the store's.
 func restoreOptions(o cli.RestoreOptions) sqlitestore.RestoreOptions {
-	out := sqlitestore.RestoreOptions{Overwrite: o.Overwrite, AllowOlder: o.AllowOlder, AllowOtherWorkspace: o.AllowOtherWorkspace, AllowWeakerPolicy: o.AllowWeakerPolicy}
+	out := sqlitestore.RestoreOptions{ExpectedSHA256: o.ExpectedSHA256, Overwrite: o.Overwrite, AllowOlder: o.AllowOlder, AllowOtherWorkspace: o.AllowOtherWorkspace, AllowWeakerPolicy: o.AllowWeakerPolicy}
 	if o.CurrentRecovery != nil {
 		in := factorInputs(*o.CurrentRecovery)
 		out.CurrentRecovery = &in
 	}
 	return out
+}
+
+// openSink builds a backup sink from its URL: s3://bucket/prefix or
+// dir:/absolute/path. The S3 adapter is constructed only for an s3:// URL, and
+// construction makes no network call.
+func openSink(ctx context.Context, url string) (backupsink.Sink, error) {
+	switch {
+	case strings.HasPrefix(url, "dir:"):
+		d, err := objdir.Open(strings.TrimPrefix(url, "dir:"))
+		if err != nil {
+			return backupsink.Sink{}, err
+		}
+		return backupsink.Sink{Kind: ports.SinkDir, Writer: d, Reader: d, Lister: d, Ranger: d, Probe: d}, nil
+	case strings.HasPrefix(url, "s3://"):
+		bucket, prefix, _ := strings.Cut(strings.TrimPrefix(url, "s3://"), "/")
+		s, err := objs3.New(ctx, bucket, prefix)
+		if err != nil {
+			return backupsink.Sink{}, err
+		}
+		return backupsink.Sink{Kind: ports.SinkS3, Writer: s, Reader: s, Lister: s, Ranger: s, Probe: s}, nil
+	}
+	return backupsink.Sink{}, errors.New("a sink is s3://bucket/prefix or dir:/absolute/path")
 }
