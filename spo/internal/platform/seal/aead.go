@@ -30,6 +30,22 @@ func hkdfKey(in *secret.Buffer, info string) (*secret.Buffer, error) {
 	return secret.TryTake(k) // wipes k
 }
 
+// hkdfExpandKey derives a 32-byte key with HKDF-Expand (RFC 5869) from prk,
+// which must itself be a uniformly random key such as an HKDF output, and the
+// info label. The result is copied into guarded memory and the heap slice wiped.
+func hkdfExpandKey(prk *secret.Buffer, info string) (*secret.Buffer, error) {
+	var k []byte
+	err := prk.Use(func(b []byte) error {
+		var err error
+		k, err = hkdf.Expand(sha256.New, b, info, KeySize)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return secret.TryTake(k)
+}
+
 // aeadSeal encrypts pt under key with XChaCha20-Poly1305. The key and the
 // plaintext are lent. The returned ciphertext (with tag) is not secret.
 func aeadSeal(key, nonce, pt, ad []byte) ([]byte, error) {

@@ -197,3 +197,34 @@ func TestUseCasesDoNotImportOS(t *testing.T) {
 		}
 	}
 }
+
+// ADR 0012 stage 3: the object layout is pure. It imports no adapter, no file,
+// no network and no process package, and nothing of the platform or the ports:
+// it builds and checks bytes it is given.
+//
+// spec: SPO-Xlayout-INV-001
+func TestLayoutIsPure(t *testing.T) {
+	layout := module + "/internal/domain/layout"
+	seen := false
+	for _, p := range load(t) {
+		if p.ImportPath != layout {
+			continue
+		}
+		seen = true
+		for _, imp := range p.Imports {
+			switch {
+			case strings.HasPrefix(imp, module+"/internal/adapters"),
+				strings.HasPrefix(imp, module+"/internal/platform"),
+				strings.HasPrefix(imp, module+"/internal/ports"),
+				strings.HasPrefix(imp, module+"/internal/app"),
+				imp == "os", strings.HasPrefix(imp, "os/"),
+				imp == "net", strings.HasPrefix(imp, "net/"),
+				imp == "io/ioutil", imp == "io/fs", imp == "syscall", imp == "unsafe", imp == "math/rand", imp == "crypto/rand":
+				t.Errorf("%s imports %s; the layout is pure", layout, imp)
+			}
+		}
+	}
+	if !seen {
+		t.Fatal("the layout package was not found")
+	}
+}

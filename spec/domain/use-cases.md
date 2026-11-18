@@ -30,6 +30,7 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 | `RevokeParty` | [`Xparty`](../extensions/Xparty.md) | 69 |
 | `RotateParty` | [`Xparty`](../extensions/Xparty.md) | 69 |
 | `SealKey` | [`Pfiles`](../upstream/patterns/Pfiles.md) | 51 |
+| `SnapshotWorkspace` | [`Xsnapshot`](../extensions/Xsnapshot.md) | 18 |
 | `StoreArtefact` | [`Pfiles`](../upstream/patterns/Pfiles.md) | 51 |
 | `UnlockWorkspace` | [`Xunlock`](../extensions/Xunlock.md) | 81 |
 | `UnprotectSigningKey` | [`01protectKey`](../upstream/scripts/01_protectKey.md) | 29 |
@@ -231,4 +232,4 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 | [`25a_genAction`](../upstream/scripts/25a_genAction.md) | Generate a governance action file | governance | 75 | draft |
 | [`25b_regAction`](../upstream/scripts/25b_regAction.md) | Submit governance actions | governance, transaction-construction | 71 | draft |
 
-Totals: 74 specs, 2725 requirements, 95 use cases.
+Totals: 76 specs, 2784 requirements, 96 use cases.
