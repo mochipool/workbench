@@ -436,6 +436,87 @@ func RunMailboxStore(t *testing.T, mk func(t *testing.T, clock relayport.Clock) 
 		mustOutcome(t, o, err, relayport.MailboxStored)
 	})
 
+	// Retract takes back one sender's own put and nothing else: another sender's
+	// copy of the same id stays listed and readable, and the counters of the
+	// retracted copy alone go. A cancelled context does not stop it.
+	//
+	// spec: SPO-Xmailbox-OUT-031
+	t.Run("RetractIsSenderScoped", func(t *testing.T) {
+		f, _ := fresh(t)
+		body := mbBody(100, 21)
+		mid := mailbox.HashOf(body)
+		for _, s := range []party.Fingerprint{B, C} { // B's copy is the first stored one
+			o, err := mbPut(f.Store, A, s, body, loose)
+			mustOutcome(t, o, err, relayport.MailboxStored)
+		}
+		other := mbBody(50, 22)
+		o, err := mbPut(f.Store, A, B, other, loose)
+		mustOutcome(t, o, err, relayport.MailboxStored)
+		gone, cancel := context.WithCancel(ctx)
+		cancel()
+		if ok, err := f.Store.Retract(gone, A, B, mid); err != nil || !ok {
+			t.Fatalf("Retract = %v, %v", ok, err)
+		}
+		es := listAll(t, f.Store, A)
+		if len(es) != 2 || es[0].Mid != mid || es[0].Sender != C || es[1].Mid != mailbox.HashOf(other) {
+			t.Fatalf("after retracting B's copy the listing is %+v, want C's copy and the other entry", es)
+		}
+		rc, err := f.Store.Open(ctx, A, mid)
+		if err != nil {
+			t.Fatalf("the other sender's copy cannot be opened: %v", err)
+		}
+		got, _ := io.ReadAll(rc)
+		rc.Close()
+		if !bytes.Equal(got, body) {
+			t.Fatal("the other sender's copy has other bytes")
+		}
+		if u := usage(t, f.Store, A, B); u.PairEntries != 1 || u.PairBytes != 50 || u.MailboxEntries != 2 || u.MailboxBytes != 150 || u.SenderBytes != 50 {
+			t.Fatalf("usage of the retracting sender %+v: only its own copy goes", u)
+		}
+		if u := usage(t, f.Store, A, C); u.PairEntries != 1 || u.PairBytes != 100 || u.SenderBytes != 100 {
+			t.Fatalf("usage of the other sender %+v: unchanged", u)
+		}
+		// nothing to retract, or not the caller's: no change
+		for _, c := range []struct {
+			name         string
+			rcpt, sender party.Fingerprint
+			mid          mailbox.Hash
+		}{
+			{"already retracted", A, B, mid},
+			{"never put by this sender", A, party.Fingerprint{9}, mid},
+			{"another recipient", C, B, mid},
+			{"unknown id", A, B, mailbox.HashOf([]byte("none"))},
+		} {
+			if ok, err := f.Store.Retract(ctx, c.rcpt, c.sender, c.mid); err != nil || ok {
+				t.Fatalf("%s: Retract = %v, %v; want false", c.name, ok, err)
+			}
+		}
+		if len(listAll(t, f.Store, A)) != 2 {
+			t.Fatal("a Retract that found nothing changed the mailbox")
+		}
+		// no tombstone: the sender can put the same bytes again, as a new entry
+		o, err = mbPut(f.Store, A, B, body, loose)
+		mustOutcome(t, o, err, relayport.MailboxStored)
+		// the last copy: the entry and the mailbox's usage are gone
+		for _, s := range []party.Fingerprint{B, C} {
+			if ok, err := f.Store.Retract(ctx, A, s, mid); err != nil || !ok {
+				t.Fatalf("Retract of %v's copy = %v, %v", s[:1], ok, err)
+			}
+		}
+		if _, err := f.Store.Open(ctx, A, mid); !errors.Is(err, relayport.ErrMailboxNotFound) {
+			t.Fatalf("Open after the last copy was retracted = %v", err)
+		}
+		if es := listAll(t, f.Store, A); len(es) != 1 || es[0].Mid != mailbox.HashOf(other) {
+			t.Fatalf("listing %+v", es)
+		}
+		if ok, err := f.Store.Retract(ctx, A, B, mailbox.HashOf(other)); err != nil || !ok {
+			t.Fatal(ok, err)
+		}
+		if u := usage(t, f.Store, A, B); u != (mailbox.Usage{}) {
+			t.Fatalf("usage after everything was retracted: %+v", u)
+		}
+	})
+
 	t.Run("RemoveMailbox", func(t *testing.T) {
 		f, _ := fresh(t)
 		for i := range 3 {
@@ -810,6 +891,9 @@ func RunMailboxStore(t *testing.T, mk func(t *testing.T, clock relayport.Clock) 
 		}
 		if _, err := f.Store.Remove(ctx, A, mailbox.Hash{}); !errors.Is(err, relayport.ErrMailboxClosed) {
 			t.Fatalf("Remove after Close = %v", err)
+		}
+		if _, err := f.Store.Retract(ctx, A, B, mailbox.Hash{}); !errors.Is(err, relayport.ErrMailboxClosed) {
+			t.Fatalf("Retract after Close = %v", err)
 		}
 		if _, err := f.Store.Open(ctx, A, mailbox.Hash{}); !errors.Is(err, relayport.ErrMailboxClosed) {
 			t.Fatalf("Open after Close = %v", err)

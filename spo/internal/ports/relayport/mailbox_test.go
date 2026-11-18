@@ -29,9 +29,18 @@ func TestAckAndMailboxDeletionAreSeparateCapabilities(t *testing.T) {
 	if got := methodNames(revoker); !slices.Equal(got, []string{"RemoveMailbox"}) {
 		t.Fatalf("MailboxRevoker has %v, want RemoveMailbox only", got)
 	}
-	// the composition root's union has both
+	// undoing one's own put is a third: it names the sender, so that it cannot
+	// delete another sender's copy of the same id
+	retractor := reflect.TypeFor[MailboxRetractor]()
+	if got := methodNames(retractor); !slices.Equal(got, []string{"Retract"}) {
+		t.Fatalf("MailboxRetractor has %v, want Retract only", got)
+	}
+	if m, _ := retractor.MethodByName("Retract"); m.Type.NumIn() != 4 {
+		t.Fatalf("Retract takes %d arguments, want a context, the recipient, the sender and the id", m.Type.NumIn())
+	}
+	// the composition root's union has all of them
 	store := reflect.TypeFor[MailboxStore]()
-	for _, name := range []string{"Remove", "RemoveMailbox"} {
+	for _, name := range []string{"Remove", "Retract", "RemoveMailbox"} {
 		if _, ok := store.MethodByName(name); !ok {
 			t.Fatalf("MailboxStore lacks %s", name)
 		}

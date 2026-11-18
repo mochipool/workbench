@@ -679,3 +679,33 @@ func TestRingWrapsWithoutLosingBytes(t *testing.T) {
 		t.Fatal("bytes were lost or reordered when the ring wrapped")
 	}
 }
+
+// FailAccept makes the next Accepts fail, in order, and then the listener
+// accepts again; a temporary failure satisfies relayport.ErrAcceptRetry and a
+// closed listener relayport.ErrListenerClosed.
+//
+// spec: SPO-Xmailbox-OUT-017, SPO-Xmailbox-IF-007
+func TestFailAcceptInjectsAcceptErrors(t *testing.T) {
+	r := newRig(t)
+	perm := errors.New("boom")
+	r.listener.FailAccept(fakenet.ErrTemporary, perm)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, _, err := r.listener.Accept(ctx); !errors.Is(err, relayport.ErrAcceptRetry) {
+		t.Fatalf("first Accept = %v, want a retryable error", err)
+	}
+	if _, _, err := r.listener.Accept(ctx); !errors.Is(err, perm) || errors.Is(err, relayport.ErrAcceptRetry) {
+		t.Fatalf("second Accept = %v, want the permanent error", err)
+	}
+	c, s := r.connect(t) // the queue is spent: the next dial is accepted
+	if _, err := c.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readAll(t, s, 1); err != nil || string(got) != "x" {
+		t.Fatalf("read %q, %v", got, err)
+	}
+	r.listener.Close()
+	if _, _, err := r.listener.Accept(ctx); !errors.Is(err, relayport.ErrListenerClosed) {
+		t.Fatalf("Accept after Close = %v, want relayport.ErrListenerClosed", err)
+	}
+}

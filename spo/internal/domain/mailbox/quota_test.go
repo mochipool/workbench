@@ -33,7 +33,7 @@ func TestDefaultQuotaIsTheBoundsTable(t *testing.T) {
 	if mailbox.MaxEnvelopeBytes != 1<<20 || mailbox.MaxHeaderFrame != 4096 || mailbox.MaxAckHashes != 64 ||
 		mailbox.MaxItemsPerFetch != 16 || mailbox.MaxFetchWaitSeconds != 20 || mailbox.MaxAccessListParties != 1024 ||
 		mailbox.MaxConnections != 64 || mailbox.MaxConnsPerKey != 2 || mailbox.MaxNewConnsPerKeyPerMinute != 6 ||
-		mailbox.MaxRequestsPerConn != 256 || mailbox.MaxBytesPerConn != 64<<20 || mailbox.MaxPutsPerPartyPerMinute != 120 ||
+		mailbox.MaxRequestsPerConn != 256 || mailbox.MaxBytesPerConn != 64<<20 || mailbox.MaxBytesSentPerConn != 256<<20 || mailbox.MaxPutsPerPartyPerMinute != 120 ||
 		mailbox.MaxInFlight != 8 || mailbox.MaxCBORDepth != 4 || mailbox.MaxCBORArray != 64 || mailbox.MaxCBORMapPairs != 8 {
 		t.Error("a bound differs from the table of ADR 0013")
 	}

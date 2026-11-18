@@ -117,13 +117,30 @@ type MailboxReader interface {
 }
 
 // MailboxAcker deletes the entries a recipient has read. It is the capability of
-// the fetch and ack handler: it names one recipient's entry by id and cannot
-// delete a whole mailbox. Only the relay's store has it.
+// the ack handler, for acks only: it names one recipient's entry by id and
+// cannot delete a whole mailbox. A session that undoes a put uses
+// MailboxRetractor, never this. Only the relay's store has it.
 type MailboxAcker interface {
 	// Remove deletes the entry of recipient with id mid, every copy of it when
 	// several senders put the same bytes, and reports whether one was there.
 	// Nothing remembers it afterwards: the same bytes can be put again.
 	Remove(ctx context.Context, recipient party.Fingerprint, mid mailbox.Hash) (bool, error)
+}
+
+// MailboxRetractor takes back one sender's own put. It is the capability a
+// session uses to undo what it has just stored when the access decision made
+// after the put turns out the other way. It is narrower than MailboxAcker on
+// purpose: Remove deletes every sender's copy of an id, which would delete
+// another sender's legitimate copy of the same bytes.
+type MailboxRetractor interface {
+	// Retract deletes the entry of recipient that sender put with id mid, and
+	// only that one: another sender's copy of the same id stays, listed and
+	// readable. It reports whether the entry was there. The usage counters of
+	// the recipient, of the pair and of the sender follow. Nothing remembers the
+	// entry afterwards: the same bytes can be put again. It does not fail
+	// because ctx is cancelled: a caller compensates a put it can no longer
+	// answer.
+	Retract(ctx context.Context, recipient, sender party.Fingerprint, mid mailbox.Hash) (bool, error)
 }
 
 // MailboxRevoker deletes a whole mailbox. It is the capability of the access
@@ -157,6 +174,7 @@ type MailboxStore interface {
 	MailboxWriter
 	MailboxReader
 	MailboxAcker
+	MailboxRetractor
 	MailboxRevoker
 	MailboxExpirer
 	MailboxUsageReader

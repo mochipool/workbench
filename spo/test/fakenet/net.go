@@ -12,6 +12,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/mochipool/workbench/spo/internal/domain/party"
@@ -23,9 +24,12 @@ var (
 	ErrRefused        = errors.New("fakenet: connection refused")
 	ErrNotAllowed     = errors.New("fakenet: the dialer's node key is not in the listener's allow-list")
 	ErrNoListener     = errors.New("fakenet: no listener on that node")
-	ErrListenerClosed = errors.New("fakenet: listener closed")
-	ErrCut            = errors.New("fakenet: connection cut")
-	ErrClosed         = errors.New("fakenet: stream closed")
+	ErrListenerClosed = fmt.Errorf("fakenet: listener closed: %w", relayport.ErrListenerClosed)
+	// ErrTemporary is a retryable accept failure (relayport.ErrAcceptRetry): what
+	// FailAccept injects.
+	ErrTemporary = fmt.Errorf("fakenet: accept failed: %w", relayport.ErrAcceptRetry)
+	ErrCut       = errors.New("fakenet: connection cut")
+	ErrClosed    = errors.New("fakenet: stream closed")
 )
 
 const (
@@ -89,6 +93,34 @@ type Listener struct {
 	backlog chan *pending
 	done    chan struct{}
 	closed  bool
+	// failures are returned, one for each call, by the next Accepts (FailAccept).
+	failures []error
+	kick     chan struct{}
+}
+
+// FailAccept makes the next len(errs) calls of Accept return those errors, in
+// order, before anything is accepted: a listener that fails transiently
+// (ErrTemporary) or for good (any other error). The queue is bounded by what a
+// test puts in it.
+func (l *Listener) FailAccept(errs ...error) {
+	l.mu.Lock()
+	l.failures = append(l.failures, errs...)
+	l.mu.Unlock()
+	select { // wake an Accept that is already waiting
+	case l.kick <- struct{}{}:
+	default:
+	}
+}
+
+func (l *Listener) nextFailure() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.failures) == 0 {
+		return nil
+	}
+	err := l.failures[0]
+	l.failures = l.failures[1:]
+	return err
 }
 
 type pending struct {
@@ -104,7 +136,7 @@ func (n *Net) Listen(on *Node, allowed []party.NodeKey) (*Listener, error) {
 	if old, ok := n.listeners[on.Name]; ok && !old.isClosed() {
 		return nil, errors.New("fakenet: the node already has a listener")
 	}
-	l := &Listener{net: n, node: on, backlog: make(chan *pending, Backlog), done: make(chan struct{})}
+	l := &Listener{net: n, node: on, backlog: make(chan *pending, Backlog), done: make(chan struct{}), kick: make(chan struct{}, 1)}
 	l.setAllowedLocked(allowed)
 	n.listeners[on.Name] = l
 	return l, nil
@@ -135,13 +167,19 @@ func (l *Listener) Accept(ctx context.Context) (relayport.Stream, party.NodeKey,
 	if l.isClosed() {
 		return nil, party.NodeKey{}, ErrListenerClosed
 	}
-	select {
-	case p := <-l.backlog:
-		return p.conn, p.key, nil
-	case <-ctx.Done():
-		return nil, party.NodeKey{}, ctx.Err()
-	case <-l.done:
-		return nil, party.NodeKey{}, ErrListenerClosed
+	for {
+		if err := l.nextFailure(); err != nil {
+			return nil, party.NodeKey{}, err
+		}
+		select {
+		case p := <-l.backlog:
+			return p.conn, p.key, nil
+		case <-ctx.Done():
+			return nil, party.NodeKey{}, ctx.Err()
+		case <-l.done:
+			return nil, party.NodeKey{}, ErrListenerClosed
+		case <-l.kick: // FailAccept: look at the queue again
+		}
 	}
 }
 
