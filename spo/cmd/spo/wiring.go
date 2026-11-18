@@ -108,10 +108,16 @@ func newDeps(out, errw io.Writer, term cli.Terminal) cli.Deps {
 					Rewritten: r.Rewritten, Quarantined: r.Quarantined, Unassigned: r.Unassigned, ColdNoWrap: r.ColdNoWrap}, nil
 			},
 			Restore: func(backup, dest string, pass *secret.Buffer, o cli.RestoreOptions) error {
-				return mapStoreErr(sqlitestore.RestoreWithOptions(backup, dest, pass, restoreOptions(o)))
+				so, done := restoreOptionsReporting(o)
+				err := mapStoreErr(sqlitestore.RestoreWithOptions(backup, dest, pass, so))
+				done()
+				return err
 			},
 			RestoreFactors: func(backup, dest string, in cli.FactorOpen, o cli.RestoreOptions) error {
-				return mapStoreErr(sqlitestore.RestoreWithFactors(backup, dest, factorInputs(in), restoreOptions(o)))
+				so, done := restoreOptionsReporting(o)
+				err := mapStoreErr(sqlitestore.RestoreWithFactors(backup, dest, factorInputs(in), so))
+				done()
+				return err
 			},
 		},
 		// A plain-directory workspace is wired only by a build with the
@@ -318,12 +324,29 @@ func (w sealedStore) Slots(ctx context.Context) ([]cli.Slot, error) {
 
 // restoreOptions maps the command tree's restore choices to the store's.
 func restoreOptions(o cli.RestoreOptions) sqlitestore.RestoreOptions {
-	out := sqlitestore.RestoreOptions{ExpectedSHA256: o.ExpectedSHA256, Overwrite: o.Overwrite, AllowOlder: o.AllowOlder, AllowOtherWorkspace: o.AllowOtherWorkspace, AllowWeakerPolicy: o.AllowWeakerPolicy}
+	out := sqlitestore.RestoreOptions{AcceptLowerCounters: o.AcceptLowerCounters, ExpectedSHA256: o.ExpectedSHA256, Overwrite: o.Overwrite, AllowOlder: o.AllowOlder, AllowOtherWorkspace: o.AllowOtherWorkspace, AllowWeakerPolicy: o.AllowWeakerPolicy}
 	if o.CurrentRecovery != nil {
 		in := factorInputs(*o.CurrentRecovery)
 		out.CurrentRecovery = &in
 	}
 	return out
+}
+
+// restoreOptionsReporting is restoreOptions with the store's report of the
+// counter rule; done copies it into the command's report once the restore is over.
+func restoreOptionsReporting(o cli.RestoreOptions) (sqlitestore.RestoreOptions, func()) {
+	so := restoreOptions(o)
+	var rep sqlitestore.RestoreReport
+	so.Report = &rep
+	return so, func() {
+		if o.Report == nil {
+			return
+		}
+		o.Report.LowerAccepted = rep.LowerAccepted
+		for _, c := range rep.Carried {
+			o.Report.Carried = append(o.Report.Carried, cli.CarriedCounter{Pool: c.Pool, Kind: c.Kind, Live: c.Live, Backup: c.Backup})
+		}
+	}
 }
 
 // openSink builds a backup sink from its URL: s3://bucket/prefix or

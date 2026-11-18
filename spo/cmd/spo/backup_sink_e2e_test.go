@@ -5,9 +5,12 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/mochipool/workbench/spo/internal/app/backupsink"
+	"github.com/mochipool/workbench/spo/internal/platform/seal"
 	"github.com/mochipool/workbench/spo/test/fakes3"
 )
 
@@ -97,7 +100,7 @@ func TestBackupSinkDirStandardRoundTrip(t *testing.T) {
 	// a pin with a wrong field is refused and changes nothing
 	fresh2 := t.TempDir()
 	f := strings.Split(pin, ":")
-	for i, repl := range map[int]string{1: "999", 2: "00ff", 3: strings.Repeat("0", 64)} {
+	for i, repl := range map[int]string{1: "999", 2: strings.Repeat("0", 63) + "f", 3: strings.Repeat("0", 64)} {
 		g := append([]string(nil), f...)
 		g[i] = repl
 		if out, err := withPass(t, fresh2, testPass, "store", "restore", "--sink", url, "--pin", strings.Join(g, ":"), "--network", "preview"); err == nil {
@@ -120,19 +123,55 @@ func TestBackupSinkDirStandardRoundTrip(t *testing.T) {
 	}
 }
 
-// A restore from a sink refuses --allow-older before it touches the sink.
+// The counter rule through the commands: a workspace that issued operational
+// certificates after a backup is restored from the sink with --allow-older, and
+// the next certificate it issues takes the live counter, not the backup's.
 //
-// spec: SPO-Xbackup-PRE-007
-func TestRestoreFromSinkRefusesAllowOlder(t *testing.T) {
+// spec: SPO-Xbackup-PRE-007, SPO-Xbackup-PRE-011
+func TestRestoreFromSinkAllowOlderNeverLowersTheOpCertCounter(t *testing.T) {
 	dir := copyWorkspace(t)
-	sink := filepath.Join(t.TempDir(), "never-created")
-	pin := strings.Repeat("a", 56) + ":1:00:" + strings.Repeat("b", 64)
-	out, err := withPass(t, dir, testPass, "store", "restore", "--sink", "dir:"+sink, "--pin", pin, "--allow-older", "--force")
-	if err == nil || !strings.Contains(err.Error(), "counters") || !strings.Contains(err.Error(), "not supported") {
-		t.Fatalf("%v\n%s", err, out)
+	genesis := writeGenesis(t)
+	step := func(args ...string) string {
+		t.Helper()
+		out, err := withPass(t, dir, testPass, args...)
+		if err != nil {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+		return out
 	}
-	if _, serr := os.Stat(sink); serr == nil {
-		t.Error("the sink was opened before the refusal")
+	step("pool", "keys", "generate", poolName)
+	step("pool", "vrf", "generate", poolName)
+	step("pool", "kes", "generate", poolName)
+	step("pool", "opcert", "issue", poolName, "--offline", "--shelley-genesis", genesis) // counter 0
+	sink := filepath.Join(t.TempDir(), "sink")
+	url := "dir:" + sink
+	pin := pinOf(t, step("store", "backup", "--sink", url))
+	// two more certificates after the backup: the workspace's counter is 3
+	for i := 1; i <= 2; i++ {
+		step("pool", "kes", "generate", poolName)
+		out := step("pool", "opcert", "issue", poolName, "--offline", "--shelley-genesis", genesis)
+		if !strings.Contains(out, "with counter "+strconv.Itoa(i)) {
+			t.Fatalf("%s", out)
+		}
+	}
+	// without --allow-older the older backup is refused, as before
+	if _, err := withPass(t, dir, testPass, "store", "restore", "--sink", url, "--pin", pin, "--force"); err == nil {
+		t.Fatal("an older backup replaced the workspace without --allow-older")
+	}
+	out := step("store", "restore", "--sink", url, "--pin", pin, "--force", "--allow-older")
+	if !strings.Contains(out, "carried forward") || !strings.Contains(out, "node.counter") || !strings.Contains(out, "is 3 in the replaced workspace") {
+		t.Fatalf("the restore did not say what it carried:\n%s", out)
+	}
+	noLeftovers(t, dir)
+	step("store", "verify")
+	// the restored workspace issues with the live counter plus one, not the backup's,
+	// and generates the next KES number, not one already used
+	if gen := step("pool", "kes", "generate", poolName); !strings.Contains(gen, "Generated KES key 003") {
+		t.Fatalf("the KES number after the restore is not the next one:\n%s", gen)
+	}
+	out = step("pool", "opcert", "issue", poolName, "--offline", "--shelley-genesis", genesis)
+	if !strings.Contains(out, "node-003.opcert with counter 3") {
+		t.Fatalf("the certificate after the restore does not take the live counter:\n%s", out)
 	}
 }
 
@@ -460,4 +499,13 @@ func TestRestoreFromSinkChecksFlagsFirstAndKeepsAVerifiedFileForWrongPIN(t *test
 		t.Fatal("a weaker backup replaced a hardware workspace")
 	}
 	noLeftovers(t, dir)
+}
+
+// The pin's head MAC length is the store's audit MAC length.
+//
+// spec: SPO-Xbackup-OUT-002
+func TestPinMACSizeIsTheStoresMACSize(t *testing.T) {
+	if backupsink.HeadMACSize != seal.MACSize {
+		t.Fatalf("pin %d, store %d", backupsink.HeadMACSize, seal.MACSize)
+	}
 }

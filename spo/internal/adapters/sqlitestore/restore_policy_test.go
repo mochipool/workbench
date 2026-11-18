@@ -466,8 +466,13 @@ func TestRestoreRechecksUnderTheLockAndRefusesAnUnreadableDestination(t *testing
 		if b, _ := os.ReadFile(path); string(b) != "not a database at all, damaged" {
 			t.Error("the damaged file was touched")
 		}
-		if err := RestoreWithOptions(bk, path, pw(), RestoreOptions{Overwrite: true, AllowOlder: true, AllowWeakerPolicy: true, AllowOtherWorkspace: true}); err != nil {
-			t.Errorf("both flags replace it: %v", err)
+		// both flags are not enough: the counters of the file cannot be compared
+		// (restore_counters.go), which --accept-lower-counters accepts
+		if err := RestoreWithOptions(bk, path, pw(), RestoreOptions{Overwrite: true, AllowOlder: true, AllowWeakerPolicy: true, AllowOtherWorkspace: true}); !errors.Is(err, ErrCountersUnknown) {
+			t.Errorf("both flags replaced a destination whose counters are unknown: %v", err)
+		}
+		if err := RestoreWithOptions(bk, path, pw(), RestoreOptions{Overwrite: true, AllowOlder: true, AllowWeakerPolicy: true, AllowOtherWorkspace: true, AcceptLowerCounters: true}); err != nil {
+			t.Errorf("all three flags replace it: %v", err)
 		}
 	})
 }

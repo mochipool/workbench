@@ -50,8 +50,14 @@ func TestRestoreCrashBetweenSwapAndHeadFile(t *testing.T) {
 	if err := RestoreWithOptions(backup, path, pass(), RestoreOptions{Overwrite: true}); !errors.Is(err, ErrOlderBackup) {
 		t.Fatalf("a re-run without AllowOlder: %v", err)
 	}
-	// the remedy: the same restore with AllowOlder completes
-	if err := RestoreWithOptions(backup, path, pass(), RestoreOptions{Overwrite: true, AllowOlder: true}); err != nil {
+	// without the sidecar a real crash leaves, the file is older than its head
+	// file and the counters of the recorded state are not in it: the counter rule
+	// refuses unless --accept-lower-counters says to go on (with the sidecar, a
+	// re-run needs no flag: TestRerunAfterACrashedRestoreNeedsNoFlag)
+	if err := RestoreWithOptions(backup, path, pass(), RestoreOptions{Overwrite: true, AllowOlder: true}); !errors.Is(err, ErrCountersUnknown) {
+		t.Fatalf("the re-run without the flag: %v", err)
+	}
+	if err := RestoreWithOptions(backup, path, pass(), RestoreOptions{Overwrite: true, AllowOlder: true, AcceptLowerCounters: true}); err != nil {
 		t.Fatalf("the re-run: %v", err)
 	}
 	st, err := Open(path, pass())
@@ -218,4 +224,50 @@ func TestRestoreChecksTheExpectedHashOnItsOwnCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = path
+}
+
+// G4: after a crash past the swap, a read-only verify says that a matching
+// restore sidecar is present and that opening the workspace completes the
+// restore. It adopts nothing: the head file and the sidecar are as they were.
+//
+// spec: SPO-Xbackup-PRE-010
+func TestVerifyAfterACrashedRestoreNamesTheSidecar(t *testing.T) {
+	s, path, _ := scratch(t)
+	backup := filepath.Join(t.TempDir(), "old.bak")
+	if err := s.Backup(ctx, backup); err != nil {
+		t.Fatal(err)
+	}
+	putSecret(t, s, skey0, "written-after-the-backup")
+	s.Close()
+	crashingRestore(t, backup, path, RestoreOptions{Overwrite: true, AllowOlder: true})
+	headBefore, _ := os.ReadFile(headPath(path))
+	sideBefore, err := os.ReadFile(sidecarPath(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := VerifyFileDetailed(path, pw())
+	if err != nil {
+		t.Fatalf("verify after the crash: %v", err)
+	}
+	said := false
+	for _, n := range res.Notices {
+		said = said || (strings.Contains(n, "head.next") && strings.Contains(n, "opening the workspace completes the restore"))
+	}
+	if !said {
+		t.Fatalf("verify did not say so: %v", res.Notices)
+	}
+	headAfter, _ := os.ReadFile(headPath(path))
+	sideAfter, err := os.ReadFile(sidecarPath(path))
+	if err != nil || string(headAfter) != string(headBefore) || string(sideAfter) != string(sideBefore) {
+		t.Fatal("verify changed the head file or the sidecar")
+	}
+	// a plain open then completes it
+	st, err := Open(path, pw())
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	if _, err := os.Stat(sidecarPath(path)); err == nil {
+		t.Fatal("the sidecar is still there after the open")
+	}
 }

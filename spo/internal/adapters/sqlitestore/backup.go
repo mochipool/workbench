@@ -139,6 +139,13 @@ type RestoreOptions struct {
 	// checked on the restore's own private copy before anything else is done
 	// with it, so the bytes installed are the bytes that were hashed.
 	ExpectedSHA256 []byte
+	// AcceptLowerCounters lets a restore of an older backup go on although the
+	// counters of the workspace it replaces cannot be read (the file is damaged, or
+	// its credentials are lost). It never applies when that workspace can be
+	// opened: its counters are carried whatever this says.
+	AcceptLowerCounters bool
+	// Report, when set, is filled in with what the counter rule did.
+	Report *RestoreReport
 	// AllowOlder lets it replace a workspace with a backup that is older than
 	// the workspace (the workspace's last recorded state is not in the
 	// backup's chain). Without it such a restore fails with ErrOlderBackup.
@@ -295,6 +302,7 @@ func restore(backupPath, destPath string, cred credential, o RestoreOptions) (er
 	if err != nil {
 		return err
 	}
+	var plan *counterPlan
 	if exists {
 		// A weaker backup never replaces a stronger workspace unless the current
 		// recovery credential is presented (before the lock: the presentation opens
@@ -302,6 +310,26 @@ func restore(backupPath, destPath string, cred credential, o RestoreOptions) (er
 		var checked string
 		if checked, err = checkRestorePolicy(ctx, dest, tmpPath, o); err != nil {
 			return err
+		}
+		// The counter rule (restore_counters.go): reads the destination read-only,
+		// carries the larger counters into the private copy, or refuses. Nothing is
+		// written to the destination here.
+		if plan, err = prepareCounters(ctx, dest, tmpPath, cred, o); err != nil {
+			return err
+		}
+		if plan != nil && plan.carried {
+			// the copy has a new head: the head file and the sidecar record it
+			if ws, head, err = inspectFile(ctx, tmpPath); err != nil {
+				return err
+			}
+			if _, err = verifyFile(tmpPath, cred, false); err != nil {
+				return fmt.Errorf("sqlitestore: the restored copy does not verify after the counters were carried: %w", err)
+			}
+		}
+		if afterCarry != nil {
+			if err = afterCarry(); err != nil {
+				return err
+			}
 		}
 		if afterPolicyCheck != nil {
 			afterPolicyCheck()
@@ -329,6 +357,13 @@ func restore(backupPath, destPath string, cred credential, o RestoreOptions) (er
 		}
 		if err = checkReplace(ctx, dest, tmpPath, ws, o); err != nil {
 			return err
+		}
+		// The counters were read from the destination as it was: it must not have
+		// moved on since.
+		if plan != nil && plan.destHead != nil {
+			if _, nowHead, ierr := inspectFile(ctx, dest); ierr != nil || !nowHead.equal(*plan.destHead) {
+				return fmt.Errorf("%w: the workspace changed after its counters were read; nothing was replaced", ErrConflictRestore)
+			}
 		}
 	}
 	os.Remove(tmpPath + "-shm")
@@ -371,6 +406,9 @@ func restore(backupPath, destPath string, cred credential, o RestoreOptions) (er
 		return err
 	}
 	os.Remove(sidecarPath(dest))
+	if o.Report != nil && plan != nil {
+		*o.Report = plan.report
+	}
 	return syncDir(filepath.Dir(dest))
 }
 

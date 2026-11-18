@@ -80,7 +80,11 @@ var (
 	ErrOtherWorkspace = errors.New("sqlitestore: the backup is of a different workspace than the destination")
 	// ErrOlderBackup: a restore would replace a workspace with a backup that
 	// is older than, or has diverged from, the destination.
-	ErrOlderBackup = errors.New("sqlitestore: the backup is older than the destination or has diverged from it")
+	// ErrCountersUnknown: a restore of an older backup could not compare the
+	// counters of the workspace it replaces, so it might lower an operational
+	// certificate counter or a KES counter. --accept-lower-counters proceeds.
+	ErrCountersUnknown = errors.New("sqlitestore: the counters of the workspace to be replaced could not be read")
+	ErrOlderBackup     = errors.New("sqlitestore: the backup is older than the destination or has diverged from it")
 )
 
 // RefError is an error about one artefact. Error prints the kind and the

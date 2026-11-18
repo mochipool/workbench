@@ -44,6 +44,12 @@ const (
 	FaultMidDownload
 	// FaultTrickleDownload sends a GetObject body one byte every TrickleEvery.
 	FaultTrickleDownload
+	// FaultLieContentLength sends the headers of a GetObject with Content-Length
+	// LieLength and then trickles the real body one byte every TrickleEvery.
+	FaultLieContentLength
+	// FaultChunkedTrickle sends a GetObject body chunked, with no Content-Length, one
+	// byte every TrickleEvery, for ever.
+	FaultChunkedTrickle
 	// FaultStallMidDownload sends half of the body and then sends nothing until the server is closed.
 	FaultStallMidDownload
 )
@@ -78,9 +84,11 @@ type Server struct {
 	faults   map[Fault]int
 	// TrickleEvery is the pause of FaultTrickleDownload.
 	TrickleEvery time.Duration
-	denyStatus   int
-	denyCode     string
-	release      chan struct{}
+	// LieLength is the Content-Length of FaultLieContentLength.
+	LieLength  int64
+	denyStatus int
+	denyCode   string
+	release    chan struct{}
 }
 
 // New starts a fake with one bucket. Close it with Close.
@@ -188,6 +196,44 @@ func (s *Server) CABundle(dir string) (string, error) {
 	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: s.Certificate().Raw})
 	p := filepath.Join(dir, "fake-s3-ca.pem")
 	return p, os.WriteFile(p, pemBytes, 0o600)
+}
+
+// trickleRaw sends a raw response with the given length header and the body one
+// byte at a time (chunked, repeating the body without end, when chunked).
+func (s *Server) trickleRaw(w http.ResponseWriter, lengthHeader string, body []byte, chunked bool) {
+	h, ok := w.(http.Hijacker)
+	if !ok {
+		return
+	}
+	c, buf, err := h.Hijack()
+	if err != nil {
+		return
+	}
+	defer c.Close()
+	fmt.Fprintf(buf, "HTTP/1.1 200 OK\r\n%sConnection: close\r\n\r\n", lengthHeader)
+	buf.Flush()
+	every := s.TrickleEvery
+	s.mu.Unlock()
+	defer s.mu.Lock()
+	for i := 0; ; i++ {
+		if !chunked && i >= len(body) {
+			return
+		}
+		select {
+		case <-s.release:
+			return
+		case <-time.After(every):
+		}
+		b := body[i%len(body)]
+		if chunked {
+			fmt.Fprintf(buf, "1\r\n%c\r\n", b)
+		} else {
+			buf.WriteByte(b)
+		}
+		if buf.Flush() != nil {
+			return
+		}
+	}
 }
 
 // Puts is the number of PutObject requests received (accepted or refused).
@@ -361,6 +407,14 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		if r.Method == http.MethodGet && s.take(FaultMidDownload) {
 			s.partialResponse(w, "200 OK", "ETag: \"fake\"\r\n", b, len(b)/2, false)
+			return
+		}
+		if r.Method == http.MethodGet && s.take(FaultLieContentLength) {
+			s.trickleRaw(w, fmt.Sprintf("Content-Length: %d\r\n", s.LieLength), b, false)
+			return
+		}
+		if r.Method == http.MethodGet && s.take(FaultChunkedTrickle) {
+			s.trickleRaw(w, "Transfer-Encoding: chunked\r\n", b, true)
 			return
 		}
 		if r.Method == http.MethodGet && s.take(FaultTrickleDownload) {
