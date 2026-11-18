@@ -227,9 +227,12 @@ type Store struct {
 	// not zero.
 	writing atomic.Int32
 	ro      bool
-	legacy  bool          // a format 1 store opened for the migration: nothing else works on it
-	legacy2 bool          // a format 2 store opened for Migrate3: nothing else works on it
-	policy  unlock.Policy // the policy of the table this handle unlocked
+	// layoutRO marks the read-only handle of a sealed layout (LayoutUnlock.OpenReadOnly):
+	// every write is ErrLayoutReadOnly and a cold-role record is ErrLayoutColdRecord.
+	layoutRO bool
+	legacy   bool          // a format 1 store opened for the migration: nothing else works on it
+	legacy2  bool          // a format 2 store opened for Migrate3: nothing else works on it
+	policy   unlock.Policy // the policy of the table this handle unlocked
 	// cold is the source of the cold sub-key factor (SetColdSource); recSecret is
 	// the recovery key of a handle unlocked with it. Both are guarded by mu.
 	cold      *ColdSource
@@ -644,6 +647,11 @@ type credential struct {
 
 // credFactors is the credential kind of OpenWithFactors.
 const credFactors = "factors"
+
+// credMaster is the credential kind of a read-only open of a sealed layout: buf is
+// the master key one unlock of the layout's slot table already derived and checked
+// against its key epoch (LayoutUnlock). It never comes from outside this package.
+const credMaster = "master"
 
 // OpenOptions are the choices of OpenWithOptions.
 type OpenOptions struct {
@@ -1063,6 +1071,21 @@ func unlockTable(ctx context.Context, t *table, cred credential, accept func(*se
 	if cred.kind == credFactors {
 		return unlockFactors(ctx, t, cred.factors, accept)
 	}
+	if cred.kind == credMaster {
+		mk, err := copySecret(cred.buf)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		ok, err := accept(mk)
+		if err != nil || !ok {
+			mk.Destroy()
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			return nil, nil, nil, ErrKeyEpoch
+		}
+		return mk, nil, nil, nil
+	}
 	ws := t.ws
 	work := uint64(0)
 	unwrapped := false
@@ -1266,6 +1289,9 @@ func (s *Store) writable() error {
 
 // writableMigrating is writable for Migrate, the one writer of a legacy handle.
 func (s *Store) writableMigrating() error {
+	if s.layoutRO {
+		return ErrLayoutReadOnly
+	}
 	if s.ro {
 		return errors.New("sqlitestore: store opened read-only")
 	}

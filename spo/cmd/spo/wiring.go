@@ -73,6 +73,16 @@ func newDeps(out, errw io.Writer, term cli.Terminal) cli.Deps {
 				}
 				return layoutCred{c}, layoutCred{c}
 			},
+			Session: func(pass *secret.Buffer, factors *cli.FactorOpen) cli.LayoutSession {
+				var c sqlitestore.SnapshotCredential
+				if factors != nil {
+					in := factorInputs(*factors)
+					c = sqlitestore.SnapshotCredential{Factors: &in}
+				} else {
+					c = sqlitestore.SnapshotCredential{Passphrase: pass}
+				}
+				return &layoutSession{c: c}
+			},
 		},
 		Sealed: cli.SealedOps{
 			Init: func(path string, pass *secret.Buffer) (*secret.Buffer, error) {
@@ -205,6 +215,10 @@ func mapStoreErr(err error) error {
 		return cli.ErrOlderBackup
 	case errors.Is(err, sqlitestore.ErrCountersNeedCredential):
 		return &credentialRefusal{err}
+	case errors.Is(err, sqlitestore.ErrLayoutReadOnly):
+		return cli.ErrLayoutReadOnly
+	case errors.Is(err, sqlitestore.ErrLayoutColdRecord):
+		return cli.ErrLayoutColdRecord
 	case errors.Is(err, sqlitestore.ErrOutcomeUnknown):
 		return fmt.Errorf("%w (%v)", cli.ErrOutcomeUnknown, err)
 	}
@@ -319,8 +333,12 @@ func (w sealedStore) Update(ctx context.Context, fn func(ports.Writer) error) er
 	return mapStoreErr(w.s.Update(ctx, fn))
 }
 func (w sealedStore) Open(ctx context.Context, ref ports.Ref) (*secret.Buffer, error) {
-	return w.s.Open(ctx, ref)
+	b, err := w.s.Open(ctx, ref)
+	return b, mapStoreErr(err)
 }
+
+// VerifyPayloads decrypts every record (store verify --deep).
+func (w sealedStore) VerifyPayloads(ctx context.Context) error { return w.s.VerifyPayloads(ctx) }
 func (w sealedStore) VerifyDetailed(ctx context.Context) (cli.VerifyReport, error) {
 	r, err := w.s.VerifyDetailed(ctx)
 	return cli.VerifyReport{Head: toHead(r.Head), Notices: r.Notices}, err
@@ -458,3 +476,43 @@ func (l layoutCred) WriteSnapshotFile(ctx context.Context, path string, snap por
 	}
 	return mapStoreErr(err)
 }
+
+// layoutSession is one unlock of a layout kept for the read-only open: the layout
+// keys, the scratch file and the read-only handle share the master key the unlock
+// derived.
+type layoutSession struct {
+	c sqlitestore.SnapshotCredential
+	u *sqlitestore.LayoutUnlock
+}
+
+func (l *layoutSession) OpenLayoutKeys(ctx context.Context, m ports.SnapshotMeta, s []ports.SnapshotSlot) (ports.ObjectOpener, error) {
+	o, u, err := sqlitestore.UnlockLayout(ctx, m, s, l.c)
+	if err != nil {
+		if errors.Is(err, sqlitestore.ErrNoFactorSlot) {
+			return nil, cli.ErrWrongPassphrase
+		}
+		return nil, mapStoreErr(err)
+	}
+	l.u = u
+	return o, nil
+}
+
+func (l *layoutSession) WriteSnapshotFile(ctx context.Context, path string, snap ports.Snapshot) error {
+	if l.u == nil {
+		return errors.New("the layout was not unlocked")
+	}
+	return mapStoreErr(l.u.WriteFile(ctx, path, snap))
+}
+
+func (l *layoutSession) OpenReadOnly(path string) (cli.SealedStore, error) {
+	if l.u == nil {
+		return nil, errors.New("the layout was not unlocked")
+	}
+	s, err := l.u.OpenReadOnly(path)
+	if err != nil {
+		return nil, mapStoreErr(err)
+	}
+	return sealedStore{s}, nil
+}
+
+func (l *layoutSession) Close() { l.u.Close() }

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -174,7 +175,19 @@ func template(t *testing.T) (dir, recoveryKey string) {
 	return tmplDir, tmplKey
 }
 
+// testMemoryLimit is the soft limit of the Go heap of this test binary, and of the
+// copy of it that the PTY tests run as spo. Every passphrase unlock allocates the
+// 256 MiB of Argon2id memory the real workspace uses, so without a limit the heap
+// of a package that unlocks hundreds of times sits at 600 to 900 MiB (garbage the
+// runtime has not yet returned) and, with a child that does the same, the package
+// peaked at about 1.7 GiB. The limit only makes the runtime return memory sooner: no
+// parameter, check or code path of the program under test changes.
+const testMemoryLimit = 512 << 20
+
 func TestMain(m *testing.M) {
+	if os.Getenv("GOMEMLIMIT") == "" {
+		debug.SetMemoryLimit(testMemoryLimit)
+	}
 	code := m.Run()
 	if tmplDir != "" {
 		os.RemoveAll(tmplDir)

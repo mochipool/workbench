@@ -154,7 +154,7 @@ func TestStoreVerifyLayoutRefusesBeforeAnyPrompt(t *testing.T) {
 	}{
 		{[]string{"--at", "1"}, "go with --layout"},
 		{[]string{"--locked"}, "go with --layout"},
-		{[]string{"--layout", root, "--pin", pin, "--deep"}, "--layout goes with"},
+		{[]string{"--layout", root, "--pin", pin, "--locked", "--deep"}, "give one of them"},
 		{[]string{"--layout", root, "--pin", pin, "--backup", "x"}, "--layout goes with"},
 		{[]string{"--layout", root, "--pin", pin, "--locked", "--unlock", "recovery-composite"}, "recovery-composite"},
 		{[]string{"--layout", root, "--pin", pin, "--unlock", "fido2"}, "opened with its passphrase"},

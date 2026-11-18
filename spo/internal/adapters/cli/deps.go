@@ -234,6 +234,12 @@ var (
 	ErrCountersNeedCredential = errors.New("the counters of the workspace to be replaced cannot be compared")
 	// ErrOlderBackup: the backup is older than, or diverged from, the workspace.
 	ErrOlderBackup = errors.New("backup older than the workspace")
+	// ErrLayoutReadOnly: the directory is a sealed layout, opened read-only; the
+	// command writes (or needs what a layout does not hold). The SQLite file is the
+	// only writable store.
+	ErrLayoutReadOnly = errors.New("this is a sealed layout opened read-only; convert it into a workspace to change it: spo store convert --from-layout DIR --pin PIN")
+	// ErrLayoutColdRecord: a cold-role record is never opened from a layout.
+	ErrLayoutColdRecord = errors.New("this is a sealed layout opened read-only, and a cold-role record is never opened from it (a read-only open cannot rotate the per-use salt of its cold factor); convert the layout into a workspace to use the key: spo store convert --from-layout DIR --pin PIN")
 )
 
 // OpenOptions are the choices of opening a sealed workspace.
@@ -353,6 +359,30 @@ type LayoutReadOps struct {
 	// unlock of a layout's slot table and to the writing of the scratch store
 	// file. It asks for nothing by itself.
 	Credential func(pass *secret.Buffer, factors *FactorOpen) (ports.LayoutKeyOpener, ports.SnapshotFileWriter)
+	// Session is Credential for a read-only open of the layout (`spo -C DIR`): the
+	// one unlock of the slot table also serves the scratch file and the read-only
+	// open, so the credential is presented once. Nil where it is not available.
+	Session func(pass *secret.Buffer, factors *FactorOpen) LayoutSession
+}
+
+// LayoutSession is one unlock of a layout's slot table that is kept for the
+// scratch store file and the read-only handle made from it. OpenLayoutKeys must
+// run first and succeed; Close destroys what it kept and is safe to call twice.
+type LayoutSession interface {
+	ports.LayoutKeyOpener
+	ports.SnapshotFileWriter
+	// OpenReadOnly opens the scratch file as the read-only handle of the layout:
+	// every write on it is ErrLayoutReadOnly, a cold-role record is
+	// ErrLayoutColdRecord, and it holds no cold factor source.
+	OpenReadOnly(path string) (SealedStore, error)
+	Close()
+}
+
+// PayloadVerifier is the optional interface of a SealedStore that decrypts every
+// record it holds, a cold-role record only as far as the workspace key goes
+// (`store verify --deep`).
+type PayloadVerifier interface {
+	VerifyPayloads(ctx context.Context) error
 }
 
 // LayoutDir is an opened layout directory: its objects and this machine's pin of

@@ -24,6 +24,9 @@ func NewRoot(d Deps) *cobra.Command {
 		// A descriptor that is to receive a secret must be a pipe or a socket,
 		// and is refused before the command does anything (secretout.go).
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			if err := a.layoutRefuse(cmd); err != nil {
+				return err
+			}
 			if err := a.checkUnlockScope(cmd); err != nil {
 				return err
 			}
@@ -40,6 +43,8 @@ func NewRoot(d Deps) *cobra.Command {
 		root.PersistentFlags().BoolVar(&a.upstream, "upstream-layout", false,
 			"TEST BUILD ONLY: use a plain directory in the upstream scripts' file layout instead of a sealed workspace; signing keys are stored unsealed")
 	}
+	root.PersistentFlags().StringVar(&a.layPin, "pin", "",
+		"with -C naming a sealed layout (a directory with heads/ and no workspace file): the pin of the layout, which is opened read-only and is never trusted by its directory alone: <workspace id>:layout:<sequence>:<head hash> (what \"store convert --to-layout\" printed) or <workspace id>:ck:<checkpoint key hash>[:<minimum sequence>]. Some commands have a --pin of their own")
 	root.PersistentFlags().IntVar(&a.passFD, "passphrase-fd", -1,
 		"read the workspace passphrase from this inherited file descriptor (trailing newline stripped) instead of prompting; there is no passphrase flag or variable")
 
