@@ -924,7 +924,7 @@ func openFile(path string, cred credential, readOnly bool, o OpenOptions) (st *S
 	} else if !ok {
 		return nil, fmt.Errorf("%w: the file changed while the credential was being checked; open it again", ErrStaleHandle)
 	}
-	head, notices, rewrite, err := checkHead(ctx, db, abs, m.ws, readOnly, o, notices)
+	head, notices, rewrite, adopted, err := checkHead(ctx, db, abs, m.ws, readOnly, o, notices)
 	if err != nil {
 		return nil, err
 	}
@@ -993,12 +993,15 @@ func openFile(path string, cred credential, readOnly bool, o OpenOptions) (st *S
 	}
 	if rewrite {
 		write := advanceHeadFile
-		if o.AcceptRollback {
+		if o.AcceptRollback || adopted {
 			write = writeHeadFile // the operator said the file's own state is the truth
 		}
 		if err = write(abs, m.ws, head); err != nil {
 			return nil, err
 		}
+	}
+	if _, serr := os.Lstat(sidecarPath(abs)); serr == nil {
+		os.Remove(sidecarPath(abs)) // announced by a restore, now settled by a verified open
 	}
 	st.retryCleanup(ctx)
 	return st, nil
@@ -1116,11 +1119,12 @@ func unlockTable(ctx context.Context, t *table, cred credential, accept func(*se
 }
 
 // checkHead compares the file with its head file. It returns the file's own
-// head, whether the head file must be (re)written, and the notices so far.
-func checkHead(ctx context.Context, db dbq, path string, ws []byte, readOnly bool, o OpenOptions, notices []string) (Head, []string, bool, error) {
+// head, whether the head file must be (re)written, whether that write adopts a
+// restore's announcement (see adoptSidecar), and the notices so far.
+func checkHead(ctx context.Context, db dbq, path string, ws []byte, readOnly bool, o OpenOptions, notices []string) (Head, []string, bool, bool, error) {
 	own, err := chainHead(ctx, db)
 	if err != nil {
-		return Head{}, notices, false, err
+		return Head{}, notices, false, false, err
 	}
 	hws, hh, found, herr := readHeadFile(path)
 	switch {
@@ -1128,23 +1132,63 @@ func checkHead(ctx context.Context, db dbq, path string, ws []byte, readOnly boo
 		if !readOnly {
 			notices = append(notices, "the head file was missing and has been recreated; a rollback of this workspace before now cannot be detected")
 		}
-		return own, notices, true, nil
+		return own, notices, true, false, nil
 	case herr != nil || !bytes.Equal(hws, ws):
 		if !o.AcceptRollback {
-			return Head{}, notices, false, ErrHeadMismatch
+			if n, ok := adoptSidecar(path, ws, own); ok {
+				return own, append(notices, n), true, true, nil
+			} else if n != "" {
+				return Head{}, notices, false, false, fmt.Errorf("%w (%s)", ErrHeadMismatch, n)
+			}
+			return Head{}, notices, false, false, ErrHeadMismatch
 		}
-		return own, notices, true, nil
+		return own, notices, true, false, nil
 	}
 	ok, err := chainContains(ctx, db, hh)
 	if err != nil {
-		return Head{}, notices, false, err
+		return Head{}, notices, false, false, err
 	}
 	if !ok && !o.AcceptRollback {
-		return Head{}, notices, false, fmt.Errorf("%w (head file: sequence %d, file ends at sequence %d)", ErrRolledBack, hh.Seq, own.Seq)
+		if n, adopt := adoptSidecar(path, ws, own); adopt {
+			return own, append(notices, n), true, true, nil
+		} else if n != "" {
+			return Head{}, notices, false, false, fmt.Errorf("%w (head file: sequence %d, file ends at sequence %d; %s)", ErrRolledBack, hh.Seq, own.Seq, n)
+		}
+		return Head{}, notices, false, false, fmt.Errorf("%w (head file: sequence %d, file ends at sequence %d)", ErrRolledBack, hh.Seq, own.Seq)
 	}
 	// Equal, or the file is ahead (a crash between commit and head write), or
 	// the rollback was accepted: the file's own head is the truth now.
-	return own, notices, !hh.equal(own), nil
+	return own, notices, !hh.equal(own), false, nil
+}
+
+// adoptSidecar decides whether <path>.head.next, which a restore wrote before it
+// swapped the file in, settles a head file that disagrees with the file. It is
+// trusted only when it parses, names this workspace and names exactly the head
+// the file itself verifies to (own, read from the file's audit chain). The
+// message says what was done or why the sidecar was ignored; empty when there is
+// no sidecar.
+//
+// What an attacker who can write the workspace directory gains from this: the
+// ability to make an open accept the file's own state as the recorded head. They
+// already have that: the head file is a plain file with no key, and replacing
+// it does the same. The sidecar never names a head other than the file's own,
+// so it cannot make the open accept anything that the chain of the file does
+// not already show; a sidecar that does not match is ignored and reported.
+func adoptSidecar(path string, ws []byte, own Head) (msg string, adopt bool) {
+	sp := sidecarPath(path)
+	sws, sh, found, err := readHeadAt(sp)
+	if !found {
+		return "", false
+	}
+	switch {
+	case err != nil:
+		return "the file " + filepath.Base(sp) + " cannot be read as a head record and was ignored", false
+	case !bytes.Equal(sws, ws):
+		return "the file " + filepath.Base(sp) + " names another workspace and was ignored", false
+	case !sh.equal(own):
+		return "the file " + filepath.Base(sp) + " does not name this file's own head and was ignored", false
+	}
+	return "an interrupted restore left " + filepath.Base(sp) + "; it names this file's own head, so it was adopted as the head file", true
 }
 
 // FactorInfo describes one factor of a slot: its kind (unlock's names), its id,

@@ -136,7 +136,16 @@ func advanceHeadFile(path string, ws []byte, h Head) error {
 
 // replaceHeadFile writes the head file atomically. The caller holds the lock.
 func replaceHeadFile(path string, ws []byte, h Head) error {
-	hp := headPath(path)
+	return replaceHeadAt(headPath(path), ws, h)
+}
+
+// sidecarPath is where a restore announces the head file it is about to write
+// (see restore): <path>.head.next.
+func sidecarPath(path string) string { return headPath(path) + ".next" }
+
+// replaceHeadAt writes a head record atomically at hp: a temporary file in the
+// same directory, fsynced, renamed, and the directory fsynced.
+func replaceHeadAt(hp string, ws []byte, h Head) error {
 	tmp, err := os.CreateTemp(filepath.Dir(hp), ".head-*") // mode 0600
 	if err != nil {
 		return err
@@ -172,7 +181,11 @@ func replaceHeadFile(path string, ws []byte, h Head) error {
 // and the checks are made on the opened descriptor (there is no window between
 // checking a path and opening it).
 func readHeadFile(path string) (ws []byte, h Head, found bool, err error) {
-	hp := headPath(path)
+	return readHeadAt(headPath(path))
+}
+
+// readHeadAt is readHeadFile for the head record at hp.
+func readHeadAt(hp string) (ws []byte, h Head, found bool, err error) {
 	f, err := os.OpenFile(hp, os.O_RDONLY|openHeadFlags, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, h, false, nil

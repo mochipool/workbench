@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mochipool/workbench/spo/internal/app/backupsink"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -27,6 +28,13 @@ type Deps struct {
 	Terminal Terminal
 
 	Config ConfigOps
+	// OpenSink builds a backup sink from its URL (s3://bucket/prefix or
+	// dir:/absolute/path). It makes no network call. Nil where the binary has no sink.
+	OpenSink func(ctx context.Context, url string) (backupsink.Sink, error)
+	// OpenScratch gives private scratch space in a directory (the workspace
+	// directory): temporary and partial files of a sink transfer. Nil where the
+	// binary has no sink.
+	OpenScratch func(dir string) (ports.Scratch, error)
 	// Factors is the FIDO2 factor source (ADR 0011). Nil where the binary cannot
 	// reach one: a command that needs a factor then fails before any prompt.
 	Factors ports.FactorSource
@@ -219,6 +227,9 @@ type OpenOptions struct {
 
 // RestoreOptions are the choices of a restore.
 type RestoreOptions struct {
+	// ExpectedSHA256, when set, is checked on the restore's own private copy of
+	// the backup before anything else is done with it.
+	ExpectedSHA256      []byte
 	Overwrite           bool
 	AllowOlder          bool
 	AllowOtherWorkspace bool
@@ -262,6 +273,10 @@ type SealedOps struct {
 	// Describe reads the policy and the slots of the file without any key. Nil
 	// where it is not available (the command then asks for a passphrase).
 	Describe func(path string) (WorkspaceInfo, error)
+	// InspectHead reads the workspace id and the chain head of a backup or
+	// workspace file without any key (what a backup says about itself). Nil
+	// where it is not available.
+	InspectHead func(path string) (id []byte, h Head, err error)
 	// OpenFactors unlocks through a fido2-hmac or composite slot.
 	OpenFactors func(path string, in FactorOpen, o OpenOptions) (SealedStore, error)
 	// VerifyFileFactors verifies a workspace or backup file read-only, unlocking

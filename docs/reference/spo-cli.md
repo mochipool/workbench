@@ -82,14 +82,25 @@ Record the head somewhere other than the workspace directory. Replacing both `wo
 
 ```
 spo store backup DEST
+spo store backup --sink URL
 ```
 
 Writes a consistent copy of `workspace.spo` to `DEST` (must not exist, mode `0600`), then verifies the copy and prints its head. The copy opens with the passphrase and recovery key of the moment it was made; a later passphrase change or new recovery key does not reach it. It does not include `spo.toml`.
 
+With `--sink URL` (`s3://bucket/prefix` or `dir:/absolute/path`) the verified copy goes to a sink instead of `DEST`; exactly one of the two is given. The object is `backups/<workspace id>/<head sequence, 20 digits>-<sha256>.spo`. An S3 sink is refused for a `standard` workspace and for a bucket that has no versioning, no Object Lock in COMPLIANCE mode with a default retention, or credentials that are not short-lived; (all of this is checked before the workspace is unlocked, so no passphrase, PIN or touch is asked) and credentials must expire within 12 hours and the endpoint must be https; a directory sink is allowed for every policy and prints the `standard` warning. The copy is verified, sent with its SHA-256, read back and compared; then the command prints the object, the head and a `Pin:` line (`<workspace id>:<head sequence>:<head hash>:<file sha256>`) with the advice to keep the pin somewhere other than the sink. An interrupted run says what state is left and can be run again; see [Back up to a sink](../how-to/back-up-to-a-sink.md). [Xbackup](../../spec/extensions/Xbackup.md). Nothing has been run against a real bucket.
+
+### `store backups`
+
+```
+spo store backups --sink URL
+```
+
+Lists the backups of this workspace id in the sink, newest first (sequence, size, SHA-256, object name). A name under the workspace's prefix that does not parse is listed as `unrecognised (ignored)`. It asks for no passphrase and downloads nothing. Names that a sink supplied are printed quoted, with control and non-printable characters escaped.
+
 ### `store restore`
 
 ```
-spo store restore BACKUP [--force] [--allow-older] [--allow-other-workspace] [--allow-weaker-policy
+spo store restore (BACKUP | --sink URL --pin PIN) [--force] [--allow-older] [--allow-other-workspace] [--allow-weaker-policy
                          [--recovery-key-in-fd N] [--current-recovery-device PATH] [--recovery-pin-fd N]] [--network NAME]
 ```
 
@@ -97,8 +108,9 @@ Verifies `BACKUP` with its passphrase, or through its FIDO2 factors when it is a
 
 | Option | Meaning |
 | --- | --- |
+| `--sink URL`, `--pin PIN` | Download the backup the pin names from a sink instead of reading `BACKUP`. The file is used only when its SHA-256, workspace id and head equal the pin's; then the restore below runs on it unchanged. A restore without a pin is refused. An interrupted download is resumed by running the command again with the same pin (partial file `.spo-fetch-<sha256>.partial`, mode 0600, in the workspace directory). The flag combinations that can be checked without the file (an existing workspace needs `--force`, `--allow-weaker-policy` and `--allow-other-workspace` need `--force`) are checked before anything is downloaded; a refusal after the download that is not about the file (a wrong passphrase or PIN) keeps the verified file for the re-run. `--allow-older` is refused with `--sink`, before the sink is opened: the built restore does not keep the larger operational-certificate and KES counters, so an older backup would lower them. |
 | `--force` | Replace an existing workspace. |
-| `--allow-older` | Accept a backup that is older than the workspace or has diverged from it. Without it such a restore is refused, because it discards every change made since. |
+| `--allow-older` | Accept a backup that is older than the workspace or has diverged from it. Without it such a restore is refused, because it discards every change made since. **It can lower the operational-certificate and KES counters** (the restore swaps the whole file and has no counter rule yet; concern S5). Check them afterwards. |
 | `--allow-other-workspace` | Dangerous. Accept a backup of a different workspace; the current workspace and all it holds is lost. Prints a warning. Needs `--force`. |
 | `--allow-weaker-policy` | Accept a backup whose policy is weaker than the workspace's (`hardware` or `strict` replaced by an older `standard` copy). Needs `--force` and the current workspace's recovery credential, checked on the current file before anything is replaced: the recovery key (`--recovery-key-in-fd` or a prompt) and, under `hardware`, the second authenticator (`--current-recovery-device`, PIN from `--recovery-pin-fd` or a prompt). A `strict` workspace has none and is never replaced by a weaker backup. SPO-Xunlock-PRE-033. |
 | `--network NAME` | When the directory has no `spo.toml`, write one for `NAME` in mode `offline` (change it with `mode set`). Required in that case. |

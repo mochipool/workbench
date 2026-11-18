@@ -144,7 +144,7 @@ Handles (decision 5) and remote announcements (decision 3) are built with the se
 * Every use case that builds a `KeyRef` changes. The compiler finds them all.
 * An identity belongs to one owner, checked on every open; an operator who meets the residual anchor case of decision 2 resolves it with an explicit `merge`.
 
-ADR 0012 (draft) builds on this record.
+ADR 0012 (accepted 2026-11-18) builds on this record.
 
 ## Open questions
 
@@ -158,7 +158,7 @@ The owner accepted this record on 2026-11-17. The entries marked unconfirmed rem
 
 ## Amendments
 
-**Proposed amendment, awaiting owner.** The status line above is unchanged. The implementation of decisions 2 and 4 departs from the text in these ways, and the owner is asked to accept or reject them:
+**Accepted by the owner, 2026-11-18.** The implementation of decisions 2 and 4 departs from the text in these ways:
 
 * **Provisional owners.** An owner whose anchoring key does not exist yet (a pool descriptor written before the cold key, a VRF key generated first, a wallet's address file) keeps its records under a derived anchor with a label. The anchoring key moves them to the real anchor in one transaction and the keys kept meanwhile join the manifest. A provisional owner has no owner record and cannot be renamed. The text of decision 2 assumes an owner exists only with its anchor.
 * **Named records.** Records keyed by a string a use case or protocol chooses (transaction ids, transfer file names, `state`, provider tokens, Calidus and voting key families) are keyed by the content hash of `[named-record tag, [group, name]]` with a label in the group of their kind. The fixed ownerless anchor and the keying of transactions, envelopes, collections and audit events by their own content identity are not built.
