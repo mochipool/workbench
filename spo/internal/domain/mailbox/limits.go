@@ -59,8 +59,12 @@ const (
 	MaxNewConnsPerKeyPerMinute = 6
 	MaxRequestsPerConn         = 256
 	MaxBytesPerConn            = 64 << 20
-	MaxPutsPerPartyPerMinute   = 120
-	MaxInFlight                = 8
+	// MaxBytesSentPerConn bounds what the relay sends on one connection, headers
+	// and raw frames together: four times the bytes it receives. A mailbox holds
+	// at most 64 MiB, so a client that reads one whole is far inside it.
+	MaxBytesSentPerConn      = 4 * MaxBytesPerConn
+	MaxPutsPerPartyPerMinute = 120
+	MaxInFlight              = 8
 
 	MaxAckHashes     = 64
 	MaxItemsPerFetch = 16

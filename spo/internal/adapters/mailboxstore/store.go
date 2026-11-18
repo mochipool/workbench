@@ -756,6 +756,29 @@ func (s *Store) Remove(ctx context.Context, rcpt party.Fingerprint, mid mailbox.
 	return true, err
 }
 
+// Retract implements relayport.MailboxRetractor: it removes the one entry that
+// sender put to rcpt with id mid, and no other copy of the id. The counters
+// follow that entry alone. ctx is not consulted: a caller that compensates a put
+// it can no longer answer must not be refused for a context it has cancelled.
+func (s *Store) Retract(_ context.Context, rcpt, sender party.Fingerprint, mid mailbox.Hash) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.fail(); err != nil {
+		return false, err
+	}
+	b := s.boxes[rcpt]
+	if b == nil {
+		return false, nil
+	}
+	k := entKey{sender: sender, mid: mid}
+	if _, ok := b.entries[k]; !ok {
+		return false, nil
+	}
+	_, err := s.removeSetLocked(rcpt, []entKey{k})
+	s.prune(rcpt)
+	return true, err
+}
+
 // RemoveMailbox implements relayport.MailboxRevoker. A put to the mailbox that
 // has reserved but not committed fails with ErrMailboxRevoked.
 func (s *Store) RemoveMailbox(ctx context.Context, rcpt party.Fingerprint) (int, error) {

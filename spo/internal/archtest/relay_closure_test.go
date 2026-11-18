@@ -20,6 +20,7 @@ var relayPackages = []string{
 	module + "/internal/adapters/mailboxstore",
 	module + "/internal/adapters/relayconfig",
 	module + "/internal/ports/relayport",
+	module + "/internal/app/relay",
 }
 
 // relayBanned are the import-path fragments no relay package may reach.
