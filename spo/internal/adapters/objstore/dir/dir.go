@@ -202,8 +202,11 @@ func (c *ctxReader) Read(p []byte) (int, error) {
 // sameContent is nil when the existing file has the size and SHA-256 given and
 // ErrObjectExists when it differs.
 func sameContent(path string, size int64, sum []byte) error {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := openRegular(path)
 	if err != nil {
+		if errors.Is(err, errNotRegular) {
+			return fmt.Errorf("%w (the name holds something that is not a regular file)", ports.ErrObjectExists)
+		}
 		return err
 	}
 	defer f.Close()
@@ -211,7 +214,7 @@ func sameContent(path string, size int64, sum []byte) error {
 	if err != nil {
 		return err
 	}
-	if !st.Mode().IsRegular() || st.Size() != size {
+	if st.Size() != size {
 		return ports.ErrObjectExists
 	}
 	h := sha256.New()
@@ -230,16 +233,41 @@ func (s *Store) Get(_ context.Context, name string) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(full, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := openRegular(full)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, ports.ErrObjectNotFound
+	}
+	if errors.Is(err, errNotRegular) {
+		return nil, fmt.Errorf("%q is not a regular file", name)
 	}
 	if err != nil {
 		return nil, err
 	}
-	if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() {
+	return f, nil
+}
+
+var errNotRegular = errors.New("not a regular file")
+
+// openRegular opens path for reading without ever blocking and without following
+// a link, and requires a regular file: a FIFO, a socket, a device, a directory
+// or a link is refused at once (O_NONBLOCK so that opening a FIFO cannot wait
+// for a writer, O_NOFOLLOW, then fstat on the descriptor that was opened).
+func openRegular(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		if errors.Is(err, syscall.ELOOP) {
+			return nil, errNotRegular
+		}
+		return nil, err
+	}
+	st, err := f.Stat()
+	if err != nil {
 		f.Close()
-		return nil, fmt.Errorf("%q is not a regular file", name)
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		f.Close()
+		return nil, errNotRegular
 	}
 	return f, nil
 }

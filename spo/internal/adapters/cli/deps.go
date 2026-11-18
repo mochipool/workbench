@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/mochipool/workbench/spo/internal/app/backupsink"
+	"github.com/mochipool/workbench/spo/internal/app/layoutexport"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -35,6 +36,12 @@ type Deps struct {
 	// directory): temporary and partial files of a sink transfer. Nil where the
 	// binary has no sink.
 	OpenScratch func(dir string) (ports.Scratch, error)
+	// OpenLayoutDir opens (and creates, when absent) the directory a sealed layout
+	// is exported to, for the workspace whose file is workspaceFile: the object
+	// ports, the single-writer lock and the pin file (ADR 0012 stage 3). It
+	// refuses a directory that is the workspace directory or inside it and one
+	// whose permissions are loose. Nil where it is not available.
+	OpenLayoutDir func(dir, workspaceFile string) (layoutexport.Dir, error)
 	// Factors is the FIDO2 factor source (ADR 0011). Nil where the binary cannot
 	// reach one: a command that needs a factor then fails before any prompt.
 	Factors ports.FactorSource
@@ -321,6 +328,19 @@ type SealedOps struct {
 	// through its FIDO2 slots (a hardware workspace has no passphrase). deep also
 	// decrypts every record.
 	VerifyFileFactors func(path string, in FactorOpen, deep bool) (VerifyReport, error)
+	// ExportMaterial verifies the workspace file through the credential (the
+	// passphrase, or the factors when factors is not nil) and takes its raw
+	// snapshot, an object sealer and the record references, for `store convert
+	// --to-layout`. Nil where it is not available.
+	ExportMaterial func(ctx context.Context, path string, pass *secret.Buffer, factors *FactorOpen) (ExportTaken, error)
+}
+
+// ExportTaken is what ExportMaterial returns: the material of the exporter
+// (without its signing, which the command builds) and the checkpoint key record
+// as stored, nil when the workspace has none.
+type ExportTaken struct {
+	Material      layoutexport.Material
+	CheckpointKey []byte
 }
 
 // BackupFacts is what a file says about itself without a key.

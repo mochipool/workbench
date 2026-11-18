@@ -656,6 +656,13 @@ func VerifyFileWithRecovery(path string, recovery *secret.Buffer) error {
 }
 
 func verifyFile(path string, cred credential, payloads bool) (VerifyResult, error) {
+	return verifyFileThen(path, cred, payloads, nil)
+}
+
+// verifyFileThen is verifyFile that, when the verification passed, calls then
+// with the open store (read-only) before closing it, so that a caller can take
+// what it needs of the verified file without presenting the credential again.
+func verifyFileThen(path string, cred credential, payloads bool, then func(*Store) error) (VerifyResult, error) {
 	// SkipVerify: VerifyDetailed below runs the verification and reports every
 	// problem, which Open's all-or-nothing check would hide.
 	s, err := open(path, cred, true, OpenOptions{AcceptRollback: true, SkipVerify: true})
@@ -720,6 +727,9 @@ func verifyFile(path string, cred credential, payloads bool) (VerifyResult, erro
 		if cerr := s.View(context.Background(), func(r ports.Reader) error { return labels.Check(r) }); cerr != nil {
 			err = fmt.Errorf("%w: the identity layer: %w", ErrVerify, cerr)
 		}
+	}
+	if err == nil && then != nil {
+		err = then(s)
 	}
 	return res, err
 }

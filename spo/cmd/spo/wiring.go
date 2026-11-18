@@ -10,6 +10,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/adapters/cli"
 	"github.com/mochipool/workbench/spo/internal/adapters/config"
 	"github.com/mochipool/workbench/spo/internal/adapters/exportdir"
+	"github.com/mochipool/workbench/spo/internal/adapters/layoutdir"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/adapters/native/n2c"
 	"github.com/mochipool/workbench/spo/internal/adapters/nodeage"
@@ -20,6 +21,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/adapters/storeaudit"
 	"github.com/mochipool/workbench/spo/internal/adapters/upstreamdir"
 	"github.com/mochipool/workbench/spo/internal/app/backupsink"
+	"github.com/mochipool/workbench/spo/internal/app/layoutexport"
 	"github.com/mochipool/workbench/spo/internal/platform/seal"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -45,6 +47,13 @@ func newDeps(out, errw io.Writer, term cli.Terminal) cli.Deps {
 		},
 		OpenSink:    openSink,
 		OpenScratch: func(dir string) (ports.Scratch, error) { return scratchdir.Open(dir) },
+		OpenLayoutDir: func(dir, workspaceFile string) (layoutexport.Dir, error) {
+			d, err := layoutdir.Open(dir, workspaceFile)
+			if err != nil {
+				return layoutexport.Dir{}, err
+			}
+			return layoutexport.Dir{Writer: d, Reader: d, Lister: d, Locker: d, Pins: d}, nil
+		},
 		Sealed: cli.SealedOps{
 			Init: func(path string, pass *secret.Buffer) (*secret.Buffer, error) {
 				k, err := sqlitestore.Init(path, pass)
@@ -82,6 +91,7 @@ func newDeps(out, errw io.Writer, term cli.Terminal) cli.Deps {
 				return cli.BackupFacts{WorkspaceID: f.WorkspaceID, Head: toHead(f.Head), SlotTable: f.SlotTable}, mapStoreErr(err)
 			},
 			OpenFactors:       openFactors,
+			ExportMaterial:    exportMaterial,
 			VerifyFileFactors: verifyFileFactors,
 			Migrate: func(path string, pass *secret.Buffer, o cli.MigrateOptions) (cli.MigrateReport, error) {
 				s, err := sqlitestore.OpenLegacy(path, pass)

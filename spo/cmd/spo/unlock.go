@@ -8,6 +8,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/adapters/cli"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/adapters/sqlitestore"
+	"github.com/mochipool/workbench/spo/internal/app/layoutexport"
 	"github.com/mochipool/workbench/spo/internal/domain/unlock"
 	"github.com/mochipool/workbench/spo/internal/platform/seal"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
@@ -293,4 +294,30 @@ func cachedRecovery(f func(context.Context) (*secret.Buffer, error)) (func(conte
 			raw.Destroy()
 		}
 	}
+}
+
+// exportMaterial verifies the workspace file through the credential and takes
+// the raw snapshot, an object sealer and the record references for `store
+// convert --to-layout`.
+func exportMaterial(ctx context.Context, path string, pass *secret.Buffer, factors *cli.FactorOpen) (cli.ExportTaken, error) {
+	var c sqlitestore.SnapshotCredential
+	if factors != nil {
+		in := factorInputs(*factors)
+		c = sqlitestore.SnapshotCredential{Factors: &in}
+	} else {
+		c = sqlitestore.SnapshotCredential{Passphrase: pass}
+	}
+	m, err := sqlitestore.TakeExport(ctx, path, c)
+	if err != nil {
+		if errors.Is(err, sqlitestore.ErrNoFactorSlot) {
+			return cli.ExportTaken{}, cli.ErrWrongPassphrase
+		}
+		return cli.ExportTaken{}, mapStoreErr(err)
+	}
+	return cli.ExportTaken{
+		Material: layoutexport.Material{
+			Snapshot: m.Snapshot, Refs: m.Refs, Sealer: m.Sealer, Notices: m.Facts.Notices, Close: m.Sealer.Close,
+		},
+		CheckpointKey: m.CheckpointKey,
+	}, nil
 }

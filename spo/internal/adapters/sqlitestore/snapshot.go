@@ -162,6 +162,12 @@ func snapSideFiles(abs string) error {
 // workspace had; the copy then fails verification unless the writer can also
 // forge the audit chain, which needs the workspace key.
 func ReadSnapshot(ctx context.Context, path string, c SnapshotCredential) (ports.Snapshot, SnapshotFacts, error) {
+	return readSnapshot(ctx, path, c, nil)
+}
+
+// readSnapshot is ReadSnapshot with a hook that runs on the verified copy while
+// its store is still open (see TakeExport).
+func readSnapshot(ctx context.Context, path string, c SnapshotCredential, then func(*Store) error) (ports.Snapshot, SnapshotFacts, error) {
 	var zero ports.Snapshot
 	if !snapshotLocking {
 		return zero, SnapshotFacts{}, ErrSnapshotPlatform
@@ -203,7 +209,7 @@ func ReadSnapshot(ctx context.Context, path string, c SnapshotCredential) (ports
 	if err := ctx.Err(); err != nil {
 		return zero, SnapshotFacts{}, err
 	}
-	res, err := verifyFile(cp, cred, false)
+	res, err := verifyFileThen(cp, cred, false, then)
 	os.Remove(cp + "-shm")
 	os.Remove(cp + "-wal")
 	if err != nil {
