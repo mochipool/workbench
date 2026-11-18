@@ -132,6 +132,9 @@ func (m *memSink) Check(context.Context) (ports.SinkProperties, error) {
 }
 
 // A fake backup file is "<ws hex>:<seq>:<mac hex>:<payload>".
+// a head MAC is 32 bytes
+const macHex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+
 const wsHex = "aabbccddeeff00112233445566778899aabbccddeeff0011223344"
 
 func fakeFile(ws string, seq uint64, mac, payload string) []byte {
@@ -171,7 +174,7 @@ type rig struct {
 func newRig(t *testing.T, kind ports.SinkKind, policy string) *rig {
 	t.Helper()
 	dir := t.TempDir()
-	return &rig{t: t, dir: dir, scratch: &tScratch{root: dir, notOwned: map[string]bool{}}, sink: newMem(kind), policy: policy, content: fakeFile(wsHex, 7, "0102030405", "payload")}
+	return &rig{t: t, dir: dir, scratch: &tScratch{root: dir, notOwned: map[string]bool{}}, sink: newMem(kind), policy: policy, content: fakeFile(wsHex, 7, macHex, "payload")}
 }
 
 func (r *rig) push() (PushResult, error) {
@@ -241,7 +244,7 @@ func mustHex(s string) []byte {
 
 // spec: SPO-Xbackup-OUT-002
 func TestPinRoundTripAndStrictParse(t *testing.T) {
-	p := Pin{WorkspaceID: mustHex(wsHex), Seq: 12, HeadMAC: []byte{1, 2, 3}, SHA256: mustHex(sum([]byte("a")))}
+	p := Pin{WorkspaceID: mustHex(wsHex), Seq: 12, HeadMAC: mustHex(macHex), SHA256: mustHex(sum([]byte("a")))}
 	got, err := ParsePin(p.String())
 	if err != nil || got.String() != p.String() {
 		t.Fatalf("%v %v", got, err)
@@ -340,7 +343,7 @@ func TestPushNamesVerifiesPutsAndReadsBack(t *testing.T) {
 	if r.verifies != 1 {
 		t.Fatalf("verify ran %d times", r.verifies)
 	}
-	wantPin := wsHex + ":7:0102030405:" + sum(r.content)
+	wantPin := wsHex + ":7:" + macHex + ":" + sum(r.content)
 	if res.Pin.String() != wantPin {
 		t.Fatalf("pin %s", res.Pin)
 	}
@@ -458,7 +461,7 @@ func (r *rig) fetch(pin Pin, name string, max int64) error {
 }
 
 func pinOf(content []byte) Pin {
-	ws, seq, mac := mustHex(wsHex), uint64(7), []byte{1, 2, 3, 4, 5}
+	ws, seq, mac := mustHex(wsHex), uint64(7), mustHex(macHex)
 	return Pin{WorkspaceID: ws, Seq: seq, HeadMAC: mac, SHA256: mustHex(sum(content))}
 }
 
@@ -549,7 +552,7 @@ func TestFetchRefusesAnOlderObjectUnderThePinnedName(t *testing.T) {
 	// says another head than the pin does is refused even then
 	r = newRig(t, ports.SinkS3, "hardware")
 	content := fakeFile(wsHex, 3, "0a0b", "payload-old")
-	p := Pin{WorkspaceID: mustHex(wsHex), Seq: 7, HeadMAC: []byte{1, 2, 3, 4, 5}, SHA256: mustHex(sum(content))}
+	p := Pin{WorkspaceID: mustHex(wsHex), Seq: 7, HeadMAC: mustHex(macHex), SHA256: mustHex(sum(content))}
 	r.sink.objs[ObjectName(p.WorkspaceID, p.Seq, p.SHA256)] = content
 	if err := r.fetch(p, "", 1<<20); err == nil || !strings.Contains(err.Error(), "head") {
 		t.Fatalf("a file with another head than the pin: %v", err)
@@ -708,7 +711,7 @@ func TestCancelledContextBehavesLikeAFailure(t *testing.T) {
 		Backup: func(c context.Context, d string) (Head, error) {
 			os.WriteFile(d, r.content, 0o600)
 			cancel()
-			return Head{Seq: 7, MAC: []byte{1, 2, 3, 4, 5}}, c.Err()
+			return Head{Seq: 7, MAC: mustHex(macHex)}, c.Err()
 		},
 		Verify:  func(string) error { return nil },
 		Inspect: inspectFake})
@@ -737,7 +740,7 @@ func partialPath(r *rig, p Pin) string { return r.dir + "/" + PartialName(p.SHA2
 // spec: SPO-Xbackup-OUT-009, SPO-Xbackup-SEC-008
 func TestFetchResumesAPartialDownload(t *testing.T) {
 	r := newRig(t, ports.SinkS3, "hardware")
-	r.content = fakeFile(wsHex, 7, "0102030405", strings.Repeat("p", 200))
+	r.content = fakeFile(wsHex, 7, macHex, strings.Repeat("p", 200))
 	res, _ := r.push()
 	r.sink.cutAfter = 40
 	if err := r.fetch(res.Pin, "", 1<<20); err == nil || len(r.restored) != 0 {
@@ -776,7 +779,7 @@ func TestFetchResumesAPartialDownload(t *testing.T) {
 // spec: SPO-Xbackup-SEC-008
 func TestFetchPartialFileIsNeverTrusted(t *testing.T) {
 	r := newRig(t, ports.SinkS3, "hardware")
-	r.content = fakeFile(wsHex, 7, "0102030405", strings.Repeat("p", 200))
+	r.content = fakeFile(wsHex, 7, macHex, strings.Repeat("p", 200))
 	res, _ := r.push()
 	// wrong bytes of the right length so far
 	os.WriteFile(partialPath(r, res.Pin), bytes.Repeat([]byte("z"), 40), 0o600)
@@ -883,7 +886,7 @@ func TestPushNeverDownloadsObjectsItDidNotNameItself(t *testing.T) {
 	}
 	r.noTemp()
 	// a second backup of the same head with other bytes is a second object
-	r.content = fakeFile(wsHex, 7, "0102030405", "same head, other bytes")
+	r.content = fakeFile(wsHex, 7, macHex, "same head, other bytes")
 	if res2, err := r.push(); err != nil || !res2.Uploaded || len(r.sink.objs) != 22 {
 		t.Fatalf("%v", err)
 	}
@@ -910,13 +913,13 @@ func TestPushDistinguishesASinkThatLiesAboutHas(t *testing.T) {
 //
 // spec: SPO-Xbackup-OUT-002
 func TestPinHasOneSpelling(t *testing.T) {
-	p := Pin{WorkspaceID: mustHex(wsHex), Seq: 12, HeadMAC: []byte{1, 2, 3}, SHA256: mustHex(sum([]byte("a")))}
+	p := Pin{WorkspaceID: mustHex(wsHex), Seq: 12, HeadMAC: mustHex(macHex), SHA256: mustHex(sum([]byte("a")))}
 	for _, bad := range []string{
 		strings.Replace(p.String(), ":12:", ":012:", 1),
 		strings.Replace(p.String(), ":12:", ":+12:", 1),
 		strings.Replace(p.String(), ":12:", ":00:", 1) + "",
 		strings.ToUpper(p.String()),
-		strings.Replace(p.String(), ":010203:", ":010203 :", 1),
+		strings.Replace(p.String(), ":"+macHex+":", ":"+macHex+" :", 1),
 	} {
 		if g, err := ParsePin(bad); err == nil && g.String() != bad {
 			t.Errorf("%q parsed as %q", bad, g)
@@ -924,7 +927,7 @@ func TestPinHasOneSpelling(t *testing.T) {
 			t.Errorf("%q parsed", bad)
 		}
 	}
-	zero := Pin{WorkspaceID: mustHex(wsHex), Seq: 0, HeadMAC: []byte{1}, SHA256: mustHex(sum([]byte("a")))}
+	zero := Pin{WorkspaceID: mustHex(wsHex), Seq: 0, HeadMAC: mustHex(macHex), SHA256: mustHex(sum([]byte("a")))}
 	if g, err := ParsePin(zero.String()); err != nil || g.String() != zero.String() {
 		t.Errorf("sequence 0: %v", err)
 	}
@@ -1028,4 +1031,21 @@ func TestFetchKeepsAVerifiedFileOnlyForRefusalsNotAboutIt(t *testing.T) {
 		t.Fatal("accepted")
 	}
 	r.noTemp()
+}
+
+// G5: the head MAC in a pin has exactly the length of an audit MAC.
+//
+// spec: SPO-Xbackup-OUT-002
+func TestPinHeadMACLengthIsStrict(t *testing.T) {
+	ok := Pin{WorkspaceID: mustHex(wsHex), Seq: 1, HeadMAC: mustHex(macHex), SHA256: mustHex(sum([]byte("a")))}
+	if _, err := ParsePin(ok.String()); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []int{0, 1, 5, 16, 31, 33, 64} {
+		p := ok
+		p.HeadMAC = bytes.Repeat([]byte{7}, n)
+		if _, err := ParsePin(p.String()); err == nil {
+			t.Errorf("a head MAC of %d bytes parsed", n)
+		}
+	}
 }

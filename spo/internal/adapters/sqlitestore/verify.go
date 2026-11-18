@@ -501,10 +501,19 @@ func (s *Store) verify(ctx context.Context, q dbq, withHeadFile bool) (res Verif
 	}
 	if withHeadFile {
 		hws, hh, found, herr := readHeadFile(s.path)
+		disagrees := found && (herr != nil || !bytes.Equal(hws, s.ws) || hh.Seq > res.Head.Seq || (hh.Seq > 0 && !chainHas(chain, hh)))
+		sidecarMsg, sidecarOK := "", false
+		if disagrees {
+			sidecarMsg, sidecarOK = adoptSidecar(s.path, s.ws, res.Head)
+		}
 		switch {
 		case !found:
 			// Also for a read-only handle, which does not create it.
 			res.Notices = append(res.Notices, "there is no head file: a rollback of the workspace file cannot be detected")
+		case disagrees && sidecarOK:
+			// A restore died between the swap and the head file. Verify is read-only
+			// and adopts nothing; an open completes the restore.
+			res.Notices = append(res.Notices, sidecarMsg+"; opening the workspace completes the restore (verify itself adopts nothing and changes no file)")
 		case herr != nil || !bytes.Equal(hws, s.ws):
 			bad("the head file is unreadable or belongs to another workspace")
 		case hh.Seq > res.Head.Seq:

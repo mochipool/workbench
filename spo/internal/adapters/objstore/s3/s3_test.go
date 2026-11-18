@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -609,5 +611,93 @@ func TestS3DefaultChainSharedFileAndCredentialProcess(t *testing.T) {
 	base("[default]\nregion = us-test-1\ncredential_process = "+far+"\n", "")
 	if err := try(); !errors.Is(err, ErrCredentialsTooLong) {
 		t.Fatalf("a week ahead: %v", err)
+	}
+}
+
+// G1: the deadline never comes from what the sink claims. A response that
+// claims more than the expected size (or the cap) is refused at once, whatever
+// the claim (a terabyte, MaxInt64); a body with no Content-Length is bounded by
+// the cap; the arithmetic does not overflow.
+//
+// spec: SPO-Xbackup-SEC-010
+func TestS3DeadlineDoesNotTrustTheSinksContentLength(t *testing.T) {
+	srv := fakes3.New("bk")
+	defer srv.Close()
+	s := newStore(t, srv, shortLived{}, "", WithMaxAttempts(1), WithStallTimeout(5*time.Second))
+	data := strings.Repeat("0123456789", 200)
+	put(s, "a/x", data)
+	srv.TrickleEvery = 30 * time.Millisecond
+	for _, claim := range []int64{1 << 40, math.MaxInt64} {
+		srv.LieLength = claim
+		srv.Inject(fakes3.FaultLieContentLength, 1)
+		start := time.Now()
+		_, err := s.Get(context.Background(), "a/x")
+		if !errors.Is(err, ErrResponseTooLarge) {
+			t.Fatalf("claim %d: %v", claim, err)
+		}
+		if time.Since(start) > 2*time.Second {
+			t.Fatalf("claim %d: refused after %v, not at once", claim, time.Since(start))
+		}
+	}
+	// the caller's expected size is the bound: 100 bytes expected, 2000 claimed
+	srv.LieLength = 2000
+	srv.Inject(fakes3.FaultLieContentLength, 1)
+	if _, err := s.Get(ports.WithExpectedSize(context.Background(), 100), "a/x"); !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("expected size: %v", err)
+	}
+	// an honest length that is larger than expected is refused too
+	if _, err := s.Get(ports.WithExpectedSize(context.Background(), 100), "a/x"); !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("a 2000 byte object with 100 expected: %v", err)
+	}
+	// no Content-Length at all: bounded by the cap, 2000 bytes at 2000 B/s
+	s2 := newStore(t, srv, shortLived{}, "", WithMaxAttempts(1), WithStallTimeout(5*time.Second), WithTransferLimits(2000, 100*time.Millisecond), WithMaxTransfer(2000))
+	srv.Inject(fakes3.FaultChunkedTrickle, 1)
+	start := time.Now()
+	rc, err := s2.Get(context.Background(), "a/x")
+	if err == nil {
+		_, err = io.ReadAll(rc)
+		rc.Close()
+	}
+	if !errors.Is(err, ErrTooSlow) || time.Since(start) > 4*time.Second {
+		t.Fatalf("no content length: %v after %v", err, time.Since(start))
+	}
+	// the arithmetic
+	if d := s.limit(math.MaxInt64); d <= 0 || d < s.limit(1<<30) {
+		t.Fatalf("limit(MaxInt64) = %v", d)
+	}
+	if d := s.limit(1 << 40); d <= 0 {
+		t.Fatalf("limit(1 TiB) = %v", d)
+	}
+}
+
+// G3: with a CA bundle configured the SDK hands over its own HTTP client; the
+// dial, handshake and response-header timeouts still apply to it.
+//
+// spec: SPO-Xbackup-SEC-010
+func TestS3TimeoutsApplyWithACABundle(t *testing.T) {
+	srv := fakes3.New("bk")
+	defer srv.Close()
+	t.Setenv("AWS_ENDPOINT_URL", srv.URL)
+	t.Setenv("AWS_CA_BUNDLE", caBundle(t, srv))
+	t.Setenv("AWS_ACCESS_KEY_ID", "x")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "x")
+	t.Setenv("AWS_REGION", "us-test-1")
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	t.Setenv("AWS_CONFIG_FILE", "/dev/null")
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", "/dev/null")
+	s, err := New(context.Background(), "bk", "", WithStallTimeout(7*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bc, ok := s.c.Options().HTTPClient.(*awshttp.BuildableClient)
+	if !ok {
+		t.Fatalf("the client is %T", s.c.Options().HTTPClient)
+	}
+	tr := bc.GetTransport()
+	if tr.TLSHandshakeTimeout != dialTimeout || tr.ResponseHeaderTimeout != 7*time.Second {
+		t.Fatalf("handshake %v, response header %v", tr.TLSHandshakeTimeout, tr.ResponseHeaderTimeout)
+	}
+	if tr.TLSClientConfig == nil || tr.TLSClientConfig.RootCAs == nil {
+		t.Fatal("the CA bundle was lost")
 	}
 }

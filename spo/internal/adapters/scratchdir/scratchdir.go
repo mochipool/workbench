@@ -22,6 +22,12 @@ var _ ports.Scratch = (*Dir)(nil)
 
 var partRE = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
+// ownedBy reports whether st is owned by uid.
+func ownedBy(st fs.FileInfo, uid int) bool {
+	sys, ok := st.Sys().(*syscall.Stat_t)
+	return ok && int(sys.Uid) == uid
+}
+
 // Open returns the scratch space of root, creating it (0700) when missing. It
 // refuses a directory that is writable by its group or by others: another user
 // could replace what is put there.
@@ -45,6 +51,9 @@ func Open(root string) (*Dir, error) {
 	}
 	if !st.IsDir() {
 		return nil, fmt.Errorf("%s is not a directory", root)
+	}
+	if !ownedBy(st, os.Geteuid()) {
+		return nil, fmt.Errorf("the workspace directory %s is not owned by the user running this program", root)
 	}
 	if st.Mode().Perm()&0o022 != 0 {
 		return nil, fmt.Errorf("the workspace directory %s is writable by its group or by everyone (mode %o); another user could replace a temporary file in it. Run: chmod go-w %s", root, st.Mode().Perm(), root)
@@ -96,7 +105,7 @@ func (d *Dir) parentOK(parts []string) error {
 	return nil
 }
 
-// Open creates or opens the private file name.
+// Open creates or opens the private file name (made mode 0600 when it was looser).
 func (d *Dir) Open(name string) (ports.ScratchFile, error) {
 	parts, err := split(name)
 	if err != nil {
@@ -131,6 +140,12 @@ func (d *Dir) Open(name string) (ports.ScratchFile, error) {
 			f.Close()
 			return nil, ports.ErrScratchUnsafe
 		}
+		if st.Mode().Perm() != 0o600 {
+			if err := f.Chmod(0o600); err != nil {
+				f.Close()
+				return nil, err
+			}
+		}
 		return f, nil
 	}
 }
@@ -145,7 +160,8 @@ func (d *Dir) Remove(name string) error {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
-		// a link where a directory should be: remove the link
+		// a link (or a file) where the directory should be: nothing is removed
+		// through it, and the link itself is left for its own name to remove
 		if len(parts) == 2 {
 			return nil
 		}

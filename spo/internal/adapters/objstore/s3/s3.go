@@ -55,6 +55,11 @@ var ErrInsecureEndpoint = errors.New("the S3 endpoint is not https: a backup is 
 // its size.
 var ErrTooSlow = errors.New("the transfer is too slow: it did not finish within the total deadline for its size")
 
+// ErrResponseTooLarge is returned when a response claims more bytes than the
+// caller expected (or than the adapter's cap): it is refused before any body is
+// read, whatever the claim.
+var ErrResponseTooLarge = errors.New("the sink's response is larger than expected: refused")
+
 // ErrStalled is returned when a transfer moves no data for the stall timeout.
 var ErrStalled = errors.New("the transfer stalled: no data moved within the time limit")
 
@@ -67,6 +72,7 @@ const (
 	MaxCredentialLife   = 12 * time.Hour
 	DefaultMinRate      = 64 << 10 // bytes per second; with the allowance, the total deadline of a transfer
 	DefaultAllowance    = time.Minute
+	DefaultMaxTransfer  = 1 << 30 // the cap of a read whose size the caller did not give
 	DefaultStallTimeout = time.Minute
 	dialTimeout         = 10 * time.Second
 )
@@ -81,6 +87,7 @@ type Store struct {
 	stall  time.Duration
 	rate   int64
 	allow  time.Duration
+	cap    int64
 }
 
 var (
@@ -97,7 +104,12 @@ type options struct {
 	stall    time.Duration
 	rate     int64
 	allow    time.Duration
+	maxXfer  int64
 }
+
+// WithMaxTransfer sets the cap of a read when the caller gave no expected size
+// (default DefaultMaxTransfer).
+func WithMaxTransfer(n int64) Option { return func(o *options) { o.maxXfer = n } }
 
 // WithTransferLimits sets the minimum rate (bytes per second) and the fixed
 // allowance that give a transfer its total deadline: allowance + size/rate.
@@ -141,7 +153,7 @@ func New(ctx context.Context, bucket, prefix string, opts ...Option) (*Store, er
 	if bucket == "" {
 		return nil, errors.New("the S3 bucket name is empty")
 	}
-	o := options{attempts: MaxAttempts, stall: DefaultStallTimeout, rate: DefaultMinRate, allow: DefaultAllowance}
+	o := options{attempts: MaxAttempts, stall: DefaultStallTimeout, rate: DefaultMinRate, allow: DefaultAllowance, maxXfer: DefaultMaxTransfer}
 	for _, f := range opts {
 		f(&o)
 	}
@@ -160,14 +172,23 @@ func New(ctx context.Context, bucket, prefix string, opts ...Option) (*Store, er
 	if cfg.Credentials == nil {
 		return nil, errors.New("no AWS credentials provider is configured")
 	}
-	if cfg.HTTPClient == nil {
-		stall := o.stall
-		cfg.HTTPClient = awshttp.NewBuildableClient().
-			WithDialerOptions(func(d *net.Dialer) { d.Timeout = dialTimeout }).
+	// The dial, handshake and response-header timeouts apply to the client the SDK
+	// builds (a configured CA bundle makes it hand over its own BuildableClient)
+	// as well as to one this package makes. A client of any other kind (an
+	// injected one) is the caller's.
+	stall := o.stall
+	timeouts := func(c *awshttp.BuildableClient) *awshttp.BuildableClient {
+		return c.WithDialerOptions(func(d *net.Dialer) { d.Timeout = dialTimeout }).
 			WithTransportOptions(func(tr *http.Transport) {
 				tr.TLSHandshakeTimeout = dialTimeout
 				tr.ResponseHeaderTimeout = stall
 			})
+	}
+	switch c := cfg.HTTPClient.(type) {
+	case nil:
+		cfg.HTTPClient = timeouts(awshttp.NewBuildableClient())
+	case *awshttp.BuildableClient:
+		cfg.HTTPClient = timeouts(c)
 	}
 	creds := aws.NewCredentialsCache(requireShortLived{cfg.Credentials})
 	cfg.Credentials = creds
@@ -191,12 +212,27 @@ func New(ctx context.Context, bucket, prefix string, opts ...Option) (*Store, er
 			return nil, ErrInsecureEndpoint
 		}
 	}
-	return &Store{c: c, bucket: bucket, prefix: prefix, creds: creds, stall: o.stall, rate: o.rate, allow: o.allow}, nil
+	return &Store{c: c, bucket: bucket, prefix: prefix, creds: creds, stall: o.stall, rate: o.rate, allow: o.allow, cap: o.maxXfer}, nil
 }
 
-// limit is the total deadline of a transfer of size bytes.
-func (s *Store) limit(size int64) time.Duration {
-	return s.allow + time.Duration(size)*time.Second/time.Duration(s.rate)
+// limit is the total deadline of a transfer of n bytes: the allowance plus n at
+// the minimum rate. The division is done first and the seconds are clamped, so
+// no n overflows.
+func (s *Store) limit(n int64) time.Duration {
+	rate := s.rate
+	if rate <= 0 {
+		rate = DefaultMinRate
+	}
+	if n < 0 {
+		n = 0
+	}
+	secs := n / rate
+	const maxSecs = 1 << 32 // about 136 years
+	if secs > maxSecs {
+		secs = maxSecs
+	}
+	frac := time.Duration(n%rate) * time.Second / time.Duration(rate)
+	return s.allow + time.Duration(secs)*time.Second + frac
 }
 
 func (s *Store) key(name string) (string, error) {
@@ -355,7 +391,7 @@ func (s *Store) Put(ctx context.Context, name string, r io.Reader, size int64) e
 }
 
 func (s *Store) sameAsExisting(ctx context.Context, name string, size int64, sum []byte) error {
-	rc, err := s.get(ctx, name, "")
+	rc, err := s.get(ports.WithExpectedSize(ctx, size), name, "")
 	if err != nil {
 		return fmt.Errorf("the object exists but cannot be read back to compare: %w", err)
 	}
@@ -394,7 +430,14 @@ func (s *Store) get(ctx context.Context, name, rng string) (io.ReadCloser, error
 	if rng != "" {
 		in.Range = aws.String(rng)
 	}
+	// the bound of this read: what the caller expects, else the cap. The deadline
+	// is armed from it before the request and never comes from the sink's claim.
+	bound := s.cap
+	if e, ok := ports.ExpectedSize(ctx); ok {
+		bound = e
+	}
 	wctx, w := newWatch(ctx, s.stall)
+	w.deadline(s.limit(bound))
 	out, err := s.c.GetObject(wctx, in)
 	if err != nil {
 		cerr := s.wrap(wctx, err)
@@ -408,9 +451,16 @@ func (s *Store) get(ctx context.Context, name, rng string) (io.ReadCloser, error
 		}
 		return nil, fmt.Errorf("get %s: %w", name, cerr)
 	}
+	n := bound
 	if out.ContentLength != nil {
-		w.deadline(s.limit(*out.ContentLength))
+		if *out.ContentLength > bound {
+			out.Body.Close()
+			w.stop()
+			return nil, ErrResponseTooLarge
+		}
+		n = *out.ContentLength
 	}
+	w.deadline(s.limit(n))
 	return &touchReadCloser{rc: out.Body, w: w, ctx: wctx}, nil
 }
 

@@ -108,3 +108,19 @@ func ValidObjectName(name string) error {
 	}
 	return nil
 }
+
+type expectedSizeKey struct{}
+
+// WithExpectedSize tells an adapter how many bytes a read is expected to return.
+// A response that claims more is refused at once, and the transfer's deadline
+// is derived from this number (or from the adapter's cap when none is given),
+// never from what the sink claims.
+func WithExpectedSize(ctx context.Context, n int64) context.Context {
+	return context.WithValue(ctx, expectedSizeKey{}, n)
+}
+
+// ExpectedSize is the size given by WithExpectedSize.
+func ExpectedSize(ctx context.Context) (int64, bool) {
+	n, ok := ctx.Value(expectedSizeKey{}).(int64)
+	return n, ok && n >= 0
+}

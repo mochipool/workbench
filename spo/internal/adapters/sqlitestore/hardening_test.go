@@ -986,6 +986,9 @@ func TestUnlockWorkIsCapped(t *testing.T) {
 // ---- L4: restore ----
 
 func TestRestoreRefusesOtherWorkspaceAndOlderBackup(t *testing.T) {
+	// a record that is not a KES counter: this test is about the head and the
+	// refusals, not about the counter rule (restore_counters_test.go)
+	counter := rf("p", ports.AddrFile)
 	a, pa, _ := scratch(t)
 	put(t, a, counter, "1")
 	old := filepath.Join(t.TempDir(), "old.db")
@@ -1078,8 +1081,11 @@ func TestRestoreNeedsTheWorkspaceClosed(t *testing.T) {
 		t.Errorf("restore while a handle holds the file: %v", err)
 	}
 	l.Close()
-	if _, err := os.Stat(pa + "-wal"); err == nil {
-		t.Error("a -wal file was left behind")
+	// The counter rule reads the destination read-only, which can leave an empty
+	// -wal and -shm (a read-only connection cannot delete them); the swap and the
+	// next open remove them. Nothing of the workspace may be in them.
+	if st, err := os.Stat(pa + "-wal"); err == nil && st.Size() != 0 {
+		t.Errorf("a -wal file with %d bytes was left behind", st.Size())
 	}
 }
 

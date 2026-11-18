@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
+	"github.com/mochipool/workbench/spo/internal/platform/textsafe"
 )
 
 const errUpstreamStore = "store commands work on a sealed workspace; they do not apply with --upstream-layout"
@@ -282,6 +283,7 @@ func (a *app) verifyCopy(s *session, path string) (VerifyReport, error) {
 func (a *app) storeRestore() *cobra.Command {
 	var (
 		sinkURL, pinText    string
+		acceptLower         bool
 		force, older, other bool
 		weaker              bool
 		network             string
@@ -311,9 +313,18 @@ With --sink URL and --pin PIN the backup is first downloaded from a sink (the
 pin is the one "store backup --sink" printed: workspace id, head, and the file's
 SHA-256). The file is used only if all of them match what it says itself; then
 the same restore runs on it, with every refusal below. An interrupted download
-is resumed by running the command again with the same pin. --allow-older is
-refused with --sink: an older backup would lower the operational-certificate
-counters, which a restore does not guard against yet.
+is resumed by running the command again with the same pin.
+
+A restore never lowers a counter. With --allow-older, when the backup does not
+contain the head of the workspace it replaces, that workspace is opened
+read-only (with the credential given for the backup; when its slots changed
+since, with its own recovery key: --recovery-key-in-fd or a prompt, and under
+hardware --current-recovery-device and --recovery-pin-fd) and, for each pool, the
+larger of the two operational certificate issue counters and the larger KES
+counter-next are written into the restored copy before it is installed. Each
+write is audited and printed. If that workspace cannot be opened at all, the
+restore refuses; --accept-lower-counters goes on anyway, with a warning and an
+audit event, and never applies when it can be opened.
 
 spo.toml is not part of a backup: when it is missing, --network writes a new
 one in mode offline (change it with: spo mode set).`,
@@ -331,9 +342,6 @@ one in mode offline (change it with: spo mode set).`,
 			if sinkURL != "" {
 				if len(args) != 0 {
 					return errors.New("give either a <backup> file or --sink URL, not both")
-				}
-				if older {
-					return errors.New(errSinkOlder)
 				}
 				// every combination that can be checked without the file is checked
 				// before anything is downloaded
@@ -371,7 +379,8 @@ one in mode offline (change it with: spo mode set).`,
 					}
 					byFactors = bi.Policy == "hardware" || bi.Policy == "strict"
 				}
-				ropts := RestoreOptions{ExpectedSHA256: sha, Overwrite: force, AllowOlder: older, AllowOtherWorkspace: other, AllowWeakerPolicy: weaker}
+				var report RestoreReport
+				ropts := RestoreOptions{Report: &report, AcceptLowerCounters: acceptLower, ExpectedSHA256: sha, Overwrite: force, AllowOlder: older, AllowOtherWorkspace: other, AllowWeakerPolicy: weaker}
 				if weaker {
 					if !force {
 						return errors.New("--allow-weaker-policy replaces an existing workspace and needs --force")
@@ -382,6 +391,14 @@ one in mode offline (change it with: spo mode set).`,
 					}
 					defer cleanup()
 					ropts.CurrentRecovery = cur
+				}
+				if ropts.CurrentRecovery == nil {
+					// The destination's own recovery material, presented only if the
+					// credential given for the backup does not open the workspace being
+					// replaced (its slots changed since the backup): the callbacks prompt
+					// (or read --recovery-key-in-fd) when the store calls them, and not
+					// before.
+					ropts.CurrentRecovery = a.lazyCurrentRecovery(recInFD, recPinFD, curRecDevice)
 				}
 				var pass *secret.Buffer
 				if byFactors {
@@ -418,6 +435,7 @@ one in mode offline (change it with: spo mode set).`,
 						return err
 					}
 				}
+				a.printCounterReport(report)
 				fmt.Fprintf(a.d.Out, "Restored %s from %s after verifying it.\n", a.workspaceFile(), label)
 				return nil
 			}
@@ -429,8 +447,9 @@ one in mode offline (change it with: spo mode set).`,
 	}
 	restore.Flags().StringVar(&sinkURL, "sink", "", "restore from a sink instead of a file: s3://bucket/prefix or dir:/absolute/path (needs --pin)")
 	restore.Flags().StringVar(&pinText, "pin", "", "the pin that store backup --sink printed (workspace id:head sequence:head hash:file sha256), with --sink")
+	restore.Flags().BoolVar(&acceptLower, "accept-lower-counters", false, "with --allow-older, go on although the counters of the workspace being replaced cannot be read (damaged, or its credentials lost): the restored workspace may hold LOWER operational certificate and KES counters. Never applies when that workspace can be opened")
 	restore.Flags().BoolVar(&force, "force", false, "replace an existing workspace")
-	restore.Flags().BoolVar(&older, "allow-older", false, "allow a backup that is older than the workspace or has diverged from it (discards the changes made since)")
+	restore.Flags().BoolVar(&older, "allow-older", false, "allow a backup that is older than the workspace or has diverged from it (discards the changes made since; the operational certificate and KES counters of the workspace are carried forward, never lowered)")
 	restore.Flags().BoolVar(&other, "allow-other-workspace", false, "DANGEROUS: allow a backup of a different workspace to replace this one; the current workspace and everything in it is lost (needs --force)")
 	restore.Flags().StringVar(&network, "network", "", "network for a new spo.toml when the directory has none")
 	restore.Flags().BoolVar(&weaker, "allow-weaker-policy", false, "allow a backup with a weaker unlock policy than the workspace's; needs --force and the current recovery credential")
@@ -438,6 +457,39 @@ one in mode offline (change it with: spo mode set).`,
 	restore.Flags().IntVar(&recPinFD, "recovery-pin-fd", -1, "read the PIN of the current recovery authenticator from this file descriptor (with --allow-weaker-policy under hardware)")
 	restore.Flags().StringVar(&curRecDevice, "current-recovery-device", "", "the authenticator of the CURRENT recovery composite (hardware workspace, with --allow-weaker-policy)")
 	return restore
+}
+
+// lazyCurrentRecovery builds the recovery material of the workspace a restore
+// replaces without asking for anything: the callbacks prompt (or read the
+// descriptors) only if the store calls them. nil when that workspace has no
+// recovery path to present (strict) or a hardware one without a device.
+func (a *app) lazyCurrentRecovery(recKeyInFD, pinFD int, device string) *FactorOpen {
+	policy := ""
+	if a.d.Sealed.Describe != nil && exists(a.workspaceFile()) {
+		info, err := a.d.Sealed.Describe(a.workspaceFile())
+		if err != nil {
+			return nil
+		}
+		policy = info.Policy
+	}
+	if policy == "strict" || (policy == "hardware" && (a.d.Factors == nil || device == "")) {
+		return nil
+	}
+	_, cur := a.recoveryOpens(policy, "", device, -1, pinFD, recKeyInFD)
+	return &cur
+}
+
+// printCounterReport tells what the counter rule did.
+func (a *app) printCounterReport(r RestoreReport) {
+	if len(r.Carried) > 0 {
+		fmt.Fprintln(a.d.Out, "The backup is older than the workspace it replaces. A restore never lowers a counter, so these were carried forward from the replaced workspace (each is an audited write in the restored workspace):")
+		for _, c := range r.Carried {
+			fmt.Fprintf(a.d.Out, "  pool %s: %s is %s in the replaced workspace (the backup had %s); kept %s\n", textsafe.Quote(c.Pool), c.Kind, c.Live, c.Backup, c.Live)
+		}
+	}
+	if r.LowerAccepted {
+		fmt.Fprintln(a.d.Err, "warning: --accept-lower-counters: the replaced workspace could not be opened, so its operational certificate and KES counters were NOT compared. The restored workspace may hold lower counters. Before issuing an operational certificate for any pool, check its counter on chain (spo pool opcert counter POOL) and give the certificate the next number; an audit event in the restored workspace records this.")
+	}
 }
 
 // currentRecoveryForRestore reads the recovery credential of the workspace a
@@ -448,7 +500,9 @@ func (a *app) currentRecoveryForRestore(ctx context.Context, recKeyInFD, pinFD i
 	if a.d.Sealed.Describe != nil && exists(a.workspaceFile()) {
 		info, err := a.d.Sealed.Describe(a.workspaceFile())
 		if err != nil {
-			return nil, nil, err
+			// a destination that does not parse as a workspace has no recovery
+			// credential to present; the store decides what it may do with it
+			return nil, func() {}, nil
 		}
 		policy = info.Policy
 	}

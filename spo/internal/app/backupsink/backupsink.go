@@ -43,6 +43,10 @@ type Pin struct {
 	SHA256      []byte
 }
 
+// HeadMACSize is the length of an audit-chain MAC (checked against the store's
+// own constant in a test in cmd/spo).
+const HeadMACSize = 32
+
 // String is <workspace id hex>:<head sequence>:<head mac hex>:<sha256 hex>.
 func (p Pin) String() string {
 	return fmt.Sprintf("%s:%d:%s:%s", hex.EncodeToString(p.WorkspaceID), p.Seq, hex.EncodeToString(p.HeadMAC), hex.EncodeToString(p.SHA256))
@@ -56,7 +60,7 @@ var (
 // ParsePin parses a pin strictly.
 func ParsePin(s string) (Pin, error) {
 	f := strings.Split(s, ":")
-	if len(f) != 4 || !hexRE.MatchString(f[0]) || !decRE.MatchString(f[1]) || !hexRE.MatchString(f[2]) || len(f[3]) != 64 || !hexRE.MatchString(f[3]) {
+	if len(f) != 4 || !hexRE.MatchString(f[0]) || !decRE.MatchString(f[1]) || len(f[2]) != 2*HeadMACSize || !hexRE.MatchString(f[2]) || len(f[3]) != 64 || !hexRE.MatchString(f[3]) {
 		return Pin{}, errors.New("the pin is not <workspace id hex>:<head sequence>:<head hash hex>:<file sha256 hex> (lower-case hex)")
 	}
 	seq, err := strconv.ParseUint(f[1], 10, 64)
@@ -257,7 +261,7 @@ func (c ctxReader) Read(p []byte) (int, error) {
 
 // readBack downloads name and checks it is the size and SHA-256 given.
 func readBack(ctx context.Context, r ports.ObjectReader, name string, size int64, sum []byte) error {
-	rc, err := r.Get(ctx, name)
+	rc, err := r.Get(ports.WithExpectedSize(ctx, size), name)
 	if err != nil {
 		return err
 	}
@@ -533,7 +537,7 @@ func Fetch(ctx context.Context, in FetchInput) (err error) {
 	if !complete {
 		var rc io.ReadCloser
 		if have > 0 {
-			rc, err = in.Ranger.GetRange(ctx, name, have)
+			rc, err = in.Ranger.GetRange(ports.WithExpectedSize(ctx, max-have), name, have)
 			if errors.Is(err, ports.ErrRangeNotSatisfiable) {
 				rc, err, have = nil, nil, 0 // a stale partial longer than the object: start again
 			}
@@ -546,7 +550,7 @@ func Fetch(ctx context.Context, in FetchInput) (err error) {
 				return err
 			}
 			have = 0
-			if rc, err = in.Reader.Get(ctx, name); err != nil {
+			if rc, err = in.Reader.Get(ports.WithExpectedSize(ctx, max), name); err != nil {
 				return err
 			}
 		}

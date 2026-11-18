@@ -144,6 +144,8 @@ type txn struct {
 	prep     *coldPrep
 	probe    bool
 	coldNeed int
+	// extra are audit events added to the row of this transaction's writes.
+	extra [][]any
 }
 
 // fetch reads the record row for ref, or ports.ErrNotFound.
@@ -547,6 +549,7 @@ func (t *txn) apply() (*Head, error) {
 	if err != nil {
 		return nil, err
 	}
+	events = append(events, t.extra...)
 	head, err := appendAudit(t.ctx, t.q, t.s.ws, t.s.keys, auditUpdate, now, prev, events, entries, nil)
 	if err != nil {
 		return nil, err
@@ -1094,6 +1097,11 @@ func (s *Store) View(ctx context.Context, fn func(ports.Reader) error) error {
 // nothing is written. A second writer on the same file waits up to the busy
 // timeout, then fails with ports.ErrConflict.
 func (s *Store) Update(ctx context.Context, fn func(ports.Writer) error) error {
+	return s.updateExtra(ctx, fn, nil)
+}
+
+// updateExtra is Update with extra audit events recorded in the row of the writes.
+func (s *Store) updateExtra(ctx context.Context, fn func(ports.Writer) error, extra [][]any) error {
 	if err := s.writable(); err != nil {
 		return err
 	}
@@ -1118,7 +1126,7 @@ func (s *Store) Update(ctx context.Context, fn func(ports.Writer) error) error {
 			if err := s.catchUp(ctx, q); err != nil {
 				return nil, err
 			}
-			t := &txn{s: s, ctx: ctx, q: q, writable: true, ops: map[ports.Ref]*op{}, prep: prep, probe: prep == nil}
+			t := &txn{s: s, ctx: ctx, q: q, writable: true, ops: map[ports.Ref]*op{}, prep: prep, probe: prep == nil, extra: extra}
 			defer t.discard()
 			if err := fn(t); err != nil {
 				return nil, err

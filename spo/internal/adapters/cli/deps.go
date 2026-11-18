@@ -229,7 +229,12 @@ type OpenOptions struct {
 type RestoreOptions struct {
 	// ExpectedSHA256, when set, is checked on the restore's own private copy of
 	// the backup before anything else is done with it.
-	ExpectedSHA256      []byte
+	ExpectedSHA256 []byte
+	// AcceptLowerCounters lets a restore of an older backup go on although the
+	// counters of the workspace it replaces cannot be read.
+	AcceptLowerCounters bool
+	// Report, when set, is filled in with what the counter rule did.
+	Report              *RestoreReport
 	Overwrite           bool
 	AllowOlder          bool
 	AllowOtherWorkspace bool
@@ -237,6 +242,17 @@ type RestoreOptions struct {
 	// weaker than the workspace's replaces it only when both are given.
 	AllowWeakerPolicy bool
 	CurrentRecovery   *FactorOpen
+}
+
+// RestoreReport says what a restore did about the counter rule.
+type RestoreReport struct {
+	Carried       []CarriedCounter
+	LowerAccepted bool
+}
+
+// CarriedCounter is one counter carried forward from the replaced workspace.
+type CarriedCounter struct {
+	Pool, Kind, Live, Backup string
 }
 
 // Head is the end of a workspace's audit chain.

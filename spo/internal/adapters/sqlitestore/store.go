@@ -1136,7 +1136,7 @@ func checkHead(ctx context.Context, db dbq, path string, ws []byte, readOnly boo
 	case herr != nil || !bytes.Equal(hws, ws):
 		if !o.AcceptRollback {
 			if n, ok := adoptSidecar(path, ws, own); ok {
-				return own, append(notices, n), true, true, nil
+				return own, append(notices, n+", so it was adopted as the head file"), true, true, nil
 			} else if n != "" {
 				return Head{}, notices, false, false, fmt.Errorf("%w (%s)", ErrHeadMismatch, n)
 			}
@@ -1150,7 +1150,7 @@ func checkHead(ctx context.Context, db dbq, path string, ws []byte, readOnly boo
 	}
 	if !ok && !o.AcceptRollback {
 		if n, adopt := adoptSidecar(path, ws, own); adopt {
-			return own, append(notices, n), true, true, nil
+			return own, append(notices, n+", so it was adopted as the head file"), true, true, nil
 		} else if n != "" {
 			return Head{}, notices, false, false, fmt.Errorf("%w (head file: sequence %d, file ends at sequence %d; %s)", ErrRolledBack, hh.Seq, own.Seq, n)
 		}
@@ -1188,7 +1188,7 @@ func adoptSidecar(path string, ws []byte, own Head) (msg string, adopt bool) {
 	case !sh.equal(own):
 		return "the file " + filepath.Base(sp) + " does not name this file's own head and was ignored", false
 	}
-	return "an interrupted restore left " + filepath.Base(sp) + "; it names this file's own head, so it was adopted as the head file", true
+	return "an interrupted restore left " + filepath.Base(sp) + "; it names this file's own head", true
 }
 
 // FactorInfo describes one factor of a slot: its kind (unlock's names), its id,

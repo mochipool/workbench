@@ -149,3 +149,55 @@ func TestEntriesRemoveAndSymlinkParent(t *testing.T) {
 		t.Fatal("directory not removed")
 	}
 }
+
+// G2: an existing own file with a loose mode is made private.
+//
+// spec: SPO-Xbackup-SEC-008
+func TestOpenTightensTheModeOfAnExistingFile(t *testing.T) {
+	d, root := newScratch(t)
+	p := filepath.Join(root, "loose")
+	os.WriteFile(p, []byte("x"), 0o644)
+	os.Chmod(p, 0o644)
+	f, err := d.Open("loose")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if st, _ := os.Stat(p); st.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %o", st.Mode().Perm())
+	}
+}
+
+// G2: the directory must be owned by the user running the process.
+//
+// spec: SPO-Xbackup-SEC-012
+func TestDirectoryOwnerIsChecked(t *testing.T) {
+	st, err := os.Stat(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ownedBy(st, os.Geteuid()) {
+		t.Fatal("the user's own directory is not owned by the user")
+	}
+	if ownedBy(st, os.Geteuid()+1) {
+		t.Fatal("a directory owned by another user was accepted")
+	}
+}
+
+// Remove never goes through a link: a name below a symbolic link removes
+// nothing.
+func TestRemoveBelowASymlinkRemovesNothing(t *testing.T) {
+	d, root := newScratch(t)
+	outside := t.TempDir()
+	os.WriteFile(filepath.Join(outside, "keep"), []byte("x"), 0o600)
+	os.Symlink(outside, filepath.Join(root, "linkdir"))
+	if err := d.Remove("linkdir/keep"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "keep")); err != nil {
+		t.Fatal("removed through the link")
+	}
+	if _, err := os.Lstat(filepath.Join(root, "linkdir")); err != nil {
+		t.Fatal("the link itself was removed; the comment and the code must agree on nothing being removed")
+	}
+}

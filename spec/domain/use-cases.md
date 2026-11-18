@@ -14,7 +14,7 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 
 | Use case | Specs | Requirements |
 | --- | --- | --- |
-| `BackupToSink` | [`Xbackup`](../extensions/Xbackup.md) | 39 |
+| `BackupToSink` | [`Xbackup`](../extensions/Xbackup.md) | 44 |
 | `ConvertKeptKey` | [`Xcustody`](../extensions/Xcustody.md) | 100 |
 | `DiscoverSources` | [`Xmulti`](../extensions/Xmulti.md) | 55 |
 | `EnrolFactor` | [`Xunlock`](../extensions/Xunlock.md) | 81 |
@@ -25,7 +25,7 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 | `ImportWorkspace` | [`Pfiles`](../upstream/patterns/Pfiles.md), [`Xmulti`](../extensions/Xmulti.md) | 106 |
 | `ProtectSigningKey` | [`01protectKey`](../upstream/scripts/01_protectKey.md) | 29 |
 | `RequestSignatures` | [`Xparty`](../extensions/Xparty.md) | 69 |
-| `RestoreFromSink` | [`Xbackup`](../extensions/Xbackup.md) | 39 |
+| `RestoreFromSink` | [`Xbackup`](../extensions/Xbackup.md) | 44 |
 | `ReviewSigningRequest` | [`Xparty`](../extensions/Xparty.md) | 69 |
 | `RevokeParty` | [`Xparty`](../extensions/Xparty.md) | 69 |
 | `RotateParty` | [`Xparty`](../extensions/Xparty.md) | 69 |
@@ -231,4 +231,4 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 | [`25a_genAction`](../upstream/scripts/25a_genAction.md) | Generate a governance action file | governance | 75 | draft |
 | [`25b_regAction`](../upstream/scripts/25b_regAction.md) | Submit governance actions | governance, transaction-construction | 71 | draft |
 
-Totals: 74 specs, 2697 requirements, 95 use cases.
+Totals: 74 specs, 2702 requirements, 95 use cases.

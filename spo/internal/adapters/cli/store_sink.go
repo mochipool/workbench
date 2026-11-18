@@ -14,11 +14,6 @@ import (
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
-// errSinkOlder is the refusal of --allow-older with --sink: the built restore
-// swaps the whole file, so an older backup lowers the operational-certificate
-// and KES counters (a concern in docs/development).
-const errSinkOlder = "--allow-older is not supported with --sink: an older backup would lower the operational-certificate counters of this workspace, and a restore does not guard against that yet. Nothing was downloaded."
-
 const pinAdvice = "Keep this pin somewhere other than the sink (a note, another host): a restore needs it, and it is what shows that the sink was not rolled back or tampered with."
 
 // safeErr prints an error with everything a terminal could act on escaped. Text
