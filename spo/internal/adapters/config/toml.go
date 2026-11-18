@@ -2,23 +2,19 @@ package config
 
 import (
 	"fmt"
-	"strconv"
-	"strings"
-	"unicode/utf8"
+
+	"github.com/mochipool/workbench/spo/internal/platform/tomlsubset"
 )
 
-// The workspace file is a small subset of TOML, parsed here because the
-// standard library has none and the schema needs nothing more. Supported:
-//
-//   - blank lines and '#' comments (a whole line, or after a value)
-//   - [section] headers (one level, bare names)
-//   - key = value with bare keys (letters, digits, '-', '_')
-//   - values: basic strings in double quotes with the escapes \" \\ \n \t,
-//     decimal integers, and the booleans true and false
-//
-// Anything else (arrays, inline tables, dotted keys, literal or multi-line
-// strings, floats, dates, hexadecimal integers) is an error, not a silent
-// misreading. A key that occurs twice in a section is an error.
+// The workspace file is the subset of TOML that internal/platform/tomlsubset
+// parses, shared with the relay's configuration file. This dialect has:
+// [section] headers (one level, bare names), key = value with bare keys, and
+// values that are basic strings with the escapes \" \\ \n \t, decimal integers
+// and the booleans true and false. Arrays, arrays of tables, inline tables,
+// dotted keys, literal or multi-line strings, floats, dates and hexadecimal
+// integers are errors, not silent misreadings, and so is every control
+// character but tab (SPO-Xmailbox-SEC-019). A key that occurs twice in a
+// section is an error.
 
 type valueKind int
 
@@ -50,165 +46,41 @@ type section struct {
 
 type document struct{ sections []*section }
 
+var dialect = tomlsubset.Options{Escapes: "nt"}
+
 func parseDocument(data []byte) (*document, error) {
-	if !utf8.Valid(data) {
-		return nil, fmt.Errorf("not valid UTF-8")
+	raw, err := tomlsubset.Parse(data, dialect)
+	if err != nil {
+		return nil, err
 	}
 	doc := &document{}
-	cur := &section{}
-	doc.sections = append(doc.sections, cur)
-	seenSection := map[string]bool{}
-	seenKey := map[string]bool{}
-	for i, raw := range strings.Split(string(data), "\n") {
-		n := i + 1
-		line := strings.TrimSpace(strings.TrimSuffix(raw, "\r"))
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if strings.HasPrefix(line, "[") {
-			name, rest, err := parseHeader(line)
-			if err != nil {
-				return nil, fmt.Errorf("line %d: %w", n, err)
+	for _, t := range raw.Tables {
+		sec := &section{name: t.Name, line: t.Line}
+		for _, e := range t.Entries {
+			v := value{line: e.Val.Line}
+			switch e.Val.Kind {
+			case tomlsubset.String:
+				v.kind, v.s = kindString, e.Val.Str
+			case tomlsubset.Int:
+				v.kind, v.i = kindInt, e.Val.Int
+			case tomlsubset.Bool:
+				v.kind, v.b = kindBool, e.Val.Bool
 			}
-			if err := onlyComment(rest); err != nil {
-				return nil, fmt.Errorf("line %d: %w", n, err)
-			}
-			if seenSection[name] {
-				return nil, fmt.Errorf("line %d: section [%s] occurs twice", n, name)
-			}
-			seenSection[name] = true
-			cur = &section{name: name, line: n}
-			doc.sections = append(doc.sections, cur)
-			seenKey = map[string]bool{}
-			continue
+			sec.entries = append(sec.entries, entry{e.Key, v})
 		}
-		key, rest, ok := strings.Cut(line, "=")
-		if !ok {
-			return nil, fmt.Errorf("line %d: expected key = value or [section]", n)
-		}
-		key = strings.TrimSpace(key)
-		if !validBare(key) {
-			return nil, fmt.Errorf("line %d: %q is not a plain key (letters, digits, '-' and '_' only)", n, key)
-		}
-		if seenKey[key] {
-			return nil, fmt.Errorf("line %d: key %q occurs twice", n, key)
-		}
-		seenKey[key] = true
-		v, err := parseValue(strings.TrimSpace(rest), n)
-		if err != nil {
-			return nil, fmt.Errorf("line %d: key %q: %w", n, key, err)
-		}
-		cur.entries = append(cur.entries, entry{key, v})
+		doc.sections = append(doc.sections, sec)
 	}
 	return doc, nil
 }
 
-func validBare(k string) bool {
-	if k == "" {
-		return false
-	}
-	for _, r := range k {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
-		default:
-			return false
-		}
-	}
-	return true
-}
+// quoter writes strings for Marshal and remembers the first one the file cannot
+// hold, with the field that has it.
+type quoter struct{ err error }
 
-func parseHeader(line string) (name, rest string, err error) {
-	if strings.HasPrefix(line, "[[") {
-		return "", "", fmt.Errorf("arrays of tables are not supported")
+func (q *quoter) quote(field, s string) string {
+	out, err := tomlsubset.Quote(s)
+	if err != nil && q.err == nil {
+		q.err = fmt.Errorf("%s %w", field, err)
 	}
-	end := strings.IndexByte(line, ']')
-	if end < 0 {
-		return "", "", fmt.Errorf("section header is not closed")
-	}
-	name = strings.TrimSpace(line[1:end])
-	if !validBare(name) {
-		return "", "", fmt.Errorf("section name %q is not a plain name (dotted and quoted names are not supported)", name)
-	}
-	return name, line[end+1:], nil
-}
-
-func onlyComment(rest string) error {
-	rest = strings.TrimSpace(rest)
-	if rest == "" || strings.HasPrefix(rest, "#") {
-		return nil
-	}
-	return fmt.Errorf("unexpected text %q after the value", rest)
-}
-
-func parseValue(s string, line int) (value, error) {
-	switch {
-	case s == "":
-		return value{}, fmt.Errorf("missing value")
-	case s[0] == '"':
-		str, rest, err := parseString(s)
-		if err != nil {
-			return value{}, err
-		}
-		if err := onlyComment(rest); err != nil {
-			return value{}, err
-		}
-		return value{kind: kindString, s: str, line: line}, nil
-	}
-	tok, rest, _ := strings.Cut(s, "#")
-	_ = rest
-	tok = strings.TrimSpace(tok)
-	switch tok {
-	case "true":
-		return value{kind: kindBool, b: true, line: line}, nil
-	case "false":
-		return value{kind: kindBool, b: false, line: line}, nil
-	}
-	if strings.HasPrefix(tok, "[") || strings.HasPrefix(tok, "{") || strings.HasPrefix(tok, "'") {
-		return value{}, fmt.Errorf("arrays, inline tables and literal strings are not supported")
-	}
-	if strings.ContainsAny(tok, " \t") {
-		return value{}, fmt.Errorf("unexpected text after the value")
-	}
-	i, err := strconv.ParseInt(tok, 10, 64)
-	if err != nil || strings.HasPrefix(tok, "+") || (len(tok) > 1 && strings.HasPrefix(strings.TrimPrefix(tok, "-"), "0")) {
-		return value{}, fmt.Errorf("%q is not a string, a decimal integer or a boolean", tok)
-	}
-	return value{kind: kindInt, i: i, line: line}, nil
-}
-
-// parseString reads a basic string at the start of s and returns the rest.
-func parseString(s string) (string, string, error) {
-	var b strings.Builder
-	for i := 1; i < len(s); i++ {
-		switch c := s[i]; c {
-		case '"':
-			return b.String(), s[i+1:], nil
-		case '\\':
-			i++
-			if i >= len(s) {
-				return "", "", fmt.Errorf("string is not closed")
-			}
-			switch s[i] {
-			case '"', '\\':
-				b.WriteByte(s[i])
-			case 'n':
-				b.WriteByte('\n')
-			case 't':
-				b.WriteByte('\t')
-			default:
-				return "", "", fmt.Errorf("unsupported escape \\%c", s[i])
-			}
-		default:
-			if c < 0x20 || c == 0x7f {
-				return "", "", fmt.Errorf("control character in string")
-			}
-			b.WriteByte(c)
-		}
-	}
-	return "", "", fmt.Errorf("string is not closed")
-}
-
-func quote(s string) string {
-	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`, "\t", `\t`)
-	return `"` + r.Replace(s) + `"`
+	return out
 }

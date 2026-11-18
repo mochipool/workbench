@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/mochipool/workbench/spo/internal/platform/tomlsubset"
 )
 
 // FileName is the configuration file in a workspace directory.
@@ -520,26 +522,27 @@ func Marshal(c Config) ([]byte, error) {
 		return nil, err
 	}
 	var b strings.Builder
+	var q quoter
 	b.WriteString("# spo workspace configuration. No secrets belong here.\n")
-	fmt.Fprintf(&b, "network = %s\nmode = %s\n", quote(c.Network), quote(c.Mode))
+	fmt.Fprintf(&b, "network = %s\nmode = %s\n", q.quote("network", c.Network), q.quote("mode", c.Mode))
 	if c.Koios != nil {
 		b.WriteString("\n[koios]\n")
 		if c.Koios.URL != "" {
-			fmt.Fprintf(&b, "url = %s\n", quote(c.Koios.URL))
+			fmt.Fprintf(&b, "url = %s\n", q.quote("[koios] url", c.Koios.URL))
 		}
 	}
 	if c.Blockfrost != nil {
 		b.WriteString("\n[blockfrost]\n")
 		if c.Blockfrost.URL != "" {
-			fmt.Fprintf(&b, "url = %s\n", quote(c.Blockfrost.URL))
+			fmt.Fprintf(&b, "url = %s\n", q.quote("[blockfrost] url", c.Blockfrost.URL))
 		}
 		if c.Blockfrost.TokenRecord != "" {
-			fmt.Fprintf(&b, "token_record = %s\n", quote(c.Blockfrost.TokenRecord))
+			fmt.Fprintf(&b, "token_record = %s\n", q.quote("[blockfrost] token_record", c.Blockfrost.TokenRecord))
 		}
 	}
 	if n := c.Node; n != nil {
 		b.WriteString("\n[node]\n")
-		fmt.Fprintf(&b, "address = %s\n", quote(n.Address))
+		fmt.Fprintf(&b, "address = %s\n", q.quote("[node] address", n.Address))
 		if n.TimeoutSeconds > 0 {
 			fmt.Fprintf(&b, "timeout_seconds = %d\n", n.TimeoutSeconds)
 		}
@@ -547,7 +550,7 @@ func Marshal(c Config) ([]byte, error) {
 	if len(c.Order) > 0 || c.SameHostOK {
 		b.WriteString("\n[provider]\n")
 		if len(c.Order) > 0 {
-			fmt.Fprintf(&b, "order = %s\n", quote(strings.Join(c.Order, ",")))
+			fmt.Fprintf(&b, "order = %s\n", q.quote("[provider] order", strings.Join(c.Order, ",")))
 		}
 		if c.SameHostOK {
 			b.WriteString("same_host_ok = true\n")
@@ -560,17 +563,17 @@ func Marshal(c Config) ([]byte, error) {
 		}
 		for _, kv := range [][2]string{{"min_ledger", h.MinLedger}, {"min_trezor", h.MinTrezor}, {"min_keystone", h.MinKeystone}} {
 			if kv[1] != "" {
-				fmt.Fprintf(&b, "%s = %s\n", kv[0], quote(kv[1]))
+				fmt.Fprintf(&b, "%s = %s\n", kv[0], q.quote("[hardware] "+kv[0], kv[1]))
 			}
 		}
 	}
 	if p := c.Party; p != nil {
 		b.WriteString("\n[party]\n")
 		if p.Inbox != "" {
-			fmt.Fprintf(&b, "inbox = %s\n", quote(p.Inbox))
+			fmt.Fprintf(&b, "inbox = %s\n", q.quote("[party] inbox", p.Inbox))
 		}
 		if p.Outbox != "" {
-			fmt.Fprintf(&b, "outbox = %s\n", quote(p.Outbox))
+			fmt.Fprintf(&b, "outbox = %s\n", q.quote("[party] outbox", p.Outbox))
 		}
 	}
 	if t := c.Tailcat; t != nil {
@@ -579,20 +582,23 @@ func Marshal(c Config) ([]byte, error) {
 			fmt.Fprintf(&b, "port = %d\n", t.Port)
 		}
 		if t.DERPMapURL != "" {
-			fmt.Fprintf(&b, "derp_map_url = %s\n", quote(t.DERPMapURL))
+			fmt.Fprintf(&b, "derp_map_url = %s\n", q.quote("[tailcat] derp_map_url", t.DERPMapURL))
 		}
 	}
 	if c.Registry != nil {
 		b.WriteString("\n[registry]\n")
 		if c.Registry.URL != "" {
-			fmt.Fprintf(&b, "url = %s\n", quote(c.Registry.URL))
+			fmt.Fprintf(&b, "url = %s\n", q.quote("[registry] url", c.Registry.URL))
 		}
 	}
 	if c.Handles != nil {
 		b.WriteString("\n[handles]\n")
 		if c.Handles.URL != "" {
-			fmt.Fprintf(&b, "url = %s\n", quote(c.Handles.URL))
+			fmt.Fprintf(&b, "url = %s\n", q.quote("[handles] url", c.Handles.URL))
 		}
+	}
+	if q.err != nil {
+		return nil, fmt.Errorf("the configuration cannot be saved: %w", q.err)
 	}
 	return []byte(b.String()), nil
 }
@@ -667,17 +673,6 @@ func (c Config) blockfrostOverride() string {
 }
 
 // hasActiveChar is true for a string with a character a terminal acts on or
-// that changes what a reader sees: C0 controls, DEL, C1 controls, and the
-// bidirectional controls and isolates (U+061C, U+200E, U+200F, U+202A to
-// U+202E, U+2066 to U+2069), and the line and paragraph separators.
-func hasActiveChar(s string) bool {
-	for _, r := range s {
-		switch {
-		case r < 0x20, r >= 0x7f && r <= 0x9f:
-			return true
-		case r == 0x061c, r == 0x200e, r == 0x200f, r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069, r == 0x2028, r == 0x2029:
-			return true
-		}
-	}
-	return false
-}
+// that changes what a reader sees. The set is tomlsubset.ActiveRune, the one the
+// file's parser and writer use.
+func hasActiveChar(s string) bool { return tomlsubset.HasActive(s) }
