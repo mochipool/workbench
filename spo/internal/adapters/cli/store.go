@@ -447,7 +447,7 @@ one in mode offline (change it with: spo mode set).`,
 	}
 	restore.Flags().StringVar(&sinkURL, "sink", "", "restore from a sink instead of a file: s3://bucket/prefix or dir:/absolute/path (needs --pin)")
 	restore.Flags().StringVar(&pinText, "pin", "", "the pin that store backup --sink printed (workspace id:head sequence:head hash:file sha256), with --sink")
-	restore.Flags().BoolVar(&acceptLower, "accept-lower-counters", false, "with --allow-older, go on although the counters of the workspace being replaced cannot be read (damaged, or its credentials lost): the restored workspace may hold LOWER operational certificate and KES counters. Never applies when that workspace can be opened")
+	restore.Flags().BoolVar(&acceptLower, "accept-lower-counters", false, "go on although the counters of the workspace being replaced cannot be fully read because its file is unusable (it does not parse, fails verification, or is older than its head file): the restored workspace may hold LOWER operational certificate and KES counters. Never honoured for a credential problem, and what can be read is still carried")
 	restore.Flags().BoolVar(&force, "force", false, "replace an existing workspace")
 	restore.Flags().BoolVar(&older, "allow-older", false, "allow a backup that is older than the workspace or has diverged from it (discards the changes made since; the operational certificate and KES counters of the workspace are carried forward, never lowered)")
 	restore.Flags().BoolVar(&other, "allow-other-workspace", false, "DANGEROUS: allow a backup of a different workspace to replace this one; the current workspace and everything in it is lost (needs --force)")
@@ -486,6 +486,9 @@ func (a *app) printCounterReport(r RestoreReport) {
 		for _, c := range r.Carried {
 			fmt.Fprintf(a.d.Out, "  pool %s: %s is %s in the replaced workspace (the backup had %s); kept %s\n", textsafe.Quote(c.Pool), c.Kind, c.Live, c.Backup, c.Live)
 		}
+	}
+	if r.HeadAhead {
+		fmt.Fprintln(a.d.Err, "warning: the head file of the replaced workspace is AHEAD of its file (it was rolled back, or the head file was rewritten). The counters in the file were carried as a floor, but the true counters may be higher still. Before issuing an operational certificate for any pool, check its counter on chain (spo pool opcert counter POOL); an audit event in the restored workspace records this.")
 	}
 	if r.LowerAccepted {
 		fmt.Fprintln(a.d.Err, "warning: --accept-lower-counters: the replaced workspace could not be opened, so its operational certificate and KES counters were NOT compared. The restored workspace may hold lower counters. Before issuing an operational certificate for any pool, check its counter on chain (spo pool opcert counter POOL) and give the certificate the next number; an audit event in the restored workspace records this.")

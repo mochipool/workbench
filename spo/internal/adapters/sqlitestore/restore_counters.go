@@ -3,6 +3,7 @@ package sqlitestore
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -54,6 +55,10 @@ type RestoreReport struct {
 	// LowerAccepted: the replaced workspace could not be opened and
 	// AcceptLowerCounters let the restore go on without comparing.
 	LowerAccepted bool
+	// HeadAhead: the replaced workspace's head file was ahead of its file (rolled
+	// back, or the head file was rewritten): the counters in the file were carried
+	// as a floor, and the true counters may be higher still.
+	HeadAhead bool
 }
 
 // CarriedCounter is one counter carried forward.
@@ -80,8 +85,9 @@ type counterSet struct {
 	cur   map[identity.Ref]int
 	next  map[identity.Ref]int
 	names map[identity.Ref]string
-	// kesKeys are the numbers of the KES verification keys each pool holds.
-	kesKeys map[identity.Ref]map[int]bool
+	// kesKeys are the numbers of the KES verification keys each pool holds, with a
+	// hash of the key record: a number is "held" only with the same key material.
+	kesKeys map[identity.Ref]map[int][32]byte
 }
 
 func (c counterSet) poolName(a identity.Ref) string {
@@ -93,7 +99,7 @@ func (c counterSet) poolName(a identity.Ref) string {
 
 // readCounterSet reads the counters of every pool of an open store.
 func readCounterSet(ctx context.Context, s *Store, what string) (counterSet, error) {
-	cs := counterSet{issue: map[identity.Ref]issueC{}, cur: map[identity.Ref]int{}, next: map[identity.Ref]int{}, names: map[identity.Ref]string{}, kesKeys: map[identity.Ref]map[int]bool{}}
+	cs := counterSet{issue: map[identity.Ref]issueC{}, cur: map[identity.Ref]int{}, next: map[identity.Ref]int{}, names: map[identity.Ref]string{}, kesKeys: map[identity.Ref]map[int][32]byte{}}
 	err := s.View(ctx, func(r ports.Reader) error {
 		rl, ok := r.(ports.RecordLister)
 		if !ok {
@@ -113,10 +119,14 @@ func readCounterSet(ctx context.Context, s *Store, what string) (counterSet, err
 		}
 		if ks, err := refs(ports.KesVKey); err == nil {
 			for _, ref := range ks {
-				if cs.kesKeys[ref.Anchor] == nil {
-					cs.kesKeys[ref.Anchor] = map[int]bool{}
+				b, gerr := r.Get(ref)
+				if gerr != nil {
+					continue // a key record that cannot be read is not "held"
 				}
-				cs.kesKeys[ref.Anchor][ref.Num] = true
+				if cs.kesKeys[ref.Anchor] == nil {
+					cs.kesKeys[ref.Anchor] = map[int][32]byte{}
+				}
+				cs.kesKeys[ref.Anchor][ref.Num] = sha256.Sum256(b)
 			}
 		}
 		for _, k := range []ports.Kind{ports.NodeCounter, ports.KesCounter, ports.KesCounterNext} {
@@ -227,8 +237,12 @@ func planCarry(live, bak counterSet) ([]carry, error) {
 		// cur == next. When the restored workspace does not hold that key, the next
 		// number must move past it: generating at the same number again would make a
 		// different key with the same number as the one already exported.
-		if cur, ok := live.cur[a]; ok && cur == ln && !bak.kesKeys[a][cur] {
-			ln = cur + 1
+		if cur, ok := live.cur[a]; ok && cur == ln {
+			lh, lok := live.kesKeys[a][cur]
+			bh, bok := bak.kesKeys[a][cur]
+			if !(lok && bok && lh == bh) { // the same number is not the same key
+				ln = cur + 1
+			}
 		}
 		bn, bhave := bak.effNext(a)
 		if bhave && ln <= bn {
@@ -272,38 +286,38 @@ func prepareCounters(ctx context.Context, dest, tmpPath string, cred credential,
 	if err != nil {
 		return nil, err
 	}
+	// Every "return nil, nil" below is for a destination that the ordinary checks
+	// (checkReplace, under the lock, before anything is replaced) refuse anyway, and
+	// is justified at the line. No other path leaves a destination without a plan.
 	if ierr != nil {
 		if !isStructural(ierr) {
 			return nil, fmt.Errorf("the workspace to be replaced could not be read: %w", ierr)
 		}
 		if !o.AllowOtherWorkspace {
-			return nil, nil // checkReplace refuses a destination that is no workspace
+			// the destination is not a workspace and the operator did not say to
+			// replace it: checkReplace refuses (ErrOtherWorkspace), replacing nothing
+			return nil, nil
 		}
 		return damagedCounters(ctx, tmpPath, cred, o, "the file to be replaced does not parse as a workspace")
 	}
 	same := bytes.Equal(dws, bws)
 	if !same && !o.AllowOtherWorkspace {
-		return nil, nil // checkReplace refuses another workspace
+		// another workspace without the operator's say: checkReplace refuses
+		// (ErrOtherWorkspace), replacing nothing
+		return nil, nil
 	}
-	st, how, oerr := openDestinationReadOnly(ctx, dest, cred, o)
+	st, headAhead, how, oerr := openDestinationReadOnly(ctx, dest, cred, o)
 	switch how {
 	case openOK:
-	case openNeedsCredential:
-		if same && !o.AllowOlder {
-			return nil, nil // an older backup; checkReplace refuses it
-		}
-		return nil, oerr
-	case openRolledBack:
-		if same && !o.AllowOlder {
-			return nil, nil // checkReplace refuses it as an older backup
-		}
-		return damagedCounters(ctx, tmpPath, cred, o, oerr.Error())
 	case openStructural:
 		return damagedCounters(ctx, tmpPath, cred, o, oerr.Error())
-	default:
+	default: // a credential problem, a busy file, an I/O error, a refused factor
 		return nil, oerr
 	}
 	defer st.Close()
+	if headAhead && !o.AcceptLowerCounters {
+		return nil, fmt.Errorf("%w (%s). The file itself unlocked and its counters can be carried as a floor, but the head file says the workspace was further along, so its true counters may be higher than the file's. Nothing was replaced. --accept-lower-counters goes on anyway: the counters in the file are carried, a warning is printed and an audit event recorded, and you must check the counter of every pool on chain before issuing an operational certificate", ErrCountersUnknown, headAheadWhy)
+	}
 	liveHead := st.head
 	live, err := readCounterSet(ctx, st, "workspace to be replaced")
 	if err != nil {
@@ -348,12 +362,21 @@ func prepareCounters(ctx context.Context, dest, tmpPath string, cred credential,
 		}
 		plan.carried = true
 	}
+	if headAhead {
+		plan.report.HeadAhead = true
+		if err := bst.auditNote(ctx, [][]any{{"counters-floor", "the head file of the replaced workspace was ahead of its file, so the counters carried are a floor and the true counters may be higher; check every pool's counter on chain before issuing an operational certificate"}}); err != nil {
+			return nil, err
+		}
+		plan.carried = true
+	}
 	if err := settleCopy(ctx, bst, tmpPath); err != nil {
 		return nil, err
 	}
 	closed = true
 	return plan, nil
 }
+
+const headAheadWhy = "the workspace file is older than its head file, or the head file does not match it: it was rolled back, or the head file was rewritten"
 
 // settleCopy folds the write-ahead log of the private copy into the file, closes
 // the store and removes the side files of the copy (its head file and lock).
@@ -407,9 +430,6 @@ const (
 	openNeedsCredential
 	// openStructural: the file does not parse as a workspace or fails verification.
 	openStructural
-	// openRolledBack: the file is older than its head file and no restore sidecar
-	// explains it: the counters of the recorded state are not in the file.
-	openRolledBack
 	// openOther: a busy file, an I/O error, a factor that was refused: returned as
 	// it is, and never satisfies --accept-lower-counters.
 	openOther
@@ -421,7 +441,14 @@ const (
 // does not apply.
 var ErrCountersNeedCredential = errors.New("sqlitestore: the counters of the workspace to be replaced cannot be compared")
 
-func needCredential(detail string) error {
+func needCredential(detail string, cause error) error {
+	return needCredentialErr(detail, cause)
+}
+
+func needCredentialErr(detail string, cause error) error {
+	if cause != nil {
+		return fmt.Errorf("%w: %s. Present that workspace's own recovery key (--recovery-key-in-fd N, or answer the prompt; under hardware also --current-recovery-device and --recovery-pin-fd). If its credentials are lost, move workspace.spo aside and restore into the empty directory: nothing can then be compared, so check every pool's counter on chain before issuing an operational certificate; nothing was replaced: %w", ErrCountersNeedCredential, detail, cause)
+	}
 	return fmt.Errorf("%w: %s. Present that workspace's own recovery key (--recovery-key-in-fd N, or answer the prompt; under hardware also --current-recovery-device and --recovery-pin-fd). If its credentials are lost, move workspace.spo aside and restore into the empty directory: nothing can then be compared, so check every pool's counter on chain before issuing an operational certificate; nothing was replaced", ErrCountersNeedCredential, detail)
 }
 
@@ -444,77 +471,76 @@ func isStructural(err error) bool {
 	return strings.Contains(m, "no such table") || strings.Contains(m, "file is not a database") || strings.Contains(m, "malformed")
 }
 
-// openDest opens the destination read-only. A file older than its head file is
-// read as it is only when a restore sidecar that names the file's own head
-// explains it (a restore that died past the swap, whose carried counters are in
-// the file); otherwise it is ErrRolledBack.
-func openDest(dest string, cred credential) (*Store, error) {
-	st, err := open(dest, cred, true, OpenOptions{})
+// openDest opens the destination read-only. A file older than its head file (or
+// whose head file does not match it) is read as it is, with headAhead set, when
+// the credential unlocked it and only that check failed; when a restore sidecar
+// that names the file's own head explains it (a restore that died past the swap,
+// whose carried counters are in the file) headAhead is false.
+func openDest(dest string, cred credential) (st *Store, headAhead bool, err error) {
+	st, err = open(dest, cred, true, OpenOptions{})
 	if err == nil {
-		return st, nil
+		return st, false, nil
 	}
 	if errors.Is(err, ErrRolledBack) || errors.Is(err, ErrHeadMismatch) {
+		explained := false
 		if ws, own, ierr := inspectFile(context.Background(), dest); ierr == nil {
-			if _, ok := adoptSidecar(dest, ws, own); ok {
-				return open(dest, cred, true, OpenOptions{AcceptRollback: true})
-			}
+			_, explained = adoptSidecar(dest, ws, own)
 		}
+		st, err = open(dest, cred, true, OpenOptions{AcceptRollback: true})
+		return st, !explained, err
 	}
-	return nil, err
+	return nil, false, err
 }
 
 // openDestinationReadOnly opens the destination read-only with the credential
 // presented for the backup and, when that credential does not open it (its slots
 // changed since the backup), with the recovery material of the current workspace
 // that --allow-weaker-policy also takes (CurrentRecovery), asked for only then.
-func openDestinationReadOnly(ctx context.Context, dest string, cred credential, o RestoreOptions) (*Store, openHow, error) {
+func openDestinationReadOnly(ctx context.Context, dest string, cred credential, o RestoreOptions) (*Store, bool, openHow, error) {
 	classify := func(err error) (openHow, error) {
-		switch {
-		case errors.Is(err, ErrRolledBack) || errors.Is(err, ErrHeadMismatch):
-			return openRolledBack, errors.New("the workspace file is older than its head file: the counters of the state the head file records are not in the file")
-		case isStructural(err):
+		if isStructural(err) {
 			return openStructural, fmt.Errorf("the file to be replaced fails to open as a workspace (%v)", err)
 		}
 		return openOther, err
 	}
-	st, err := openDest(dest, cred)
+	st, ahead, err := openDest(dest, cred)
 	if err == nil {
-		return st, openOK, nil
+		return st, ahead, openOK, nil
 	}
 	if !wrongCredential(err) {
 		how, e := classify(err)
-		return nil, how, e
+		return nil, false, how, e
 	}
 	in := o.CurrentRecovery
 	if in == nil || (in.Recovery == nil && in.Source == nil) {
-		return nil, openNeedsCredential, needCredential("the credential presented for the backup does not open the workspace to be replaced (its key slots changed since the backup)")
+		return nil, false, openNeedsCredential, needCredential("the credential presented for the backup does not open the workspace to be replaced (its key slots changed since the backup)", nil)
 	}
 	pol, _, derr := Describe(dest)
 	if derr != nil {
 		how, e := classify(derr)
-		return nil, how, e
+		return nil, false, how, e
 	}
 	if pol == "standard" {
 		rk, rerr := in.Recovery(ctx)
 		if rerr != nil {
-			return nil, openNeedsCredential, needCredential("the recovery key of the workspace to be replaced could not be read (" + rerr.Error() + ")")
+			return nil, false, openNeedsCredential, needCredential("the recovery key of the workspace to be replaced could not be read", rerr)
 		}
 		defer rk.Destroy()
-		st, err = openDest(dest, credential{kind: seal.SlotRecovery, buf: rk})
+		st, ahead, err = openDest(dest, credential{kind: seal.SlotRecovery, buf: rk})
 	} else {
 		if in.Source == nil {
-			return nil, openNeedsCredential, needCredential("there is no factor source to present the recovery authenticator of the workspace to be replaced")
+			return nil, false, openNeedsCredential, needCredential("there is no factor source to present the recovery authenticator of the workspace to be replaced", nil)
 		}
-		st, err = openDest(dest, credential{kind: credFactors, factors: in})
+		st, ahead, err = openDest(dest, credential{kind: credFactors, factors: in})
 	}
 	if err != nil {
 		if wrongCredential(err) {
-			return nil, openNeedsCredential, needCredential("the recovery material presented does not open the workspace to be replaced")
+			return nil, false, openNeedsCredential, needCredential("the recovery material presented does not open the workspace to be replaced", nil)
 		}
 		how, e := classify(err)
-		return nil, how, e
+		return nil, false, how, e
 	}
-	return st, openOK, nil
+	return st, ahead, openOK, nil
 }
 
 func wrongCredential(err error) bool {

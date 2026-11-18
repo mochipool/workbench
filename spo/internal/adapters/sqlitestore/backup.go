@@ -477,7 +477,7 @@ func checkRestorePolicy(ctx context.Context, dest, newPath string, o RestoreOpti
 		if o.AllowWeakerPolicy && o.AllowOtherWorkspace {
 			return "", nil
 		}
-		return "", fmt.Errorf("%w: the policy of the workspace to be replaced cannot be read (%v), so the backup cannot be compared with it; --allow-weaker-policy together with --allow-other-workspace replaces it anyway", ErrRestoreWeakens, err)
+		return "", fmt.Errorf("%w: the policy of the workspace to be replaced cannot be read (%v), so the backup cannot be compared with it; --allow-weaker-policy together with --allow-other-workspace replaces it anyway, and --accept-lower-counters too, because the counters of such a file cannot be compared either", ErrRestoreWeakens, err)
 	}
 	sig, err := tableSignature(dest)
 	if err != nil {
