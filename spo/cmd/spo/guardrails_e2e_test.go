@@ -184,7 +184,7 @@ func TestGuardrailsParameterChangeAgainstALoopbackKoios(t *testing.T) {
 		t.Fatal(err)
 	}
 	file := []string{"", "ret_parameterchange_261116000000"}
-	putPublic(t, dir, ports.Ref{Name: file[1], Kind: ports.GovActionFile}, built.Envelope)
+	putPublic(t, dir, ports.NamedRef{Name: file[1], Kind: ports.GovActionFile}, built.Envelope)
 
 	genesis := writeGenesis(t)
 	submit := func(extra ...string) (string, error) {
@@ -314,7 +314,7 @@ func TestGuardrailsParameterChangeAgainstALoopbackKoios(t *testing.T) {
 	if len(term.asked) != 0 || len(k.calls) != calls || len(k.submitted) != 1 {
 		t.Errorf("offline refusal: asked %v, requests %v, submitted %d", term.asked, k.calls[calls:], len(k.submitted))
 	}
-	notLeaked(t, all.String(), secretHex(t, dir, ports.Ref{Name: walletName, Kind: ports.AddrSKey}))
+	notLeaked(t, all.String(), secretHex(t, dir, ports.NamedRef{Name: walletName, Kind: ports.AddrSKey}))
 	for _, c := range k.calls {
 		if !strings.Contains(c, koiosLoopback) && !strings.Contains(c, "uptime.live") {
 			t.Errorf("a request went elsewhere: %s", c)

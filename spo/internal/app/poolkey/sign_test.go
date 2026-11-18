@@ -15,7 +15,7 @@ import (
 )
 
 func (r rig) signUC() SignWithCalidusKey {
-	return SignWithCalidusKey{Store: r.store, Signers: native.NewSignatureSigners(r.store)}
+	return SignWithCalidusKey{Store: r.store, Signers: native.NewSignatureSigners(r.store.Anchor())}
 }
 
 // spec: SPO-15-IF-006, SPO-15-EXT-006, SPO-15-OUT-006
@@ -60,7 +60,7 @@ func TestSignWithCalidusKeyRefusals(t *testing.T) {
 		t.Errorf("name: %v", err)
 	}
 	// A key file that is only a hardware signing file is not a signing key.
-	r.put(t, ports.Ref{Name: "hw", Kind: ports.CalidusHwsFile}, []byte("{}"))
+	r.put(t, ports.NamedRef{Name: "hw", Kind: ports.CalidusHwsFile}, []byte("{}"))
 	if _, err := r.signUC().Run(ctx, "hw", []byte("x")); !errors.Is(err, ErrMissingFile) {
 		t.Errorf("hwsfile only: %v", err)
 	}

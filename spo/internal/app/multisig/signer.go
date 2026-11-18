@@ -104,7 +104,7 @@ type Signer struct {
 	// makes it and calls w.PutSecret. The Invite's node key has already been
 	// checked to be the coordinator's enrolled one. A nil hook refuses an
 	// Invite.
-	OnInvite func(w ports.Writer, from party.Party, inv party.Invite) error
+	OnInvite func(w ports.NamedWriter, from party.Party, inv party.Invite) error
 }
 
 // DefaultGateTimeout is how long a claimed approval is believed to be alive.
@@ -171,7 +171,7 @@ type signerState struct {
 	Rotations []pendingRotation `json:"rotations,omitempty"`
 }
 
-func readSigner(r ports.Reader) (signerState, error) {
+func readSigner(r ports.NamedReader) (signerState, error) {
 	var s signerState
 	return s, readJSON(r, signerRef, &s)
 }
@@ -335,7 +335,7 @@ func (s Signer) Handle(ctx context.Context, rcv ports.Received) (Handled, error)
 	var o ports.OpenedEnvelope
 	var body party.Body
 	var again *storedRequest // an answered request that arrived again
-	err = s.Store.View(ctx, func(r ports.Reader) error {
+	err = s.Store.View(ctx, func(r ports.NamedReader) error {
 		lookup, _, err := s.loadParties(r)
 		if err != nil {
 			return err
@@ -385,7 +385,7 @@ func (s Signer) Handle(ctx context.Context, rcv ports.Received) (Handled, error)
 		}
 		return s.onRequest(ctx, local, o, m, via, slotNow, now)
 	case party.CollectionClosed:
-		err = s.Store.Update(ctx, func(w ports.Writer) error {
+		err = s.Store.Update(ctx, func(w ports.NamedWriter) error {
 			st, err := readSigner(w)
 			if err != nil {
 				return err
@@ -428,7 +428,7 @@ func (s Signer) Handle(ctx context.Context, rcv ports.Received) (Handled, error)
 		})
 		h.Effect = "closed"
 	case party.RotationAnnouncement:
-		err = s.Store.Update(ctx, func(w ports.Writer) error {
+		err = s.Store.Update(ctx, func(w ports.NamedWriter) error {
 			var err error
 			h, err = s.onRotation(w, o, m, via, now)
 			return err
@@ -437,7 +437,7 @@ func (s Signer) Handle(ctx context.Context, rcv ports.Received) (Handled, error)
 		if s.OnInvite == nil {
 			return s.rejectEffect(ctx, o, errors.New("this signer takes no invitations"), now)
 		}
-		err = s.Store.Update(ctx, func(w ports.Writer) error {
+		err = s.Store.Update(ctx, func(w ports.NamedWriter) error {
 			if err := s.Replay.Record(w, o.Sender().Fingerprint, o.ID(), o.Expires(), now); err != nil {
 				return err
 			}
@@ -466,7 +466,7 @@ func (s Signer) Handle(ctx context.Context, rcv ports.Received) (Handled, error)
 func (s Signer) rejectEffect(ctx context.Context, o ports.OpenedEnvelope, why error, now time.Time) (Handled, error) {
 	ev := eventOf(now, "message-refused", "", 0, [32]byte{})
 	ev.Peer, ev.Reason, ev.Detail = o.Sender().Fingerprint.String(), why.Error(), string(o.Type())
-	if err := s.Store.Update(ctx, func(w ports.Writer) error { return appendRefusal(w, ev) }); err != nil {
+	if err := s.Store.Update(ctx, func(w ports.NamedWriter) error { return appendRefusal(w, ev) }); err != nil {
 		return Handled{}, err
 	}
 	return Handled{Type: o.Type(), Sender: o.Sender().Fingerprint, HasSender: true, Refused: true, Reason: why.Error()}, nil
@@ -479,7 +479,7 @@ func (s Signer) resend(ctx context.Context, sealer party.Fingerprint, o ports.Op
 	if err != nil {
 		return Handled{}, err
 	}
-	err = s.Store.Update(ctx, func(w ports.Writer) error {
+	err = s.Store.Update(ctx, func(w ports.NamedWriter) error {
 		if err := s.enqueue(w, now, sealer, OutItem{ID: q.ResponseID, To: q.From, Type: responseType(*q), Collection: q.Collection, Slot: q.Slot,
 			Expires: q.Expires, Envelope: q.Response}); err != nil {
 			return err
@@ -687,7 +687,8 @@ func (s Signer) onRequest(ctx context.Context, local ports.LocalIdentity, o port
 		if holds && facts.OverNetwork && s.History != nil {
 			// fails closed: a history that cannot be read for certain refuses too
 			h, known, err := s.History(ctx, k.Identity)
-			if err != nil || (known && h.HasColdRole()) {
+			// (a held key is a member of an owner, so it has a history: none is refused)
+			if err != nil || !known || h.HasColdRole() {
 				reason, refuse = party.RefuseNoKey, true
 			}
 		}
@@ -740,7 +741,7 @@ func (s Signer) onRequest(ctx context.Context, local ports.LocalIdentity, o port
 			q.ResponseID, q.Response = hexMsg(rid), env
 		}
 	}
-	err := s.Store.Update(ctx, func(w ports.Writer) error {
+	err := s.Store.Update(ctx, func(w ports.NamedWriter) error {
 		if err := s.Replay.Record(w, o.Sender().Fingerprint, o.ID(), o.Expires(), now); err != nil {
 			return err
 		}
@@ -786,7 +787,7 @@ func (s Signer) onRequest(ctx context.Context, local ports.LocalIdentity, o port
 // Pending lists the requests waiting for a decision.
 func (s Signer) Pending(ctx context.Context) ([]PendingRequest, error) {
 	var out []PendingRequest
-	err := s.Store.View(ctx, func(r ports.Reader) error {
+	err := s.Store.View(ctx, func(r ports.NamedReader) error {
 		st, err := readSigner(r)
 		for _, q := range st.Requests {
 			if q.claimable(s.Clock.Now(), s.gateTimeout()) && q.Expires >= s.Clock.Now().Unix() && q.Closed == "" {
@@ -817,7 +818,7 @@ type ClosedRequest struct {
 // what became of it.
 func (s Signer) Closed(ctx context.Context) ([]ClosedRequest, error) {
 	var out []ClosedRequest
-	err := s.Store.View(ctx, func(r ports.Reader) error {
+	err := s.Store.View(ctx, func(r ports.NamedReader) error {
 		st, err := readSigner(r)
 		for _, q := range st.Requests {
 			if q.Closed != "" && (q.State == reqPending || q.State == reqSigning) && q.Expires >= s.Clock.Now().Unix() {
@@ -957,7 +958,7 @@ func (s Signer) ReviewRequest(ctx context.Context, id party.MessageID) (Review, 
 	// Read the request, then decode and resolve outside any store
 	// transaction: the chain view of the signer may be a network call.
 	var q storedRequest
-	err := s.Store.View(ctx, func(r ports.Reader) error {
+	err := s.Store.View(ctx, func(r ports.NamedReader) error {
 		st, err := readSigner(r)
 		if err != nil {
 			return err
@@ -1017,7 +1018,7 @@ func (s Signer) ReviewRequest(ctx context.Context, id party.MessageID) (Review, 
 	rv := Review{RequestID: id, BodyHash: hash, Role: custody.Role(q.Role), Coordinator: q.FromName, Via: q.Via, View: view, Flow: flow, Aux: aux,
 		TotalOutput: view.TotalOutput(), ClaimedPurpose: q.Purpose, token: &reviewToken{id: id, hash: hash, flow: flow.Digest()}}
 	copy(rv.KeyHash[:], kh)
-	err = s.Store.Update(ctx, func(w ports.Writer) error {
+	err = s.Store.Update(ctx, func(w ports.NamedWriter) error {
 		st, err := readSigner(w)
 		if err != nil {
 			return err
@@ -1073,7 +1074,7 @@ func (s Signer) Approve(ctx context.Context, a Approval) (Handled, error) {
 	// transaction: the chain view of the signer may be a network call. The
 	// claim then compares it with what was reviewed.
 	var q storedRequest
-	if err := s.Store.View(ctx, func(r ports.Reader) error {
+	if err := s.Store.View(ctx, func(r ports.NamedReader) error {
 		st, err := readSigner(r)
 		if err != nil {
 			return err
@@ -1099,7 +1100,7 @@ func (s Signer) Approve(ctx context.Context, a Approval) (Handled, error) {
 	// expired, and not closed; the sender must still be an active
 	// coordinator with a scope that still allows it; the flow must be the one
 	// reviewed. It is then marked as being signed.
-	err = s.Store.Update(ctx, func(w ports.Writer) error {
+	err = s.Store.Update(ctx, func(w ports.NamedWriter) error {
 		st, err := readSigner(w)
 		if err != nil {
 			return err
@@ -1161,7 +1162,7 @@ func (s Signer) Approve(ctx context.Context, a Approval) (Handled, error) {
 	env, rid, serr := s.sign(ctx, local, coord, q, now)
 	if serr != nil {
 		// Nothing was answered: the request is waiting again.
-		_ = s.Store.Update(ctx, func(w ports.Writer) error {
+		_ = s.Store.Update(ctx, func(w ports.NamedWriter) error {
 			st, err := readSigner(w)
 			if err != nil {
 				return err
@@ -1181,7 +1182,7 @@ func (s Signer) Approve(ctx context.Context, a Approval) (Handled, error) {
 	// envelope: nothing is stored or queued, an event says why
 	// (SPO-Xparty-INV-038).
 	var dropped error
-	err = s.Store.Update(ctx, func(w ports.Writer) error {
+	err = s.Store.Update(ctx, func(w ports.NamedWriter) error {
 		st, err := readSigner(w)
 		if err != nil {
 			return err
@@ -1230,7 +1231,7 @@ func (s Signer) Approve(ctx context.Context, a Approval) (Handled, error) {
 // or nil: the request is closed; its sender is not an active enrolled party
 // with the fingerprint the request came from; or this machine's identity is not
 // the one that sealed the response.
-func (s Signer) approvalStale(w ports.Writer, p *storedRequest, sealedBy party.Fingerprint) error {
+func (s Signer) approvalStale(w ports.NamedWriter, p *storedRequest, sealedBy party.Fingerprint) error {
 	if p.Closed != "" {
 		return ClosedError{p.Closed}
 	}
@@ -1330,7 +1331,7 @@ func (s Signer) Refuse(ctx context.Context, id party.MessageID) (Handled, error)
 	defer local.Destroy()
 	now := s.Clock.Now()
 	var out Handled
-	err = s.Store.Update(ctx, func(w ports.Writer) error {
+	err = s.Store.Update(ctx, func(w ports.NamedWriter) error {
 		st, err := readSigner(w)
 		if err != nil {
 			return err
@@ -1402,7 +1403,7 @@ func (s Signer) NewHello(ctx context.Context, coordinator string) ([]byte, error
 	}
 	defer local.Destroy()
 	var coord party.Party
-	err = s.Store.View(ctx, func(r ports.Reader) error {
+	err = s.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
 		coord, err = s.Parties.ByName(r, coordinator)
 		return err
@@ -1430,7 +1431,7 @@ func (s Signer) Hello(ctx context.Context, coordinator string, send ports.Envelo
 		return err
 	}
 	var coord party.Party
-	err = s.Store.View(ctx, func(r ports.Reader) error {
+	err = s.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
 		coord, err = s.Parties.ByName(r, coordinator)
 		return err

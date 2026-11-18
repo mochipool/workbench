@@ -108,7 +108,7 @@ func TestAnsweredRequestIsAnsweredAgainFromTheStore(t *testing.T) {
 	s := newScene(t, sceneOpt{})
 	var n atomic.Int32
 	signer := s.B.Signer()
-	signer.Signers = countingDir{countingSigner{native.VaultSigner{Vault: s.B.Store}, &n}}
+	signer.Signers = countingDir{countingSigner{native.VaultSigner{Vault: s.B.Store.Anchor()}, &n}}
 	s.request()
 	reqs := s.cb.Take()
 	if len(reqs) != 1 {
@@ -279,8 +279,8 @@ func TestSweepAnnouncesADiscard(t *testing.T) {
 	s := newScene(t, sceneOpt{})
 	s.request()
 	s.bobHandles()
-	if err := s.C.Store.Update(ctx, func(w ports.Writer) error {
-		return w.Delete(ports.Ref{Name: s.ref.Name, Kind: ports.MultisigCollection})
+	if err := s.C.Store.Update(ctx, func(w ports.NamedWriter) error {
+		return w.Delete(ports.NamedRef{Name: s.ref.Name, Kind: ports.MultisigCollection})
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -434,7 +434,7 @@ func TestInviteGoesToTheHookAndIsRedacted(t *testing.T) {
 	s := newScene(t, sceneOpt{})
 	var got party.Invite
 	signer := s.B.Signer()
-	signer.OnInvite = func(_ ports.Writer, from party.Party, inv party.Invite) error {
+	signer.OnInvite = func(_ ports.NamedWriter, from party.Party, inv party.Invite) error {
 		got = inv
 		if from.Name != "coord" {
 			t.Errorf("from %s", from.Name)

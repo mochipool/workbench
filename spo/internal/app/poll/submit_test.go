@@ -159,8 +159,8 @@ func TestAnswerRefusals(t *testing.T) {
 		t.Errorf("no cold key: %v", err)
 	}
 	// A hardware cold key is not supported (only the key-file form).
-	if err := r.w.Store.Update(ctx, func(w ports.Writer) error {
-		return w.Put(ports.Ref{Name: "hwpool", Kind: ports.NodeHwsFile}, []byte("{}"))
+	if err := r.w.Store.Update(ctx, func(w ports.NamedWriter) error {
+		return w.Put(ports.NamedRef{Name: "hwpool", Kind: ports.NodeHwsFile}, []byte("{}"))
 	}); err != nil {
 		t.Fatal(err)
 	}

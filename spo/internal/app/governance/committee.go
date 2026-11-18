@@ -27,30 +27,30 @@ type coldInputs struct {
 	key  custody.KeyRef
 }
 
-func hashOfFile(r ports.Reader, nm string, vk, hf ports.Kind) (stake.KeyHash, error) {
-	v, err := get(r, ports.Ref{Name: nm, Kind: vk})
+func hashOfFile(r ports.NamedReader, nm string, vk, hf ports.Kind) (stake.KeyHash, error) {
+	v, err := get(r, ports.NamedRef{Name: nm, Kind: vk})
 	if err != nil {
 		return stake.KeyHash{}, err
 	}
 	vh, err := vkeyHash(v)
 	if err != nil {
-		return stake.KeyHash{}, fmt.Errorf("%s: %w", ports.Ref{Name: nm, Kind: vk}, err)
+		return stake.KeyHash{}, fmt.Errorf("%s: %w", ports.NamedRef{Name: nm, Kind: vk}, err)
 	}
-	hb, err := get(r, ports.Ref{Name: nm, Kind: hf})
+	hb, err := get(r, ports.NamedRef{Name: nm, Kind: hf})
 	if err != nil {
 		return stake.KeyHash{}, err
 	}
 	fh, err := governance.ParseHash28(firstLine(hb))
 	if err != nil {
-		return stake.KeyHash{}, fmt.Errorf("%s: %w", ports.Ref{Name: nm, Kind: hf}, err)
+		return stake.KeyHash{}, fmt.Errorf("%s: %w", ports.NamedRef{Name: nm, Kind: hf}, err)
 	}
 	if fh != [28]byte(vh) {
-		return stake.KeyHash{}, fmt.Errorf("%w: %s", ErrHashFileMismatch, ports.Ref{Name: nm, Kind: hf})
+		return stake.KeyHash{}, fmt.Errorf("%w: %s", ErrHashFileMismatch, ports.NamedRef{Name: nm, Kind: hf})
 	}
 	return stake.KeyHash(vh), nil
 }
 
-func readCold(r ports.Reader, nm string) (coldInputs, error) {
+func readCold(r ports.NamedReader, nm string) (coldInputs, error) {
 	h, err := hashOfFile(r, nm, ports.CCColdVKey, ports.CCColdHash)
 	if err != nil {
 		return coldInputs{}, err
@@ -139,7 +139,7 @@ func (uc AuthorizeCommitteeHotKey) Run(ctx context.Context, req AuthorizeRequest
 	var cold coldInputs
 	var hot stake.KeyHash
 	var pay payer
-	if err := uc.Store.View(ctx, func(r ports.Reader) error {
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
 		if cold, err = readCold(r, cn); err != nil {
 			return err
@@ -178,8 +178,8 @@ func (uc AuthorizeCommitteeHotKey) Run(ctx context.Context, req AuthorizeRequest
 	if err != nil {
 		return Result{}, err
 	}
-	if err := uc.Store.Update(ctx, func(w ports.Writer) error {
-		return w.Put(ports.Ref{Name: hn, Kind: ports.CCHotCert}, cert.Envelope)
+	if err := uc.Store.Update(ctx, func(w ports.NamedWriter) error {
+		return w.Put(ports.NamedRef{Name: hn, Kind: ports.CCHotCert}, cert.Envelope)
 	}); err != nil {
 		return Result{}, fmt.Errorf("the transaction was sent, but the certificate file could not be stored: %w", err)
 	}
@@ -244,7 +244,7 @@ func (uc ResignCommitteeColdKey) Run(ctx context.Context, req ResignRequest) (Re
 	}
 	var cold coldInputs
 	var pay payer
-	if err := uc.Store.View(ctx, func(r ports.Reader) error {
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
 		if cold, err = readCold(r, cn); err != nil {
 			return err
@@ -294,8 +294,8 @@ func (uc ResignCommitteeColdKey) Run(ctx context.Context, req ResignRequest) (Re
 	if err != nil {
 		return Result{}, err
 	}
-	if err := uc.Store.Update(ctx, func(w ports.Writer) error {
-		return w.Put(ports.Ref{Name: cn, Kind: ports.CCColdRetCert}, cert.Envelope)
+	if err := uc.Store.Update(ctx, func(w ports.NamedWriter) error {
+		return w.Put(ports.NamedRef{Name: cn, Kind: ports.CCColdRetCert}, cert.Envelope)
 	}); err != nil {
 		return Result{}, fmt.Errorf("the transaction was sent, but the certificate file could not be stored: %w", err)
 	}
@@ -309,7 +309,7 @@ func (uc ResignCommitteeColdKey) Run(ctx context.Context, req ResignRequest) (Re
 // there are none, the members whose authorised hot credential is. Online or
 // light only: offline is refused (SPO-23d-PRE-002).
 type CheckCommittee struct {
-	Store     ports.Store
+	Store     ports.NamedStore
 	Committee ports.CommitteeStateReader
 	// Offline composes the use case with a snapshot that cannot answer.
 	Offline bool
@@ -407,9 +407,9 @@ func (uc CheckCommittee) resolve(ctx context.Context, word string) (governance.C
 		return governance.Credential{}, fmt.Errorf("%w: %q", ErrBadWord, word)
 	}
 	var out governance.Credential
-	err = uc.Store.View(ctx, func(r ports.Reader) error {
+	err = uc.Store.View(ctx, func(r ports.NamedReader) error {
 		for _, k := range []ports.Kind{ports.CCColdHash, ports.CCHotHash} {
-			b, err := r.Get(ports.Ref{Name: nm, Kind: k})
+			b, err := r.Get(ports.NamedRef{Name: nm, Kind: k})
 			if errors.Is(err, ports.ErrNotFound) {
 				continue
 			}
@@ -418,13 +418,13 @@ func (uc CheckCommittee) resolve(ctx context.Context, word string) (governance.C
 			}
 			h, err := governance.ParseHash28(firstLine(b))
 			if err != nil {
-				return fmt.Errorf("%s: %w", ports.Ref{Name: nm, Kind: k}, err)
+				return fmt.Errorf("%s: %w", ports.NamedRef{Name: nm, Kind: k}, err)
 			}
 			out = governance.Credential{Hash: h}
 			return nil
 		}
 		for _, k := range []ports.Kind{ports.CCColdVKey, ports.CCHotVKey} {
-			b, err := r.Get(ports.Ref{Name: nm, Kind: k})
+			b, err := r.Get(ports.NamedRef{Name: nm, Kind: k})
 			if errors.Is(err, ports.ErrNotFound) {
 				continue
 			}

@@ -246,6 +246,19 @@ type FactorSource interface {
 	Assert(ctx context.Context, req AssertRequest) (Assertion, error)
 }
 
+// PINChecker is the optional capability of a FactorSource that can check an
+// authenticator PIN without a credential or a touch: a rotation uses it to
+// verify the PINs of both authenticators before it makes any credential, so a
+// wrong PIN leaves no orphan credential and burns no retry on a loop (ADR 0011
+// decision 4, per-device PIN). For the libfido2 tools the check is an assertion
+// for a credential id that cannot exist, with user presence off: the PIN token
+// is obtained (and a wrong PIN refused) before the authenticator looks for the
+// credential, so ErrFactorNoCredential means the PIN was right. That order is
+// the CTAP 2.1 flow as libfido2 implements it and has not been run on a device.
+type PINChecker interface {
+	CheckPIN(ctx context.Context, device string, pin *Secret) error
+}
+
 // FactorIDOf is the factor id of a FIDO2 credential: SHA-256 over a label and
 // the credential id, so it is fixed-size, public and the same wherever the
 // credential id is known (decision 8).

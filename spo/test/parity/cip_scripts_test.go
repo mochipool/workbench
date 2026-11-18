@@ -256,7 +256,7 @@ func TestCalidusRegistrationScriptParity(t *testing.T) {
 	upDir, portDir, st := e.poolWorkspaces(t)
 	ctx := context.Background()
 	uc := func(now time.Time) poolkey.GenerateCalidusRegistration {
-		return poolkey.GenerateCalidusRegistration{Store: st, Signers: native.NewSignatureSigners(st), Clock: fakeClock{now}}
+		return poolkey.GenerateCalidusRegistration{Store: st, Signers: native.NewSignatureSigners(st.Anchor()), Clock: fakeClock{now}}
 	}
 
 	// With a nonce, and the names as upstream normalises them.
@@ -463,7 +463,7 @@ func TestCatalystRegistrationScriptParity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			uc := catalyst.GenerateRegistration{Store: st, Signers: native.NewSignatureSigners(st),
+			uc := catalyst.GenerateRegistration{Store: st, Signers: native.NewSignatureSigners(st.Anchor()),
 				Clock: fakeClock{fileTime(t, name, ".vote-registration.cbor")}, Tip: sourceTip{reg.Nonce}, NetworkID: ports.NetworkTestnet}
 			res, err := uc.Run(ctx, catalyst.RegistrationRequest{Delegation: deleg, Stake: "w", Rewards: "w.payment"})
 			if err != nil {
@@ -495,7 +495,7 @@ func TestCatalystRegistrationScriptParity(t *testing.T) {
 		deleg, perr := catalyst.ParseDelegation(c.deleg)
 		var err error
 		if perr == nil {
-			uc := catalyst.GenerateRegistration{Store: st, Signers: native.NewSignatureSigners(st), Clock: fakeClock{time.Now()}, Tip: sourceTip{1}, NetworkID: ports.NetworkTestnet}
+			uc := catalyst.GenerateRegistration{Store: st, Signers: native.NewSignatureSigners(st.Anchor()), Clock: fakeClock{time.Now()}, Tip: sourceTip{1}, NetworkID: ports.NetworkTestnet}
 			_, err = uc.Run(ctx, catalyst.RegistrationRequest{Delegation: deleg, Stake: c.stake, Rewards: c.rewards})
 		} else {
 			err = perr

@@ -169,7 +169,7 @@ func TestHardwareWalletSendOfflineQueuesAVerifiedWitness(t *testing.T) {
 	if len(txs) != 1 || len(txs[0].witness[0]) != 1 {
 		t.Fatalf("%d transactions\n%s", len(txs), out)
 	}
-	if got, want := hex.EncodeToString(txs[0].witness[0][0][0]), hex.EncodeToString(vkeyOf(t, dir, ports.Ref{Name: "w", Kind: ports.AddrVKey})); got != want {
+	if got, want := hex.EncodeToString(txs[0].witness[0][0][0]), hex.EncodeToString(vkeyOf(t, dir, ports.NamedRef{Name: "w", Kind: ports.AddrVKey})); got != want {
 		t.Errorf("the witness is of key %s, the wallet's is %s", got, want)
 	}
 	order := ""

@@ -21,14 +21,14 @@ import (
 // SPO-11a-OUT-002 and rewrites the file (locked at 0400 by the store).
 //
 // spec: SPO-11a-OUT-002, SPO-11a-OUT-003, SPO-11b-OUT-001, SPO-Pfiles-OUT-033
-func ApplyChange(ctx context.Context, store ports.Store, record string, c assets.Change) error {
-	ref := ports.Ref{Name: record, Kind: ports.AssetFile}
-	return store.Update(ctx, func(w ports.Writer) error {
+func ApplyChange(ctx context.Context, store ports.NamedStore, record string, c assets.Change) error {
+	ref := ports.NamedRef{Name: record, Kind: ports.AssetFile}
+	return store.Update(ctx, func(w ports.NamedWriter) error {
 		return applyIn(w, ref, c)
 	})
 }
 
-func applyIn(w ports.Writer, ref ports.Ref, c assets.Change) error {
+func applyIn(w ports.NamedWriter, ref ports.NamedRef, c assets.Change) error {
 	cur, err := w.Get(ref)
 	if err != nil && !errors.Is(err, ports.ErrNotFound) {
 		return err
@@ -47,7 +47,7 @@ func applyIn(w ports.Writer, ref ports.Ref, c assets.Change) error {
 // Applier changes the record a pending update stands for. It runs inside the
 // store commit that removes the pending update, so the change and the removal
 // are one step: a crash leaves both or neither (exactly once).
-type Applier func(w ports.Writer, p assets.Pending, now time.Time) error
+type Applier func(w ports.NamedWriter, p assets.Pending, now time.Time) error
 
 // Settle applies and removes pending updates (hazard H9). Asset updates are
 // applied here; the other kinds (the pool registration and retirement records)
@@ -55,7 +55,7 @@ type Applier func(w ports.Writer, p assets.Pending, now time.Time) error
 // not know the pool descriptor. A kind with no applier is an error, never
 // skipped silently.
 type Settle struct {
-	Store ports.Store
+	Store ports.NamedStore
 	Clock ports.Clock
 	// Appliers maps a pending kind to its applier; the asset kind is built in.
 	Appliers map[string]Applier
@@ -71,21 +71,21 @@ func (s Settle) applier(kind string) (Applier, error) {
 	return nil, fmt.Errorf("no applier for the pending update kind %q", kind)
 }
 
-func applyAsset(w ports.Writer, p assets.Pending, now time.Time) error {
+func applyAsset(w ports.NamedWriter, p assets.Pending, now time.Time) error {
 	c, err := p.Change(now)
 	if err != nil {
 		return err
 	}
-	return applyIn(w, ports.Ref{Name: p.Record, Kind: ports.AssetFile}, c)
+	return applyIn(w, ports.NamedRef{Name: p.Record, Kind: ports.AssetFile}, c)
 }
 
 // pendingRefs are the places a pending update of a transaction can be: the
 // current kind, and the first version's.
-func pendingRefs(id string) []ports.Ref {
-	return []ports.Ref{{Name: id, Kind: ports.PendingUpdate}, {Name: id, Kind: ports.AssetPending}}
+func pendingRefs(id string) []ports.NamedRef {
+	return []ports.NamedRef{{Name: id, Kind: ports.PendingUpdate}, {Name: id, Kind: ports.AssetPending}}
 }
 
-func getPending(r ports.Reader, id string) (assets.Pending, ports.Ref, bool, error) {
+func getPending(r ports.NamedReader, id string) (assets.Pending, ports.NamedRef, bool, error) {
 	for _, ref := range pendingRefs(id) {
 		b, err := r.Get(ref)
 		if errors.Is(err, ports.ErrNotFound) {
@@ -100,14 +100,14 @@ func getPending(r ports.Reader, id string) (assets.Pending, ports.Ref, bool, err
 		}
 		return p, ref, true, nil
 	}
-	return assets.Pending{}, ports.Ref{}, false, nil
+	return assets.Pending{}, ports.NamedRef{}, false, nil
 }
 
 // PendingOf reads the pending update of a transaction, whichever version wrote it.
-func PendingOf(ctx context.Context, store ports.Store, id chain.TxID) (assets.Pending, bool, error) {
+func PendingOf(ctx context.Context, store ports.NamedStore, id chain.TxID) (assets.Pending, bool, error) {
 	var p assets.Pending
 	var found bool
-	err := store.View(ctx, func(r ports.Reader) error {
+	err := store.View(ctx, func(r ports.NamedReader) error {
 		var err error
 		p, _, found, err = getPending(r, id.String())
 		return err
@@ -117,7 +117,7 @@ func PendingOf(ctx context.Context, store ports.Store, id chain.TxID) (assets.Pe
 
 // ListPending reads every pending update of the workspace, oldest name first.
 // It needs the workspace's lister; without one it returns nothing and false.
-func ListPending(ctx context.Context, store ports.Store, lister ports.SourceLister) ([]assets.Pending, bool, error) {
+func ListPending(ctx context.Context, store ports.NamedStore, lister ports.SourceLister) ([]assets.Pending, bool, error) {
 	if lister == nil {
 		return nil, false, nil
 	}
@@ -135,7 +135,7 @@ func ListPending(ctx context.Context, store ports.Store, lister ports.SourceList
 	}
 	sort.Strings(ids)
 	var out []assets.Pending
-	err = store.View(ctx, func(r ports.Reader) error {
+	err = store.View(ctx, func(r ports.NamedReader) error {
 		for _, id := range ids {
 			p, _, ok, err := getPending(r, id)
 			if err != nil {
@@ -156,7 +156,7 @@ func ListPending(ctx context.Context, store ports.Store, lister ports.SourceList
 func (s Settle) Apply(ctx context.Context, id chain.TxID) (assets.Pending, bool, error) {
 	var got assets.Pending
 	var found bool
-	err := s.Store.Update(ctx, func(w ports.Writer) error {
+	err := s.Store.Update(ctx, func(w ports.NamedWriter) error {
 		p, ref, ok, err := getPending(w, id.String())
 		if err != nil || !ok {
 			return err
@@ -178,7 +178,7 @@ func (s Settle) Apply(ctx context.Context, id chain.TxID) (assets.Pending, bool,
 func (s Settle) Discard(ctx context.Context, id chain.TxID) (assets.Pending, bool, error) {
 	var got assets.Pending
 	var found bool
-	err := s.Store.Update(ctx, func(w ports.Writer) error {
+	err := s.Store.Update(ctx, func(w ports.NamedWriter) error {
 		p, ref, ok, err := getPending(w, id.String())
 		if err != nil || !ok {
 			return err
@@ -204,7 +204,7 @@ func (s Settle) Discard(ctx context.Context, id chain.TxID) (assets.Pending, boo
 // record's own name) and amount must be what the transaction's own mint field
 // says. Without Tx, TxIDs and Viewer the fallback refuses.
 type UpdateHook struct {
-	Store    ports.Store
+	Store    ports.NamedStore
 	Clock    ports.Clock
 	Appliers map[string]Applier
 	Tx       []byte
@@ -284,8 +284,8 @@ func (h UpdateHook) OnConfirmedUpdate(ctx context.Context, id chain.TxID, update
 	if err != nil {
 		return err
 	}
-	ref := ports.Ref{Name: p.Record, Kind: ports.AssetFile}
-	return h.Store.Update(ctx, func(w ports.Writer) error {
+	ref := ports.NamedRef{Name: p.Record, Kind: ports.AssetFile}
+	return h.Store.Update(ctx, func(w ports.NamedWriter) error {
 		ok, err := w.Exists(ref)
 		if err != nil || !ok {
 			return err

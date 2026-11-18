@@ -54,7 +54,7 @@ func (r rig) qrUC() ExportVotingKeyQR {
 // 128 of the stored extended key.
 func (r rig) voteSecret(t *testing.T, name string) []byte {
 	t.Helper()
-	env, err := r.store.Open(context.Background(), ports.Ref{Name: name, Kind: ports.VotingSKey})
+	env, err := r.store.Open(context.Background(), ports.NamedRef{Name: name, Kind: ports.VotingSKey})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestExportVotingKeyQRRefusals(t *testing.T) {
 	if _, err := r.qrUC().Run(ctx, QRRequest{Name: "nope", PIN: []byte("1234")}); !errors.Is(err, ErrMissingFile) {
 		t.Errorf("missing: %v", err)
 	}
-	r.put(t, ports.Ref{Name: "hw", Kind: ports.VotingHwsFile}, []byte("{}"))
+	r.put(t, ports.NamedRef{Name: "hw", Kind: ports.VotingHwsFile}, []byte("{}"))
 	if _, err := r.qrUC().Run(ctx, QRRequest{Name: "hw", PIN: []byte("1234")}); !errors.Is(err, ErrHardwareVotingKey) {
 		t.Errorf("hardware: %v", err)
 	}

@@ -19,9 +19,9 @@ import (
 func storedCount(t *testing.T, s *scene) int {
 	t.Helper()
 	var raw []byte
-	if err := s.B.Store.View(ctx, func(r ports.Reader) error {
+	if err := s.B.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
-		raw, err = r.Get(ports.Ref{Name: "state", Kind: ports.MultisigSigner})
+		raw, err = r.Get(ports.NamedRef{Name: "state", Kind: ports.MultisigSigner})
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -141,8 +141,8 @@ func TestStaleSigningClaimIsRecoveredAfterTheGateTimeout(t *testing.T) {
 	s := newScene(t, sceneOpt{})
 	a := s.reviewed()
 	// What a crash between the claim and the stored response leaves behind.
-	err := s.B.Store.Update(ctx, func(w ports.Writer) error {
-		raw, err := w.Get(ports.Ref{Name: "state", Kind: ports.MultisigSigner})
+	err := s.B.Store.Update(ctx, func(w ports.NamedWriter) error {
+		raw, err := w.Get(ports.NamedRef{Name: "state", Kind: ports.MultisigSigner})
 		if err != nil {
 			return err
 		}
@@ -153,7 +153,7 @@ func TestStaleSigningClaimIsRecoveredAfterTheGateTimeout(t *testing.T) {
 		st["requests"][0]["state"] = "signing"
 		st["requests"][0]["signingSince"] = s.clock.Now().Unix()
 		raw, _ = json.Marshal(st)
-		return w.Put(ports.Ref{Name: "state", Kind: ports.MultisigSigner}, raw)
+		return w.Put(ports.NamedRef{Name: "state", Kind: ports.MultisigSigner}, raw)
 	})
 	if err != nil {
 		t.Fatal(err)

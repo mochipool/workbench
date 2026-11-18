@@ -129,7 +129,7 @@ func (uc NewSnapshot) Run(ctx context.Context) (SnapshotResult, error) {
 // no registry port.
 type AddAddress struct {
 	Bundle ports.BundleMutator
-	Store  ports.Store
+	Store  ports.NamedStore
 	// Addresses classifies the address (payment or stake).
 	Addresses ports.AddressInspector
 	// The chain readers; nil in offline mode, which refuses.
@@ -196,8 +196,8 @@ func (uc AddAddress) Run(ctx context.Context, name string) (AddResult, error) {
 		kind, base = ports.StakingAddr, b
 	}
 	var addrText string
-	if err := uc.Store.View(ctx, func(r ports.Reader) error {
-		b, err := r.Get(ports.Ref{Name: base, Kind: kind})
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
+		b, err := r.Get(ports.NamedRef{Name: base, Kind: kind})
 		if errors.Is(err, ports.ErrNotFound) || errors.Is(err, ports.ErrInvalidRef) {
 			return fmt.Errorf("%w: %s", ErrNoAddressFile, addrName)
 		}

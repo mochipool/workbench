@@ -151,22 +151,22 @@ type EnvelopeAcker interface {
 // PartyReader reads the party registry inside a Store View or Update.
 // Lookups return ErrNotFound for an unknown party.
 type PartyReader interface {
-	ByFingerprint(r Reader, fp party.Fingerprint) (party.Party, error)
-	ByName(r Reader, name string) (party.Party, error)
-	List(r Reader) ([]party.Party, error)
+	ByFingerprint(r NamedReader, fp party.Fingerprint) (party.Party, error)
+	ByName(r NamedReader, name string) (party.Party, error)
+	List(r NamedReader) ([]party.Party, error)
 }
 
 // PartyWriter changes the registry inside a Store Update.
 type PartyWriter interface {
 	// Put stores a new party. It refuses a name or fingerprint in use.
-	Put(w Writer, p party.Party) error
+	Put(w NamedWriter, p party.Party) error
 	// Revoke sets a party to revoked (SPO-Xparty-IF-003).
-	Revoke(w Writer, name string) (party.Party, error)
+	Revoke(w NamedWriter, name string) (party.Party, error)
 	// Rotate replaces the record of the party with fingerprint old by retired
 	// (the same party, revoked and renamed) and adds next, in one write
 	// (SPO-Xparty-INV-032). It refuses a next whose fingerprint, name or node
 	// key is already held by another record, and an old that is not there.
-	Rotate(w Writer, old party.Fingerprint, retired, next party.Party) error
+	Rotate(w NamedWriter, old party.Fingerprint, retired, next party.Party) error
 }
 
 // PartyRegistry is the registry backed by ports.Store records.
@@ -190,10 +190,10 @@ var ErrReplayFull = errors.New("replay log is full for that sender")
 // effect lost. Entries are kept until their expiry has passed.
 type ReplayLog interface {
 	// Seen reports whether id is recorded and not yet expired at now.
-	Seen(r Reader, id party.MessageID, now time.Time) (bool, error)
+	Seen(r NamedReader, id party.MessageID, now time.Time) (bool, error)
 	// Record stores id, sent by sender, until expires; ErrReplay if it is
 	// already there, ErrReplayFull when the sender is over its quota.
-	Record(w Writer, sender party.Fingerprint, id party.MessageID, expires, now time.Time) error
+	Record(w NamedWriter, sender party.Fingerprint, id party.MessageID, expires, now time.Time) error
 }
 
 // ---- sealing and opening (SPO-Xparty-OUT-002, PRE-002) ----------------------

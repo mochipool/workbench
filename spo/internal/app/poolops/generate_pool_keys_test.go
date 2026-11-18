@@ -53,7 +53,7 @@ func (f *fakeVrfGen) GenerateVRF(context.Context) (ports.KeyPair, error) {
 	}, nil
 }
 
-func newDir(t *testing.T) (ports.Store, string) {
+func newDir(t *testing.T) (ports.NamedStore, string) {
 	t.Helper()
 	dir := t.TempDir()
 	st, err := plainstore.OpenTestnet(dir)

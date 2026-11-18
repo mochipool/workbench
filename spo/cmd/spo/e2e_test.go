@@ -15,9 +15,9 @@ import (
 	"golang.org/x/crypto/blake2b"
 
 	"github.com/mochipool/workbench/spo/internal/adapters/cli"
-	"github.com/mochipool/workbench/spo/internal/adapters/sqlitestore"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 )
 
 const (
@@ -92,23 +92,24 @@ func walletKey() (seed []byte, addr string) {
 func importWallet(t *testing.T, dir string) (seed []byte, addr string) {
 	t.Helper()
 	seed, addr = walletKey()
-	st, err := sqlitestore.Open(filepath.Join(dir, cli.WorkspaceFile), secret.Take([]byte(testPass)))
+	st, err := openCold(filepath.Join(dir, cli.WorkspaceFile), secret.Take([]byte(testPass)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	err = st.Update(context.Background(), func(w ports.Writer) error {
-		if err := w.PutSecret(ports.Ref{Name: walletName, Kind: ports.AddrSKey},
-			secret.Take([]byte(`{"type":"PaymentSigningKeyShelley_ed25519","description":"","cborHex":"5820`+hex.EncodeToString(seed)+`"}`))); err != nil {
-			return err
-		}
-		// the verification key beside it: a key is found in the vault by identity
+	err = labels.Named(st).Update(context.Background(), func(w ports.NamedWriter) error {
+		// the verification key first: it anchors the wallet (ADR 0010), and a key
+		// is found in the vault by identity
 		pub := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
-		if err := w.Put(ports.Ref{Name: walletName, Kind: ports.AddrVKey},
+		if err := w.Put(ports.NamedRef{Name: walletName, Kind: ports.AddrVKey},
 			[]byte(`{"type":"PaymentVerificationKeyShelley_ed25519","description":"","cborHex":"5820`+hex.EncodeToString(pub)+`"}`)); err != nil {
 			return err
 		}
-		return w.Put(ports.Ref{Name: walletName, Kind: ports.AddrFile}, []byte(addr+"\n"))
+		if err := w.PutSecret(ports.NamedRef{Name: walletName, Kind: ports.AddrSKey},
+			secret.Take([]byte(`{"type":"PaymentSigningKeyShelley_ed25519","description":"","cborHex":"5820`+hex.EncodeToString(seed)+`"}`))); err != nil {
+			return err
+		}
+		return w.Put(ports.NamedRef{Name: walletName, Kind: ports.AddrFile}, []byte(addr+"\n"))
 	})
 	if err != nil {
 		t.Fatal(err)

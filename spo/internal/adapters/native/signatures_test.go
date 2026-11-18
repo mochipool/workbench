@@ -81,7 +81,7 @@ func TestCalidusAndVotingDerivationVectors(t *testing.T) {
 // roles it cannot sign for.
 func TestVaultSignaturesProfile(t *testing.T) {
 	st, _ := plainstore.OpenTestnet(t.TempDir())
-	s := VaultSignatures{VaultSigner{Vault: st}}
+	s := VaultSignatures{VaultSigner{Vault: st.Anchor()}}
 	if err := ports.CheckSignatureSigner(s); err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestVaultSignaturesProfile(t *testing.T) {
 		t.Error("a signer claiming OpSignCip88 without the interface passed")
 	}
 	// The directory answers for the keys the vault holds and for no other.
-	dir := NewSignatureSigners(st)
+	dir := NewSignatureSigners(st.Anchor())
 	nobody, _ := identity.KeyHashOf(make([]byte, 32))
 	if _, err := dir.SignerFor(custody.KeyRef{Role: custody.RoleStake, Identity: nobody}); err == nil {
 		t.Error("a key nobody holds found a signer")
@@ -139,18 +139,18 @@ func TestVaultSignaturesSignMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pair.SKey.Destroy()
-	if err := st.Update(context.Background(), func(w ports.Writer) error {
-		if err := w.Put(ports.Ref{Name: "w", Kind: ports.StakingVKey}, pair.VKey); err != nil {
+	if err := st.Update(context.Background(), func(w ports.NamedWriter) error {
+		if err := w.Put(ports.NamedRef{Name: "w", Kind: ports.StakingVKey}, pair.VKey); err != nil {
 			return err
 		}
-		return w.PutSecret(ports.Ref{Name: "w", Kind: ports.StakingSKey}, pair.SKey)
+		return w.PutSecret(ports.NamedRef{Name: "w", Kind: ports.StakingSKey}, pair.SKey)
 	}); err != nil {
 		t.Fatal(err)
 	}
 	pub, _ := hex.DecodeString(envPub(t, pair.VKey))
 	h := cose.Blake2b224(pub)
 	reward := append([]byte{0xe0}, h[:]...)
-	s := VaultSignatures{VaultSigner{Vault: st}}
+	s := VaultSignatures{VaultSigner{Vault: st.Anchor()}}
 	ref := porttest.Key(t, st, custody.RoleStake, "w")
 	for _, hashed := range []bool{false, true} {
 		sm, err := s.SignMessage(context.Background(), ports.MessageRequest{Key: ref, Address: reward, Payload: []byte("hi"), Hashed: hashed})

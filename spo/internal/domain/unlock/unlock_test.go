@@ -165,3 +165,28 @@ func TestAPassphraseInACompositeMayShareAnIDWithAStandaloneSlot(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A legacy slot (sealed before store format 3) binds no recovery public key hash
+// and is allowed under standard only; under hardware and strict it is the slot
+// that a passphrase or the recovery key alone opens.
+//
+// spec: SPO-Xunlock-PRE-025
+func TestLegacySlotsAreStandardOnly(t *testing.T) {
+	legacy := []Slot{
+		{ID: []byte{1}, Kind: SlotPassphrase, Factors: []Factor{{Passphrase, []byte{1}}}, Legacy: true},
+		{ID: []byte{2}, Kind: SlotRecovery, Factors: []Factor{{Recovery, []byte("legacy")}}, Legacy: true},
+	}
+	if err := Check(Table{Policy: Standard, Slots: legacy}); err != nil {
+		t.Errorf("a table of legacy slots under standard: %v", err)
+	}
+	for _, p := range []Policy{Hardware, Strict} {
+		if err := Check(Table{Policy: p, Slots: legacy}); !errors.Is(err, ErrPolicy) {
+			t.Errorf("%s: %v", p, err)
+		}
+	}
+	// a legacy slot that claims a hash, or a factor slot marked legacy, is refused
+	bad := []Slot{{ID: []byte{1}, Kind: SlotPassphrase, Factors: []Factor{{Passphrase, []byte{1}}}, Legacy: true, RecoveryPubKeyHash: []byte{9}}, legacy[1]}
+	if err := Check(Table{Policy: Standard, Slots: bad}); !errors.Is(err, ErrPolicy) {
+		t.Errorf("legacy with a hash: %v", err)
+	}
+}

@@ -16,17 +16,21 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mochipool/workbench/spo/internal/app/workspace"
+	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/platform/uihint"
+	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 )
 
 // importFlags are the options of `workspace import`.
 type importFlags struct {
-	owners, only, rename          []string
-	depth                         int
-	all, dry, printManifest       bool
-	manifest, manifestOut, format string
-	passFD                        int
-	keepEncrypted, overwrite      bool
+	owners, only, rename                     []string
+	depth                                    int
+	all, dry, printManifest                  bool
+	manifest, manifestOut, format            string
+	passFD                                   int
+	deferEncrypted, keepEncrypted, overwrite bool
 }
 
 func (a *app) workspaceImportCommand() *cobra.Command {
@@ -59,8 +63,10 @@ FILE, which makes a new file) prints the manifest the flags stand for and
 imports nothing.
 
 A key that upstream encrypted needs its password: --password-fd N reads it from a
-descriptor, else it is asked for without echo when such a key is met. --keep-encrypted
-imports it in upstream's encrypted form without decrypting. An existing artefact
+descriptor, else it is asked for without echo when such a key is met.
+--defer-encrypted imports no encrypted key file: each is listed as left in the
+source and its owner is not imported (decrypt it with the default, or keep
+using the upstream scripts for that owner). An existing artefact
 is kept and its owner refused unless --overwrite.
 
 The result is a table of owner, artefact, status and reason; it never shows key
@@ -90,14 +96,19 @@ would fail.`,
 			}
 			spec := envSpec{needs: []Need{CapVKeyDerive, CapAddress}}
 			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, _ WireOptions) error {
-				uc := workspace.ImportWorkspace{Dest: s.Store, Decryptor: env.KeyDecryptor, Deriver: env.VKeyDeriver, Addresses: env.AddressInspector,
+				idx := labels.NewIndex(s.Anchored)
+				uc := workspace.ImportWorkspace{Dest: s.Store, Decryptor: env.KeyDecryptor, Deriver: env.VKeyDeriver, Addresses: env.AddressInspector, HotDeriver: a.d.HotDeriver,
+					History: func(ctx context.Context, id identity.Ref) (custody.RoleHistory, bool, error) {
+						return ports.RoleHistoryOf(ctx, idx, id)
+					},
+					Homes: func(ctx context.Context, id identity.Ref) ([]ports.KeyHome, error) { return idx.Homes(ctx, id) },
 					Open: func(dir string) (workspace.Source, error) {
 						if sameDir(dir, a.workspace) {
 							return nil, fmt.Errorf("%s is the workspace itself", dir)
 						}
 						return a.d.OpenUpstreamSource(dir)
 					}}
-				pw, err := a.importPassword(ctx, func() (int, error) { return uc.CountEncrypted(ctx, req) }, env, f.passFD, f.keepEncrypted)
+				pw, err := a.importPassword(ctx, func() (int, error) { return uc.CountEncrypted(ctx, req) }, env, f.passFD, f.deferEncrypted)
 				if err != nil {
 					return err
 				}
@@ -145,7 +156,9 @@ would fail.`,
 	cmd.Flags().BoolVar(&f.printManifest, "print-manifest", false, "print the manifest the folders and flags stand for and import nothing")
 	cmd.Flags().StringVar(&f.manifestOut, "manifest-out", "", "write that manifest to a new file (never replaces one) and import nothing")
 	cmd.Flags().IntVar(&f.passFD, "password-fd", -1, "read the password of upstream's encrypted keys from this inherited file descriptor (trailing newline stripped); there is no password flag or variable")
-	cmd.Flags().BoolVar(&f.keepEncrypted, "keep-encrypted", false, "import upstream-encrypted keys in their encrypted form instead of decrypting them (no password, no gpg)")
+	cmd.Flags().BoolVar(&f.deferEncrypted, "defer-encrypted", false, "do not import upstream-encrypted key files: list each as left in the source and do not import its owner (no password, no gpg)")
+	cmd.Flags().BoolVar(&f.keepEncrypted, "keep-encrypted", false, "removed: use --defer-encrypted")
+	_ = cmd.Flags().MarkHidden("keep-encrypted")
 	cmd.Flags().BoolVar(&f.overwrite, "overwrite", false, "replace artefacts that already exist in the workspace (default: refuse the owner)")
 	return cmd
 }
@@ -156,7 +169,10 @@ would fail.`,
 // spec: SPO-Xmulti-IF-001, SPO-Xmulti-IF-002, SPO-Xmulti-PRE-003
 func (a *app) importRequest(cmd *cobra.Command, args []string, f *importFlags) (workspace.ImportRequest, error) {
 	req := workspace.ImportRequest{DryRun: f.dry}
-	req.KeepEncrypted, req.Overwrite = f.keepEncrypted, f.overwrite
+	if f.keepEncrypted {
+		return req, errors.New("--keep-encrypted was removed: a key in upstream's encrypted form is no longer stored (ADR 0011 decision 2). Use --defer-encrypted to leave such a key file in the source, or import with its password to decrypt and seal it")
+	}
+	req.DeferEncrypted, req.Overwrite = f.deferEncrypted, f.overwrite
 	if f.manifest != "" {
 		for _, n := range []string{"depth", "only", "rename", "all", "owner"} {
 			if cmd.Flags().Changed(n) {

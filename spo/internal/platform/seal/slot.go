@@ -102,7 +102,25 @@ type Slot struct {
 	Commit  []byte
 	Nonce   []byte
 	Wrapped []byte
+	// Binding is nil for a slot sealed before store format 3. Such a slot binds
+	// neither the workspace policy nor a recovery public key hash (its
+	// associated data is the one above); a format 2 workspace migrates with
+	// these slots because rewrapping them needs their credentials.
+	Binding *SlotBinding
 }
+
+// SlotBinding is what a slot of store format 3 binds in its associated data in
+// addition to the legacy fields (ADR 0011, decision 6): the workspace policy
+// and the hash of the recovery public key (empty under strict).
+//
+//	AD = CBOR ["spo/slot-ad/pr", StoreFormat, workspace id, slot id, kind, kdf,
+//	           policy, recovery public key hash, commit]
+type SlotBinding struct {
+	Policy             string
+	RecoveryPubKeyHash []byte // MACSize bytes, or empty
+}
+
+const labelSlotADBound = "spo/slot-ad/pr"
 
 func (s Slot) ad(workspaceID []byte) ([]byte, error) {
 	if len(workspaceID) != IDSize || len(s.ID) != IDSize {
@@ -122,6 +140,12 @@ func (s Slot) ad(workspaceID []byte) ([]byte, error) {
 	}
 	if len(s.Commit) != MACSize {
 		return nil, fmt.Errorf("%w: slot commitment", ErrFormat)
+	}
+	if b := s.Binding; b != nil {
+		if b.Policy == "" || (len(b.RecoveryPubKeyHash) != 0 && len(b.RecoveryPubKeyHash) != MACSize) {
+			return nil, fmt.Errorf("%w: slot binding", ErrFormat)
+		}
+		return EncodeCanonical([]any{labelSlotADBound, StoreFormat, workspaceID, s.ID, s.Kind, kdf, b.Policy, b.RecoveryPubKeyHash, s.Commit})
 	}
 	return EncodeCanonical([]any{FormatVersion, workspaceID, s.ID, s.Kind, kdf, s.Commit})
 }
@@ -193,10 +217,16 @@ func slotCommit(key []byte) []byte {
 // NewPassphraseSlot wraps master under a key derived from passphrase.
 // Randomness is read in this order (pinned by the vectors): salt, nonce.
 func NewPassphraseSlot(workspaceID, slotID []byte, master, passphrase *secret.Buffer, p KDFParams) (Slot, error) {
-	return defaultSealer.newPassphraseSlot(workspaceID, slotID, master, passphrase, p)
+	return defaultSealer.newPassphraseSlot(workspaceID, slotID, master, passphrase, p, nil)
 }
 
-func (s sealer) newPassphraseSlot(workspaceID, slotID []byte, master, passphrase *secret.Buffer, p KDFParams) (Slot, error) {
+// NewBoundPassphraseSlot is NewPassphraseSlot for store format 3: the slot
+// binds b.
+func NewBoundPassphraseSlot(workspaceID, slotID []byte, master, passphrase *secret.Buffer, p KDFParams, b SlotBinding) (Slot, error) {
+	return defaultSealer.newPassphraseSlot(workspaceID, slotID, master, passphrase, p, &b)
+}
+
+func (s sealer) newPassphraseSlot(workspaceID, slotID []byte, master, passphrase *secret.Buffer, p KDFParams, b *SlotBinding) (Slot, error) {
 	if err := p.validate(); err != nil {
 		return Slot{}, err
 	}
@@ -211,7 +241,7 @@ func (s sealer) newPassphraseSlot(workspaceID, slotID []byte, master, passphrase
 	if err != nil {
 		return Slot{}, err
 	}
-	slot := Slot{ID: slotID, Kind: SlotPassphrase, KDF: p, Salt: salt, Nonce: nonce}
+	slot := Slot{ID: slotID, Kind: SlotPassphrase, KDF: p, Salt: salt, Nonce: nonce, Binding: b}
 	if err := s.wrap(&slot, workspaceID, master, passphrase); err != nil {
 		return Slot{}, err
 	}
@@ -222,23 +252,42 @@ func (s sealer) newPassphraseSlot(workspaceID, slotID []byte, master, passphrase
 // The recovery key is returned raw; show it once with EncodeRecoveryKey.
 // Randomness is read in this order: recovery key, nonce.
 func NewRecoverySlot(workspaceID, slotID []byte, master *secret.Buffer) (Slot, *secret.Buffer, error) {
-	return defaultSealer.newRecoverySlot(workspaceID, slotID, master)
+	return defaultSealer.newRecoverySlot(workspaceID, slotID, master, nil, nil)
 }
 
-func (s sealer) newRecoverySlot(workspaceID, slotID []byte, master *secret.Buffer) (Slot, *secret.Buffer, error) {
-	rk, err := readSecret(s.rand, KeySize)
-	if err != nil {
-		return Slot{}, nil, err
+// NewBoundRecoverySlot is NewRecoverySlot for store format 3. The caller draws
+// the recovery key (it needs it to derive the recovery public key whose hash
+// every slot binds) and passes it in rk; the binding is b.
+func NewBoundRecoverySlot(workspaceID, slotID []byte, master, rk *secret.Buffer, b SlotBinding) (Slot, error) {
+	slot, _, err := defaultSealer.newRecoverySlot(workspaceID, slotID, master, rk, &b)
+	return slot, err
+}
+
+func (s sealer) newRecoverySlot(workspaceID, slotID []byte, master, given *secret.Buffer, b *SlotBinding) (Slot, *secret.Buffer, error) {
+	rk := given
+	var err error
+	if rk == nil {
+		if rk, err = readSecret(s.rand, KeySize); err != nil {
+			return Slot{}, nil, err
+		}
+	}
+	destroyRK := func() {
+		if given == nil {
+			rk.Destroy()
+		}
 	}
 	nonce, err := readBytes(s.rand, NonceSize)
 	if err != nil {
-		rk.Destroy()
+		destroyRK()
 		return Slot{}, nil, err
 	}
-	slot := Slot{ID: slotID, Kind: SlotRecovery, Nonce: nonce}
+	slot := Slot{ID: slotID, Kind: SlotRecovery, Nonce: nonce, Binding: b}
 	if err := s.wrap(&slot, workspaceID, master, rk); err != nil {
-		rk.Destroy()
+		destroyRK()
 		return Slot{}, nil, err
+	}
+	if given != nil {
+		return slot, nil, nil
 	}
 	return slot, rk, nil
 }

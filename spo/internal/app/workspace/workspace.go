@@ -50,7 +50,7 @@ const (
 // ArtefactReport is the outcome for one artefact. Reason and Note are fixed
 // phrases of this package, never content of a file.
 type ArtefactReport struct {
-	Ref    ports.Ref
+	Ref    ports.NamedRef
 	Status Status
 	Reason string
 	// Note carries a remark on a done artefact: a check that could not be
@@ -58,7 +58,7 @@ type ArtefactReport struct {
 	Note string
 	// To is the reference the artefact is stored under when the owner is
 	// imported under another name; zero when it is the same as Ref.
-	To ports.Ref
+	To ports.NamedRef
 }
 
 // OwnerReport is the outcome for one pool or wallet. A destination is
@@ -97,7 +97,7 @@ type Rewrite struct {
 type FoundOwner struct {
 	Kind      OwnerKind
 	Name, Dir string
-	Artefacts []ports.Ref
+	Artefacts []ports.NamedRef
 }
 
 // Report is the result of an import or an export.
@@ -155,7 +155,7 @@ var (
 // belong to `<w>`.
 //
 // spec: SPO-Pfiles-IN-003
-func OwnerOf(r ports.Ref) string {
+func OwnerOf(r ports.NamedRef) string {
 	n := r.Name
 	switch r.Kind {
 	case ports.AddrFile, ports.AddrVKey, ports.AddrSKey, ports.AddrHwsFile:
@@ -189,7 +189,7 @@ func OwnerOf(r ports.Ref) string {
 
 // KeyStem is the file name of a signing key without its `.skey`, which names
 // an upstream-encrypted record: `<pool>.node`, `<wallet>.payment`.
-func KeyStem(r ports.Ref) (string, bool) {
+func KeyStem(r ports.NamedRef) (string, bool) {
 	role, ok := ports.SigningKeyKinds()[r.Kind]
 	if !ok {
 		return "", false
@@ -204,11 +204,11 @@ var reKesStem = regexp.MustCompile(`^(.+)\.kes-(\d+)$`)
 
 // SKeyRefFromStem is the reverse of KeyStem. A stem with no known role is a
 // plain payment key.
-func SKeyRefFromStem(stem string) (ports.Ref, bool) {
+func SKeyRefFromStem(stem string) (ports.NamedRef, bool) {
 	if m := reKesStem.FindStringSubmatch(stem); m != nil {
 		var n int
 		if _, err := fmt.Sscanf(m[2], "%d", &n); err == nil {
-			r := ports.Ref{Name: m[1], Kind: ports.KesSKey, Num: n}
+			r := ports.NamedRef{Name: m[1], Kind: ports.KesSKey, Num: n}
 			return r, r.Validate() == nil
 		}
 	}
@@ -225,11 +225,11 @@ func SKeyRefFromStem(stem string) (ports.Ref, bool) {
 	sort.Slice(cands, func(i, j int) bool { return len(cands[i].role) > len(cands[j].role) })
 	for _, c := range cands {
 		if name, ok := strings.CutSuffix(stem, c.role); ok && name != "" {
-			r := ports.Ref{Name: name, Kind: c.kind}
+			r := ports.NamedRef{Name: name, Kind: c.kind}
 			return r, r.Validate() == nil
 		}
 	}
-	r := ports.Ref{Name: stem, Kind: ports.AddrSKey}
+	r := ports.NamedRef{Name: stem, Kind: ports.AddrSKey}
 	return r, r.Validate() == nil
 }
 

@@ -66,7 +66,7 @@ type tx struct {
 	order []string
 }
 
-func (t *tx) path(r ports.Ref) (string, error) {
+func (t *tx) path(r ports.NamedRef) (string, error) {
 	name, err := upstreamdir.FileName(r)
 	if err != nil {
 		return "", err
@@ -74,7 +74,7 @@ func (t *tx) path(r ports.Ref) (string, error) {
 	return filepath.Join(t.d.dir, name), nil
 }
 
-func (t *tx) Get(r ports.Ref) ([]byte, error) {
+func (t *tx) Get(r ports.NamedRef) ([]byte, error) {
 	if r.Kind.Secret() {
 		return nil, ports.ErrSecretKind
 	}
@@ -95,7 +95,7 @@ func (t *tx) Get(r ports.Ref) ([]byte, error) {
 	return b, err
 }
 
-func (t *tx) Exists(r ports.Ref) (bool, error) {
+func (t *tx) Exists(r ports.NamedRef) (bool, error) {
 	p, err := t.path(r)
 	if err != nil {
 		return false, err
@@ -117,7 +117,7 @@ func (t *tx) stage(p string, st *staged) {
 	t.ops[p] = st
 }
 
-func (t *tx) Put(r ports.Ref, data []byte) error {
+func (t *tx) Put(r ports.NamedRef, data []byte) error {
 	if r.Kind.Secret() {
 		return ports.ErrSecretKind
 	}
@@ -130,7 +130,7 @@ func (t *tx) Put(r ports.Ref, data []byte) error {
 }
 
 // PutSecret accepts a signing key envelope in upstream's encrypted form only.
-func (t *tx) PutSecret(r ports.Ref, sec *secret.Buffer) error {
+func (t *tx) PutSecret(r ports.NamedRef, sec *secret.Buffer) error {
 	if !r.Kind.Secret() {
 		return fmt.Errorf("%w: %s is not a secret kind", ports.ErrInvalidRef, r.Kind)
 	}
@@ -173,7 +173,7 @@ func (t *tx) PutSecret(r ports.Ref, sec *secret.Buffer) error {
 	return nil
 }
 
-func (t *tx) Delete(r ports.Ref) error {
+func (t *tx) Delete(r ports.NamedRef) error {
 	p, err := t.path(r)
 	if err != nil {
 		return err
@@ -182,16 +182,16 @@ func (t *tx) Delete(r ports.Ref) error {
 	return nil
 }
 
-// View implements ports.Store.
-func (d *Dir) View(_ context.Context, fn func(ports.Reader) error) error {
+// View implements ports.NamedStore.
+func (d *Dir) View(_ context.Context, fn func(ports.NamedReader) error) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return fn(&tx{d: d, ops: map[string]*staged{}})
 }
 
-// Update implements ports.Store: all the files are written beside their
+// Update implements ports.NamedStore: all the files are written beside their
 // destinations first, then renamed into place.
-func (d *Dir) Update(_ context.Context, fn func(ports.Writer) error) error {
+func (d *Dir) Update(_ context.Context, fn func(ports.NamedWriter) error) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	t := &tx{d: d, ops: map[string]*staged{}}
@@ -261,4 +261,4 @@ func writeTemp(dest string, st *staged) (string, error) {
 	return tmp, nil
 }
 
-var _ ports.Store = (*Dir)(nil)
+var _ ports.NamedStore = (*Dir)(nil)

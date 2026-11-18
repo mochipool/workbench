@@ -83,6 +83,11 @@ let
     src = lib.cleanSource ../spo;
     vendorHash = "sha256-HzNiNP+Ryjd5TRn+0hXoo66G8qz+F+1Bx6aCed1VChw=";
     env.CGO_ENABLED = 0;
+    # `spo` opens workspaces. The block producer's start-up helper `spo-node-keys`
+    # (ADR 0011 decision 2), the only plaintext writer of a signing key, is its own
+    # package (`nodeKeys` below), so a producer host installs it without `spo`.
+    # The checks below prove from the import graphs that `spo` holds no plaintext
+    # writer and that the helper holds no way to open a workspace.
     subPackages = [ "cmd/spo" ];
     ldflags = [ "-s" "-w" "-X main.version=${version}" ];
     # subPackages limits the build; the tests cover the whole module.
@@ -107,6 +112,22 @@ let
         echo "the release build contains the test-only plain store"
         exit 1
       fi
+      # The node-delivery exception: the workspace-opening binary holds no
+      # plaintext writer, and the start-up helper holds no way to open a
+      # workspace (no sealed store, no slot or key-wrapping code, no factor
+      # source). A package that is not in the build cannot be linked.
+      go list -deps ./cmd/spo-node-keys > helper-deps.txt
+      if grep -e '/internal/adapters/nodefiles' release-deps.txt tagged-deps.txt; then
+        echo "the workspace-opening binary contains the plaintext writer of the start-up helper"
+        exit 1
+      fi
+      if grep -e '/internal/adapters/sqlitestore' -e '/internal/platform/seal' -e '/internal/adapters/fido2cli' -e '/internal/adapters/cli' -e '/internal/adapters/partystore' -e 'modernc.org/sqlite' helper-deps.txt || grep -x 'github.com/mochipool/workbench/spo/internal/adapters/native' helper-deps.txt; then
+        echo "the start-up helper contains code that opens a workspace"
+        exit 1
+      fi
+      grep -q '/internal/adapters/nodefiles' helper-deps.txt \
+        || { echo "the start-up helper no longer contains its writer: the checks above prove nothing"; exit 1; }
+      rm helper-deps.txt
       grep -q '/internal/adapters/upstreamdir' release-deps.txt \
         || { echo "the release build lacks the read-only upstream reader"; exit 1; }
       grep -q '/test/plainstore' tagged-deps.txt \
@@ -132,8 +153,10 @@ let
       refuse workspace
       refuse workspace export
       refuse workspace import
+      refuse node export
       refuse key
       "$spo" key --help 2>&1 | grep -q 'convert' || { echo "spo key convert is missing"; exit 1; }
+      "$spo" node --help 2>&1 | grep -q 'export' || { echo "spo node export is missing"; exit 1; }
       if "$spo" --upstream-layout version >/dev/null 2>&1; then
         echo "the release binary accepts --upstream-layout"
         exit 1
@@ -154,6 +177,36 @@ let
       description = "Stake pool operations from one binary (unwrapped; no toolchain manifest)";
       license = lib.licenses.gpl3Only;
       mainProgram = "spo";
+    };
+  };
+
+  # The start-up helper alone: no `spo`, no toolchain manifest, no external tool.
+  nodeKeys = buildGoModule {
+    pname = "spo-node-keys";
+    inherit version;
+    src = lib.cleanSource ../spo;
+    vendorHash = "sha256-HzNiNP+Ryjd5TRn+0hXoo66G8qz+F+1Bx6aCed1VChw=";
+    env.CGO_ENABLED = 0;
+    subPackages = [ "cmd/spo-node-keys" ];
+    ldflags = [ "-s" "-w" ];
+    doCheck = false; # `unwrapped` runs every test of the module
+    doInstallCheck = true;
+    installCheckPhase = ''
+      runHook preInstallCheck
+      [ -x "$out/bin/spo-node-keys" ] || { echo "spo-node-keys is not installed"; exit 1; }
+      [ ! -e "$out/bin/spo" ] || { echo "the helper package holds spo"; exit 1; }
+      helper_usage=$("$out/bin/spo-node-keys" 2>&1 || true)
+      echo "$helper_usage" | grep -q 'usage: spo-node-keys deliver' || { echo "spo-node-keys has no usage text"; exit 1; }
+      if "$out/bin/spo-node-keys" --version >/dev/null 2>&1; then
+        echo "spo-node-keys accepted an unknown command"
+        exit 1
+      fi
+      runHook postInstallCheck
+    '';
+    meta = {
+      description = "Block producer start-up helper: decrypts a spo node export into a ramfs directory";
+      license = lib.licenses.gpl3Only;
+      mainProgram = "spo-node-keys";
     };
   };
 
@@ -244,7 +297,7 @@ let
   package = pkgs.runCommand "spo-${version}"
     {
       nativeBuildInputs = [ pkgs.makeWrapper ];
-      passthru = { inherit toolchain unwrapped parity taggedNoBinary; tests = unwrapped; };
+      passthru = { inherit toolchain unwrapped parity taggedNoBinary nodeKeys; tests = unwrapped; };
       meta = unwrapped.meta // {
         description = "Stake pool operations from one binary, with sealed keys and multi-party signing";
         platforms = lib.platforms.unix;
@@ -252,6 +305,7 @@ let
     } ''
     mkdir -p $out/bin
     makeWrapper ${unwrapped}/bin/spo $out/bin/spo --set-default SPO_TOOLCHAIN ${toolchain}
+
   '';
 in
 package

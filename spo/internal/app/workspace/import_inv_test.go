@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"golang.org/x/crypto/blake2b"
 	"path"
 	"slices"
 	"sort"
@@ -35,12 +36,12 @@ func opcertOf(cold, kes []byte) []byte {
 type invState struct {
 	trs     []*memTree
 	dst     *memStore
-	pres    []map[ports.Ref]string // the workspace before each import of the test
-	renames map[string]string      // source owner name -> stored name
+	pres    []map[ports.NamedRef]string // the workspace before each import of the test
+	renames map[string]string           // source owner name -> stored name
 }
 
 // before returns what the workspace held at ref before any import of the test.
-func (s *invState) before(r ports.Ref) []string {
+func (s *invState) before(r ports.NamedRef) []string {
 	var out []string
 	for _, p := range s.pres {
 		if v, ok := p[r]; ok {
@@ -70,6 +71,9 @@ func assertINV006(t *testing.T, st *invState) {
 type oracleName struct {
 	field, name string
 	self        bool
+	// payer: the paying wallet of an open registration and its witness slot, which
+	// name a payment key (`<wallet>.payment`, or a key-only address), not a stake key.
+	payer bool
 }
 
 // oracleNames reads the names of a descriptor with the domain's own accessors,
@@ -94,11 +98,12 @@ func oracleNames(b []byte) []oracleName {
 	}
 	if rn, err := d.RegistrationNames(); err == nil {
 		if rn.Pay != "" {
-			out = append(out, oracleName{field: "regWitness.regPayName", name: rn.Pay})
+			out = append(out, oracleName{field: "regWitness.regPayName", name: rn.Pay, payer: true})
 		}
 		for _, k := range rn.Slots {
 			n := strings.TrimSuffix(strings.TrimSuffix(k, ".staking"), ".node")
-			out = append(out, oracleName{field: fmt.Sprintf("regWitness.witnesses[%q]", k), name: n, self: strings.HasSuffix(k, ".node")})
+			payer := !strings.HasSuffix(k, ".staking") && !strings.HasSuffix(k, ".node")
+			out = append(out, oracleName{field: fmt.Sprintf("regWitness.witnesses[%q]", k), name: n, self: strings.HasSuffix(k, ".node"), payer: payer})
 		}
 		for _, tok := range strings.FieldsFunc(rn.MetadataFiles, func(r rune) bool { return strings.ContainsRune(" ,\"'\t\n", r) }) {
 			for _, suf := range []string{".metadata.json", ".extended-metadata.json", ".additional-metadata.json"} {
@@ -159,14 +164,14 @@ func oracleResolve(tr *memTree, dir, value string) (*memDir, string) {
 func oracleINV006(st *invState) (bad []string) {
 	dst := st.dst
 	report := func(f string, a ...any) { bad = append(bad, fmt.Sprintf(f, a...)) }
-	owners := map[string]map[ports.Ref][]byte{}
+	owners := map[string]map[ports.NamedRef][]byte{}
 	for r, b := range dst.files {
 		if !ports.IsWorkspaceKind(r.Kind) {
 			continue
 		}
 		n := OwnerOf(r)
 		if owners[n] == nil {
-			owners[n] = map[ports.Ref][]byte{}
+			owners[n] = map[ports.NamedRef][]byte{}
 		}
 		owners[n][r] = b
 	}
@@ -179,7 +184,7 @@ func oracleINV006(st *invState) (bad []string) {
 		arts := owners[n]
 		hasWallet, hasPool := false, false
 		for r := range arts {
-			switch kindOfRefs([]ports.Ref{r}) {
+			switch kindOfRefs([]ports.NamedRef{r}) {
 			case KindWallet:
 				hasWallet = true
 			case KindPool:
@@ -189,7 +194,7 @@ func oracleINV006(st *invState) (bad []string) {
 		if hasWallet && hasPool {
 			report("owner %q holds wallet and pool artefacts", n)
 		}
-		kinfo := func(r ports.Ref) []byte {
+		kinfo := func(r ports.NamedRef) []byte {
 			switch roleOf[r.Kind] {
 			case 0:
 				return rawOf(arts[r])
@@ -206,7 +211,7 @@ func oracleINV006(st *invState) (bad []string) {
 			if !ok || roleOf[r.Kind] == 0 {
 				continue
 			}
-			v := ports.Ref{Name: r.Name, Kind: vk, Num: r.Num}
+			v := ports.NamedRef{Name: r.Name, Kind: vk, Num: r.Num}
 			if _, have := arts[v]; !have {
 				continue
 			}
@@ -218,7 +223,7 @@ func oracleINV006(st *invState) (bad []string) {
 		// the cold key of a pool, from whatever material it holds, and
 		// everything that names it
 		var colds [][]byte
-		for _, r := range []ports.Ref{{Name: n, Kind: ports.NodeVKey}, {Name: n, Kind: ports.NodeSKey}, {Name: n, Kind: ports.NodeHwsFile}} {
+		for _, r := range []ports.NamedRef{{Name: n, Kind: ports.NodeVKey}, {Name: n, Kind: ports.NodeSKey}, {Name: n, Kind: ports.NodeHwsFile}} {
 			if _, have := arts[r]; have {
 				if k := kinfo(r); k != nil {
 					colds = append(colds, k)
@@ -265,7 +270,7 @@ func oracleINV006(st *invState) (bad []string) {
 					if !bytes.Equal(oc.ColdVKey[:], cold) {
 						report("%s names another cold key", r)
 					}
-					if kv := rawOf(arts[ports.Ref{Name: n, Kind: ports.KesVKey, Num: r.Num}]); kv != nil && !bytes.Equal(oc.KesVKey[:], kv) {
+					if kv := rawOf(arts[ports.NamedRef{Name: n, Kind: ports.KesVKey, Num: r.Num}]); kv != nil && !bytes.Equal(oc.KesVKey[:], kv) {
 						report("%s names another hot key", r)
 					}
 				case ports.PoolIDFile:
@@ -301,10 +306,10 @@ func oracleINV006(st *invState) (bad []string) {
 				if err != nil {
 					continue
 				}
-				if pk := rawOf(arts[ports.Ref{Name: r.Name, Kind: ports.AddrVKey}]); pk != nil && info.PaymentKeyHash != nil && *info.PaymentKeyHash != txbuild.HashKey(pk) {
+				if pk := rawOf(arts[ports.NamedRef{Name: r.Name, Kind: ports.AddrVKey}]); pk != nil && info.PaymentKeyHash != nil && *info.PaymentKeyHash != txbuild.HashKey(pk) {
 					report("%s is not derived from the payment key of its name", r)
 				}
-				if sk := rawOf(owners[n][ports.Ref{Name: n, Kind: ports.StakingVKey}]); sk != nil && info.StakeKeyHash != nil && *info.StakeKeyHash != txbuild.HashKey(sk) {
+				if sk := rawOf(owners[n][ports.NamedRef{Name: n, Kind: ports.StakingVKey}]); sk != nil && info.StakeKeyHash != nil && *info.StakeKeyHash != txbuild.HashKey(sk) {
 					report("%s is not derived from the stake key of its owner", r)
 				}
 			}
@@ -316,24 +321,24 @@ func oracleINV006(st *invState) (bad []string) {
 	// from one source owner
 	for _, n := range names {
 		arts := owners[n]
-		S := rawOf(arts[ports.Ref{Name: n, Kind: ports.StakingVKey}])
-		P := rawOf(arts[ports.Ref{Name: n + ".payment", Kind: ports.AddrVKey}])
+		S := rawOf(arts[ports.NamedRef{Name: n, Kind: ports.StakingVKey}])
+		P := rawOf(arts[ports.NamedRef{Name: n + ".payment", Kind: ports.AddrVKey}])
 		if S == nil || P == nil {
 			continue
 		}
 		ok := false
-		if b, have := arts[ports.Ref{Name: n + ".payment", Kind: ports.AddrFile}]; have {
+		if b, have := arts[ports.NamedRef{Name: n + ".payment", Kind: ports.AddrFile}]; have {
 			if info, err := (addrInspector{}).InspectAddress(chain.Address(strings.TrimSpace(string(b)))); err == nil && info.PaymentKeyHash != nil && info.StakeKeyHash != nil {
 				ok = *info.PaymentKeyHash == txbuild.HashKey(P) && *info.StakeKeyHash == txbuild.HashKey(S)
 			}
 		}
 		for _, pre := range st.pres {
-			ok = ok || (bytes.Equal(rawOf([]byte(pre[ports.Ref{Name: n, Kind: ports.StakingVKey}])), S) && bytes.Equal(rawOf([]byte(pre[ports.Ref{Name: n + ".payment", Kind: ports.AddrVKey}])), P))
+			ok = ok || (bytes.Equal(rawOf([]byte(pre[ports.NamedRef{Name: n, Kind: ports.StakingVKey}])), S) && bytes.Equal(rawOf([]byte(pre[ports.NamedRef{Name: n + ".payment", Kind: ports.AddrVKey}])), P))
 		}
 		for _, tr := range st.trs {
 			for _, d := range tr.dirs {
 				for sr, sb := range d.files {
-					if sr.Kind == ports.StakingVKey && st.storedName(sr.Name) == n && bytes.Equal(rawOf(sb), S) && bytes.Equal(rawOf(d.files[ports.Ref{Name: sr.Name + ".payment", Kind: ports.AddrVKey}]), P) {
+					if sr.Kind == ports.StakingVKey && st.storedName(sr.Name) == n && bytes.Equal(rawOf(sb), S) && bytes.Equal(rawOf(d.files[ports.NamedRef{Name: sr.Name + ".payment", Kind: ports.AddrVKey}]), P) {
 						ok = true
 					}
 				}
@@ -345,17 +350,17 @@ func oracleINV006(st *invState) (bad []string) {
 	}
 
 	// every name a descriptor of the workspace carries
-	wsStake := func(n string) []byte { return rawOf(owners[n][ports.Ref{Name: n, Kind: ports.StakingVKey}]) }
+	wsStake := func(n string) []byte { return rawOf(owners[n][ports.NamedRef{Name: n, Kind: ports.StakingVKey}]) }
 	wasStake := func(n string, k []byte) bool {
-		for _, v := range st.before(ports.Ref{Name: n, Kind: ports.StakingVKey}) {
+		for _, v := range st.before(ports.NamedRef{Name: n, Kind: ports.StakingVKey}) {
 			if bytes.Equal(rawOf([]byte(v)), k) {
 				return true
 			}
 		}
 		return false
 	}
-	everHad := func(n string) bool { return len(st.before(ports.Ref{Name: n, Kind: ports.StakingVKey})) > 0 }
-	descs := make([]ports.Ref, 0)
+	everHad := func(n string) bool { return len(st.before(ports.NamedRef{Name: n, Kind: ports.StakingVKey})) > 0 }
+	descs := make([]ports.NamedRef, 0)
 	for r := range dst.files {
 		if r.Kind == ports.PoolDescriptor {
 			descs = append(descs, r)
@@ -372,6 +377,64 @@ func oracleINV006(st *invState) (bad []string) {
 			if nr.self {
 				if nr.name != r.Name {
 					who("it names another pool than its own")
+				}
+				continue
+			}
+			hasPay := func() bool {
+				base := strings.TrimSuffix(nr.name, ".payment")
+				return owners[base][ports.NamedRef{Name: base + ".payment", Kind: ports.AddrVKey}] != nil || owners[base][ports.NamedRef{Name: base, Kind: ports.AddrVKey}] != nil || strings.HasSuffix(nr.name, ".payment")
+			}
+			if nr.payer && hasPay() {
+				// the payer is a payment key: the wallet its name stands for holds one, and
+				// it is the one of a source wallet of the run or the workspace's own
+				base := strings.TrimSuffix(nr.name, ".payment")
+				pay := rawOf(owners[base][ports.NamedRef{Name: base + ".payment", Kind: ports.AddrVKey}])
+				if pay == nil {
+					pay = rawOf(owners[base][ports.NamedRef{Name: base, Kind: ports.AddrVKey}])
+				}
+				if pay == nil {
+					who("no wallet of the workspace has a payment key of that name")
+					continue
+				}
+				// The expected key is read from the fixture bytes by the oracle's own lexical
+				// rule (oracleResolve), and compared by its blake2b-224 hash, computed here:
+				// nothing of the product's resolver or of txbuild is used.
+				hash28 := func(raw []byte) string {
+					h, _ := blake2b.New(28, nil)
+					h.Write(raw)
+					return hex.EncodeToString(h.Sum(nil))
+				}
+				want := map[string]bool{}
+				for _, tr := range st.trs {
+					for dir, d := range tr.dirs {
+						for sr, sb := range d.files {
+							if sr.Kind != ports.PoolDescriptor || st.storedName(sr.Name) != r.Name {
+								continue
+							}
+							for _, x := range oracleNames(sb) {
+								if x.field != nr.field {
+									continue
+								}
+								if sd, w := oracleResolve(tr, dir, strings.TrimSuffix(x.name, ".payment")); sd != nil {
+									k := rawOf(sd.files[ports.NamedRef{Name: w + ".payment", Kind: ports.AddrVKey}])
+									if k == nil {
+										k = rawOf(sd.files[ports.NamedRef{Name: w, Kind: ports.AddrVKey}])
+									}
+									if k != nil {
+										want[hash28(k)] = true
+									}
+								}
+							}
+						}
+					}
+				}
+				if len(want) == 0 { // no source owner is named: the workspace's own wallet as it was
+					for _, v := range append(st.before(ports.NamedRef{Name: base + ".payment", Kind: ports.AddrVKey}), st.before(ports.NamedRef{Name: base, Kind: ports.AddrVKey})...) {
+						want[hash28(rawOf([]byte(v)))] = true
+					}
+				}
+				if !want[hash28(pay)] {
+					who("the payment key hash of that wallet is neither the source owner's nor the workspace's own as it was")
 				}
 				continue
 			}
@@ -411,11 +474,11 @@ func oracleINV006(st *invState) (bad []string) {
 						sd, want := oracleResolve(tr, dir, v)
 						switch {
 						case sd != nil:
-							if !bytes.Equal(rawOf(sd.files[ports.Ref{Name: want, Kind: ports.StakingVKey}]), stake) {
+							if !bytes.Equal(rawOf(sd.files[ports.NamedRef{Name: want, Kind: ports.StakingVKey}]), stake) {
 								ps = append(ps, "the workspace wallet has other stake keys than the source owner the layout names")
 							}
-							srcPay := rawOf(sd.files[ports.Ref{Name: want + ".payment", Kind: ports.AddrVKey}])
-							if pay := rawOf(owners[nr.name][ports.Ref{Name: nr.name + ".payment", Kind: ports.AddrVKey}]); pay != nil && srcPay != nil && !bytes.Equal(pay, srcPay) {
+							srcPay := rawOf(sd.files[ports.NamedRef{Name: want + ".payment", Kind: ports.AddrVKey}])
+							if pay := rawOf(owners[nr.name][ports.NamedRef{Name: nr.name + ".payment", Kind: ports.AddrVKey}]); pay != nil && srcPay != nil && !bytes.Equal(pay, srcPay) {
 								ps = append(ps, "the workspace wallet has other payment keys than the source owner the layout names")
 							}
 						default:
@@ -454,8 +517,8 @@ func oracleINV006(st *invState) (bad []string) {
 	return bad
 }
 
-func sortedKeys(m map[ports.Ref][]byte) []ports.Ref {
-	out := make([]ports.Ref, 0, len(m))
+func sortedKeys(m map[ports.NamedRef][]byte) []ports.NamedRef {
+	out := make([]ports.NamedRef, 0, len(m))
 	for r := range m {
 		out = append(out, r)
 	}

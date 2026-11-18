@@ -390,7 +390,9 @@ func TestSettleFromBundleRoutesByKind(t *testing.T) {
 	pb, _ := p.Marshal()
 	var compact strings.Builder
 	compact.WriteString(strings.Join(strings.Fields(string(pb)), ""))
-	if err := w.store.Update(ctx, func(wr ports.Writer) error { return wr.Put(ports.Ref{Name: p.TxID, Kind: ports.PendingUpdate}, pb) }); err != nil {
+	if err := w.store.Update(ctx, func(wr ports.NamedWriter) error {
+		return wr.Put(ports.NamedRef{Name: p.TxID, Kind: ports.PendingUpdate}, pb)
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.Enqueue(ctx, ports.QueuedTx{Type: transfer.TypePoolRegistration, FromName: "w", FromAddr: "a", ToName: "w", ToAddr: "a",
@@ -401,7 +403,7 @@ func TestSettleFromBundleRoutesByKind(t *testing.T) {
 		t.Fatal(err)
 	}
 	applied := 0
-	apply := func(_ ports.Writer, got assets.Pending, _ time.Time) error {
+	apply := func(_ ports.NamedWriter, got assets.Pending, _ time.Time) error {
 		if got.Pool != "mypool" || got.Epoch != "7" {
 			t.Errorf("%+v", got)
 		}

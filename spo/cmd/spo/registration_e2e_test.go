@@ -114,9 +114,9 @@ func TestCalidusKeyAndRegistrationThroughCommands(t *testing.T) {
 	// The stored record is the signer's JSON: nonce and Calidus key in its payload.
 	st := storeOf(t, dir)
 	var stored []byte
-	if err := st.View(context.Background(), func(r ports.Reader) error {
+	if err := st.View(context.Background(), func(r ports.NamedReader) error {
 		var e error
-		stored, e = r.Get(ports.Ref{Name: strings.TrimSuffix(m[1], ".calidus-registration.json"), Kind: ports.CalidusRegistration})
+		stored, e = r.Get(ports.NamedRef{Name: strings.TrimSuffix(m[1], ".calidus-registration.json"), Kind: ports.CalidusRegistration})
 		return e
 	}); err != nil {
 		t.Fatal(err)
@@ -148,7 +148,7 @@ func TestCalidusKeyAndRegistrationThroughCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the registration in the transaction does not verify: %v", err)
 	}
-	cold := vkeyOf(t, dir, ports.Ref{Name: "p", Kind: ports.NodeVKey})
+	cold := vkeyOf(t, dir, ports.NamedRef{Name: "p", Kind: ports.NodeVKey})
 	h224, _ := blake2b.New(28, nil)
 	h224.Write(cold)
 	if hex.EncodeToString(reg.PoolID[:]) != hex.EncodeToString(h224.Sum(nil)) {
@@ -172,7 +172,7 @@ func TestCalidusKeyAndRegistrationThroughCommands(t *testing.T) {
 	}
 
 	notLeaked(t, all.String(), abandonArt, "abandon abandon",
-		secretHex(t, dir, ports.Ref{Name: "c", Kind: ports.CalidusSKey}), secretHex(t, dir, ports.Ref{Name: "p", Kind: ports.NodeSKey}), "SigningKey")
+		secretHex(t, dir, ports.NamedRef{Name: "c", Kind: ports.CalidusSKey}), secretHex(t, dir, ports.NamedRef{Name: "p", Kind: ports.NodeSKey}), "SigningKey")
 	stepOn(t, dir, &all, "store", "verify")
 }
 
@@ -210,7 +210,7 @@ func TestCatalystRegistrationThroughCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the registration in the transaction does not verify: %v", err)
 	}
-	stakeKey := vkeyOf(t, dir, ports.Ref{Name: "s", Kind: ports.StakingVKey})
+	stakeKey := vkeyOf(t, dir, ports.NamedRef{Name: "s", Kind: ports.StakingVKey})
 	if hex.EncodeToString(reg.StakePub[:]) != hex.EncodeToString(stakeKey) || reg.Nonce != 123 || len(reg.Delegations) != 2 ||
 		reg.Delegations[0].Weight != 3 || reg.Delegations[1].Weight != 1 || reg.Delegations[0].VotePub != reg.Delegations[1].VotePub {
 		t.Errorf("registration %+v (stake key %x)", reg, stakeKey)
@@ -230,6 +230,6 @@ func TestCatalystRegistrationThroughCommands(t *testing.T) {
 			t.Errorf("%v: %v\n%s", tc.args, err, out)
 		}
 	}
-	notLeaked(t, all.String(), secretHex(t, dir, ports.Ref{Name: "v", Kind: ports.VotingSKey}), secretHex(t, dir, ports.Ref{Name: "s", Kind: ports.StakingSKey}), "SigningKey")
+	notLeaked(t, all.String(), secretHex(t, dir, ports.NamedRef{Name: "v", Kind: ports.VotingSKey}), secretHex(t, dir, ports.NamedRef{Name: "s", Kind: ports.StakingSKey}), "SigningKey")
 	stepOn(t, dir, &all, "store", "verify")
 }

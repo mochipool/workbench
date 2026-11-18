@@ -63,8 +63,8 @@ var _ ports.OpenedEnvelope = (*Opened)(nil)
 // keys are read from the vault into guarded memory for one use and wiped by
 // the caller with Local.Destroy.
 type Kit struct {
-	Store ports.Store
-	Vault ports.Vault
+	Store ports.NamedStore
+	Vault ports.NamedVault
 	// Rand is the entropy of key generation and message ids; nil means
 	// crypto/rand.
 	Rand io.Reader
@@ -117,9 +117,9 @@ func (k Kit) Local(ctx context.Context) (ports.LocalIdentity, error) {
 // destroys it.
 func (k Kit) private(ctx context.Context) (*Private, error) {
 	var raw []byte
-	err := k.Store.View(ctx, func(r ports.Reader) error {
+	err := k.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
-		raw, err = r.Get(ports.Ref{Name: LocalName, Kind: ports.PartyIdentity})
+		raw, err = r.Get(ports.NamedRef{Name: LocalName, Kind: ports.PartyIdentity})
 		return err
 	})
 	if errors.Is(err, ports.ErrNotFound) {
@@ -135,7 +135,7 @@ func (k Kit) private(ctx context.Context) (*Private, error) {
 	if err := doc.Verify(); err != nil {
 		return nil, fmt.Errorf("the stored identity document: %w", err)
 	}
-	keys, err := k.Vault.Open(ctx, ports.Ref{Name: LocalName, Kind: ports.PartyKeys})
+	keys, err := k.Vault.Open(ctx, ports.NamedRef{Name: LocalName, Kind: ports.PartyKeys})
 	if err != nil {
 		return nil, fmt.Errorf("the identity's private keys: %w", err)
 	}

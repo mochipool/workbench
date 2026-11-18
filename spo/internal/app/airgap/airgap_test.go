@@ -136,7 +136,7 @@ type rig struct {
 	t     *testing.T
 	dir   string
 	file  *transferfile.File
-	store ports.Store
+	store ports.NamedStore
 	clock *clock
 }
 
@@ -150,7 +150,9 @@ func newRig(t *testing.T) *rig {
 	r := &rig{t: t, dir: dir, store: st, clock: &clock{t: time.Date(2026, 11, 16, 9, 0, 0, 0, time.FixedZone("CET", 3600))}}
 	r.file = &transferfile.File{Path: filepath.Join(dir, "offlineTransfer.json")}
 	put := func(name string, kind ports.Kind, content string) {
-		if err := st.Update(bg, func(w ports.Writer) error { return w.Put(ports.Ref{Name: name, Kind: kind}, []byte(content+"\n")) }); err != nil {
+		if err := st.Update(bg, func(w ports.NamedWriter) error {
+			return w.Put(ports.NamedRef{Name: name, Kind: kind}, []byte(content+"\n"))
+		}); err != nil {
 			t.Fatal(err)
 		}
 	}

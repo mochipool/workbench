@@ -124,33 +124,33 @@ func (wsDeriver) DeriveVerificationKey(_ context.Context, env *ports.Secret) ([]
 // wsRecorder wraps a store and records which kinds were written with Put and
 // which with PutSecret.
 type wsRecorder struct {
-	ports.Store
+	ports.NamedStore
 	mu      sync.Mutex
-	puts    []ports.Ref
-	secrets []ports.Ref
+	puts    []ports.NamedRef
+	secrets []ports.NamedRef
 }
 
 type wsWriter struct {
-	ports.Writer
+	ports.NamedWriter
 	r *wsRecorder
 }
 
-func (w wsWriter) Put(ref ports.Ref, d []byte) error {
+func (w wsWriter) Put(ref ports.NamedRef, d []byte) error {
 	w.r.mu.Lock()
 	w.r.puts = append(w.r.puts, ref)
 	w.r.mu.Unlock()
-	return w.Writer.Put(ref, d)
+	return w.NamedWriter.Put(ref, d)
 }
 
-func (w wsWriter) PutSecret(ref ports.Ref, s *secret.Buffer) error {
+func (w wsWriter) PutSecret(ref ports.NamedRef, s *secret.Buffer) error {
 	w.r.mu.Lock()
 	w.r.secrets = append(w.r.secrets, ref)
 	w.r.mu.Unlock()
-	return w.Writer.PutSecret(ref, s)
+	return w.NamedWriter.PutSecret(ref, s)
 }
 
-func (r *wsRecorder) Update(ctx context.Context, fn func(ports.Writer) error) error {
-	return r.Store.Update(ctx, func(w ports.Writer) error { return fn(wsWriter{w, r}) })
+func (r *wsRecorder) Update(ctx context.Context, fn func(ports.NamedWriter) error) error {
+	return r.NamedStore.Update(ctx, func(w ports.NamedWriter) error { return fn(wsWriter{w, r}) })
 }
 
 type wsAudit struct{ events []ports.AuditEvent }
@@ -360,7 +360,7 @@ func TestImportRealWorkspaceAndRoundTrip(t *testing.T) {
 	}
 	dstDir := t.TempDir()
 	dstFS, _ := plainstore.OpenTestnet(dstDir)
-	dst := &wsRecorder{Store: dstFS}
+	dst := &wsRecorder{NamedStore: dstFS}
 	led := native.Ledger{}
 	imp := workspace.ImportWorkspace{Source: src, SourceVault: src, Lister: src, Dest: dst, Decryptor: e.wsGPG(), Deriver: wsDeriver{}, Addresses: led}
 
@@ -380,7 +380,7 @@ func TestImportRealWorkspaceAndRoundTrip(t *testing.T) {
 	// with the keystrokes of the password: everything
 	dstDir = t.TempDir()
 	dstFS, _ = plainstore.OpenTestnet(dstDir)
-	dst = &wsRecorder{Store: dstFS}
+	dst = &wsRecorder{NamedStore: dstFS}
 	imp.Dest = dst
 	pw := wsSec(typed)
 	rep, err = imp.Run(ctx, workspace.ImportOptions{Password: pw})

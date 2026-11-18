@@ -18,7 +18,7 @@ func init() {
 		ports.GovActionFile: ".action",
 	} {
 		ext := ext
-		layout[k] = func(r ports.Ref) string { return r.Name + ext }
+		layout[k] = func(r ports.NamedRef) string { return r.Name + ext }
 	}
 	// Vote files keep the process default mode, as upstream's `echo >` leaves
 	// them (SPO-Pfiles-OUT-029); every other governance artefact is locked.

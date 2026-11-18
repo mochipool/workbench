@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -14,7 +15,8 @@ import (
 func (a *app) drepCommand() *cobra.Command {
 	keys := govGroup("keys", "DRep keys", a.drepKeysGenerateCommand())
 	return govGroup("drep", "DReps: keys, register or update, status, retire",
-		keys, a.drepRegisterCommand(), a.drepStatusCommand(), a.drepRetireCommand())
+		keys, a.drepRegisterCommand(), a.drepStatusCommand(), a.drepRetireCommand(),
+		a.renameCommand(identity.OwnerDRep, "DRep"), a.mergeCommand(identity.OwnerDRep, "DRep"))
 }
 
 // drepStem is the name a DRep is stored under: the use cases accept
@@ -53,7 +55,7 @@ read from file descriptor N. --account and --index select the path.`,
 // drepDetails are the lines of the confirmation that name the DRep and what the
 // certificate carries, read from the workspace's public files.
 func (a *app) drepDetails(ctx context.Context, s *session, env *Env, f *govFlags, drep string) (details, notes []string) {
-	if id := readPublic(ctx, s.Store, ports.Ref{Name: drepStem(drep), Kind: ports.DRepID}); id != nil {
+	if id := readPublic(ctx, s.Store, ports.NamedRef{Name: drepStem(drep), Kind: ports.DRepID}); id != nil {
 		details = append(details, "DRep id       "+firstLineText(id))
 	}
 	switch {
@@ -124,7 +126,7 @@ was sent or queued. Offline, the DRep must be in the transfer file
 					kind = "DRep registration"
 				}
 				a.govReport(govOutcome{kind: kind, account: drepStem(args[0]), payer: payerStem(args[1]), res: res, details: details, notes: notes,
-					stored: []ports.Ref{{Name: drepStem(args[0]), Kind: ports.DRepRegCert}}}, &f, env, wo)
+					stored: []ports.NamedRef{{Name: drepStem(args[0]), Kind: ports.DRepRegCert}}}, &f, env, wo)
 				return nil
 			})
 		},
@@ -161,7 +163,7 @@ was sent or queued.`,
 					return err
 				}
 				var details []string
-				if id := readPublic(ctx, s.Store, ports.Ref{Name: drepStem(args[0]), Kind: ports.DRepID}); id != nil {
+				if id := readPublic(ctx, s.Store, ports.NamedRef{Name: drepStem(args[0]), Kind: ports.DRepID}); id != nil {
 					details = append(details, "DRep id       "+firstLineText(id))
 				}
 				uc := governance.RetireDRep{Base: a.govBase(s, env, &f, govConfirmer{a: a, details: details}),
@@ -171,7 +173,7 @@ was sent or queued.`,
 					return f.hint(err)
 				}
 				a.govReport(govOutcome{kind: "DRep retirement", account: drepStem(args[0]), payer: payerStem(args[1]), res: res, details: details,
-					stored: []ports.Ref{{Name: drepStem(args[0]), Kind: ports.DRepRetCert}}}, &f, env, wo)
+					stored: []ports.NamedRef{{Name: drepStem(args[0]), Kind: ports.DRepRetCert}}}, &f, env, wo)
 				return nil
 			})
 		},

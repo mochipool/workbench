@@ -23,10 +23,10 @@ import (
 
 const publicPhrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art"
 
-func storeHas(t *testing.T, w *world.World, ref ports.Ref) bool {
+func storeHas(t *testing.T, w *world.World, ref ports.NamedRef) bool {
 	t.Helper()
 	var ok bool
-	if err := w.Store.View(context.Background(), func(r ports.Reader) error {
+	if err := w.Store.View(context.Background(), func(r ports.NamedReader) error {
 		var err error
 		ok, err = r.Exists(ref)
 		return err
@@ -151,8 +151,8 @@ func TestCalidusRegistrationRefusals(t *testing.T) {
 	}
 	// A hardware signing file alone is no Calidus signing key (the flag that
 	// used to say "on hardware" is gone: the directory decides).
-	if err := w.Store.Update(ctx, func(wr ports.Writer) error {
-		return wr.Put(ports.Ref{Name: "hwonly", Kind: ports.CalidusHwsFile}, []byte("{}"))
+	if err := w.Store.Update(ctx, func(wr ports.NamedWriter) error {
+		return wr.Put(ports.NamedRef{Name: "hwonly", Kind: ports.CalidusHwsFile}, []byte("{}"))
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -188,12 +188,12 @@ func TestVotingKeyOnLedger(t *testing.T) {
 		t.Errorf("argv %v", argv)
 	}
 	for _, k := range []ports.Kind{ports.VotingVKey, ports.VotingHwsFile} {
-		if !storeHas(t, w, ports.Ref{Name: "v", Kind: k}) {
+		if !storeHas(t, w, ports.NamedRef{Name: "v", Kind: k}) {
 			t.Errorf("no %s", k)
 		}
 	}
 	for _, k := range []ports.Kind{ports.VotingSKey, ports.VotingPKey, ports.VotingMnemonics} {
-		if storeHas(t, w, ports.Ref{Name: "v", Kind: k}) {
+		if storeHas(t, w, ports.NamedRef{Name: "v", Kind: k}) {
 			t.Errorf("a hardware voting key has a %s", k)
 		}
 	}
@@ -213,7 +213,7 @@ func TestVotingKeyOnLedger(t *testing.T) {
 		p := hw.Prompts()
 		var ue *custody.UnsupportedError
 		_, err := (catalyst.GenerateVotingKey{Store: w.Store, Hardware: w.Exporter()}).Run(ctx, catalyst.GenerateVotingKeyRequest{Name: "o", Place: custody.PlaceHardware})
-		if !errors.As(err, &ue) || hw.Prompts() != p || storeHas(t, w, ports.Ref{Name: "o", Kind: ports.VotingVKey}) {
+		if !errors.As(err, &ue) || hw.Prompts() != p || storeHas(t, w, ports.NamedRef{Name: "o", Kind: ports.VotingVKey}) {
 			t.Errorf("%s: %v", v[0], err)
 		}
 	}

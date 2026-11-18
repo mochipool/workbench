@@ -491,6 +491,13 @@ func TestPRE006Refusals(t *testing.T) {
 			}
 			return sg
 		}},
+		{"a held key with no role history, over a network (fails closed)", party.RefuseNoKey, sceneOpt{kind: ports.ViaNetwork}, nil, func(s *scene) multisig.Signer {
+			sg := s.B.Signer()
+			sg.History = func(context.Context, identity.Ref) (custody.RoleHistory, bool, error) {
+				return custody.RoleHistory{}, false, nil // a member of an owner always has one
+			}
+			return sg
+		}},
 		{"the signer cannot meet the demand of the body", party.RefuseCannotSign, sceneOpt{}, nil, func(s *scene) multisig.Signer {
 			sg := s.B.Signer()
 			sg.Signers = deviceDir{}

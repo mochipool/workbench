@@ -16,8 +16,8 @@ import (
 // reference, and the signing keys in plain form (guarded memory), whether
 // they were plain in the source or decrypted on the way in.
 type ownerData struct {
-	open map[ports.Ref][]byte
-	skey map[ports.Ref]*ports.Secret
+	open map[ports.NamedRef][]byte
+	skey map[ports.NamedRef]*ports.Secret
 }
 
 type checker struct {
@@ -30,8 +30,8 @@ type checker struct {
 // written before this has passed.
 //
 // spec: SPO-Pfiles-OUT-002, SPO-Pfiles-OUT-001, SPO-Pfiles-OUT-011, SPO-Pfiles-OUT-013, SPO-04c-IN-001, SPO-04c-IN-002
-func (c checker) check(ctx context.Context, d ownerData) (fail map[ports.Ref]string, notes map[ports.Ref]string) {
-	fail, notes = map[ports.Ref]string{}, map[ports.Ref]string{}
+func (c checker) check(ctx context.Context, d ownerData) (fail map[ports.NamedRef]string, notes map[ports.NamedRef]string) {
+	fail, notes = map[ports.NamedRef]string{}, map[ports.NamedRef]string{}
 	c.checkKeyPairs(ctx, d, fail, notes)
 	c.checkAddresses(d, fail, notes)
 	checkNodeCounter(d, fail, notes)
@@ -39,7 +39,7 @@ func (c checker) check(ctx context.Context, d ownerData) (fail map[ports.Ref]str
 	return fail, notes
 }
 
-func rawVKey(d ownerData, ref ports.Ref) ([]byte, bool) {
+func rawVKey(d ownerData, ref ports.NamedRef) ([]byte, bool) {
 	data, ok := d.open[ref]
 	if !ok {
 		return nil, false
@@ -56,10 +56,10 @@ func rawVKey(d ownerData, ref ports.Ref) ([]byte, bool) {
 }
 
 // checkKeyPairs: a signing key's verification key matches the stored `.vkey`.
-func (c checker) checkKeyPairs(ctx context.Context, d ownerData, fail, notes map[ports.Ref]string) {
+func (c checker) checkKeyPairs(ctx context.Context, d ownerData, fail, notes map[ports.NamedRef]string) {
 	for ref, sk := range d.skey {
 		role := ports.SigningKeyKinds()[ref.Kind]
-		vref := ports.Ref{Name: ref.Name, Kind: role.VKey, Num: ref.Num}
+		vref := ports.NamedRef{Name: ref.Name, Kind: role.VKey, Num: ref.Num}
 		if role.VKey == "" {
 			continue
 		}
@@ -94,7 +94,7 @@ func (c checker) checkKeyPairs(ctx context.Context, d ownerData, fail, notes map
 }
 
 // checkAddresses: an address file belongs to the keys of its name.
-func (c checker) checkAddresses(d ownerData, fail, notes map[ports.Ref]string) {
+func (c checker) checkAddresses(d ownerData, fail, notes map[ports.NamedRef]string) {
 	for ref, data := range d.open {
 		if ref.Kind != ports.AddrFile {
 			continue
@@ -102,7 +102,7 @@ func (c checker) checkAddresses(d ownerData, fail, notes map[ports.Ref]string) {
 		if c.addresses == nil {
 			continue
 		}
-		pay, havePay := rawVKey(d, ports.Ref{Name: ref.Name, Kind: ports.AddrVKey})
+		pay, havePay := rawVKey(d, ports.NamedRef{Name: ref.Name, Kind: ports.AddrVKey})
 		if !havePay {
 			continue
 		}
@@ -117,7 +117,7 @@ func (c checker) checkAddresses(d ownerData, fail, notes map[ports.Ref]string) {
 		}
 		if info.StakeKeyHash != nil {
 			stakeName := strings.TrimSuffix(ref.Name, ".payment")
-			if st, ok := rawVKey(d, ports.Ref{Name: stakeName, Kind: ports.StakingVKey}); ok && *info.StakeKeyHash != txbuild.HashKey(st) {
+			if st, ok := rawVKey(d, ports.NamedRef{Name: stakeName, Kind: ports.StakingVKey}); ok && *info.StakeKeyHash != txbuild.HashKey(st) {
 				fail[ref] = "the address does not belong to the stake verification key of the same wallet"
 			}
 		}
@@ -125,7 +125,7 @@ func (c checker) checkAddresses(d ownerData, fail, notes map[ports.Ref]string) {
 }
 
 // checkNodeCounter: the issue counter belongs to the cold verification key.
-func checkNodeCounter(d ownerData, fail, notes map[ports.Ref]string) {
+func checkNodeCounter(d ownerData, fail, notes map[ports.NamedRef]string) {
 	for ref, data := range d.open {
 		if ref.Kind != ports.NodeCounter {
 			continue
@@ -135,7 +135,7 @@ func checkNodeCounter(d ownerData, fail, notes map[ports.Ref]string) {
 			fail[ref] = "the operational certificate issue counter is malformed"
 			continue
 		}
-		cold, ok := rawVKey(d, ports.Ref{Name: ref.Name, Kind: ports.NodeVKey})
+		cold, ok := rawVKey(d, ports.NamedRef{Name: ref.Name, Kind: ports.NodeVKey})
 		if !ok {
 			notes[ref] = "no cold verification key to check the counter against"
 			continue
@@ -148,8 +148,8 @@ func checkNodeCounter(d ownerData, fail, notes map[ports.Ref]string) {
 
 // checkKesCounters: the two KES counters are numbers and agree with the
 // rotation rule (next is current, or current plus one).
-func checkKesCounters(d ownerData, fail, notes map[ports.Ref]string) {
-	var curRef, nextRef *ports.Ref
+func checkKesCounters(d ownerData, fail, notes map[ports.NamedRef]string) {
+	var curRef, nextRef *ports.NamedRef
 	for ref := range d.open {
 		r := ref
 		switch ref.Kind {
@@ -193,11 +193,11 @@ func checkKesCounters(d ownerData, fail, notes map[ports.Ref]string) {
 		fail[*nextRef] = "the KES counters disagree: next is not the current number or the one after it"
 	default:
 		if n, ok := st.Current(); ok {
-			name := ports.Ref{}.Name
+			name := ports.NamedRef{}.Name
 			if curRef != nil {
 				name = curRef.Name
 			}
-			if _, have := d.open[ports.Ref{Name: name, Kind: ports.KesVKey, Num: n}]; !have {
+			if _, have := d.open[ports.NamedRef{Name: name, Kind: ports.KesVKey, Num: n}]; !have {
 				notes[*curRef] = "the KES key named by the counter has no verification key file"
 			}
 		}

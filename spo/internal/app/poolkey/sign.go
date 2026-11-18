@@ -22,7 +22,7 @@ var ErrHardwareCalidusSuspended = errors.New("a Calidus key cannot be held on a 
 // The signature is a plain Ed25519 signature over the text, not a CIP-8
 // message (SPO-15-OUT-006). A failed signature is an error here, not exit 0.
 type SignWithCalidusKey struct {
-	Store   ports.Store
+	Store   ports.NamedStore
 	Signers ports.SignerDirectory
 }
 
@@ -46,15 +46,15 @@ func (uc SignWithCalidusKey) Run(ctx context.Context, calidus string, text []byt
 		return res, err
 	}
 	var ref custody.KeyRef
-	if err := uc.Store.View(ctx, func(r ports.Reader) error {
-		have, err := r.Exists(ports.Ref{Name: cal, Kind: ports.CalidusSKey})
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
+		have, err := r.Exists(ports.NamedRef{Name: cal, Kind: ports.CalidusSKey})
 		if err != nil {
 			return err
 		}
 		if !have {
 			// A Calidus key cannot be made on a device (SPO-15-PRE-002): a hardware
 			// signing file alone is no signing key.
-			return fmt.Errorf("%w: %s", ErrMissingFile, ports.Ref{Name: cal, Kind: ports.CalidusSKey})
+			return fmt.Errorf("%w: %s", ErrMissingFile, ports.NamedRef{Name: cal, Kind: ports.CalidusSKey})
 		}
 		ref, err = keyring.Resolve(r, custody.RoleCalidus, cal)
 		return err

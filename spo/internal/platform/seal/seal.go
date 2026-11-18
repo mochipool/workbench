@@ -78,8 +78,23 @@ import (
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 )
 
-// FormatVersion is the version of every encoding in this package.
+// FormatVersion is the version of the encodings of the key slots, the audit
+// chain and the audit events: it did not change when the record encoding did.
 const FormatVersion = 1
+
+// Record encodings. LegacyRecordFormat (1) is the name-keyed store: the owner
+// of a record is a name. RecordFormat (2) is the identity-keyed store of
+// ADR 0010: the owner is an anchor identity and a number, in the associated
+// data and in the owner blob. The store's format version (the meta row) is
+// RecordFormat.
+const (
+	LegacyRecordFormat uint64 = 1
+	RecordFormat       uint64 = 2
+	// StoreFormat (3) is the store of ADR 0011: slot kinds and a workspace
+	// policy on disk. It does not change the record encoding, which stays
+	// RecordFormat, so a migration from format 2 re-seals no record.
+	StoreFormat uint64 = 3
+)
 
 // Algorithm identifiers. They appear in associated data, so they are part of
 // the format.

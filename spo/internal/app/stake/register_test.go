@@ -59,7 +59,7 @@ func TestRegisterStakeAddress(t *testing.T) {
 		if !(conf < w1 && w1 < w2 && w2 < enq && enq < put) {
 			t.Errorf("order: confirm %d, payment %d, stake %d, enqueue %d, certificate file %d: %v", conf, w1, w2, enq, put, r.l.calls)
 		}
-		if got := string(r.store.files[ports.Ref{Name: "w", Kind: ports.StakingCert}]); got != string(res.Certificate.Envelope) {
+		if got := string(r.store.files[ports.NamedRef{Name: "w", Kind: ports.StakingCert}]); got != string(res.Certificate.Envelope) {
 			t.Errorf("the certificate file is %q", got)
 		}
 		q := r.queue.got[0]
@@ -106,28 +106,28 @@ func TestRegisterRefusalsWriteNothing(t *testing.T) {
 		{"the provider fails", func(r *rig, _ *RegisterStakeAddress) { r.rewards.err = errors.New("connection refused") }, nil, false},
 		{"no reader and no permission to skip the check", func(_ *rig, uc *RegisterStakeAddress) { uc.Rewards = nil }, ErrNoChainReader, false},
 		{"hardware payment key", func(r *rig, _ *RegisterStakeAddress) {
-			r.device(t, ports.Ref{Name: "w.payment", Kind: ports.AddrSKey})
+			r.device(t, ports.NamedRef{Name: "w.payment", Kind: ports.AddrSKey})
 		}, nil, true},
 		{"hardware stake key", func(r *rig, _ *RegisterStakeAddress) {
-			r.device(t, ports.Ref{Name: "w", Kind: ports.StakingSKey})
+			r.device(t, ports.NamedRef{Name: "w", Kind: ports.StakingSKey})
 		}, nil, true},
 		{"the stake file holds a payment address", func(r *rig, _ *RegisterStakeAddress) {
-			r.store.files[ports.Ref{Name: "w", Kind: ports.StakingAddr}] = []byte("addr_test_pay\n")
+			r.store.files[ports.NamedRef{Name: "w", Kind: ports.StakingAddr}] = []byte("addr_test_pay\n")
 		}, ErrNotStakeAddress, true},
 		{"a mainnet stake address on a testnet workspace", func(r *rig, _ *RegisterStakeAddress) {
-			r.store.files[ports.Ref{Name: "w", Kind: ports.StakingAddr}] = []byte("stake_main_w\n")
+			r.store.files[ports.NamedRef{Name: "w", Kind: ports.StakingAddr}] = []byte("stake_main_w\n")
 		}, ErrNetworkMismatch, true},
 		{"a script stake credential", func(r *rig, _ *RegisterStakeAddress) {
-			r.store.files[ports.Ref{Name: "w", Kind: ports.StakingAddr}] = []byte("stake_script\n")
+			r.store.files[ports.NamedRef{Name: "w", Kind: ports.StakingAddr}] = []byte("stake_script\n")
 		}, ErrNotStakeAddress, true},
 		{"no stake address file", func(r *rig, _ *RegisterStakeAddress) {
-			delete(r.store.files, ports.Ref{Name: "w", Kind: ports.StakingAddr})
+			delete(r.store.files, ports.NamedRef{Name: "w", Kind: ports.StakingAddr})
 		}, ErrMissingFile, true},
 		{"no stake signing key", func(r *rig, _ *RegisterStakeAddress) {
-			delete(r.store.files, ports.Ref{Name: "w", Kind: ports.StakingSKey})
+			delete(r.store.files, ports.NamedRef{Name: "w", Kind: ports.StakingSKey})
 		}, ErrNoSigningKey, true},
 		{"no payer signing key", func(r *rig, _ *RegisterStakeAddress) {
-			delete(r.store.files, ports.Ref{Name: "w.payment", Kind: ports.AddrSKey})
+			delete(r.store.files, ports.NamedRef{Name: "w.payment", Kind: ports.AddrSKey})
 		}, ErrNoSigningKey, true},
 		{"a pre-Conway protocol", func(r *rig, _ *RegisterStakeAddress) { r.chain.params.ProtocolMajor = 8 }, ErrProtocolTooOld, false},
 		{"no deposit in the parameters", func(r *rig, _ *RegisterStakeAddress) { r.chain.params.StakeAddressDeposit = 0 }, ErrNoDeposit, false},
@@ -252,7 +252,7 @@ func TestRegisterSubmits(t *testing.T) {
 // spec: SPO-Ptx-IN-001, SPO-Ptx-IN-002
 func TestRegisterPayerChecks(t *testing.T) {
 	r := newRig(t)
-	r.store.files[ports.Ref{Name: "w.payment", Kind: ports.AddrFile}] = []byte("addr_script\n")
+	r.store.files[ports.NamedRef{Name: "w.payment", Kind: ports.AddrFile}] = []byte("addr_script\n")
 	if _, err := r.register().Run(bg, RegisterRequest{Stake: "w", Payer: "w.payment"}); !errors.Is(err, ErrSourceNotKey) {
 		t.Errorf("%v", err)
 	}

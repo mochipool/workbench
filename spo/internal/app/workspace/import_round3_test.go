@@ -39,20 +39,35 @@ func TestXmultiKeptEncryptedKeySaysItsPairIsNotChecked(t *testing.T) {
 	build := func(dir *memStore) {
 		stake := pair(40, "StakeSigningKeyShelley_ed25519", "StakeVerificationKeyShelley_ed25519", "Stake")
 		other := pair(41, "StakeSigningKeyShelley_ed25519", "StakeVerificationKeyShelley_ed25519", "Stake")
-		dir.put(ports.Ref{Name: "w", Kind: ports.StakingSKey}, encryptedOf(t, other, "Correct-Horse-9"))
-		dir.put(ports.Ref{Name: "w", Kind: ports.StakingVKey}, stake.vkey)
+		dir.put(ports.NamedRef{Name: "w", Kind: ports.StakingSKey}, encryptedOf(t, other, "Correct-Horse-9"))
+		dir.put(ports.NamedRef{Name: "w", Kind: ports.StakingVKey}, stake.vkey)
 	}
 	src, dst := newMem(), newMem()
 	build(src)
-	rep, err := importer(src, dst, &fakeGPG{}).Run(ctx(), ImportOptions{KeepEncrypted: true})
-	if o := ownerOf(rep, "w"); err != nil || !o.Written || !strings.Contains(notes(o), "pair with the verification key is not checked") {
+	deferred := func(o OwnerReport) bool {
+		for _, a := range o.Artefacts {
+			if a.Status == StatusFailed && a.Reason == ReasonDeferred {
+				return true
+			}
+		}
+		return false
+	}
+	rep, err := importer(src, dst, &fakeGPG{}).Run(ctx(), ImportOptions{DeferEncrypted: true})
+	if o := ownerOf(rep, "w"); err != nil || o.Written || !deferred(o) {
 		t.Errorf("plain form: %v %+v", err, o)
 	}
 	tr, dst2 := newTree(), newMem()
 	build(tr.dir("/d"))
-	rep, err = multi(t, tr, dst2).Import(ctx(), ImportRequest{Dirs: []string{"/d"}, All: true, ImportOptions: ImportOptions{KeepEncrypted: true}})
-	if o := ownerOf(rep, "w"); err != nil || !o.Written || !strings.Contains(notes(o), "pair with the verification key is not checked") {
+	rep, err = multi(t, tr, dst2).Import(ctx(), ImportRequest{Dirs: []string{"/d"}, All: true, ImportOptions: ImportOptions{DeferEncrypted: true}})
+	if o := ownerOf(rep, "w"); err != nil || o.Written || !deferred(o) {
 		t.Errorf("selective form: %v %+v", err, o)
+	}
+	for _, d := range []*memStore{dst, dst2} {
+		for r := range d.snapshot() {
+			if r.Kind == ports.UpstreamEncryptedSKey || OwnerOf(r) == "w" {
+				t.Errorf("a deferred owner left %v in the workspace", r)
+			}
+		}
 	}
 }
 

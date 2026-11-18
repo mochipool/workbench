@@ -58,7 +58,7 @@ var (
 type QueryAddress struct {
 	// Store resolves a name to its `<name>.addr` or `<name>.staking.addr`;
 	// nil means only literal addresses are accepted.
-	Store     ports.Store
+	Store     ports.NamedStore
 	Addresses ports.AddressInspector
 	Utxos     ports.UtxoReader
 	Rewards   ports.RewardAccountReader
@@ -204,8 +204,8 @@ func (uc QueryAddress) resolve(ctx context.Context, word string) (name, addr str
 			kind, base = ports.StakingAddr, b
 		}
 		found := false
-		verr := uc.Store.View(ctx, func(r ports.Reader) error {
-			b, gerr := r.Get(ports.Ref{Name: base, Kind: kind})
+		verr := uc.Store.View(ctx, func(r ports.NamedReader) error {
+			b, gerr := r.Get(ports.NamedRef{Name: base, Kind: kind})
 			if errors.Is(gerr, ports.ErrNotFound) || errors.Is(gerr, ports.ErrInvalidRef) {
 				return nil
 			}

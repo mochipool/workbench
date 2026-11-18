@@ -37,9 +37,12 @@ func TestRekeyCommandRunsTheCleanup(t *testing.T) {
 	dir := copyWorkspace(t)
 	nf, nfd := fdIn(t, "a brand new long passphrase\n")
 	defer nf.Close()
-	rf, rfd := fdOut(t)
-	defer rf.Close()
-	out, err := withPass(t, dir, testPass, "store", "passphrase", "change", "--new-passphrase-fd", nfd, "--recovery-key-fd", rfd)
+	_, oldKey := template(t)
+	kf, kfd := fdIn(t, oldKey+"\n")
+	defer kf.Close()
+	of, ofd := fdIn(t, testPass+"\n")
+	defer of.Close()
+	out, err := withPass(t, dir, testPass, "store", "passphrase", "change", "--old-passphrase-fd", ofd, "--new-passphrase-fd", nfd, "--recovery-key-in-fd", kfd)
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}

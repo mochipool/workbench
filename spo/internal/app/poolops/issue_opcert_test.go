@@ -16,6 +16,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
@@ -87,14 +88,15 @@ func signedOpCert(priv ed25519.PrivateKey, kes []byte, counter, period uint64) [
 // device: a key with only a hardware file has no signer.
 type directory struct {
 	vault ports.Signer
-	store ports.Store
+	store ports.NamedStore
 }
 
 func (d directory) SignerFor(k custody.KeyRef) (ports.Signer, error) {
-	idx, err := ports.NewStoreKeyIndex(d.store)
-	if err != nil {
-		return nil, err
+	anchored, ok := labels.AnchorOf(d.store)
+	if !ok {
+		return nil, errors.New("the test store has no anchor level")
 	}
+	idx := labels.NewIndex(anchored)
 	homes, err := idx.Homes(context.Background(), k.Identity)
 	if err != nil {
 		return nil, err

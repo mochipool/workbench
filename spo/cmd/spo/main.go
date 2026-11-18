@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/mochipool/workbench/spo/internal/adapters/cli"
+	"github.com/mochipool/workbench/spo/internal/adapters/fido2cli"
 	"github.com/mochipool/workbench/spo/internal/adapters/toolchain"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
@@ -80,6 +81,7 @@ func buildDeps(out, errw io.Writer, term cli.Terminal) (cli.Deps, error) {
 	switch {
 	case err == nil:
 		tc := toolchain.New(manifest, execx.OS{})
+		deps.Factors = &fido2cli.Source{Tools: tc, Runner: execx.OS{}}
 		deps.Toolchain, deps.Tools, deps.Release = tc, tc.Names(), tc.Release()
 		deps.Genesis = func(network string) (string, string, bool) {
 			n, ok := tc.Genesis(network)

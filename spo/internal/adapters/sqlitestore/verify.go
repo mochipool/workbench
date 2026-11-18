@@ -11,9 +11,11 @@ import (
 
 	"github.com/fxamacker/cbor/v2"
 
+	"github.com/mochipool/workbench/spo/internal/domain/unlock"
 	"github.com/mochipool/workbench/spo/internal/platform/seal"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 )
 
 // ErrVerify is wrapped by every verification failure (a schema failure
@@ -201,34 +203,48 @@ func (s *Store) VerifyDetailed(ctx context.Context) (res VerifyResult, err error
 // than Verify; nothing is returned to the caller but the error. A record that
 // does not open is reported by its kind only (a *RefError wrapping ErrCorrupt).
 func (s *Store) VerifyPayloads(ctx context.Context) error {
+	_, err := s.VerifyPayloadsReport(ctx)
+	return err
+}
+
+// VerifyPayloadsReport is VerifyPayloads and says what it could not check. A
+// cold-role record is opened only as far as the master key goes: its outer layer
+// authenticates the class, the header, the recovery wrap and the associated data,
+// and its role history agrees with its sealed class, but whether the payload
+// decrypts, and whether the key in it derives the record's identity, cannot be
+// known without the sub-key factor. VerifyColdPayloads is the variant that
+// presents the factor.
+func (s *Store) VerifyPayloadsReport(ctx context.Context) (ColdCheck, error) {
+	var cold ColdCheck
 	release, err := s.enter(ctx)
 	if err != nil {
-		return err
+		return cold, err
 	}
 	defer release()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return cold, err
 	}
 	defer tx.Rollback()
 	if err := s.checkEpoch(ctx, tx); err != nil {
-		return err
+		return cold, err
 	}
 	_, _, known, err := s.verify(ctx, tx, true)
 	if err != nil {
-		return err
+		return cold, err
 	}
 	s.known = known
-	return s.openAll(ctx, tx)
+	return cold, s.openAll(ctx, tx, &cold)
 }
 
 // openAll decrypts every record as VerifyPayloads describes.
-func (s *Store) openAll(ctx context.Context, q dbq) error {
+func (s *Store) openAll(ctx context.Context, q dbq, cold *ColdCheck) error {
 	rows, err := q.QueryContext(ctx, `SELECT id, lookup_tag, kind, version, nonce, wrapped_key, owner_sealed, ciphertext FROM records ORDER BY id`)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
+	var keyRefs []keyRow
 	for rows.Next() {
 		var id, tag []byte
 		var kind string
@@ -237,36 +253,68 @@ func (s *Store) openAll(ctx context.Context, q dbq) error {
 		if err := rows.Scan(&id, &tag, &kind, &v, &r.Nonce, &r.WrappedKey, &r.Owner, &r.Ciphertext); err != nil {
 			return err
 		}
-		ref := ports.Ref{Kind: ports.Kind(kind)} // the kind only: the name is Sensitive
-		owner, err := s.keys.OpenOwner(s.ws, id, kind, r)
+		ref, err := s.refOf(id, kind, r)
+		kref := ports.Ref{Kind: ports.Kind(kind)} // errors carry the kind only: the anchor is Sensitive
 		if err != nil {
-			return corrupt(ref, err)
+			return corrupt(kref, err)
 		}
-		name, num, err := parseOwner(owner)
-		if err != nil {
-			return &RefError{ref, err}
-		}
-		if want, err := tagFor(s.keys, name, kind, num); err != nil {
+		if want, err := tagFor(s.keys, ref.Anchor, kind, ref.Num); err != nil {
 			return err
 		} else if !bytes.Equal(want, tag) {
-			return &RefError{ref, fmt.Errorf("%w: lookup tag does not match the owner", ErrCorrupt)}
+			return &RefError{kref, fmt.Errorf("%w: lookup tag does not match the owner", ErrCorrupt)}
 		}
-		meta := seal.RecordMeta{WorkspaceID: s.ws, RecordID: id, Kind: kind, Owner: owner, Class: classOf(ref.Kind), Version: uint64(v)}
+		meta := metaOf(s.ws, id, ref, classOf(ref.Kind), uint64(v))
+		if ref.Kind.Secret() && seal.IsColdSealed(r) {
+			// A cold-role record: the master key opens the outer layer, which
+			// authenticates the class, the header, the recovery wrap and the
+			// associated data; the payload needs the sub-key factor and is not
+			// opened here (VerifyColdPayloads does, with the factor).
+			if _, err := s.keys.OpenColdOuter(meta.ColdMeta(), r); err != nil {
+				return corrupt(kref, err)
+			}
+			cold.Records++
+			cold.OuterOnly++
+			keyRefs = append(keyRefs, keyRow{ref, true})
+			continue
+		}
+		if labels.IsKeySecret(ref.Kind) {
+			keyRefs = append(keyRefs, keyRow{ref, false})
+		}
 		if ref.Kind.Secret() {
 			b, err := s.keys.OpenSecret(meta, r)
 			if err != nil {
-				return corrupt(ref, err)
+				return corrupt(kref, err)
 			}
 			b.Destroy()
 		} else {
 			pt, err := s.keys.OpenRecord(meta, r)
 			if err != nil {
-				return corrupt(ref, err)
+				return corrupt(kref, err)
 			}
 			clear(pt)
 		}
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows.Close()
+	// The sealed class of every signing key agrees with its role history.
+	t := &txn{s: s, ctx: ctx, q: q, ops: map[ports.Ref]*op{}}
+	for _, k := range keyRefs {
+		cls, err := labels.ClassifyKeyRecord(t, k.ref)
+		if err != nil {
+			return &RefError{ports.Ref{Kind: k.ref.Kind}, err}
+		}
+		if cls.Cold != k.cold {
+			return &RefError{ports.Ref{Kind: k.ref.Kind}, ErrColdClassMismatch}
+		}
+	}
+	return nil
+}
+
+type keyRow struct {
+	ref  ports.Ref
+	cold bool
 }
 
 // verifyLocked runs verify in its own read transaction. The caller holds the
@@ -562,13 +610,25 @@ func VerifyFile(path string, passphrase *secret.Buffer) error {
 
 // VerifyFileDetailed is VerifyFile that also returns the chain head and notices.
 func VerifyFileDetailed(path string, passphrase *secret.Buffer) (VerifyResult, error) {
-	return verifyFile(path, credential{seal.SlotPassphrase, passphrase}, false)
+	return verifyFile(path, credential{kind: seal.SlotPassphrase, buf: passphrase}, false)
 }
 
 // VerifyFilePayloads is VerifyFileDetailed followed by VerifyPayloads: it also
 // decrypts every record. Read-only, like VerifyFile.
 func VerifyFilePayloads(path string, passphrase *secret.Buffer) (VerifyResult, error) {
-	return verifyFile(path, credential{seal.SlotPassphrase, passphrase}, true)
+	return verifyFile(path, credential{kind: seal.SlotPassphrase, buf: passphrase}, true)
+}
+
+// VerifyFileFactors is VerifyFileDetailed (payloads false) or VerifyFilePayloads
+// (true) for a workspace that unlocks through FIDO2 factors: the file's own slot
+// table decides which slot opens, and the authenticator is asked again (PIN and
+// touch). A backup of a hardware workspace has the same slots, so this is how
+// `store backup` verifies its copy under that policy. Read-only.
+func VerifyFileFactors(path string, in FactorInputs, payloads bool) (VerifyResult, error) {
+	if in.Source == nil {
+		return VerifyResult{}, errors.New("sqlitestore: no factor source")
+	}
+	return verifyFile(path, credential{kind: credFactors, factors: &in}, payloads)
 }
 
 // VerifyFileWithRecovery is VerifyFile with the printed recovery key.
@@ -578,7 +638,7 @@ func VerifyFileWithRecovery(path string, recovery *secret.Buffer) error {
 		return err
 	}
 	defer raw.Destroy()
-	_, err = verifyFile(path, credential{seal.SlotRecovery, raw}, false)
+	_, err = verifyFile(path, credential{kind: seal.SlotRecovery, buf: raw}, false)
 	return err
 }
 
@@ -593,7 +653,40 @@ func verifyFile(path string, cred credential, payloads bool) (VerifyResult, erro
 	res, err := s.VerifyDetailed(context.Background())
 	res.Notices = append(s.Notices(), res.Notices...)
 	if err == nil && payloads {
-		err = s.VerifyPayloads(context.Background())
+		var cold ColdCheck
+		cold, err = s.VerifyPayloadsReport(context.Background())
+		if err == nil && cold.OuterOnly > 0 {
+			res.Notices = append(res.Notices, fmt.Sprintf("%d cold-role record(s): the outer layer was opened with the workspace key and authenticated (class, header, recovery wrap, associated data), but the payloads were not decrypted, because that needs the cold sub-key factor, and so it is not known that the keys in them can be read or belong to their identities; run `spo store verify --deep --with-cold-factor` to open them with the factor", cold.OuterOnly))
+		}
+	}
+	if err == nil && !s.legacy {
+		// What the workspace key alone says about the cold records: no recovery wrap,
+		// a healed fallback, and records out of step with the policy, which fail the
+		// verification (no factor needed).
+		st, cerr := coldStatusFn(s, context.Background())
+		if cerr != nil {
+			err = fmt.Errorf("%w: reading the cold-role records: %w", ErrVerify, cerr)
+		} else {
+			if st.WithoutWrap > 0 && s.policy != unlock.Strict {
+				res.Notices = append(res.Notices, ColdNoWrapNotice(st.WithoutWrap))
+			}
+			for _, f := range st.Fallbacks {
+				res.Notices = append(res.Notices, fmt.Sprintf("cold record %s was healed from its previous wrap %d time(s): the authenticator gave a faulty answer once", f.Record, f.Count))
+			}
+			if len(st.Problems) > 0 {
+				ve := &VerifyError{}
+				for _, p := range st.Problems {
+					ve.Problems = append(ve.Problems, fmt.Sprintf("cold record %s: %s", p.Record, p.Why))
+				}
+				err = ve
+			}
+		}
+	}
+	if err == nil && !s.legacy {
+		// the identity layer, as every open checks it (ADR 0010 decision 4)
+		if cerr := s.View(context.Background(), func(r ports.Reader) error { return labels.Check(r) }); cerr != nil {
+			err = fmt.Errorf("%w: the identity layer: %w", ErrVerify, cerr)
+		}
 	}
 	return res, err
 }

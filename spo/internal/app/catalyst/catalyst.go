@@ -54,13 +54,13 @@ func trimDir(s string) string { return strings.TrimPrefix(s, "./") }
 
 func plainName(s string) (string, error) {
 	s = trimDir(s)
-	if err := (ports.Ref{Name: s, Kind: ports.VotingVKey}).Validate(); err != nil {
+	if err := (ports.NamedRef{Name: s, Kind: ports.VotingVKey}).Validate(); err != nil {
 		return "", fmt.Errorf("%w: %q", ErrBadName, s)
 	}
 	return s, nil
 }
 
-func refuseExisting(r ports.Reader, refs ...ports.Ref) error {
+func refuseExisting(r ports.NamedReader, refs ...ports.NamedRef) error {
 	for _, ref := range refs {
 		ok, err := r.Exists(ref)
 		if err != nil {
@@ -81,7 +81,7 @@ func refuseExisting(r ports.Reader, refs ...ports.Ref) error {
 // stored as a secret and never returned. The key is never encrypted
 // (SPO-09a-INV-001) here: the store seals it.
 type GenerateVotingKey struct {
-	Store     ports.Store
+	Store     ports.NamedStore
 	Deriver   ports.VotingKeyDeriver
 	Mnemonics ports.MnemonicGenerator // when no phrase is given
 	// Hardware makes the key on a device (upstream 09a `new hw`,
@@ -130,11 +130,11 @@ func (uc GenerateVotingKey) Run(ctx context.Context, req GenerateVotingKeyReques
 	if _, err := hwkeys.Plan(uc.Hardware, req.Place, custody.RoleCatalystVote); err != nil {
 		return res, err
 	}
-	refs := []ports.Ref{
+	refs := []ports.NamedRef{
 		{Name: nm, Kind: ports.VotingVKey}, {Name: nm, Kind: ports.VotingSKey}, {Name: nm, Kind: ports.VotingHwsFile},
 		{Name: nm, Kind: ports.VotingPKey}, {Name: nm, Kind: ports.VotingMnemonics},
 	}
-	if err := uc.Store.View(ctx, func(r ports.Reader) error { return refuseExisting(r, refs...) }); err != nil {
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error { return refuseExisting(r, refs...) }); err != nil {
 		return res, err
 	}
 	if onDevice {
@@ -164,7 +164,7 @@ func (uc GenerateVotingKey) Run(ctx context.Context, req GenerateVotingKeyReques
 		return res, err
 	}
 	defer file.Destroy()
-	err = uc.Store.Update(ctx, func(w ports.Writer) error {
+	err = uc.Store.Update(ctx, func(w ports.NamedWriter) error {
 		if err := refuseExisting(w, refs...); err != nil {
 			return err
 		}
@@ -189,7 +189,7 @@ func (uc GenerateVotingKey) Run(ctx context.Context, req GenerateVotingKeyReques
 // 1694H/1815H/<account>H/0/<index>, and the verification key and the hardware
 // signing file are stored (SPO-09a-EXT-002, SPO-09a-OUT-004). Nothing of the
 // device's reaches the workspace but those two files.
-func (uc GenerateVotingKey) runOnDevice(ctx context.Context, nm string, req GenerateVotingKeyRequest, refs []ports.Ref) (res VotingKeyGenerated, err error) {
+func (uc GenerateVotingKey) runOnDevice(ctx context.Context, nm string, req GenerateVotingKeyRequest, refs []ports.NamedRef) (res VotingKeyGenerated, err error) {
 	if req.Mnemonic != nil {
 		return res, errors.New("a hardware voting key has no mnemonic: it is made on the device")
 	}
@@ -205,7 +205,7 @@ func (uc GenerateVotingKey) runOnDevice(ctx context.Context, nm string, req Gene
 	if err != nil {
 		return res, err
 	}
-	err = uc.Store.Update(ctx, func(w ports.Writer) error {
+	err = uc.Store.Update(ctx, func(w ports.NamedWriter) error {
 		if err := refuseExisting(w, refs...); err != nil {
 			return err
 		}
@@ -262,7 +262,7 @@ func ParseDelegation(s string) ([]DelegationWord, error) {
 // `<stake>_<yymmddHHMMSS>.vote-registration.cbor`. The stake key is demanded
 // through a signing plan before anything is built.
 type GenerateRegistration struct {
-	Store   ports.Store
+	Store   ports.NamedStore
 	Signers ports.SignerDirectory
 	Clock   ports.Clock
 	// Tip gives the nonce: the current slot of the active work mode
@@ -289,7 +289,7 @@ type RegistrationRequest struct {
 
 // RegistrationGenerated is the result. All of it is public.
 type RegistrationGenerated struct {
-	Ref     ports.Ref // the registration file
+	Ref     ports.NamedRef // the registration file
 	Nonce   uint64
 	Keys    []ResolvedKey
 	Rewards chain.Address
@@ -329,20 +329,20 @@ func (uc GenerateRegistration) Run(ctx context.Context, req RegistrationRequest)
 	var rewards chain.Address
 	var keys []ResolvedKey
 	var stake, rewardsKey custody.KeyRef
-	err = uc.Store.View(ctx, func(r ports.Reader) error {
+	err = uc.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
-		if haveSKey, err = r.Exists(ports.Ref{Name: sn, Kind: ports.StakingSKey}); err != nil {
+		if haveSKey, err = r.Exists(ports.NamedRef{Name: sn, Kind: ports.StakingSKey}); err != nil {
 			return err
 		}
-		if haveHws, err = r.Exists(ports.Ref{Name: sn, Kind: ports.StakingHwsFile}); err != nil {
+		if haveHws, err = r.Exists(ports.NamedRef{Name: sn, Kind: ports.StakingHwsFile}); err != nil {
 			return err
 		}
 		if !haveSKey && !haveHws {
 			return nil
 		}
-		if stakeVKey, err = r.Get(ports.Ref{Name: sn, Kind: ports.StakingVKey}); err != nil {
+		if stakeVKey, err = r.Get(ports.NamedRef{Name: sn, Kind: ports.StakingVKey}); err != nil {
 			if errors.Is(err, ports.ErrNotFound) {
-				return fmt.Errorf("%w: %s", ErrMissingFile, ports.Ref{Name: sn, Kind: ports.StakingVKey})
+				return fmt.Errorf("%w: %s", ErrMissingFile, ports.NamedRef{Name: sn, Kind: ports.StakingVKey})
 			}
 			return err
 		}
@@ -355,8 +355,8 @@ func (uc GenerateRegistration) Run(ctx context.Context, req RegistrationRequest)
 		// SPO-09a-INV-004: the rewards account's hardware signing file counts only
 		// when the rewards account is the staking account.
 		rewardsKeyName = rewardsName(req.Rewards)
-		if strings.TrimSuffix(rewardsKeyName, ".payment") == sn && (ports.Ref{Name: rewardsKeyName, Kind: ports.AddrHwsFile}).Validate() == nil {
-			if haveRewardsHws, err = r.Exists(ports.Ref{Name: rewardsKeyName, Kind: ports.AddrHwsFile}); err != nil {
+		if strings.TrimSuffix(rewardsKeyName, ".payment") == sn && (ports.NamedRef{Name: rewardsKeyName, Kind: ports.AddrHwsFile}).Validate() == nil {
+			if haveRewardsHws, err = r.Exists(ports.NamedRef{Name: rewardsKeyName, Kind: ports.AddrHwsFile}); err != nil {
 				return err
 			}
 			if haveRewardsHws {
@@ -445,8 +445,8 @@ func (uc GenerateRegistration) Run(ctx context.Context, req RegistrationRequest)
 	if _, err := custody.VerifyCip36(signed.CBOR, demanded); err != nil {
 		return res, fmt.Errorf("the signer's registration does not verify: %w", err)
 	}
-	ref := ports.Ref{Name: sn + "_" + uc.Clock.Now().Format("060102150405"), Kind: ports.VoteRegistration}
-	if err := uc.Store.Update(ctx, func(w ports.Writer) error {
+	ref := ports.NamedRef{Name: sn + "_" + uc.Clock.Now().Format("060102150405"), Kind: ports.VoteRegistration}
+	if err := uc.Store.Update(ctx, func(w ports.NamedWriter) error {
 		if err := refuseExisting(w, ref); err != nil { // SPO-09a-OUT-005
 			return err
 		}
@@ -467,11 +467,11 @@ func rewardsName(s string) string {
 // rewardsAddress resolves the rewards argument (SPO-09a-IN-004): a stored
 // `<rewards>.addr`, else the argument as a payment address. An ADA Handle is
 // refused as in the send use case.
-func (uc GenerateRegistration) rewardsAddress(r ports.Reader, s string) (chain.Address, error) {
+func (uc GenerateRegistration) rewardsAddress(r ports.NamedReader, s string) (chain.Address, error) {
 	name := strings.TrimSuffix(trimDir(s), ".addr")
 	var text string
-	if (ports.Ref{Name: name, Kind: ports.AddrFile}).Validate() == nil {
-		if b, err := r.Get(ports.Ref{Name: name, Kind: ports.AddrFile}); err == nil {
+	if (ports.NamedRef{Name: name, Kind: ports.AddrFile}).Validate() == nil {
+		if b, err := r.Get(ports.NamedRef{Name: name, Kind: ports.AddrFile}); err == nil {
 			text = strings.TrimSpace(strings.SplitN(string(b), "\n", 2)[0])
 		}
 	}
@@ -494,7 +494,7 @@ func (uc GenerateRegistration) rewardsAddress(r ports.Reader, s string) (chain.A
 
 // resolveVotingKey is SPO-09a-IF-006: a stored `.voting.pkey`, a stored
 // `.voting.vkey`, 64 or 128 hex digits, a bech32 key; the first match wins.
-func resolveVotingKey(r ports.Reader, d DelegationWord) (ResolvedKey, error) {
+func resolveVotingKey(r ports.NamedReader, d DelegationWord) (ResolvedKey, error) {
 	k := ResolvedKey{Ref: d.Ref, Weight: d.Weight}
 	ref := trimDir(d.Ref)
 	name := strings.TrimSuffix(strings.TrimSuffix(ref, ".pkey"), ".voting")
@@ -506,17 +506,17 @@ func resolveVotingKey(r ports.Reader, d DelegationWord) (ResolvedKey, error) {
 		copy(k.PublicKey[:], raw)
 		return true
 	}
-	if (ports.Ref{Name: name, Kind: ports.VotingPKey}).Validate() == nil {
-		if b, err := r.Get(ports.Ref{Name: name, Kind: ports.VotingPKey}); err == nil && bech(strings.TrimSpace(string(b))) {
-			k.Source = ports.Ref{Name: name, Kind: ports.VotingPKey}.String()
+	if (ports.NamedRef{Name: name, Kind: ports.VotingPKey}).Validate() == nil {
+		if b, err := r.Get(ports.NamedRef{Name: name, Kind: ports.VotingPKey}); err == nil && bech(strings.TrimSpace(string(b))) {
+			k.Source = ports.NamedRef{Name: name, Kind: ports.VotingPKey}.String()
 			return k, nil
 		}
-		if b, err := r.Get(ports.Ref{Name: name, Kind: ports.VotingVKey}); err == nil {
+		if b, err := r.Get(ports.NamedRef{Name: name, Kind: ports.VotingVKey}); err == nil {
 			pub, err := cose.VKeyFromEnvelope(b)
 			if err != nil {
 				return k, fmt.Errorf("%w: %s: %v", ErrBadVotingKey, d.Ref, err)
 			}
-			k.PublicKey, k.Source = pub, ports.Ref{Name: name, Kind: ports.VotingVKey}.String()
+			k.PublicKey, k.Source = pub, ports.NamedRef{Name: name, Kind: ports.VotingVKey}.String()
 			return k, nil
 		}
 	}

@@ -111,7 +111,7 @@ func TestGenerateVoteFileNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Files[0].Ref != (ports.Ref{Name: "d_250304050607", Kind: ports.VoteDRepFile}) || res.Files[1].Ref.Name != "d_250304050608" {
+	if res.Files[0].Ref != (ports.NamedRef{Name: "d_250304050607", Kind: ports.VoteDRepFile}) || res.Files[1].Ref.Name != "d_250304050608" {
 		t.Fatalf("names: %v %v", res.Files[0].Ref, res.Files[1].Ref)
 	}
 	for in, want := range map[string]string{"x.drep": "x", "x.drep.vkey": "x.drep", "x.cc-hot": "x", "x.node.vkey": "x.node", "./x": "x", "x.": "x"} {
@@ -261,7 +261,7 @@ func (r *rig) voteFile(t *testing.T, name string, role governance.Role, hash [28
 	t.Helper()
 	v := governance.Vote{Voter: governance.Voter{Role: role, Cred: governance.Credential{Hash: hash}}, Action: governance.ActionID{TxID: chain.TxID{action}, Index: uint32(action)}, Decision: d}
 	vf, _ := fakeVotes{}.BuildVoteFile(v, "")
-	r.store.files[ports.Ref{Name: name, Kind: ports.VoteFileKind(role)}] = vf.Envelope
+	r.store.files[ports.NamedRef{Name: name, Kind: ports.VoteFileKind(role)}] = vf.Envelope
 	return name + "." + string(ports.VoteFileKind(role))
 }
 
@@ -328,7 +328,7 @@ func TestRegisterVoteRefusals(t *testing.T) {
 	d1b := r.voteFile(t, "d_1b", governance.RoleDRep, r.drep, 1, governance.No)
 	other := r.voteFile(t, "o_1", governance.RoleDRep, [28]byte{5}, 2, governance.No)
 	pf := r.voteFile(t, "p_1", governance.RolePool, r.poolKey, 3, governance.No)
-	r.store.files[ports.Ref{Name: "junk", Kind: ports.VoteDRepFile}] = []byte("junk")
+	r.store.files[ports.NamedRef{Name: "junk", Kind: ports.VoteDRepFile}] = []byte("junk")
 	run := func(voter string, files ...string) error {
 		_, err := RegisterVote{Base: r.base, Votes: fakeVotes{}}.Run(context.Background(), RegisterVoteRequest{Voter: voter, Payer: "w.payment", Files: files})
 		return err
@@ -347,7 +347,7 @@ func TestRegisterVoteRefusals(t *testing.T) {
 		}
 	}
 	r.nothingWritten(t)
-	r.hardware(ports.Ref{Name: "d", Kind: ports.DRepSKey}, ports.DRepHwsFile)
+	r.hardware(ports.NamedRef{Name: "d", Kind: ports.DRepSKey}, ports.DRepHwsFile)
 	if err := run("d", d1); err == nil {
 		t.Error("a hardware voter key must be refused")
 	}

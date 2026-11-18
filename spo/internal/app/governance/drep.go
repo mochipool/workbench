@@ -120,8 +120,8 @@ type drepInputs struct {
 	key  custody.KeyRef
 }
 
-func readDRep(r ports.Reader, nm string) (drepInputs, error) {
-	vk, err := get(r, ports.Ref{Name: nm, Kind: ports.DRepVKey})
+func readDRep(r ports.NamedReader, nm string) (drepInputs, error) {
+	vk, err := get(r, ports.NamedRef{Name: nm, Kind: ports.DRepVKey})
 	if err != nil {
 		return drepInputs{}, err
 	}
@@ -222,7 +222,7 @@ func (uc RegisterDRep) Run(ctx context.Context, req RegisterDRepRequest) (Result
 	}
 	var dr drepInputs
 	var pay payer
-	if err := uc.Store.View(ctx, func(r ports.Reader) error {
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
 		if dr, err = readDRep(r, dn); err != nil {
 			return err
@@ -296,8 +296,8 @@ func (uc RegisterDRep) Run(ctx context.Context, req RegisterDRepRequest) (Result
 	if err != nil {
 		return Result{}, err
 	}
-	if err := uc.Store.Update(ctx, func(w ports.Writer) error {
-		return w.Put(ports.Ref{Name: dn, Kind: ports.DRepRegCert}, cert.Envelope)
+	if err := uc.Store.Update(ctx, func(w ports.NamedWriter) error {
+		return w.Put(ports.NamedRef{Name: dn, Kind: ports.DRepRegCert}, cert.Envelope)
 	}); err != nil {
 		return Result{}, fmt.Errorf("the transaction was sent, but the certificate file could not be stored: %w", err)
 	}
@@ -362,7 +362,7 @@ func (uc RetireDRep) Run(ctx context.Context, req RetireDRepRequest) (Result, er
 	}
 	var dr drepInputs
 	var pay payer
-	if err := uc.Store.View(ctx, func(r ports.Reader) error {
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
 		if dr, err = readDRep(r, dn); err != nil {
 			return err
@@ -403,8 +403,8 @@ func (uc RetireDRep) Run(ctx context.Context, req RetireDRepRequest) (Result, er
 	if err != nil {
 		return Result{}, err
 	}
-	if err := uc.Store.Update(ctx, func(w ports.Writer) error {
-		return w.Put(ports.Ref{Name: dn, Kind: ports.DRepRetCert}, cert.Envelope)
+	if err := uc.Store.Update(ctx, func(w ports.NamedWriter) error {
+		return w.Put(ports.NamedRef{Name: dn, Kind: ports.DRepRetCert}, cert.Envelope)
 	}); err != nil {
 		return Result{}, fmt.Errorf("the transaction was sent, but the certificate file could not be stored: %w", err)
 	}
@@ -422,7 +422,7 @@ func (uc RetireDRep) Run(ctx context.Context, req RetireDRepRequest) (Result, er
 // and not registered are three distinct standings (SPO-21c-PRE-004 port note).
 // A failed or unknown state is an error.
 type CheckDRep struct {
-	Store ports.Store
+	Store ports.NamedStore
 	DReps ports.DRepStateReader
 	// Epoch gives the current epoch for the expiry test. Optional: without an
 	// epoch source (or when it fails) registration, deposit and anchor are
@@ -568,8 +568,8 @@ func (uc CheckDRep) resolve(ctx context.Context, word string) (governance.Creden
 	var file governance.Credential
 	found := false
 	if uc.Store != nil && nm != "" && !strings.ContainsAny(nm, "/\\") {
-		err := uc.Store.View(ctx, func(r ports.Reader) error {
-			if b, err := r.Get(ports.Ref{Name: nm, Kind: ports.DRepID}); err == nil {
+		err := uc.Store.View(ctx, func(r ports.NamedReader) error {
+			if b, err := r.Get(ports.NamedRef{Name: nm, Kind: ports.DRepID}); err == nil {
 				w, perr := stake.ParseDRepWord(firstLine(b))
 				if perr != nil || !w.IsID {
 					return fmt.Errorf("%s.drep.id does not hold a DRep id: %w", nm, perr)
@@ -597,8 +597,8 @@ func (uc CheckDRep) resolve(ctx context.Context, word string) (governance.Creden
 	}
 	if uc.Store != nil && w.Name != "" {
 		var out governance.Credential
-		err := uc.Store.View(ctx, func(r ports.Reader) error {
-			vk, err := get(r, ports.Ref{Name: w.Name, Kind: ports.DRepVKey})
+		err := uc.Store.View(ctx, func(r ports.NamedReader) error {
+			vk, err := get(r, ports.NamedRef{Name: w.Name, Kind: ports.DRepVKey})
 			if err != nil {
 				return fmt.Errorf("%w: %q is not a DRep id or a stored DRep: %v", ErrBadWord, word, err)
 			}

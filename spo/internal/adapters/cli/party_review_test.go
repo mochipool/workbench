@@ -423,4 +423,4 @@ func TestObligation4HandleIsFedOnlyFromATransport(t *testing.T) {
 }
 
 var _ = hex.EncodeToString
-var _ ports.Reader
+var _ ports.NamedReader

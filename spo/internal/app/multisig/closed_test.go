@@ -244,19 +244,19 @@ func TestSweepTellsASubmissionFromADiscard(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			s := newScene(t, sceneOpt{})
 			// the scene's collection is a pool's: keep it under a pool descriptor
-			ref := ports.Ref{Name: s.ref.Name, Kind: ports.MultisigCollection}
+			ref := ports.NamedRef{Name: s.ref.Name, Kind: ports.MultisigCollection}
 			var raw []byte
-			if err := s.C.Store.View(ctx, func(r ports.Reader) error { var err error; raw, err = r.Get(ref); return err }); err != nil {
+			if err := s.C.Store.View(ctx, func(r ports.NamedReader) error { var err error; raw, err = r.Get(ref); return err }); err != nil {
 				t.Fatal(err)
 			}
-			poolRef := ports.Ref{Name: "mypool", Kind: ports.PoolDescriptor}
-			if err := s.C.Store.Update(ctx, func(w ports.Writer) error { return w.Put(poolRef, raw) }); err != nil {
+			poolRef := ports.NamedRef{Name: "mypool", Kind: ports.PoolDescriptor}
+			if err := s.C.Store.Update(ctx, func(w ports.NamedWriter) error { return w.Put(poolRef, raw) }); err != nil {
 				t.Fatal(err)
 			}
 			s.ref = multisig.CollectionRef{Kind: multisig.KindPool, Name: "mypool"}
 			s.request()
 			s.bobHandles()
-			if err := s.C.Store.Update(ctx, func(w ports.Writer) error {
+			if err := s.C.Store.Update(ctx, func(w ports.NamedWriter) error {
 				b, err := w.Get(poolRef)
 				if err != nil {
 					return err
@@ -275,7 +275,7 @@ func TestSweepTellsASubmissionFromADiscard(t *testing.T) {
 					if mode == "replaced" {
 						id[0] ^= 0xff // another transaction was submitted for the pool
 					}
-					if err := w.Put(ports.Ref{Name: "mypool", Kind: ports.MultisigSubmitted}, []byte(hex.EncodeToString(id[:]))); err != nil {
+					if err := w.Put(ports.NamedRef{Name: "mypool", Kind: ports.MultisigSubmitted}, []byte(hex.EncodeToString(id[:]))); err != nil {
 						return err
 					}
 				} else {
@@ -288,7 +288,7 @@ func TestSweepTellsASubmissionFromADiscard(t *testing.T) {
 					}
 					p := assets.Pending{Kind: assets.PendingPoolRegistration, TxID: hex.EncodeToString(id[:]), Pool: "mypool", Epoch: "5", Stamp: "x", Queued: mode == "pending-queued"}
 					pb, _ := p.Marshal()
-					if err := w.Put(ports.Ref{Name: p.TxID, Kind: ports.PendingUpdate}, pb); err != nil {
+					if err := w.Put(ports.NamedRef{Name: p.TxID, Kind: ports.PendingUpdate}, pb); err != nil {
 						return err
 					}
 				}

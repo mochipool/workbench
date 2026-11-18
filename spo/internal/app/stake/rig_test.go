@@ -47,38 +47,38 @@ func (l *log) count(prefix string) (n int) {
 // written, so a refusal can be shown to write nothing.
 type memStore struct {
 	l      *log
-	files  map[ports.Ref][]byte
+	files  map[ports.NamedRef][]byte
 	writes int
 }
 
-type memView struct{ m map[ports.Ref][]byte }
+type memView struct{ m map[ports.NamedRef][]byte }
 
-func (v memView) Get(r ports.Ref) ([]byte, error) {
+func (v memView) Get(r ports.NamedRef) ([]byte, error) {
 	if b, ok := v.m[r]; ok {
 		return b, nil
 	}
 	return nil, ports.ErrNotFound
 }
-func (v memView) Exists(r ports.Ref) (bool, error) { _, ok := v.m[r]; return ok, nil }
+func (v memView) Exists(r ports.NamedRef) (bool, error) { _, ok := v.m[r]; return ok, nil }
 
 type memWriter struct {
 	memView
 	s *memStore
 }
 
-func (w memWriter) Put(r ports.Ref, b []byte) error {
+func (w memWriter) Put(r ports.NamedRef, b []byte) error {
 	w.s.writes++
 	w.s.l.add("put " + r.String())
 	w.s.files[r] = append([]byte(nil), b...)
 	return nil
 }
-func (w memWriter) PutSecret(ports.Ref, *secret.Buffer) error { panic("no secrets here") }
-func (w memWriter) Delete(r ports.Ref) error                  { delete(w.s.files, r); return nil }
+func (w memWriter) PutSecret(ports.NamedRef, *secret.Buffer) error { panic("no secrets here") }
+func (w memWriter) Delete(r ports.NamedRef) error                  { delete(w.s.files, r); return nil }
 
-func (s *memStore) View(_ context.Context, fn func(ports.Reader) error) error {
+func (s *memStore) View(_ context.Context, fn func(ports.NamedReader) error) error {
 	return fn(memView{s.files})
 }
-func (s *memStore) Update(_ context.Context, fn func(ports.Writer) error) error {
+func (s *memStore) Update(_ context.Context, fn func(ports.NamedWriter) error) error {
 	return fn(memWriter{memView{s.files}, s})
 }
 
@@ -341,7 +341,7 @@ func newRig(t *testing.T) *rig {
 	r := &rig{l: l, certs: fakeCerts{l}}
 	r.insp = fakeInspector{payHash: txbuild.HashKey(payPub), stakeHash: txbuild.HashKey(stkPub)}
 	r.stakeID = stk.KeyHash(r.insp.stakeHash)
-	r.store = &memStore{l: l, files: map[ports.Ref][]byte{
+	r.store = &memStore{l: l, files: map[ports.NamedRef][]byte{
 		{Name: "w.payment", Kind: ports.AddrFile}: []byte("addr_test_pay\n"),
 		{Name: "w.payment", Kind: ports.AddrSKey}: nil,
 		{Name: "w.payment", Kind: ports.AddrVKey}: payVKeyEnvelope(payPub),
@@ -390,7 +390,7 @@ func (r *rig) nothingWritten(t *testing.T) {
 // device moves a signing key to a device: its signing key file becomes a
 // hardware file and the directory serves the key with no signer, as a build
 // with no hardware signer does.
-func (r *rig) device(t *testing.T, ref ports.Ref) {
+func (r *rig) device(t *testing.T, ref ports.NamedRef) {
 	t.Helper()
 	delete(r.store.files, ref)
 	hws, role := ref, custody.RolePayment
@@ -402,7 +402,7 @@ func (r *rig) device(t *testing.T, ref ports.Ref) {
 	}
 	r.store.files[hws] = []byte("hw")
 	var k custody.KeyRef
-	if err := r.store.View(context.Background(), func(rd ports.Reader) error {
+	if err := r.store.View(context.Background(), func(rd ports.NamedReader) error {
 		var err error
 		k, err = keyring.Resolve(rd, role, ref.Name)
 		return err
@@ -414,7 +414,7 @@ func (r *rig) device(t *testing.T, ref ports.Ref) {
 
 // signerPub is the public key the pool "mypool" is stored with.
 func (r *rig) signerPub() []byte {
-	e, _ := pool.ParseEnvelope(r.store.files[ports.Ref{Name: "mypool", Kind: ports.NodeVKey}])
+	e, _ := pool.ParseEnvelope(r.store.files[ports.NamedRef{Name: "mypool", Kind: ports.NodeVKey}])
 	raw, _ := e.Key32()
 	return raw
 }

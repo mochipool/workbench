@@ -77,7 +77,7 @@ func TestRotateAgainIsRefusedWhileAnnouncementsAreUndelivered(t *testing.T) {
 
 // walStore is a store with a write-ahead log: it counts the checkpoints asked.
 type walStore struct {
-	ports.Store
+	ports.NamedStore
 	calls int
 	err   error
 }
@@ -91,7 +91,7 @@ func (w *walStore) CheckpointWAL(context.Context) error { w.calls++; return w.er
 // spec: SPO-Xparty-IF-008, SPO-Xparty-INV-033
 func TestRotationAsksTheStoreToCheckpointItsLog(t *testing.T) {
 	s := newScene(t, sceneOpt{})
-	ws := &walStore{Store: s.B.Store}
+	ws := &walStore{NamedStore: s.B.Store}
 	node := s.B.Node()
 	node.Store = ws
 	done, err := node.RotateIdentity(ctx, "")

@@ -221,7 +221,7 @@ func (w *Workspace) Signer() multisig.Signer {
 	if w.Resolver != nil {
 		res = multisig.OwnProvider(w.Resolver) // the rig's resolver is this signer's own
 	}
-	return multisig.Signer{Node: w.Node(), Signers: native.Signers{Vault: w.Store}, Keys: w, NetworkMagic: Magic,
+	return multisig.Signer{Node: w.Node(), Signers: native.Signers{Vault: w.Store.Anchor()}, Keys: w, NetworkMagic: Magic,
 		Owned: w.Owned, Resolver: res, Addresses: w.Addresses, Gate: w.Gate}
 }
 
@@ -261,11 +261,11 @@ func (w *Workspace) AddKey(role custody.Role, owner string) txbuild.KeyHash {
 		w.T.Fatal(err)
 	}
 	defer kp.SKey.Destroy()
-	if err := w.Store.Update(ctx, func(wr ports.Writer) error {
-		if err := wr.Put(ports.Ref{Name: owner, Kind: vk}, kp.VKey); err != nil {
+	if err := w.Store.Update(ctx, func(wr ports.NamedWriter) error {
+		if err := wr.Put(ports.NamedRef{Name: owner, Kind: vk}, kp.VKey); err != nil {
 			return err
 		}
-		return wr.PutSecret(ports.Ref{Name: owner, Kind: sk}, kp.SKey)
+		return wr.PutSecret(ports.NamedRef{Name: owner, Kind: sk}, kp.SKey)
 	}); err != nil {
 		w.T.Fatal(err)
 	}
@@ -318,7 +318,7 @@ func (w *Workspace) EnrollScoped(other *Workspace, name string, roles []party.Ro
 // what a coordinator may ask.
 func (w *Workspace) SetScope(name string, scope party.Scope) {
 	w.T.Helper()
-	if err := w.Store.Update(context.Background(), func(wr ports.Writer) error {
+	if err := w.Store.Update(context.Background(), func(wr ports.NamedWriter) error {
 		_, err := w.Registry.SetScope(wr, name, scope)
 		return err
 	}); err != nil {
@@ -331,7 +331,7 @@ func (w *Workspace) SetScope(name string, scope party.Scope) {
 func (w *Workspace) Revoke(name string) party.Party {
 	w.T.Helper()
 	c := w.Coordinator()
-	p, err := parties.Revoke{Store: w.Store, Registry: w.Registry, Clock: w.Clock, Hooks: []func(ports.Writer, party.Party) error{c.OnRevoke}}.
+	p, err := parties.Revoke{Store: w.Store, Registry: w.Registry, Clock: w.Clock, Hooks: []func(ports.NamedWriter, party.Party) error{c.OnRevoke}}.
 		Run(context.Background(), name)
 	if err != nil {
 		w.T.Fatal(err)
@@ -343,7 +343,7 @@ func (w *Workspace) Revoke(name string) party.Party {
 func (w *Workspace) Events() []parties.Event {
 	w.T.Helper()
 	var es []parties.Event
-	if err := w.Store.View(context.Background(), func(r ports.Reader) error {
+	if err := w.Store.View(context.Background(), func(r ports.NamedReader) error {
 		var err error
 		es, err = multisig.Events(r)
 		return err
@@ -359,7 +359,7 @@ func (w *Workspace) Noise() ([]parties.Event, uint64) {
 	w.T.Helper()
 	var es []parties.Event
 	var n uint64
-	if err := w.Store.View(context.Background(), func(r ports.Reader) error {
+	if err := w.Store.View(context.Background(), func(r ports.NamedReader) error {
 		var err error
 		es, n, err = multisig.Noise(r)
 		return err
@@ -417,7 +417,7 @@ func Seal(t *testing.T, from, to *Workspace, body party.Body, expires time.Durat
 	}
 	defer local.Destroy()
 	var rcpt party.Party
-	if err := from.Store.View(ctx, func(r ports.Reader) error {
+	if err := from.Store.View(ctx, func(r ports.NamedReader) error {
 		ps, err := from.Registry.List(r)
 		for _, p := range ps {
 			if p.Fingerprint == to.Identity.Fingerprint {
@@ -467,7 +467,7 @@ func (w *Workspace) SignID(role custody.Role, owner string, id [32]byte) txbuild
 	if !ok {
 		w.T.Fatalf("no key of role %s", role)
 	}
-	buf, err := w.Store.Open(context.Background(), ports.Ref{Name: owner, Kind: kinds.SKey})
+	buf, err := w.Store.Open(context.Background(), ports.NamedRef{Name: owner, Kind: kinds.SKey})
 	if err != nil {
 		w.T.Fatal(err)
 	}
@@ -501,7 +501,7 @@ func (w *Workspace) FingerprintOf(name string) party.Fingerprint {
 	w.T.Helper()
 	var fp party.Fingerprint
 	found := false
-	_ = w.Store.View(context.Background(), func(r ports.Reader) error {
+	_ = w.Store.View(context.Background(), func(r ports.NamedReader) error {
 		if p, err := w.Registry.ByName(r, name); err == nil {
 			fp, found = p.Fingerprint, true
 		}

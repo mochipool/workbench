@@ -27,8 +27,8 @@ func (g gateFunc) Reauthenticate(ctx context.Context, key custody.KeyRef, hash [
 func rawOutbox(t *testing.T, w *partyrig.Workspace) []multisig.OutItem {
 	t.Helper()
 	var items []multisig.OutItem
-	err := w.Store.View(ctx, func(r ports.Reader) error {
-		b, err := r.Get(ports.Ref{Name: "all", Kind: ports.MultisigOutbox})
+	err := w.Store.View(ctx, func(r ports.NamedReader) error {
+		b, err := r.Get(ports.NamedRef{Name: "all", Kind: ports.MultisigOutbox})
 		if errors.Is(err, ports.ErrNotFound) {
 			return nil
 		}
@@ -163,9 +163,9 @@ func TestOutboxDropsWhatMustNotLeave(t *testing.T) {
 		item("gg", coord, stranger, string(party.TypeRotation)),        // a Rotation type alone is no exemption
 	}
 	items[4].Rotation, items[5].Rotation = true, true // as enqueueRotation marks them
-	if err := s.B.Store.Update(ctx, func(w ports.Writer) error {
+	if err := s.B.Store.Update(ctx, func(w ports.NamedWriter) error {
 		b, _ := json.Marshal(items)
-		return w.Put(ports.Ref{Name: "all", Kind: ports.MultisigOutbox}, b)
+		return w.Put(ports.NamedRef{Name: "all", Kind: ports.MultisigOutbox}, b)
 	}); err != nil {
 		t.Fatal(err)
 	}

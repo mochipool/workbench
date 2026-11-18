@@ -11,15 +11,15 @@ import (
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
-type reader map[ports.Ref][]byte
+type reader map[ports.NamedRef][]byte
 
-func (r reader) Get(ref ports.Ref) ([]byte, error) {
+func (r reader) Get(ref ports.NamedRef) ([]byte, error) {
 	if b, ok := r[ref]; ok {
 		return b, nil
 	}
 	return nil, ports.ErrNotFound
 }
-func (r reader) Exists(ref ports.Ref) (bool, error) { _, ok := r[ref]; return ok, nil }
+func (r reader) Exists(ref ports.NamedRef) (bool, error) { _, ok := r[ref]; return ok, nil }
 
 func vkey(b byte) []byte {
 	return []byte(`{"type":"X","description":"","cborHex":"5820` + strings.Repeat(string("0123456789abcdef"[b%16]), 64) + `"}`)
@@ -66,7 +66,7 @@ func TestResolveReadsTheStoredVerificationKey(t *testing.T) {
 	if _, held, err := keyring.ResolveHeld(r, custody.RolePayment, "h"); err != nil || !held {
 		t.Errorf("a hardware file holds a key: %v %v", held, err)
 	}
-	delete(r, ports.Ref{Name: "w", Kind: ports.AddrSKey})
+	delete(r, ports.NamedRef{Name: "w", Kind: ports.AddrSKey})
 	if _, held, err := keyring.ResolveHeld(r, custody.RolePayment, "w"); err != nil || held {
 		t.Errorf("no signing key: %v %v", held, err)
 	}

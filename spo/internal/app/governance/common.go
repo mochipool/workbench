@@ -134,7 +134,7 @@ func firstLine(b []byte) string {
 	return strings.TrimSpace(line)
 }
 
-func get(r ports.Reader, ref ports.Ref) ([]byte, error) {
+func get(r ports.NamedReader, ref ports.NamedRef) ([]byte, error) {
 	b, err := r.Get(ref)
 	if errors.Is(err, ports.ErrNotFound) {
 		return nil, fmt.Errorf("%w: %s", ErrMissingFile, ref)
@@ -142,7 +142,7 @@ func get(r ports.Reader, ref ports.Ref) ([]byte, error) {
 	return b, err
 }
 
-func refuseExisting(r ports.Reader, refs ...ports.Ref) error {
+func refuseExisting(r ports.NamedReader, refs ...ports.NamedRef) error {
 	for _, ref := range refs {
 		ok, err := r.Exists(ref)
 		if err != nil {
@@ -172,7 +172,7 @@ func vkeyHash(env []byte) (txbuild.KeyHash, error) {
 // Base is what the transaction use cases share; the embedded Pipeline holds
 // the signing and ledger ports and exactly one of Submitter and Queue.
 type Base struct {
-	Store     ports.Store
+	Store     ports.NamedStore
 	Addresses ports.AddressInspector
 	Params    ports.ProtocolParametersReader
 	Tip       ports.TipReader
@@ -223,8 +223,8 @@ type payer struct {
 	key  custody.KeyRef
 }
 
-func (b Base) readPayer(r ports.Reader, pn string) (payer, error) {
-	ab, err := get(r, ports.Ref{Name: pn, Kind: ports.AddrFile})
+func (b Base) readPayer(r ports.NamedReader, pn string) (payer, error) {
+	ab, err := get(r, ports.NamedRef{Name: pn, Kind: ports.AddrFile})
 	if err != nil {
 		return payer{}, err
 	}
@@ -309,8 +309,8 @@ func (b Base) changeKeys(ctx context.Context, r txRun) []custody.KeyRef {
 	if stem == r.payer.name {
 		return keys
 	}
-	_ = b.Store.View(ctx, func(rd ports.Reader) error {
-		if ok, err := rd.Exists(ports.Ref{Name: stem, Kind: ports.StakingHwsFile}); err == nil && ok {
+	_ = b.Store.View(ctx, func(rd ports.NamedReader) error {
+		if ok, err := rd.Exists(ports.NamedRef{Name: stem, Kind: ports.StakingHwsFile}); err == nil && ok {
 			if sk, err := keyring.Resolve(rd, custody.RoleStake, stem); err == nil {
 				keys = append(keys, sk)
 			}

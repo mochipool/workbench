@@ -34,17 +34,177 @@ import, which only reads it. Export writes the files out again for the upstream
 scripts with every signing key encrypted in upstream's gpg form; it is recorded
 in the workspace's audit log.`,
 	}
-	c.AddCommand(a.workspaceImportCommand(), a.workspaceExportCommand())
+	c.AddCommand(a.workspaceImportCommand(), a.workspaceExportCommand(), a.workspaceMigrateCommand(), a.workspaceSlotCommand(), a.workspacePolicyCommand(), a.workspaceRotateCommand())
 	return c
+}
+
+// workspaceMigrateCommand is `workspace migrate`: it converts a workspace of the
+// old format (records keyed by the operator's names) to the current one, where
+// every record is keyed by the anchor identity of its owner and a name is a label
+// (ADR 0010 decision 4).
+//
+// spec: SPO-Xidentity-IF-005
+func (a *app) workspaceMigrateCommand() *cobra.Command {
+	var quarantine []string
+	var removeCopies bool
+	cmd := &cobra.Command{
+		Use:   "migrate [--quarantine POOL]...",
+		Short: "Convert a workspace of the old format (records keyed by name) to the current one",
+		Long: `A workspace made by an earlier version keys every record by the name of its
+owner. This version keys records by the identity of their owner and keeps a name
+as a label. migrate converts the file in place, in one transaction: every record
+is sealed again under the same master key, the owners and their anchors are found
+from the keys the workspace holds (a pool by its cold key, a wallet by its payment
+key, else its stake key), each pool descriptor's owners and reward account are
+rewritten from names to key hashes, and the witness slots of an open registration
+get the fingerprint of their party.
+
+It first makes a copy of the file beside it (<file>.pre-migrate-v1) and says where.
+A workspace of store format 2 (identity-keyed records, no slot kinds or policy) is
+converted to format 3 in one transaction after a copy named <file>.pre-migrate-v2:
+the policy becomes standard and the passphrase and recovery slots are unchanged.
+It refuses, with a list and without changing anything, when a name in a descriptor
+resolves to no key or its registration data disagrees with the keys, when one key
+would belong to two owners, or when two records that become one differ.
+--quarantine POOL lets the migration go on for a pool whose own problems those
+are, and leaves that pool unusable until you fix it.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if a.upstream {
+				return errors.New("migrate works on a sealed workspace; it does not apply with --upstream-layout")
+			}
+			if a.d.Sealed.Migrate == nil {
+				return errors.New("workspace migrate is not available in this build")
+			}
+			ctx := cmd.Context()
+			if !exists(a.workspaceFile()) {
+				return fmt.Errorf("no workspace in %s (%s not found)", a.workspace, WorkspaceFile)
+			}
+			pass, err := a.readPassphrase(ctx)
+			if err != nil {
+				return err
+			}
+			defer pass.Destroy()
+			rep, err := a.d.Sealed.Migrate(a.workspaceFile(), pass, MigrateOptions{Quarantine: quarantine, Cold: a.coldOpen()})
+			if err != nil {
+				return err
+			}
+			w := a.d.Out
+			defer warnColdNoWrap(a.d.Err, rep) // runs last: the warning is the end of the output
+			defer a.migrateCopies(ctx, w, rep, pass, removeCopies)
+			if rep.Format3Only {
+				fmt.Fprintf(w, "Migrated %s from store format 2 to format 3: the workspace now has the policy standard, and its passphrase and recovery slots are unchanged.\n", a.workspaceFile())
+				fmt.Fprintf(w, "The old file is kept as %s\n", rep.Backup)
+				return nil
+			}
+			if rep.Backup3 != "" {
+				defer fmt.Fprintf(w, "The copy made before the conversion to store format 3 is %s\n", rep.Backup3)
+			}
+			fmt.Fprintf(w, "Migrated %s to the current format: %d record(s) converted, %d merged, %d added, %d owner(s).\n", a.workspaceFile(), rep.Records, rep.Merged, rep.Added, rep.Owners)
+			fmt.Fprintf(w, "The old file is kept as %s\n", rep.Backup)
+			for _, p := range rep.Rewritten {
+				fmt.Fprintf(w, "  descriptor of pool %s: owners and reward account now name key hashes\n", p)
+			}
+			for _, l := range rep.Unassigned {
+				fmt.Fprintf(w, "  unassigned: %s\n", l)
+			}
+			for _, l := range rep.Quarantined {
+				fmt.Fprintf(w, "  quarantined: %s\n", l)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringArrayVar(&quarantine, "quarantine", nil, "go on for this pool although its descriptor or records are unresolved; it is left unusable (repeatable)")
+	cmd.Flags().BoolVar(&removeCopies, "remove-copies", false, "delete the .pre-migrate copies once the migrated workspace verifies and opens (best effort on modern storage)")
+	return cmd
+}
+
+// warnColdNoWrap ends a migration that sealed cold-role keys with no recovery
+// path: the migrated slots bind no recovery key, so the recovery key cannot open
+// those keys until a rekey binds one and adds their wraps.
+func warnColdNoWrap(w io.Writer, rep MigrateReport) {
+	if rep.ColdNoWrap == 0 {
+		return
+	}
+	fmt.Fprintf(w, "\nWARNING: %d cold key record(s) have NO recovery path. The migrated workspace binds no recovery key, so if the cold-key passphrase is lost these keys are lost. Run `spo store passphrase change` now (or `spo store recovery-key new`): it binds the recovery key and adds the recovery wrap to every cold key, and asks for the cold-key passphrase once. `spo store slots` and `spo store verify` report how many cold records still lack the wrap.\n", rep.ColdNoWrap)
+}
+
+// migrateCopies says what the copies made before the migration hold and, with
+// removeCopies, deletes them after the migrated file verifies and opens. A
+// failed check keeps them. Deletion is an unlink: the bytes may stay on a
+// journaling or copy-on-write file system and on an SSD, and no overwrite is
+// attempted.
+func (a *app) migrateCopies(ctx context.Context, w io.Writer, rep MigrateReport, pass *secret.Buffer, remove bool) {
+	var copies []string
+	for _, c := range []string{rep.Backup, rep.Backup3} {
+		if c != "" {
+			copies = append(copies, c)
+		}
+	}
+	if len(copies) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "WARNING: the copies of the old file (%s) are in the older format: a pool cold key or committee cold key in them is sealed under the master key alone, without the cold-key passphrase. Anyone with a copy and the workspace passphrase can read it.\n", strings.Join(copies, ", "))
+	if !remove {
+		fmt.Fprintln(w, "Delete them once you have checked the migrated workspace, or run the migration with --remove-copies. Deleting is best effort on modern storage (the bytes may stay on disk).")
+		return
+	}
+	if _, err := a.d.Sealed.VerifyFile(a.workspaceFile(), pass); err != nil {
+		fmt.Fprintf(w, "The copies were NOT removed: the migrated workspace did not verify: %v\n", err)
+		return
+	}
+	st, err := a.d.Sealed.Open(a.workspaceFile(), pass, OpenOptions{})
+	if err != nil {
+		fmt.Fprintf(w, "The copies were NOT removed: the migrated workspace did not open: %v\n", err)
+		return
+	}
+	defer st.Close()
+	// The copies may hold the only readable form of a cold key that has no recovery
+	// wrap: they are removed only after the cold key has been read again, with the
+	// factor typed afresh (not the one the migration used), and decrypts.
+	if cc, ok := st.(ColdWrapCounter); ok {
+		if _, without, cerr := cc.ColdWithoutWrap(ctx); cerr != nil || without > 0 {
+			if cerr != nil {
+				fmt.Fprintf(w, "The copies were NOT removed: the cold records could not be counted: %v\n", cerr)
+				return
+			}
+			if a.coldFD >= 0 {
+				fmt.Fprintf(w, "The copies were NOT removed: %d cold key record(s) have no recovery wrap, so the copies may be the only other readable form; --remove-copies then needs the cold-key passphrase typed again at the terminal, and --cold-passphrase-fd gives it only once. Remove the copies by hand when you have checked the keys.\n", without)
+				return
+			}
+			cf, okf := st.(ColdFactors)
+			cv, okv := st.(ColdVerifier)
+			if !okf || !okv {
+				fmt.Fprintln(w, "The copies were NOT removed: this build cannot read the cold keys again to check them.")
+				return
+			}
+			fresh := func(ctx context.Context, _ bool) (*secret.Buffer, error) {
+				return a.askColdPassphrase(ctx, false, "Cold-key passphrase, typed again to confirm the cold key still opens before its copy is removed", "")
+			}
+			cf.SetColdSource(ColdOpen{Passphrase: fresh})
+			if _, verr := cv.VerifyColdPayloads(ctx); verr != nil {
+				fmt.Fprintf(w, "The copies were NOT removed: a cold key did not open with the factor typed again: %v\n", verr)
+				return
+			}
+		}
+	}
+	for _, c := range copies {
+		if err := os.Remove(c); err != nil {
+			fmt.Fprintf(w, "could not remove %s: %v\n", c, err)
+			continue
+		}
+		fmt.Fprintf(w, "Removed %s (unlinked; deletion is best effort on modern storage, the bytes may remain on disk).\n", c)
+	}
 }
 
 func (a *app) keyCommand() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "key",
 		Short: "Signing keys kept in upstream's encrypted form",
-		Long: `A workspace import with --keep-encrypted stores a key still in upstream's
-password-encrypted form. Such a key cannot sign and is never written out. convert
-turns it into an ordinary sealed key.`,
+		Long: `An older workspace may hold a key still in upstream's password-encrypted form
+(an import made before --keep-encrypted was removed; a new import creates none).
+Such a key cannot sign and is never written out. convert turns it into an
+ordinary sealed key; for a key of a cold role it needs the cold sub-key factor.`,
 	}
 	c.AddCommand(a.keyConvertCommand())
 	return c
@@ -55,7 +215,7 @@ turns it into an ordinary sealed key.`,
 // statusText is one word per status.
 func statusText(s workspace.Status) string { return string(s) }
 
-func artefactName(r ports.Ref) string {
+func artefactName(r ports.NamedRef) string {
 	if r.Kind.Numbered() {
 		return fmt.Sprintf("%s.%s#%d", r.Name, r.Kind, r.Num)
 	}
@@ -64,7 +224,7 @@ func artefactName(r ports.Ref) string {
 
 // printWorkspaceReport writes the report as a table: owner, artefact, status,
 // reason. It holds names, kinds and the use case's reasons, no key material.
-func printWorkspaceReport(w io.Writer, rep *workspace.Report, protection func(ports.Ref) string) {
+func printWorkspaceReport(w io.Writer, rep *workspace.Report, protection func(ports.NamedRef) string) {
 	if rep.Extended {
 		printSelectiveReport(w, rep)
 		return
@@ -175,13 +335,13 @@ func (a *app) importPassword(ctx context.Context, count func() (int, error), env
 	}
 	p, err := a.term.ReadSecret(ctx, "Password of the upstream-encrypted keys: ")
 	if errors.Is(err, ErrNoTerminal) {
-		return nil, errors.New("the directory holds keys that upstream encrypted and there is no terminal to ask for their password on; give it on a file descriptor with --password-fd N, or pass --keep-encrypted")
+		return nil, errors.New("the directory holds keys that upstream encrypted and there is no terminal to ask for their password on; give it on a file descriptor with --password-fd N, or pass --defer-encrypted (that leaves the key file, and its owner, out of the import)")
 	}
 	return p, err
 }
 
 func withGPGNote(err error) error {
-	return &explained{msg: err.Error() + "\n" + gpgNote + "; without it, pass --keep-encrypted to import such a key undecrypted", err: err}
+	return &explained{msg: err.Error() + "\n" + gpgNote + "; without it, pass --defer-encrypted to leave such a key file in the source", err: err}
 }
 
 // ---- export ----
@@ -255,7 +415,7 @@ what you export: put it on storage you control and remove it afterwards.`,
 				if s.Sealed == nil {
 					return errors.New("workspace export reads the sealed workspace")
 				}
-				lister, ok := any(s.Sealed).(ports.SourceLister)
+				lister, ok := any(s.Store).(ports.SourceLister)
 				if !ok {
 					return errors.New("this build's sealed workspace cannot list its artefacts")
 				}
@@ -293,7 +453,7 @@ what you export: put it on storage you control and remove it afterwards.`,
 				if err != nil {
 					return err
 				}
-				uc := workspace.ExportWorkspace{Source: s.Store, SourceVault: s.Sealed, Lister: lister, Dest: dest,
+				uc := workspace.ExportWorkspace{Source: s.Store, SourceVault: s.Store.(ports.NamedVault), Lister: lister, Dest: dest,
 					Encryptor: env.KeyEncryptor, Decryptor: env.KeyDecryptor, Auditor: a.d.WorkspaceAuditor(a.workspace, s.Store, reason)}
 				rep, err := uc.Run(ctx, workspace.ExportOptions{Owners: owners, Password: pw, Overwrite: overwrite})
 				if rep != nil {
@@ -353,7 +513,7 @@ func (a *app) deliverExportPassword(pw *secret.Buffer, fd int, toFD bool) error 
 }
 
 // exportProtection says how an exported artefact is protected, for the table.
-func exportProtection(r ports.Ref) string {
+func exportProtection(r ports.NamedRef) string {
 	if r.Kind.IsSigningKey() {
 		return "encrypted"
 	}
@@ -400,23 +560,24 @@ func (a *app) keyConvertCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "convert <key> [--password-fd N]",
 		Short: "Turn a key kept in upstream's encrypted form into a sealed signing key",
-		Long: `<key> names a key that an import with --keep-encrypted stored in upstream's
-encrypted form: the key file name, with or without .skey (mypool.node,
+		Long: `<key> names a key that an older import stored in upstream's encrypted form: the key file name, with or without .skey (mypool.node,
 mywallet.payment.skey). The upstream password is read from --password-fd N, else
 asked for without echo. gpg is needed.
 
 The key is decrypted in protected memory only, checked against the verification
 key in the workspace (import the .vkey file too; a key with no verification key
 here is refused), then stored sealed, and the kept record removed, in one
-transaction. The key is never written in clear. KES, VRF and BLS keys cannot be
-checked this way and are not converted: import them again with --password-fd.`,
+transaction. The key is never written in clear. A KES or VRF key is checked in its
+exact form (the Sum6 root key, or the public half of the seed) against the
+verification key of its number; BLS keys cannot be checked and are not converted:
+import them again with --password-fd.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if a.upstream {
 				return errors.New("key convert works on the sealed workspace; it does not apply with --upstream-layout")
 			}
 			return a.withEnv(cmd, envSpec{needs: []Need{CapKeyCrypto, CapVKeyDerive}}, func(ctx context.Context, s *session, env *Env, _ WireOptions) error {
-				vault, ok := any(s.Sealed).(ports.Vault)
+				vault, ok := any(s.Store).(ports.NamedVault)
 				if !ok || s.Sealed == nil {
 					return errors.New("key convert works on the sealed workspace")
 				}

@@ -56,8 +56,12 @@ func TestManifestIsImmutableAndAppendOnly(t *testing.T) {
 	if _, err := m2.Add(identity.Member{Role: identity.MemberStake, Identity: other}); !errors.Is(err, identity.ErrManifestAppend) {
 		t.Errorf("replace a role: %v", err)
 	}
-	if _, err := m1.Add(identity.Member{Role: identity.MemberStake, Identity: pay}); !errors.Is(err, identity.ErrManifestAppend) {
-		t.Errorf("list an identity twice: %v", err)
+	// One key may be a member under two roles of one owner (a wallet whose payment
+	// and stake keys are one key); the owner is still anchored by the payment role.
+	if same, err := m1.Add(identity.Member{Role: identity.MemberStake, Identity: pay}); err != nil {
+		t.Errorf("the same key under a second role of one owner: %v", err)
+	} else if err := same.CheckAnchor(pay); err != nil {
+		t.Error(err)
 	}
 	// A forged "next version" with no predecessor link does not extend.
 	forged, _ := identity.NewManifest(identity.OwnerWallet, pay, []identity.Member{{Role: "payment", Identity: pay}, {Role: "stake", Identity: other}})
@@ -102,12 +106,11 @@ func TestManifestVocabularyAndAnchorRule(t *testing.T) {
 		"no anchor":                    {identity.OwnerWallet, identity.Ref{}, []identity.Member{M("payment", pay)}},
 		"anchor not a member":          {identity.OwnerWallet, other, []identity.Member{M("payment", pay)}},
 		"unknown owner kind":           {"nothing", pay, []identity.Member{M("payment", pay)}},
-		"unknown role":                 {identity.OwnerWallet, pay, []identity.Member{M("payment", pay), M("bogus", other)}},
 		"empty role":                   {identity.OwnerWallet, pay, []identity.Member{M("", pay)}},
+		"unknown role":                 {identity.OwnerWallet, pay, []identity.Member{M("payment", pay), M("bogus", other)}},
 		"a pool role in a wallet":      {identity.OwnerWallet, pay, []identity.Member{M("payment", pay), M("vrf", vrf)}},
 		"zero identity":                {identity.OwnerWallet, pay, []identity.Member{M("payment", pay), M("stake", identity.Ref{})}},
 		"role twice":                   {identity.OwnerWallet, pay, []identity.Member{M("payment", pay), M("payment", other)}},
-		"identity twice":               {identity.OwnerWallet, pay, []identity.Member{M("payment", pay), M("stake", pay)}},
 		"no members":                   {identity.OwnerWallet, pay, nil},
 		"second payment key":           {identity.OwnerWallet, pay, []identity.Member{M("payment", pay), {Role: "payment", Num: 1, Identity: other}}},
 		"number on an unnumbered role": {identity.OwnerWallet, pay, []identity.Member{{Role: "payment", Num: 3, Identity: pay}}},
@@ -128,7 +131,8 @@ func TestManifestVocabularyAndAnchorRule(t *testing.T) {
 		members []identity.Member
 	}{
 		{identity.OwnerWallet, pay, []identity.Member{M("payment", pay), M("stake", stake)}},
-		{identity.OwnerWallet, stake, []identity.Member{M("stake", stake)}}, // stake-only wallet
+		{identity.OwnerWallet, stake, []identity.Member{M("stake", stake)}},                // stake-only wallet
+		{identity.OwnerWallet, pay, []identity.Member{M("payment", pay), M("stake", pay)}}, // one key under two roles of one owner
 		{identity.OwnerPool, other, []identity.Member{M("cold", other), M("vrf", vrf), {Role: "kes", Num: 7, Identity: kes}}},
 		{identity.OwnerDRep, other, []identity.Member{M("drep", other)}},
 		{identity.OwnerCommittee, other, []identity.Member{M("cold", other), M("hot", pay)}},

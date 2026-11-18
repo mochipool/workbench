@@ -54,7 +54,7 @@ func (r *partyRun) tailcatSettings() (port uint16, derp string) {
 }
 
 // openLocalSecret opens one of this workspace's own secret records.
-func (r *partyRun) openSecret(ctx context.Context, ref ports.Ref) (*secret.Buffer, error) {
+func (r *partyRun) openSecret(ctx context.Context, ref ports.NamedRef) (*secret.Buffer, error) {
 	v, err := r.vault()
 	if err != nil {
 		return nil, err
@@ -133,9 +133,9 @@ func (r *partyRun) serve(ctx context.Context, invites []string, outboxDir string
 	if len(allowed) == 0 {
 		return errors.New("no enrolled signer has a tailcat node key, so nobody could be admitted. tailcat admits every client when its allow-list is empty, so spo refuses to start. Enroll a signer whose identity has a node key (spo party init --tailcat)")
 	}
-	nodeRef, pskRef := ports.Ref{Name: "local", Kind: ports.TailcatNodeKey}, ports.Ref{Name: "local", Kind: ports.TailcatPSK}
+	nodeRef, pskRef := ports.NamedRef{Name: "local", Kind: ports.TailcatNodeKey}, ports.NamedRef{Name: "local", Kind: ports.TailcatPSK}
 	var have bool
-	if err := r.s.Store.View(ctx, func(rd ports.Reader) error {
+	if err := r.s.Store.View(ctx, func(rd ports.NamedReader) error {
 		var err error
 		have, err = rd.Exists(pskRef)
 		return err
@@ -147,7 +147,7 @@ func (r *partyRun) serve(ctx context.Context, invites []string, outboxDir string
 		if err != nil {
 			return err
 		}
-		err = r.s.Store.Update(ctx, func(w ports.Writer) error { return w.PutSecret(pskRef, k) })
+		err = r.s.Store.Update(ctx, func(w ports.NamedWriter) error { return w.PutSecret(pskRef, k) })
 		k.Destroy()
 		if err != nil {
 			return err
@@ -359,14 +359,14 @@ func (r *partyRun) connect(ctx context.Context, coordName string, f *signerFlags
 	if _, err := r.nodeKey(ctx, false); err != nil {
 		return err
 	}
-	addr, err := r.openSecret(ctx, ports.Ref{Name: coord.Name, Kind: ports.TailcatAddr})
+	addr, err := r.openSecret(ctx, ports.NamedRef{Name: coord.Name, Kind: ports.TailcatAddr})
 	if errors.Is(err, ports.ErrNotFound) {
 		return fmt.Errorf("there is no invitation from %s: ask its operator for one (spo party serve --invite %s) and import the file with spo party inbox import", coordName, "NAME")
 	}
 	if err != nil {
 		return err
 	}
-	nodeKey, err := r.openSecret(ctx, ports.Ref{Name: "local", Kind: ports.TailcatNodeKey})
+	nodeKey, err := r.openSecret(ctx, ports.NamedRef{Name: "local", Kind: ports.TailcatNodeKey})
 	if err != nil {
 		addr.Destroy()
 		return err

@@ -39,8 +39,8 @@ func (l *log) count(prefix string) (n int) {
 
 type memStore struct {
 	l       *log
-	files   map[ports.Ref][]byte
-	secrets map[ports.Ref][]byte
+	files   map[ports.NamedRef][]byte
+	secrets map[ports.NamedRef][]byte
 	writes  int
 }
 
@@ -55,7 +55,7 @@ func (s *memStore) List(context.Context) (ports.SourceListing, error) {
 
 type memView struct{ s *memStore }
 
-func (v memView) Get(r ports.Ref) ([]byte, error) {
+func (v memView) Get(r ports.NamedRef) ([]byte, error) {
 	if b, ok := v.s.files[r]; ok {
 		return b, nil
 	}
@@ -64,7 +64,7 @@ func (v memView) Get(r ports.Ref) ([]byte, error) {
 	}
 	return nil, ports.ErrNotFound
 }
-func (v memView) Exists(r ports.Ref) (bool, error) {
+func (v memView) Exists(r ports.NamedRef) (bool, error) {
 	_, a := v.s.files[r]
 	_, b := v.s.secrets[r]
 	return a || b, nil
@@ -72,28 +72,28 @@ func (v memView) Exists(r ports.Ref) (bool, error) {
 
 type memWriter struct{ memView }
 
-func (w memWriter) Put(r ports.Ref, b []byte) error {
+func (w memWriter) Put(r ports.NamedRef, b []byte) error {
 	w.s.writes++
 	w.s.l.add("put " + r.String())
 	w.s.files[r] = append([]byte(nil), b...)
 	return nil
 }
-func (w memWriter) PutSecret(r ports.Ref, s *secret.Buffer) error {
+func (w memWriter) PutSecret(r ports.NamedRef, s *secret.Buffer) error {
 	w.s.writes++
 	w.s.l.add("put-secret " + r.String())
 	return s.Use(func(b []byte) error { w.s.secrets[r] = append([]byte(nil), b...); return nil })
 }
-func (w memWriter) Delete(r ports.Ref) error {
+func (w memWriter) Delete(r ports.NamedRef) error {
 	w.s.l.add("delete " + r.String())
 	delete(w.s.files, r)
 	delete(w.s.secrets, r)
 	return nil
 }
 
-func (s *memStore) View(_ context.Context, fn func(ports.Reader) error) error {
+func (s *memStore) View(_ context.Context, fn func(ports.NamedReader) error) error {
 	return fn(memView{s})
 }
-func (s *memStore) Update(_ context.Context, fn func(ports.Writer) error) error {
+func (s *memStore) Update(_ context.Context, fn func(ports.NamedWriter) error) error {
 	return fn(memWriter{memView{s}})
 }
 
@@ -179,7 +179,7 @@ func (s *fakeSigner) Witness(_ context.Context, key custody.KeyRef, body txbuild
 
 // fakeDir serves the fake signer for the keys whose signing key the store
 // holds. Profile of the fake: everything is witnessed.
-func fakeDir(st ports.Store, s *fakeSigner) ports.SignerDirectory {
+func fakeDir(st ports.NamedStore, s *fakeSigner) ports.SignerDirectory {
 	return porttest.VaultOnly(st, fullSigner{s})
 }
 
@@ -324,7 +324,7 @@ func newRig(t *testing.T) *rig {
 	r.hot = stake.KeyHash(txbuild.HashKey(pubs[custody.RoleCommitteeHot]))
 	r.poolKey = stake.KeyHash(txbuild.HashKey(pubs[custody.RolePoolCold]))
 	hexh := func(h stake.KeyHash) []byte { return []byte(fmt.Sprintf("%x\n", h[:])) }
-	r.store = &memStore{l: l, secrets: map[ports.Ref][]byte{}, files: map[ports.Ref][]byte{
+	r.store = &memStore{l: l, secrets: map[ports.NamedRef][]byte{}, files: map[ports.NamedRef][]byte{
 		{Name: "w.payment", Kind: ports.AddrFile}: []byte("addr_test_pay\n"),
 		{Name: "w.payment", Kind: ports.AddrSKey}: nil,
 		{Name: "w.payment", Kind: ports.AddrVKey}: vkeyEnvelope(pubs[custody.RolePayment]),
@@ -367,9 +367,9 @@ func (r *rig) nothingWritten(t *testing.T) {
 	}
 }
 
-func (r *rig) hardware(ref ports.Ref, hws ports.Kind) {
+func (r *rig) hardware(ref ports.NamedRef, hws ports.Kind) {
 	delete(r.store.files, ref)
-	r.store.files[ports.Ref{Name: ref.Name, Kind: hws}] = []byte("hw")
+	r.store.files[ports.NamedRef{Name: ref.Name, Kind: hws}] = []byte("hw")
 }
 
 func registeredDRep(deposit chain.Lovelace, anchorURL string) chain.Reading[chain.DRepState] {

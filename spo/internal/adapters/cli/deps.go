@@ -27,6 +27,9 @@ type Deps struct {
 	Terminal Terminal
 
 	Config ConfigOps
+	// Factors is the FIDO2 factor source (ADR 0011). Nil where the binary cannot
+	// reach one: a command that needs a factor then fails before any prompt.
+	Factors ports.FactorSource
 	// NodeAddressWarning returns the warning to print for a node address that
 	// is plain TCP to a non-loopback host, "" otherwise. Nil: no warning.
 	NodeAddressWarning func(address string) string
@@ -46,13 +49,19 @@ type Deps struct {
 	// OpenExportDir opens the destination of `workspace export`: a store that
 	// accepts non-secret files and signing keys in upstream's encrypted form,
 	// and refuses every other secret.
-	OpenExportDir func(dir string) (ports.Store, error)
+	OpenExportDir func(dir string) (ports.NamedStore, error)
 
 	// WorkspaceAuditor makes the recorder of dangerous workspace operations
 	// (export) over a store; reason is the operator's, kept with each event.
 	// dir is the workspace directory: a store with no place for the log keeps
 	// it in a file there.
-	WorkspaceAuditor func(dir string, store ports.Store, reason string) ports.WorkspaceAuditor
+	WorkspaceAuditor func(dir string, store ports.NamedStore, reason string) ports.WorkspaceAuditor
+
+	// HotSealer and HotDeriver are the age sealer and the KES and VRF
+	// verification-key deriver of `node export` (ADR 0011 decision 2). Nil: the
+	// command is unavailable. Neither can write a file.
+	HotSealer  ports.HotSealer
+	HotDeriver ports.HotVKeyDeriver
 
 	// Wire builds the Env a command runs in, from the open store (nil to
 	// only inspect what the configuration yields) and the options. It
@@ -77,8 +86,8 @@ type Deps struct {
 
 // UpstreamSource is an upstream-layout directory opened for an import.
 type UpstreamSource interface {
-	ports.ReadStore
-	ports.Vault
+	ports.NamedReadStore
+	ports.NamedVault
 	ports.SourceLister
 	ports.SourceTree
 }
@@ -213,6 +222,10 @@ type RestoreOptions struct {
 	Overwrite           bool
 	AllowOlder          bool
 	AllowOtherWorkspace bool
+	// AllowWeakerPolicy and CurrentRecovery: a backup whose unlock policy is
+	// weaker than the workspace's replaces it only when both are given.
+	AllowWeakerPolicy bool
+	CurrentRecovery   *FactorOpen
 }
 
 // Head is the end of a workspace's audit chain.
@@ -240,10 +253,155 @@ type SealedOps struct {
 	// verify --deep). Nil where it is not available.
 	VerifyFileDeep func(path string, passphrase *secret.Buffer) (VerifyReport, error)
 	Restore        func(backup, dest string, passphrase *secret.Buffer, o RestoreOptions) error
+	// RestoreFactors restores a backup of a workspace that unlocks through FIDO2
+	// factors, verifying it through them. Nil where it is not available.
+	RestoreFactors func(backup, dest string, in FactorOpen, o RestoreOptions) error
+	// Migrate converts a workspace file of the old format (records keyed by name)
+	// to the current one (ADR 0010 decision 4). Nil where it is not available.
+	Migrate func(path string, passphrase *secret.Buffer, o MigrateOptions) (MigrateReport, error)
+	// Describe reads the policy and the slots of the file without any key. Nil
+	// where it is not available (the command then asks for a passphrase).
+	Describe func(path string) (WorkspaceInfo, error)
+	// OpenFactors unlocks through a fido2-hmac or composite slot.
+	OpenFactors func(path string, in FactorOpen, o OpenOptions) (SealedStore, error)
+	// VerifyFileFactors verifies a workspace or backup file read-only, unlocking
+	// through its FIDO2 slots (a hardware workspace has no passphrase). deep also
+	// decrypts every record.
+	VerifyFileFactors func(path string, in FactorOpen, deep bool) (VerifyReport, error)
+}
+
+// WorkspaceInfo is the policy and the slot table of a workspace file.
+type WorkspaceInfo struct {
+	Policy string // standard, hardware or strict
+	Slots  []Slot
+	// ID, Records and AuditRows are what the file shows without a key: its
+	// workspace id and the number of records and audit rows it holds.
+	ID        []byte
+	Records   int
+	AuditRows int
+}
+
+// FactorOpen is what a command can present of the factors a slot asks for. A
+// nil callback means the command cannot present that factor. Passphrase and
+// Recovery return text as typed (the recovery key as printed).
+type FactorOpen struct {
+	Source     ports.FactorSource
+	Device     string
+	PIN        func(ctx context.Context) (*secret.Buffer, error)
+	Passphrase func(ctx context.Context) (*secret.Buffer, error)
+	Recovery   func(ctx context.Context) (*secret.Buffer, error)
+	Notify     func(msg string)
+}
+
+// RotateRequest is the table a rotation writes. Policy standard: Passphrase is
+// the new passphrase and the table is that passphrase and a recovery key.
+// hardware: Daily is the authenticator of the fido2-hmac slot and Recovery the
+// second authenticator of the recovery composite. strict: Daily only.
+type RotateRequest struct {
+	// YesRemove are the slot ids (hex) the operator confirmed removing; the store
+	// re-checks them against the table inside its transaction (strict rotations).
+	YesRemove  []string
+	Policy     string
+	Passphrase *secret.Buffer
+	// ColdPassphrase presents the sub-key passphrase of the new table (standard);
+	// under hardware and strict the new daily authenticator (Daily) presents it.
+	ColdPassphrase func(ctx context.Context, create bool) (*secret.Buffer, error)
+	Daily          FactorOpen
+	Recovery       FactorOpen
+	// CurrentRecovery presents the workspace's current recovery credential: the
+	// recovery key (Recovery returns the printed text) and, under hardware, the
+	// recovery composite's second authenticator (Source, Device, PIN). ADR 0011
+	// decision 6: the recovery path changes only in a rotation that presents it.
+	// A strict workspace has none.
+	CurrentRecovery FactorOpen
+	// KeepCopy is the path of an explicit copy of the file made before the
+	// rotation; it still opens with the old credentials (workspace rotate
+	// --keep-copy). Empty makes no copy.
+	KeepCopy string
+	// LeaveUnreachable names the cold-role records (kind/label) the rotation may
+	// leave under their old cold factor (--leave-unreachable); without it a record
+	// that cannot be re-established refuses the rotation.
+	LeaveUnreachable []string
+}
+
+// RemoveSlotRequest is `workspace slot remove`: the slot, what presents the
+// factors of the slots that stay (Daily: the daily authenticator and, as
+// Passphrase, the passphrase of a passphrase slot), and the current recovery
+// credential.
+type RemoveSlotRequest struct {
+	ID              []byte
+	Daily           FactorOpen
+	CurrentRecovery FactorOpen
+	KeepCopy        string
+}
+
+// RecoveryAdmin is the optional interface of a SealedStore that checks the
+// current recovery key before the recovery path changes (a rekey).
+type RecoveryAdmin interface {
+	// PresentRecovery checks the recovery key (as printed) against the workspace.
+	PresentRecovery(ctx context.Context, in FactorOpen) error
+	// ChangePassphraseKeepRecovery changes the passphrase and keeps the recovery
+	// key presented (no new recovery key is made).
+	ChangePassphraseKeepRecovery(ctx context.Context, newPassphrase, recoveryText *secret.Buffer) error
+}
+
+// FactorReauth is the optional interface of a SealedStore that can ask for a
+// fresh presentation of a factor of the slot it unlocked through (the approval
+// gate of a factor session).
+type FactorReauth interface {
+	Reauthenticate(ctx context.Context, in FactorOpen) error
+}
+
+// SlotAdmin is the optional interface of a SealedStore that can change its slot
+// table (ADR 0011).
+type SlotAdmin interface {
+	Policy(ctx context.Context) (string, error)
+	// AddFIDO2Slot enrols the authenticator named by in and adds a fido2-hmac slot.
+	AddFIDO2Slot(ctx context.Context, in FactorOpen) (id []byte, err error)
+	// Rotate writes the table of req and returns the new recovery key (nil under
+	// strict) and the path of the explicit copy when req.KeepCopy asked for one.
+	Rotate(ctx context.Context, req RotateRequest) (recovery *secret.Buffer, backup string, err error)
+	// RemoveSlot removes a slot by a rotation that re-creates the others, and
+	// returns the new recovery key when a recovery slot or composite stays.
+	RemoveSlot(ctx context.Context, req RemoveSlotRequest) (recovery *secret.Buffer, backup string, err error)
+}
+
+// MigrateOptions are the operator's choices for `workspace migrate`.
+type MigrateOptions struct {
+	// Quarantine names the pools to proceed with although their descriptor does
+	// not resolve to keys or their records collide.
+	Quarantine []string
+	// Cold presents the sub-key factor the migration seals cold-role keys under.
+	Cold ColdOpen
+}
+
+// MigrateReport says what a migration did.
+type MigrateReport struct {
+	Backup string
+	// Backup3 is the copy made before the conversion to store format 3, when the
+	// migration ran both steps; Format3Only says the workspace was already in
+	// format 2 and Backup is that copy.
+	Backup3     string
+	Format3Only bool
+	Records     int
+	Merged      int
+	Added       int
+	Owners      int
+	Rewritten   []string
+	Quarantined []string
+	Unassigned  []string
+	// ColdNoWrap is the number of cold-role records the migration sealed with no
+	// recovery wrap.
+	ColdNoWrap int
 }
 
 // Slot describes a key slot. Nothing in it is secret.
 type Slot struct {
+	Legacy  bool
+	Factors []string
+	// Touch is parallel to Factors: for a FIDO2 factor the stored result of the
+	// enrolment touch probe as a phrase ("touch not enforced"), else "".
+	Touch  []string
 	ID     []byte
 	Kind   string // "passphrase" or "recovery"
 	Detail string // key-derivation parameters of a passphrase slot
@@ -251,6 +409,9 @@ type Slot struct {
 
 // SealedStore is an unlocked sealed workspace.
 type SealedStore interface {
+	// The sealed workspace is the anchor-level store (ADR 0010): the commands
+	// reach it by name through labels.Named, and the signers reach its keys
+	// through ports.Vault and the key index.
 	ports.Store
 	ports.Vault
 	VerifyDetailed(ctx context.Context) (VerifyReport, error)

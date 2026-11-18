@@ -183,11 +183,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/mochipool/workbench/spo/internal/domain/unlock"
 	"github.com/mochipool/workbench/spo/internal/platform/seal"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 
 	_ "modernc.org/sqlite" // driver name "sqlite"
 )
@@ -215,10 +218,25 @@ type Store struct {
 	master *secret.Buffer // kept for slot management; guarded memory
 	keys   *seal.Keys
 	slotID []byte // slot that unlocked this store
-	ro     bool
-	now    func() time.Time
-	lock   *os.File
-	gate   chan struct{} // capacity 1: held for the length of an operation
+	// viaRecovery: the handle was unlocked with the recovery credential, which is
+	// a presentation of it; recProof is the last PresentRecovery on this handle.
+	viaRecovery bool
+	recProof    *RecoveryProof
+	// writing counts the write transactions and exclusive file locks this handle
+	// holds right now (writeHeld); the cold factor is never asked while it is
+	// not zero.
+	writing atomic.Int32
+	ro      bool
+	legacy  bool          // a format 1 store opened for the migration: nothing else works on it
+	legacy2 bool          // a format 2 store opened for Migrate3: nothing else works on it
+	policy  unlock.Policy // the policy of the table this handle unlocked
+	// cold is the source of the cold sub-key factor (SetColdSource); recSecret is
+	// the recovery key of a handle unlocked with it. Both are guarded by mu.
+	cold      *ColdSource
+	recSecret *recoveryKey
+	now       func() time.Time
+	lock      *os.File
+	gate      chan struct{} // capacity 1: held for the length of an operation
 
 	// Both are read and replaced under the gate.
 	schemaV int         // schema version the database was last checked against
@@ -282,6 +300,10 @@ func (s *Store) Close() error {
 	}
 	s.keys.Destroy()
 	s.master.Destroy()
+	s.recSecret.destroy()
+	if s.recProof != nil {
+		s.recProof.key.destroy()
+	}
 	err := s.db.Close()
 	if s.lock != nil {
 		s.lock.Close()
@@ -440,8 +462,8 @@ func loadMeta(ctx context.Context, q dbq) (metaRow, error) {
 	if err != nil {
 		return m, bad("is missing or unreadable")
 	}
-	if m.format != seal.FormatVersion {
-		return m, fmt.Errorf("sqlitestore: format version %d is not supported (this binary: %d; or the meta row was modified)", m.format, seal.FormatVersion)
+	if f := uint64(m.format); f != seal.LegacyRecordFormat && f != seal.RecordFormat && f != seal.StoreFormat {
+		return m, fmt.Errorf("sqlitestore: format version %d is not supported (this binary: %d; or the meta row was modified)", m.format, seal.StoreFormat)
 	}
 	if len(m.ws) != seal.IDSize {
 		return m, bad("has a bad workspace id")
@@ -450,40 +472,6 @@ func loadMeta(ctx context.Context, q dbq) (metaRow, error) {
 		return m, bad("has a bad key epoch")
 	}
 	return m, nil
-}
-
-// loadSlots reads the key slots in a stable order (by id).
-func loadSlots(ctx context.Context, q dbq) ([]seal.Slot, error) {
-	rows, err := q.QueryContext(ctx, `SELECT id, kind, kdf_memory_kib, kdf_passes, kdf_lanes, salt, key_commit, nonce, wrapped_key FROM keyslots ORDER BY id`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []seal.Slot
-	for rows.Next() {
-		var s seal.Slot
-		var mem, passes, lanes sql.NullInt64
-		if err := rows.Scan(&s.ID, &s.Kind, &mem, &passes, &lanes, &s.Salt, &s.Commit, &s.Nonce, &s.Wrapped); err != nil {
-			return nil, err
-		}
-		s.KDF = seal.KDFParams{MemoryKiB: uint32(mem.Int64), Passes: uint32(passes.Int64), Lanes: uint8(lanes.Int64)}
-		if mem.Int64 < 0 || mem.Int64 > 1<<32-1 || passes.Int64 < 0 || passes.Int64 > 1<<32-1 || lanes.Int64 < 0 || lanes.Int64 > 255 {
-			s.KDF = seal.KDFParams{} // out of range values wrap: zero is refused as weak
-		}
-		out = append(out, s)
-	}
-	return out, rows.Err()
-}
-
-func insertSlot(ctx context.Context, q dbq, s seal.Slot) error {
-	var mem, passes, lanes any
-	var salt any
-	if s.Kind == seal.SlotPassphrase {
-		mem, passes, lanes, salt = int64(s.KDF.MemoryKiB), int64(s.KDF.Passes), int64(s.KDF.Lanes), s.Salt
-	}
-	_, err := q.ExecContext(ctx, `INSERT INTO keyslots (id, kind, kdf_memory_kib, kdf_passes, kdf_lanes, salt, key_commit, nonce, wrapped_key) VALUES (?,?,?,?,?,?,?,?,?)`,
-		s.ID, s.Kind, mem, passes, lanes, salt, s.Commit, s.Nonce, s.Wrapped)
-	return err
 }
 
 // Init creates a new workspace file at path (which must not exist) with one
@@ -557,14 +545,16 @@ func Init(path string, passphrase *secret.Buffer) (recoveryKey *secret.Buffer, e
 	}
 	defer tx.Rollback()
 	now := time.Now().Unix()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO meta (id, workspace_id, format_version, created_at, key_epoch, epoch_mac) VALUES (1,?,?,?,?,?)`,
-		ws, seal.FormatVersion, now, epoch, epochMAC); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO meta (id, workspace_id, format_version, created_at, key_epoch, epoch_mac, policy) VALUES (1,?,?,?,?,?,?)`,
+		ws, seal.StoreFormat, now, epoch, epochMAC, string(unlock.Standard)); err != nil {
 		return nil, err
 	}
-	if err := insertSlot(ctx, tx, pslot); err != nil {
-		return nil, err
+	for _, sl := range []tslot{pslot, rslot} {
+		if err := insertTSlot(ctx, tx, sl); err != nil {
+			return nil, err
+		}
 	}
-	if err := insertSlot(ctx, tx, rslot); err != nil {
+	if err := writeRecoveryPub(ctx, tx, pslot.recPub); err != nil {
 		return nil, err
 	}
 	// The first audit row records the slot set the workspace starts with.
@@ -585,9 +575,22 @@ func Init(path string, passphrase *secret.Buffer) (recoveryKey *secret.Buffer, e
 	return text, nil
 }
 
-// newSlots wraps master in one passphrase slot and one new recovery slot, and
-// returns the recovery key as printable text.
-func newSlots(ws []byte, master, passphrase *secret.Buffer) (pslot, rslot seal.Slot, text *secret.Buffer, err error) {
+// newSlots wraps master in one passphrase slot and one new recovery slot, both
+// of store format 3 under the standard policy and both binding the hash of the
+// recovery public key derived from the new recovery key, and returns the
+// recovery key as printable text.
+func newSlots(ws []byte, master, passphrase *secret.Buffer) (pslot, rslot tslot, text *secret.Buffer, err error) {
+	rk, err := seal.NewMasterKey() // 32 random bytes in guarded memory
+	if err != nil {
+		return
+	}
+	defer rk.Destroy()
+	return newSlotsWith(ws, master, passphrase, rk)
+}
+
+// newSlotsWith is newSlots for a given recovery key: a passphrase change that
+// keeps the recovery key (and so the bound recovery public key hash).
+func newSlotsWith(ws []byte, master, passphrase, rk *secret.Buffer) (pslot, rslot tslot, text *secret.Buffer, err error) {
 	pid, err := seal.NewID()
 	if err != nil {
 		return
@@ -596,16 +599,26 @@ func newSlots(ws []byte, master, passphrase *secret.Buffer) (pslot, rslot seal.S
 	if err != nil {
 		return
 	}
-	if pslot, err = seal.NewPassphraseSlot(ws, pid, master, passphrase, kdfForNewSlots); err != nil {
-		return
-	}
-	rslot, raw, err := seal.NewRecoverySlot(ws, rid, master)
+	priv, err := seal.RecoveryKeyPair(rk)
 	if err != nil {
 		return
 	}
-	defer raw.Destroy()
-	text, err = seal.EncodeRecoveryKey(raw)
-	return
+	pub := priv.PublicKey().Bytes()
+	hash := seal.RecoveryPubKeyHash(pub)
+	b := seal.SlotBinding{Policy: string(unlock.Standard), RecoveryPubKeyHash: hash}
+	ps, err := seal.NewBoundPassphraseSlot(ws, pid, master, passphrase, kdfForNewSlots, b)
+	if err != nil {
+		return
+	}
+	rs, err := seal.NewBoundRecoverySlot(ws, rid, master, rk, b)
+	if err != nil {
+		return
+	}
+	text, err = seal.EncodeRecoveryKey(rk)
+	if err != nil {
+		return
+	}
+	return tslot{id: pid, kind: seal.SlotPassphrase, ps: ps, bound: true, recPub: pub}, tslot{id: rid, kind: seal.SlotRecovery, ps: rs, bound: true, recPub: pub}, text, nil
 }
 
 // hasWAL reports whether a non-empty -wal file sits beside path.
@@ -624,9 +637,13 @@ func removeDB(path string) {
 }
 
 type credential struct {
-	kind string
-	buf  *secret.Buffer // passphrase text, or the raw 32-byte recovery key
+	kind    string
+	buf     *secret.Buffer // passphrase text, or the raw 32-byte recovery key
+	factors *FactorInputs  // kind credFactors: what the fido2-hmac and composite slots need
 }
+
+// credFactors is the credential kind of OpenWithFactors.
+const credFactors = "factors"
 
 // OpenOptions are the choices of OpenWithOptions.
 type OpenOptions struct {
@@ -644,16 +661,23 @@ type OpenOptions struct {
 	// back inside the file is then not noticed until Verify is called.
 	// AcceptRollback is independent: it only governs the head-file check.
 	SkipVerify bool
+
+	// legacy opens a store of format 1 for the migration (Migrate), which is the
+	// only code that reads one; every other open refuses it with ErrLegacyFormat.
+	legacy bool
+	// legacy2 opens a store of format 2 for Migrate3, the only code that reads
+	// one; every other open refuses it with ErrFormat2, before any key is derived.
+	legacy2 bool
 }
 
 // Open unlocks the workspace at path with a passphrase.
 func Open(path string, passphrase *secret.Buffer) (*Store, error) {
-	return open(path, credential{seal.SlotPassphrase, passphrase}, false, OpenOptions{})
+	return open(path, credential{kind: seal.SlotPassphrase, buf: passphrase}, false, OpenOptions{})
 }
 
 // OpenWithOptions is Open with options. Check Store.Notices after it.
 func OpenWithOptions(path string, passphrase *secret.Buffer, o OpenOptions) (*Store, error) {
-	return open(path, credential{seal.SlotPassphrase, passphrase}, false, o)
+	return open(path, credential{kind: seal.SlotPassphrase, buf: passphrase}, false, o)
 }
 
 // OpenWithRecovery unlocks the workspace with the recovery key as printed
@@ -669,7 +693,7 @@ func OpenWithRecoveryOptions(path string, recovery *secret.Buffer, o OpenOptions
 		return nil, err
 	}
 	defer raw.Destroy()
-	return open(path, credential{seal.SlotRecovery, raw}, false, o)
+	return open(path, credential{kind: seal.SlotRecovery, buf: raw}, false, o)
 }
 
 // lockWaitMax is how long an open waits for the file lock held by another
@@ -808,7 +832,24 @@ func confirmReopen(ctx context.Context, abs string, lock *os.File, db dbq, want 
 // writes anything; and only when all of that passed, a connection that may
 // write (unless the handle is read-only) for the migration, the head file and
 // the cleanup retry.
-func open(path string, cred credential, readOnly bool, o OpenOptions) (st *Store, err error) {
+func open(path string, cred credential, readOnly bool, o OpenOptions) (*Store, error) {
+	st, err := openFile(path, cred, readOnly, o)
+	if err != nil {
+		return nil, err
+	}
+	if !o.SkipVerify && !o.legacy && !o.legacy2 {
+		// The identity layer, on every open (ADR 0010 decision 4): manifest
+		// members against the identities recomputed from the stored keys,
+		// owner anchors, membership uniqueness, labels.
+		if cerr := st.View(context.Background(), func(r ports.Reader) error { return labels.Check(r) }); cerr != nil {
+			st.Close()
+			return nil, cerr
+		}
+	}
+	return st, nil
+}
+
+func openFile(path string, cred credential, readOnly bool, o OpenOptions) (st *Store, err error) {
 	ctx := context.Background()
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -818,9 +859,25 @@ func open(path string, cred credential, readOnly bool, o OpenOptions) (st *Store
 		return nil, err
 	}
 	// Steps 2 and 3: what the key derivation needs, then the key derivation.
-	m1, slots, err := readUnlockInputs(ctx, abs, readOnly)
+	m1, tbl, err := readUnlockInputs(ctx, abs, readOnly)
 	if err != nil {
 		return nil, err
+	}
+	// Before any key is derived: a format this open does not read, and a slot
+	// table that breaks its own policy.
+	switch f := uint64(m1.format); {
+	case f == seal.LegacyRecordFormat && !o.legacy:
+		return nil, ErrLegacyFormat
+	case f == seal.RecordFormat && !o.legacy2:
+		return nil, ErrFormat2
+	case f == seal.LegacyRecordFormat && o.legacy, f == seal.RecordFormat && o.legacy2:
+	case o.legacy || o.legacy2:
+		return nil, ErrNotLegacy
+	}
+	if tbl.format >= seal.StoreFormat {
+		if err := tbl.check(); err != nil {
+			return nil, fmt.Errorf("%w: the slot table of this workspace was edited or is damaged, so nothing was unlocked (run `spo store verify` to see what differs; an old copy of the file may be the way back): %w", ErrVerify, err)
+		}
 	}
 	var master *secret.Buffer
 	var keys *seal.Keys
@@ -833,7 +890,7 @@ func open(path string, cred credential, readOnly bool, o OpenOptions) (st *Store
 	if beforeUnlock != nil {
 		beforeUnlock()
 	}
-	master, used, notices, err := unlock(m1.ws, slots, cred, func(mk *secret.Buffer) (bool, error) {
+	master, used, notices, err := unlockTable(ctx, tbl, cred, func(mk *secret.Buffer) (bool, error) {
 		return epochMatches(m1, mk)
 	})
 	if err != nil {
@@ -871,8 +928,13 @@ func open(path string, cred credential, readOnly bool, o OpenOptions) (st *Store
 	if err != nil {
 		return nil, err
 	}
-	st = &Store{db: db, path: abs, ws: m.ws, epoch: m.epoch, master: master, keys: keys, slotID: used, ro: readOnly, now: time.Now,
+	st = &Store{legacy: o.legacy || o.legacy2, legacy2: o.legacy2, policy: tbl.policy, db: db, path: abs, ws: m.ws, epoch: m.epoch, master: master, keys: keys, slotID: used, viaRecovery: cred.kind == seal.SlotRecovery, ro: readOnly, now: time.Now,
 		lock: g.lock, gate: make(chan struct{}, 1), head: head, notices: notices, schemaV: v}
+	if cred.kind == seal.SlotRecovery && cred.buf != nil {
+		if cp, cerr := copySecret(cred.buf); cerr == nil {
+			st.recSecret = &recoveryKey{secret: cp}
+		}
+	}
 	// The full verification, still on the read-only connection. (With
 	// SkipVerify the handle builds the same knowledge at its first use.)
 	if !o.SkipVerify {
@@ -914,8 +976,8 @@ func open(path string, cred credential, readOnly bool, o OpenOptions) (st *Store
 	if readOnly {
 		return st, nil
 	}
-	// Step 6.
-	if v < len(migrations) {
+	// Step 6. A file of format 1 or 2 is migrated by Migrate and Migrate3 only.
+	if v < len(migrations) && !o.legacy && !o.legacy2 {
 		if err = migrate(ctx, db); err != nil {
 			return nil, err
 		}
@@ -943,9 +1005,9 @@ func open(path string, cred credential, readOnly bool, o OpenOptions) (st *Store
 }
 
 // readUnlockInputs is step 2 of the open: under the file lock, the schema
-// check, the meta row and the key slots. The lock is released before it
+// check, the meta row and the slot table. The lock is released before it
 // returns.
-func readUnlockInputs(ctx context.Context, abs string, readOnly bool) (m metaRow, slots []seal.Slot, err error) {
+func readUnlockInputs(ctx context.Context, abs string, readOnly bool) (m metaRow, t *table, err error) {
 	g, err := openStage(ctx, abs)
 	if err != nil {
 		return m, nil, err
@@ -957,8 +1019,8 @@ func readUnlockInputs(ctx context.Context, abs string, readOnly bool) (m metaRow
 	if m, err = loadMeta(ctx, g.db); err != nil {
 		return m, nil, err
 	}
-	slots, err = loadSlots(ctx, g.db)
-	return m, slots, err
+	t, err = loadTable(ctx, g.db, m.ws, uint64(m.format))
+	return m, t, err
 }
 
 // epochMatches reports whether master belongs to the key epoch recorded in m:
@@ -994,11 +1056,16 @@ func epochMatches(m metaRow, master *secret.Buffer) (bool, error) {
 // afterwards fails, because the audit rows after the rollover are MAC'd under
 // the new audit key and the slot set no longer matches the recorded one. With
 // SkipVerify the handle opens, finds no record, and Verify fails.
-func unlock(ws []byte, slots []seal.Slot, cred credential, accept func(*secret.Buffer) (bool, error)) (master *secret.Buffer, used []byte, notices []string, err error) {
+func unlockTable(ctx context.Context, t *table, cred credential, accept func(*secret.Buffer) (bool, error)) (master *secret.Buffer, used []byte, notices []string, err error) {
+	if cred.kind == credFactors {
+		return unlockFactors(ctx, t, cred.factors, accept)
+	}
+	ws := t.ws
 	work := uint64(0)
 	unwrapped := false
-	for _, sl := range slots {
-		if sl.Kind != cred.kind {
+	for _, ts := range t.slots {
+		sl := ts.ps
+		if ts.isFactor() || sl.Kind != cred.kind {
 			continue
 		}
 		skip := func(why string) {
@@ -1080,42 +1147,87 @@ func checkHead(ctx context.Context, db dbq, path string, ws []byte, readOnly boo
 	return own, notices, !hh.equal(own), nil
 }
 
+// FactorInfo describes one factor of a slot: its kind (unlock's names), its id,
+// and for a FIDO2 factor the credential id.
+type FactorInfo struct {
+	Kind         string
+	ID           []byte
+	CredentialID []byte
+	// Touch is the stored result of the enrolment touch probe (0 when the factor
+	// is not a FIDO2 credential or the probe did not run).
+	Touch uint8
+}
+
 // SlotInfo describes a key slot. Kind and id are structural data.
 type SlotInfo struct {
-	ID   []byte
-	Kind string
-	KDF  seal.KDFParams // passphrase slots
+	ID      []byte
+	Kind    string
+	KDF     seal.KDFParams // passphrase slots
+	Factors []FactorInfo
+	// Legacy: a passphrase or recovery slot carried over from format 2; it binds
+	// neither the policy nor a recovery public key hash.
+	Legacy bool
+	// RecoveryPubKeyHash is the hash the slot binds (empty for a legacy slot and
+	// under strict).
+	RecoveryPubKeyHash []byte
 }
 
 // Slots lists the key slots, ordered by id.
 func (s *Store) Slots(ctx context.Context) ([]SlotInfo, error) {
+	_, out, err := s.slotsAndPolicy(ctx)
+	return out, err
+}
+
+// Policy returns the workspace policy of the table this handle unlocked, read
+// from the file again.
+func (s *Store) Policy(ctx context.Context) (unlock.Policy, error) {
+	p, _, err := s.slotsAndPolicy(ctx)
+	return p, err
+}
+
+func (s *Store) slotsAndPolicy(ctx context.Context) (unlock.Policy, []SlotInfo, error) {
 	release, err := s.enter(ctx)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	defer release()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	defer tx.Rollback()
 	if err := s.checkEpoch(ctx, tx); err != nil {
-		return nil, err
+		return "", nil, err
 	}
-	sl, err := loadSlots(ctx, tx)
+	m, err := loadMeta(ctx, tx)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
-	var out []SlotInfo
-	for _, x := range sl {
-		out = append(out, SlotInfo{ID: x.ID, Kind: x.Kind, KDF: x.KDF})
+	t, err := loadTable(ctx, tx, m.ws, uint64(m.format))
+	if err != nil {
+		return "", nil, err
 	}
-	return out, nil
+	out := t.infos()
+	return t.policy, out, nil
 }
 
+// writable refuses a write on a read-only handle and on a handle opened for the
+// migration: a store of format 1 is changed only by Migrate.
 func (s *Store) writable() error {
+	if s.legacy {
+		return ErrLegacyFormat
+	}
+	return s.writableMigrating()
+}
+
+// writableMigrating is writable for Migrate, the one writer of a legacy handle.
+func (s *Store) writableMigrating() error {
 	if s.ro {
 		return errors.New("sqlitestore: store opened read-only")
 	}
 	return nil
 }
+
+// writeHeld reports whether this handle holds a write transaction or the exclusive
+// file lock.
+func (s *Store) writeHeld() bool { return s.writing.Load() > 0 }

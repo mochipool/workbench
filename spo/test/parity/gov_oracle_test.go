@@ -435,7 +435,7 @@ func TestGovTransactionsMatchCardanoCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	signer := native.VaultSigner{Vault: store}
+	signer := native.VaultSigner{Vault: store.Anchor()}
 	p := func(n string) string { return filepath.Join(keys.dir, n) }
 
 	certs := map[string]stake.Certificate{}

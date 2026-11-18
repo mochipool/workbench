@@ -75,7 +75,7 @@ func TestVaultSignerIssuesAVerifiableCertificate(t *testing.T) {
 		kes[i] = byte(i * 3)
 	}
 	skey := `{"type":"StakePoolSigningKey_ed25519","description":"x","cborHex":"5820` + hex.EncodeToString(seed) + `"}`
-	s := VaultSigner{Vault: vaultWith(t, skey)}
+	s := VaultSigner{Vault: vaultWith(t, skey).Anchor()}
 
 	out, err := s.IssueOpCert(context.Background(), coldKey(t), ports.OpCertRequest{KesVKey: kes, Counter: 300, KesPeriod: 988})
 	if err != nil {
@@ -107,14 +107,14 @@ func TestVaultSignerRefusesWhatItCannotSign(t *testing.T) {
 		"short key":    `{"type":"StakePoolSigningKey_ed25519","cborHex":"5820aa"}`,
 		"not json":     `nope`,
 	} {
-		s := VaultSigner{Vault: vaultWith(t, skey)}
+		s := VaultSigner{Vault: vaultWith(t, skey).Anchor()}
 		if _, err := s.IssueOpCert(context.Background(), coldKey(t), ports.OpCertRequest{KesVKey: make([]byte, 32)}); err == nil {
 			t.Errorf("%s accepted", name)
 		}
 	}
 	// No key in the vault.
 	st, _ := plainstore.OpenTestnet(t.TempDir())
-	if _, err := (VaultSigner{Vault: st}).IssueOpCert(context.Background(), coldKey(t), ports.OpCertRequest{KesVKey: make([]byte, 32)}); err == nil {
+	if _, err := (VaultSigner{Vault: st.Anchor()}).IssueOpCert(context.Background(), coldKey(t), ports.OpCertRequest{KesVKey: make([]byte, 32)}); err == nil {
 		t.Error("missing key accepted")
 	}
 }
@@ -125,10 +125,10 @@ func TestVaultSignerRefusesWhatItCannotSign(t *testing.T) {
 // spec: SPO-Xidentity-IF-001
 func TestSignerConformanceAndDirectory(t *testing.T) {
 	st := vaultWith(t, `{"type":"StakePoolSigningKey_ed25519","description":"x","cborHex":"5820`+hex.EncodeToString(seedOf(100))+`"}`)
-	if err := ports.CheckSigner(VaultSigner{Vault: st}); err != nil {
+	if err := ports.CheckSigner(VaultSigner{Vault: st.Anchor()}); err != nil {
 		t.Fatal(err)
 	}
-	d := Signers{Vault: st}
+	d := Signers{Vault: st.Anchor()}
 	cold := coldKey(t).Ref()
 	sg, err := d.SignerFor(cold)
 	if err != nil {

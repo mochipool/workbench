@@ -14,47 +14,47 @@ import (
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
-// memStore is a transactional ports.Store in memory. The real stores' kind
+// memStore is a transactional ports.NamedStore in memory. The real stores' kind
 // catalogues are owned elsewhere: plainstore maps kinds to upstream file names
 // and has no entry for the party kinds yet, so it cannot back these tests.
 type memStore struct {
 	mu   sync.Mutex
-	data map[ports.Ref][]byte
+	data map[ports.NamedRef][]byte
 }
 
-func newMem() *memStore { return &memStore{data: map[ports.Ref][]byte{}} }
+func newMem() *memStore { return &memStore{data: map[ports.NamedRef][]byte{}} }
 
 type memTx struct {
-	data map[ports.Ref][]byte
+	data map[ports.NamedRef][]byte
 }
 
-func (t *memTx) Get(r ports.Ref) ([]byte, error) {
+func (t *memTx) Get(r ports.NamedRef) ([]byte, error) {
 	if b, ok := t.data[r]; ok {
 		return append([]byte(nil), b...), nil
 	}
 	return nil, ports.ErrNotFound
 }
-func (t *memTx) Exists(r ports.Ref) (bool, error) { _, ok := t.data[r]; return ok, nil }
-func (t *memTx) Put(r ports.Ref, b []byte) error {
+func (t *memTx) Exists(r ports.NamedRef) (bool, error) { _, ok := t.data[r]; return ok, nil }
+func (t *memTx) Put(r ports.NamedRef, b []byte) error {
 	if err := r.Validate(); err != nil {
 		return err
 	}
 	t.data[r] = append([]byte(nil), b...)
 	return nil
 }
-func (t *memTx) PutSecret(ports.Ref, *secret.Buffer) error { return ports.ErrSecretKind }
-func (t *memTx) Delete(r ports.Ref) error                  { delete(t.data, r); return nil }
+func (t *memTx) PutSecret(ports.NamedRef, *secret.Buffer) error { return ports.ErrSecretKind }
+func (t *memTx) Delete(r ports.NamedRef) error                  { delete(t.data, r); return nil }
 
-func (m *memStore) View(_ context.Context, fn func(ports.Reader) error) error {
+func (m *memStore) View(_ context.Context, fn func(ports.NamedReader) error) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return fn(&memTx{data: m.data})
 }
 
-func (m *memStore) Update(_ context.Context, fn func(ports.Writer) error) error {
+func (m *memStore) Update(_ context.Context, fn func(ports.NamedWriter) error) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	cp := make(map[ports.Ref][]byte, len(m.data))
+	cp := make(map[ports.NamedRef][]byte, len(m.data))
 	for k, v := range m.data {
 		cp[k] = v
 	}
@@ -84,7 +84,7 @@ func TestRegistry(t *testing.T) {
 	ctx := context.Background()
 	s, reg := newMem(), Registry{}
 	a, b := mkParty(1, "alice"), mkParty(2, "bob")
-	if err := s.Update(ctx, func(w ports.Writer) error {
+	if err := s.Update(ctx, func(w ports.NamedWriter) error {
 		if err := reg.Put(w, a); err != nil {
 			return err
 		}
@@ -92,7 +92,7 @@ func TestRegistry(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	s.View(ctx, func(r ports.Reader) error {
+	s.View(ctx, func(r ports.NamedReader) error {
 		got, err := reg.ByName(r, "bob")
 		if err != nil || got.Fingerprint != b.Fingerprint || got.Identity.Node == nil || *got.Identity.Node != *b.Identity.Node || !got.EnrolledAt.Equal(t0) {
 			t.Fatalf("ByName = %+v, %v", got, err)
@@ -113,29 +113,29 @@ func TestRegistry(t *testing.T) {
 		return nil
 	})
 	// Duplicates change nothing.
-	err := s.Update(ctx, func(w ports.Writer) error { return reg.Put(w, mkParty(3, "alice")) })
+	err := s.Update(ctx, func(w ports.NamedWriter) error { return reg.Put(w, mkParty(3, "alice")) })
 	if !errors.Is(err, party.ErrNameTaken) {
 		t.Fatal(err)
 	}
-	err = s.Update(ctx, func(w ports.Writer) error { return reg.Put(w, mkParty(1, "other")) })
+	err = s.Update(ctx, func(w ports.NamedWriter) error { return reg.Put(w, mkParty(1, "other")) })
 	if !errors.Is(err, party.ErrAlreadyEnrolled) {
 		t.Fatal(err)
 	}
 	// Revoke.
-	if err := s.Update(ctx, func(w ports.Writer) error { _, err := reg.Revoke(w, "alice"); return err }); err != nil {
+	if err := s.Update(ctx, func(w ports.NamedWriter) error { _, err := reg.Revoke(w, "alice"); return err }); err != nil {
 		t.Fatal(err)
 	}
-	s.View(ctx, func(r ports.Reader) error {
+	s.View(ctx, func(r ports.NamedReader) error {
 		got, _ := reg.ByName(r, "alice")
 		if got.State != party.StateRevoked {
 			t.Fatal("not revoked")
 		}
 		return nil
 	})
-	if err := s.Update(ctx, func(w ports.Writer) error { _, err := reg.Revoke(w, "alice"); return err }); !errors.Is(err, party.ErrAlreadyRevoked) {
+	if err := s.Update(ctx, func(w ports.NamedWriter) error { _, err := reg.Revoke(w, "alice"); return err }); !errors.Is(err, party.ErrAlreadyRevoked) {
 		t.Fatal(err)
 	}
-	if err := s.Update(ctx, func(w ports.Writer) error { _, err := reg.Revoke(w, "zed"); return err }); !errors.Is(err, ports.ErrNotFound) {
+	if err := s.Update(ctx, func(w ports.NamedWriter) error { _, err := reg.Revoke(w, "zed"); return err }); !errors.Is(err, ports.ErrNotFound) {
 		t.Fatal(err)
 	}
 }
@@ -143,7 +143,7 @@ func TestRegistry(t *testing.T) {
 func TestRegistryDetectsTampering(t *testing.T) {
 	ctx := context.Background()
 	s := newMem()
-	s.Update(ctx, func(w ports.Writer) error { return Registry{}.Put(w, mkParty(1, "alice")) })
+	s.Update(ctx, func(w ports.NamedWriter) error { return Registry{}.Put(w, mkParty(1, "alice")) })
 	// Change a public key in the stored record without the fingerprint.
 	b := s.data[recordsRef]
 	for i := range b {
@@ -152,7 +152,7 @@ func TestRegistryDetectsTampering(t *testing.T) {
 			break
 		}
 	}
-	err := s.View(ctx, func(r ports.Reader) error { _, err := Registry{}.List(r); return err })
+	err := s.View(ctx, func(r ports.NamedReader) error { _, err := Registry{}.List(r); return err })
 	if !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("err = %v", err)
 	}
@@ -164,12 +164,12 @@ func TestReplayLog(t *testing.T) {
 	s, log := newMem(), Replay{}
 	id := party.MessageID{1}
 	exp := t0.Add(time.Hour)
-	if err := s.Update(ctx, func(w ports.Writer) error { return log.Record(w, snd, id, exp, t0) }); err != nil {
+	if err := s.Update(ctx, func(w ports.NamedWriter) error { return log.Record(w, snd, id, exp, t0) }); err != nil {
 		t.Fatal(err)
 	}
 	seen := func(at time.Time) bool {
 		var got bool
-		s.View(ctx, func(r ports.Reader) error { got, _ = log.Seen(r, id, at); return nil })
+		s.View(ctx, func(r ports.NamedReader) error { got, _ = log.Seen(r, id, at); return nil })
 		return got
 	}
 	if !seen(t0) || !seen(exp) {
@@ -178,12 +178,12 @@ func TestReplayLog(t *testing.T) {
 	if seen(exp.Add(time.Second)) {
 		t.Fatal("expired id still seen")
 	}
-	if err := s.Update(ctx, func(w ports.Writer) error { return log.Record(w, snd, id, exp, t0) }); !errors.Is(err, ports.ErrReplay) {
+	if err := s.Update(ctx, func(w ports.NamedWriter) error { return log.Record(w, snd, id, exp, t0) }); !errors.Is(err, ports.ErrReplay) {
 		t.Fatalf("second record: %v", err)
 	}
 	// Expired entries are dropped by the next write; the id may be recorded
 	// again after expiry (it cannot arrive again: the envelope is expired).
-	if err := s.Update(ctx, func(w ports.Writer) error {
+	if err := s.Update(ctx, func(w ports.NamedWriter) error {
 		return log.Record(w, snd, party.MessageID{2}, exp.Add(2*time.Hour), exp.Add(time.Minute))
 	}); err != nil {
 		t.Fatal(err)
@@ -199,9 +199,9 @@ func TestReplayAtomicWithEffect(t *testing.T) {
 	ctx := context.Background()
 	s, log := newMem(), Replay{}
 	id := party.MessageID{7}
-	effect := ports.Ref{Name: "x", Kind: ports.NodeCounter}
+	effect := ports.NamedRef{Name: "x", Kind: ports.NodeCounter}
 	boom := errors.New("effect failed")
-	err := s.Update(ctx, func(w ports.Writer) error {
+	err := s.Update(ctx, func(w ports.NamedWriter) error {
 		if err := log.Record(w, snd, id, t0.Add(time.Hour), t0); err != nil {
 			return err
 		}
@@ -213,15 +213,15 @@ func TestReplayAtomicWithEffect(t *testing.T) {
 	if !errors.Is(err, boom) {
 		t.Fatal(err)
 	}
-	s.View(ctx, func(r ports.Reader) error {
+	s.View(ctx, func(r ports.NamedReader) error {
 		if seen, _ := log.Seen(r, id, t0); seen {
 			t.Fatal("id recorded although the effect failed")
 		}
 		return nil
 	})
 	// Two transactions for one id: the second is refused inside its own transaction.
-	ok := s.Update(ctx, func(w ports.Writer) error { return log.Record(w, snd, id, t0.Add(time.Hour), t0) })
-	dup := s.Update(ctx, func(w ports.Writer) error {
+	ok := s.Update(ctx, func(w ports.NamedWriter) error { return log.Record(w, snd, id, t0.Add(time.Hour), t0) })
+	dup := s.Update(ctx, func(w ports.NamedWriter) error {
 		if err := log.Record(w, snd, id, t0.Add(time.Hour), t0); err != nil {
 			return err
 		}
@@ -230,7 +230,7 @@ func TestReplayAtomicWithEffect(t *testing.T) {
 	if ok != nil || !errors.Is(dup, ports.ErrReplay) {
 		t.Fatal(ok, dup)
 	}
-	s.View(ctx, func(r ports.Reader) error {
+	s.View(ctx, func(r ports.NamedReader) error {
 		if _, err := r.Get(effect); !errors.Is(err, ports.ErrNotFound) {
 			t.Fatal("duplicate's effect was applied")
 		}
@@ -254,12 +254,14 @@ func TestReplayFullAndCorrupt(t *testing.T) {
 		big[o+36+3] = 0x7f // far-future expiry
 	}
 	s.data[replayRef] = big
-	err := s.Update(ctx, func(w ports.Writer) error { return log.Record(w, snd, party.MessageID{0xee}, t0.Add(time.Hour), t0) })
+	err := s.Update(ctx, func(w ports.NamedWriter) error {
+		return log.Record(w, snd, party.MessageID{0xee}, t0.Add(time.Hour), t0)
+	})
 	if !errors.Is(err, ports.ErrReplayFull) {
 		t.Fatalf("err = %v", err)
 	}
 	s.data[replayRef] = []byte(replayMagic + "\x01\x02\x03")
-	err = s.View(ctx, func(r ports.Reader) error { _, err := log.Seen(r, party.MessageID{}, t0); return err })
+	err = s.View(ctx, func(r ports.NamedReader) error { _, err := log.Seen(r, party.MessageID{}, t0); return err })
 	if !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("err = %v", err)
 	}
@@ -273,20 +275,20 @@ func TestReplayQuotaIsPerSender(t *testing.T) {
 	far := t0.Add(time.Hour)
 	for i := 0; i < party.MaxReplayPerSender; i++ {
 		id := party.MessageID{byte(i), byte(i >> 8), 1}
-		if err := s.Update(ctx, func(w ports.Writer) error { return log.Record(w, snd, id, far, t0) }); err != nil {
+		if err := s.Update(ctx, func(w ports.NamedWriter) error { return log.Record(w, snd, id, far, t0) }); err != nil {
 			t.Fatalf("entry %d: %v", i, err)
 		}
 	}
-	err := s.Update(ctx, func(w ports.Writer) error { return log.Record(w, snd, party.MessageID{0xff, 0xff, 2}, far, t0) })
+	err := s.Update(ctx, func(w ports.NamedWriter) error { return log.Record(w, snd, party.MessageID{0xff, 0xff, 2}, far, t0) })
 	if !errors.Is(err, ports.ErrReplayFull) {
 		t.Fatalf("over quota: %v", err)
 	}
 	other := party.Fingerprint{0xbb}
-	if err := s.Update(ctx, func(w ports.Writer) error { return log.Record(w, other, party.MessageID{0xff, 0xff, 3}, far, t0) }); err != nil {
+	if err := s.Update(ctx, func(w ports.NamedWriter) error { return log.Record(w, other, party.MessageID{0xff, 0xff, 3}, far, t0) }); err != nil {
 		t.Fatalf("another sender was refused: %v", err)
 	}
 	// The quota frees as entries expire.
-	if err := s.Update(ctx, func(w ports.Writer) error {
+	if err := s.Update(ctx, func(w ports.NamedWriter) error {
 		return log.Record(w, snd, party.MessageID{0xff, 0xff, 4}, far.Add(2*time.Hour), far.Add(time.Minute))
 	}); err != nil {
 		t.Fatalf("after expiry: %v", err)
@@ -309,7 +311,7 @@ func TestOldRecordReadsAsEmptyScope(t *testing.T) {
 		"fingerprint": j.Fingerprint, "roles": j.Roles, "pools": []string{"pool1x"}, "state": j.State, "enrolled_at": j.EnrolledAt}})
 	s.data[recordsRef] = raw
 	var got party.Party
-	if err := s.View(ctx, func(r ports.Reader) error { var err error; got, err = Registry{}.ByName(r, "old"); return err }); err != nil {
+	if err := s.View(ctx, func(r ports.NamedReader) error { var err error; got, err = Registry{}.ByName(r, "old"); return err }); err != nil {
 		t.Fatal(err)
 	}
 	if len(got.Scope.KeyRoles) != 0 || len(got.Scope.Pools) != 0 || got.Scope.Unscoped {
@@ -330,17 +332,17 @@ func TestRegistryNodeKeyAndScope(t *testing.T) {
 	n := *a.Identity.Node
 	dup.Identity.Node = &n
 	dup.Fingerprint = dup.Identity.Fingerprint()
-	if err := s.Update(ctx, func(w ports.Writer) error { return reg.Put(w, a) }); err != nil {
+	if err := s.Update(ctx, func(w ports.NamedWriter) error { return reg.Put(w, a) }); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Update(ctx, func(w ports.Writer) error { return reg.Put(w, dup) }); !errors.Is(err, party.ErrNodeKeyInUse) {
+	if err := s.Update(ctx, func(w ports.NamedWriter) error { return reg.Put(w, dup) }); !errors.Is(err, party.ErrNodeKeyInUse) {
 		t.Fatalf("a shared node key: %v", err)
 	}
 	narrow := party.Scope{KeyRoles: []custody.Role{custody.RoleStake}, Pools: []string{"p2"}}
-	if err := s.Update(ctx, func(w ports.Writer) error { _, err := reg.SetScope(w, "alice", narrow); return err }); err != nil {
+	if err := s.Update(ctx, func(w ports.NamedWriter) error { _, err := reg.SetScope(w, "alice", narrow); return err }); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.View(ctx, func(r ports.Reader) error {
+	if err := s.View(ctx, func(r ports.NamedReader) error {
 		got, err := reg.ByName(r, "alice")
 		if err != nil || got.Scope.Unscoped || len(got.Scope.Pools) != 1 || got.Scope.Pools[0] != "p2" {
 			t.Fatalf("%+v %v", got, err)
@@ -349,7 +351,7 @@ func TestRegistryNodeKeyAndScope(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Update(ctx, func(w ports.Writer) error { _, err := reg.SetScope(w, "nobody", narrow); return err }); !errors.Is(err, ports.ErrNotFound) {
+	if err := s.Update(ctx, func(w ports.NamedWriter) error { _, err := reg.SetScope(w, "nobody", narrow); return err }); !errors.Is(err, ports.ErrNotFound) {
 		t.Fatalf("unknown party: %v", err)
 	}
 }
@@ -363,7 +365,7 @@ func TestRegistryRotateIsOneWrite(t *testing.T) {
 	ctx := context.Background()
 	s, reg := newMem(), Registry{}
 	a, b, c := mkParty(1, "alice"), mkParty(3, "bob"), mkParty(5, "carol")
-	if err := s.Update(ctx, func(w ports.Writer) error {
+	if err := s.Update(ctx, func(w ports.NamedWriter) error {
 		for _, p := range []party.Party{a, b} {
 			if err := reg.Put(w, p); err != nil {
 				return err
@@ -380,26 +382,26 @@ func TestRegistryRotateIsOneWrite(t *testing.T) {
 	// a refusal (the new identity's name is bob's) writes nothing
 	clash := next
 	clash.Name = "bob"
-	if err := s.Update(ctx, func(w ports.Writer) error { return reg.Rotate(w, a.Fingerprint, retired, clash) }); !errors.Is(err, party.ErrNameTaken) {
+	if err := s.Update(ctx, func(w ports.NamedWriter) error { return reg.Rotate(w, a.Fingerprint, retired, clash) }); !errors.Is(err, party.ErrNameTaken) {
 		t.Fatalf("a name in use: %v", err)
 	}
-	if err := s.Update(ctx, func(w ports.Writer) error { return reg.Rotate(w, party.Fingerprint{9}, retired, next) }); !errors.Is(err, ports.ErrNotFound) {
+	if err := s.Update(ctx, func(w ports.NamedWriter) error { return reg.Rotate(w, party.Fingerprint{9}, retired, next) }); !errors.Is(err, ports.ErrNotFound) {
 		t.Fatalf("an old identity that is not there: %v", err)
 	}
-	if err := s.Update(ctx, func(w ports.Writer) error { return reg.Rotate(w, a.Fingerprint, a, next) }); err == nil {
+	if err := s.Update(ctx, func(w ports.NamedWriter) error { return reg.Rotate(w, a.Fingerprint, a, next) }); err == nil {
 		t.Fatal("an old record that is still active was accepted as retired")
 	}
-	s.View(ctx, func(r ports.Reader) error {
+	s.View(ctx, func(r ports.NamedReader) error {
 		got, _ := reg.ByName(r, "alice")
 		if got.Fingerprint != a.Fingerprint || !got.Active() {
 			t.Fatalf("a refused rotation changed the registry: %+v", got)
 		}
 		return nil
 	})
-	if err := s.Update(ctx, func(w ports.Writer) error { return reg.Rotate(w, a.Fingerprint, retired, next) }); err != nil {
+	if err := s.Update(ctx, func(w ports.NamedWriter) error { return reg.Rotate(w, a.Fingerprint, retired, next) }); err != nil {
 		t.Fatal(err)
 	}
-	s.View(ctx, func(r ports.Reader) error {
+	s.View(ctx, func(r ports.NamedReader) error {
 		got, err := reg.ByName(r, "alice")
 		if err != nil || got.Fingerprint != c.Fingerprint || !got.Active() {
 			t.Fatalf("alice is %+v, %v", got, err)
@@ -429,13 +431,13 @@ func TestRegistryNodeKeyIsHeldByActiveRecordsOnly(t *testing.T) {
 		return p
 	}
 	a, b, c, d := mk(1, "alice"), mk(3, "alice"), mk(5, "alice"), mk(7, "alice2")
-	if err := s.Update(ctx, func(w ports.Writer) error { return reg.Put(w, a) }); err != nil {
+	if err := s.Update(ctx, func(w ports.NamedWriter) error { return reg.Put(w, a) }); err != nil {
 		t.Fatal(err)
 	}
 	rotate := func(from, to party.Party) error {
 		retired := from
 		retired.State, retired.Name = party.StateRevoked, party.RetiredName("alice", from.Fingerprint)
-		return s.Update(ctx, func(w ports.Writer) error { return reg.Rotate(w, from.Fingerprint, retired, to) })
+		return s.Update(ctx, func(w ports.NamedWriter) error { return reg.Rotate(w, from.Fingerprint, retired, to) })
 	}
 	if err := rotate(a, b); err != nil {
 		t.Fatalf("A to B: %v", err)
@@ -444,17 +446,17 @@ func TestRegistryNodeKeyIsHeldByActiveRecordsOnly(t *testing.T) {
 		t.Fatalf("B to C: %v", err)
 	}
 	// another active party with the same node key is refused
-	if err := s.Update(ctx, func(w ports.Writer) error { return reg.Put(w, d) }); !errors.Is(err, party.ErrNodeKeyInUse) {
+	if err := s.Update(ctx, func(w ports.NamedWriter) error { return reg.Put(w, d) }); !errors.Is(err, party.ErrNodeKeyInUse) {
 		t.Fatalf("a node key held by the active C: %v", err)
 	}
 	// revoke C: the key is free for a new enrollment
-	if err := s.Update(ctx, func(w ports.Writer) error { _, err := reg.Revoke(w, "alice"); return err }); err != nil {
+	if err := s.Update(ctx, func(w ports.NamedWriter) error { _, err := reg.Revoke(w, "alice"); return err }); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Update(ctx, func(w ports.Writer) error { return reg.Put(w, d) }); err != nil {
+	if err := s.Update(ctx, func(w ports.NamedWriter) error { return reg.Put(w, d) }); err != nil {
 		t.Fatalf("re-enrolling the node key after every record with it was revoked: %v", err)
 	}
-	s.View(ctx, func(r ports.Reader) error {
+	s.View(ctx, func(r ports.NamedReader) error {
 		ps, _ := reg.List(r)
 		if keys := party.AllowedNodeKeys(ps); len(keys) != 1 || keys[0] != n {
 			t.Errorf("allow-list %v", keys)

@@ -190,7 +190,7 @@ func TestIssueOpCertMatchesTheVaultSigner(t *testing.T) {
 		t.Fatal(err)
 	}
 	vault := vaultWithSeed(t, "mypool.node.skey", "StakePoolSigningKey_ed25519", fakeSeed(path))
-	want, err := native.VaultSigner{Vault: vault}.IssueOpCert(context.Background(),
+	want, err := native.VaultSigner{Vault: vault.Anchor()}.IssueOpCert(context.Background(),
 		cold,
 		ports.OpCertRequest{KesVKey: kes, Counter: 7, KesPeriod: 300})
 	if err != nil {
@@ -259,7 +259,7 @@ func TestWitnessMatchesTheVaultSignerAndDeclaresTheChangeKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	vault := vaultWithSeed(t, "w.skey", "PaymentSigningKeyShelley_ed25519", fakeSeed(payPath))
-	want, err := native.VaultSigner{Vault: vault}.Witness(context.Background(), pay, body)
+	want, err := native.VaultSigner{Vault: vault.Anchor()}.Witness(context.Background(), pay, body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -592,16 +592,16 @@ func TestSigningFilesComeFromTheStoreNotFromAnOperatorPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.cfg.Files = hwcli.StoreFiles{Store: st}
+	r.cfg.Files = hwcli.StoreFiles{Store: st.Anchor()}
 	sess := r.open()
 	cold := mustAs[custody.PoolCold](t, hwKey(custody.RolePoolCold, "mypool"))
 	if _, err := sess.IssueOpCert(context.Background(), cold, ports.OpCertRequest{KesVKey: bytes.Repeat([]byte{1}, 32), Counter: 1, KesPeriod: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (hwcli.StoreFiles{Store: st}).HardwareSigningFile(context.Background(), hwKey(custody.RoleKES, "x")); err == nil {
+	if _, err := (hwcli.StoreFiles{Store: st.Anchor()}).HardwareSigningFile(context.Background(), hwKey(custody.RoleKES, "x")); err == nil {
 		t.Error("a KES key has a signing file")
 	}
-	if _, err := (hwcli.StoreFiles{Store: st}).HardwareSigningFile(context.Background(), hwKey(custody.RolePoolCold, "other")); !errors.Is(err, ports.ErrNotFound) {
+	if _, err := (hwcli.StoreFiles{Store: st.Anchor()}).HardwareSigningFile(context.Background(), hwKey(custody.RolePoolCold, "other")); !errors.Is(err, ports.ErrNotFound) {
 		t.Errorf("%v", err)
 	}
 }

@@ -22,20 +22,20 @@ const legacyAuditFileName = "spo-workspace-audit.json"
 
 // AuditStore is the record store of the audit log of a plain directory: it
 // holds the one record storeaudit keeps, in AuditFileName.
-func AuditStore(dir string) ports.Store { return auditFile{dir: dir} }
+func AuditStore(dir string) ports.NamedStore { return auditFile{dir: dir} }
 
 // IsPlain reports whether store is a plain store.
-func IsPlain(store ports.Store) bool { _, ok := store.(*Store); return ok }
+func IsPlain(store ports.Store) bool { _, ok := store.(*anchored); return ok }
 
 type auditFile struct{ dir string }
 
 func (a auditFile) path() string { return filepath.Join(a.dir, AuditFileName) }
 
-func (a auditFile) View(_ context.Context, fn func(ports.Reader) error) error {
+func (a auditFile) View(_ context.Context, fn func(ports.NamedReader) error) error {
 	return fn(auditTx{a})
 }
 
-func (a auditFile) Update(_ context.Context, fn func(ports.Writer) error) error {
+func (a auditFile) Update(_ context.Context, fn func(ports.NamedWriter) error) error {
 	return fn(auditTx{a})
 }
 
@@ -43,7 +43,7 @@ type auditTx struct{ a auditFile }
 
 var errAuditOnly = errors.New("this record store holds the audit log only")
 
-func (t auditTx) Get(ref ports.Ref) ([]byte, error) {
+func (t auditTx) Get(ref ports.NamedRef) ([]byte, error) {
 	if ref != storeaudit.Ref {
 		return nil, errAuditOnly
 	}
@@ -57,7 +57,7 @@ func (t auditTx) Get(ref ports.Ref) ([]byte, error) {
 	return b, err
 }
 
-func (t auditTx) Exists(ref ports.Ref) (bool, error) {
+func (t auditTx) Exists(ref ports.NamedRef) (bool, error) {
 	_, err := t.Get(ref)
 	if errors.Is(err, ports.ErrNotFound) {
 		return false, nil
@@ -65,7 +65,7 @@ func (t auditTx) Exists(ref ports.Ref) (bool, error) {
 	return err == nil, err
 }
 
-func (t auditTx) Put(ref ports.Ref, data []byte) error {
+func (t auditTx) Put(ref ports.NamedRef, data []byte) error {
 	if ref != storeaudit.Ref {
 		return errAuditOnly
 	}
@@ -96,5 +96,5 @@ func (t auditTx) Put(ref ports.Ref, data []byte) error {
 	return nil
 }
 
-func (t auditTx) PutSecret(ports.Ref, *secret.Buffer) error { return errAuditOnly }
-func (t auditTx) Delete(ports.Ref) error                    { return errAuditOnly }
+func (t auditTx) PutSecret(ports.NamedRef, *secret.Buffer) error { return errAuditOnly }
+func (t auditTx) Delete(ports.NamedRef) error                    { return errAuditOnly }

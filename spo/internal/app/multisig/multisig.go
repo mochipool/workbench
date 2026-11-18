@@ -39,7 +39,7 @@ import (
 
 // Node is what both roles need.
 type Node struct {
-	Store   ports.Store
+	Store   ports.NamedStore
 	Parties ports.PartyRegistry
 	Replay  ports.ReplayLog
 	Kit     ports.IdentityKit
@@ -192,7 +192,7 @@ func hexHash(h [32]byte) string { return hex.EncodeToString(h[:]) }
 
 // loadParties reads the registry once for an Open: a lookup over the slice
 // cannot fail half way.
-func (n Node) loadParties(r ports.Reader) (func(party.Fingerprint) (party.Party, bool), []party.Party, error) {
+func (n Node) loadParties(r ports.NamedReader) (func(party.Fingerprint) (party.Party, bool), []party.Party, error) {
 	ps, err := n.Parties.List(r)
 	if err != nil {
 		return nil, nil, err
@@ -220,7 +220,7 @@ func (n Node) refusalEvent(ctx context.Context, local ports.EnvelopeOpener, err 
 	if known {
 		ev.Peer = sender.String()
 	}
-	if uerr := n.Store.Update(ctx, func(w ports.Writer) error {
+	if uerr := n.Store.Update(ctx, func(w ports.NamedWriter) error {
 		if !known {
 			return appendNoise(w, ev)
 		}
@@ -240,7 +240,7 @@ var ErrFirstFrame = errors.New("the first frame of a connection must be a Hello 
 // (SPO-Xparty-IF-005).
 func (n Node) AllowList(ctx context.Context) ([]party.NodeKey, error) {
 	var keys []party.NodeKey
-	err := n.Store.View(ctx, func(r ports.Reader) error {
+	err := n.Store.View(ctx, func(r ports.NamedReader) error {
 		ps, err := n.Parties.List(r)
 		keys = party.AllowedNodeKeys(ps)
 		return err
@@ -251,7 +251,7 @@ func (n Node) AllowList(ctx context.Context) ([]party.NodeKey, error) {
 // AllowOwners is AllowList with the fingerprint of the party that holds each key.
 func (n Node) AllowOwners(ctx context.Context) (map[party.NodeKey]party.Fingerprint, error) {
 	var out map[party.NodeKey]party.Fingerprint
-	err := n.Store.View(ctx, func(r ports.Reader) error {
+	err := n.Store.View(ctx, func(r ports.NamedReader) error {
 		ps, err := n.Parties.List(r)
 		out = party.AllowedOwners(ps)
 		return err
@@ -283,7 +283,7 @@ func (n Node) Admit(ctx context.Context, raw []byte, peer party.NodeKey) (party.
 	now := n.Clock.Now()
 	var fp party.Fingerprint
 	var first error
-	err = n.Store.View(ctx, func(r ports.Reader) error {
+	err = n.Store.View(ctx, func(r ports.NamedReader) error {
 		lookup, _, err := n.loadParties(r)
 		if err != nil {
 			return err
@@ -327,7 +327,7 @@ func (n Node) Admit(ctx context.Context, raw []byte, peer party.NodeKey) (party.
 	if err == nil && first != nil {
 		ev := eventOf(now, "first-frame-refused", "", 0, [32]byte{})
 		ev.Peer, ev.Reason = fp.String(), first.Error()
-		if uerr := n.Store.Update(ctx, func(w ports.Writer) error { return appendRefusal(w, ev) }); uerr != nil {
+		if uerr := n.Store.Update(ctx, func(w ports.NamedWriter) error { return appendRefusal(w, ev) }); uerr != nil {
 			return party.Fingerprint{}, uerr
 		}
 		return party.Fingerprint{}, first

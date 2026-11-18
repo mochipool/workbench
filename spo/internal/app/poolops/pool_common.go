@@ -89,7 +89,7 @@ func firstLine(b []byte) string {
 
 func rfc5322(t time.Time) string { return t.Format(time.RFC1123Z) }
 
-func get(r ports.Reader, ref ports.Ref) ([]byte, error) {
+func get(r ports.NamedReader, ref ports.NamedRef) ([]byte, error) {
 	b, err := r.Get(ref)
 	if errors.Is(err, ports.ErrNotFound) {
 		return nil, fmt.Errorf("%w: %s", ErrMissingFile, ref)
@@ -118,8 +118,8 @@ type payer struct {
 	key  custody.KeyRef
 }
 
-func readPayer(r ports.Reader, ins ports.AddressInspector, network uint8, name string) (payer, error) {
-	ab, err := get(r, ports.Ref{Name: name, Kind: ports.AddrFile})
+func readPayer(r ports.NamedReader, ins ports.AddressInspector, network uint8, name string) (payer, error) {
+	ab, err := get(r, ports.NamedRef{Name: name, Kind: ports.AddrFile})
 	if err != nil {
 		return payer{}, err
 	}
@@ -197,8 +197,8 @@ func poolIDOf(env []byte) (chain.PoolID, error) {
 	return chain.PoolIDOf(raw)
 }
 
-func readDescriptor(r ports.Reader, name string) (*pool.Descriptor, error) {
-	b, err := r.Get(ports.Ref{Name: name, Kind: ports.PoolDescriptor})
+func readDescriptor(r ports.NamedReader, name string) (*pool.Descriptor, error) {
+	b, err := r.Get(ports.NamedRef{Name: name, Kind: ports.PoolDescriptor})
 	if errors.Is(err, ports.ErrNotFound) {
 		return nil, fmt.Errorf("%w: %s", ErrNoDescriptor, name)
 	}

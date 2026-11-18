@@ -46,7 +46,7 @@ var ErrNoTransferFile = errors.New("there is no transfer file: carry the file ba
 // Without a Lister, discarding unmatched updates is not possible and only the
 // transactions the file names are looked at.
 type SettleFromBundle struct {
-	Store  ports.Store
+	Store  ports.NamedStore
 	Lister ports.SourceLister
 	Bundle ports.BundleReader
 	Clock  ports.Clock
@@ -187,7 +187,7 @@ func (uc SettleFromBundle) plan(ctx context.Context) (SettleResult, error) {
 		}
 	}
 	sort.Strings(ids)
-	err = uc.Store.View(ctx, func(r ports.Reader) error {
+	err = uc.Store.View(ctx, func(r ports.NamedReader) error {
 		for _, id := range ids {
 			p, _, ok, err := getPending(r, id)
 			if err != nil {

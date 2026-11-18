@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -29,15 +30,24 @@ type genFake struct {
 	lastPhrase string
 }
 
-func (g *genFake) pair() ports.KeyPair {
+func (g *genFake) pair() ports.KeyPair { return g.keyPair(false) }
+
+// keyPair makes a key pair. The VRF pair is genVKeyHex; every other pair has a
+// verification key of its own, as real keys do: the store gives an identity to
+// one owner only (ADR 0010).
+func (g *genFake) keyPair(vrf bool) ports.KeyPair {
 	g.calls++
+	vk := genVKeyHex
+	if !vrf {
+		vk = genVKeyHex[:len(genVKeyHex)-2] + fmt.Sprintf("%02x", 0x80+g.calls)
+	}
 	return ports.KeyPair{
-		VKey: []byte(`{"type":"VerificationKey_ed25519","description":"","cborHex":"` + genVKeyHex + `"}`),
+		VKey: []byte(`{"type":"VerificationKey_ed25519","description":"","cborHex":"` + vk + `"}`),
 		SKey: secret.Take([]byte(`{"type":"SigningKey_ed25519","description":"","cborHex":"` + genSKeyHex + `"}`)),
 	}
 }
 func (g *genFake) GenerateCold(context.Context) (ports.KeyPair, error)    { return g.pair(), nil }
-func (g *genFake) GenerateVRF(context.Context) (ports.KeyPair, error)     { return g.pair(), nil }
+func (g *genFake) GenerateVRF(context.Context) (ports.KeyPair, error)     { return g.keyPair(true), nil }
 func (g *genFake) GeneratePayment(context.Context) (ports.KeyPair, error) { return g.pair(), nil }
 func (g *genFake) GenerateStake(context.Context) (ports.KeyPair, error)   { return g.pair(), nil }
 func (g *genFake) GenerateMnemonic(context.Context) (*secret.Buffer, error) {
@@ -60,7 +70,7 @@ func (g *genFake) BuildStakeAddress(uint8, txbuild.KeyHash) (chain.StakeAddress,
 func genDeps(out *bytes.Buffer, g *genFake, drop ...Cap) Deps {
 	return Deps{
 		Out: out, Err: out,
-		OpenUpstream: func(dir string) (ports.Store, error) { return plainstore.OpenTestnet(dir) },
+		OpenUpstream: plainstore.Upstream,
 		Wire: func(ports.Store, WireOptions) (*Env, error) {
 			env := &Env{NetworkID: ports.NetworkTestnet, ColdKeys: g, VrfKeys: g, PaymentKeys: g, StakeKeys: g,
 				Mnemonics: g, WalletDeriver: g, Addresses: g}

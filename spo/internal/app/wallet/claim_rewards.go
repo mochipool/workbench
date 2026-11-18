@@ -48,7 +48,7 @@ var (
 // enough. The body is built once in memory and signed as built: no file from
 // an earlier run can be picked up.
 type ClaimRewards struct {
-	Store     ports.Store
+	Store     ports.NamedStore
 	Signers   ports.SignerDirectory
 	Utxos     ports.UtxoReader
 	Params    ports.ProtocolParametersReader
@@ -150,8 +150,8 @@ func (uc ClaimRewards) Run(ctx context.Context, req ClaimRequest) (ClaimResult, 
 	var stakeKey, payKey custody.KeyRef
 	var dst, pay resolved
 	destWasName := false
-	if err := uc.Store.View(ctx, func(r ports.Reader) error {
-		b, err := r.Get(ports.Ref{Name: sn, Kind: ports.StakingAddr})
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
+		b, err := r.Get(ports.NamedRef{Name: sn, Kind: ports.StakingAddr})
 		if errors.Is(err, ports.ErrNotFound) {
 			return fmt.Errorf("%w: %s.staking.addr", ErrNoStakeAddress, sn)
 		}

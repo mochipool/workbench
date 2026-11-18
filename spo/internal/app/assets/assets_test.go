@@ -140,7 +140,7 @@ func (w *world) policy(name string, lifetime uint64) PolicyGenerated {
 
 func (w *world) base(queue bool) Base {
 	led := native.Ledger{}
-	b := Base{Store: w.store, Signers: native.Signers{Vault: w.store}, Utxos: w.chain, Params: w.chain, Tip: w.chain, Addresses: led,
+	b := Base{Store: w.store, Signers: native.Signers{Vault: w.store.Anchor()}, Utxos: w.chain, Params: w.chain, Tip: w.chain, Addresses: led,
 		Policies: led, Min: led, Fees: led, Bodies: led, Assembler: led, Clock: w.clock, NetworkID: ports.NetworkTestnet, Approval: txflow.ApprovalSkip}
 	if queue {
 		b.Queue = w.queue
@@ -480,22 +480,22 @@ func TestApplyIsOneCommitWithTheRemoval(t *testing.T) {
 
 // failDelete is a store whose writer cannot delete: the commit rolls back.
 type failDelete struct {
-	ports.Store
+	ports.NamedStore
 	err error
 }
 
-func (f failDelete) Update(ctx context.Context, fn func(ports.Writer) error) error {
-	return f.Store.Update(ctx, func(w ports.Writer) error {
+func (f failDelete) Update(ctx context.Context, fn func(ports.NamedWriter) error) error {
+	return f.NamedStore.Update(ctx, func(w ports.NamedWriter) error {
 		return fn(noDelete{w, f.err})
 	})
 }
 
 type noDelete struct {
-	ports.Writer
+	ports.NamedWriter
 	err error
 }
 
-func (n noDelete) Delete(ports.Ref) error { return n.err }
+func (n noDelete) Delete(ports.NamedRef) error { return n.err }
 
 // A workspace written by the first version holds `<txid>.asset-pending`, a
 // record without a kind: it still settles, as an asset update.

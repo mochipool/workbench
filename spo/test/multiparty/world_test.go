@@ -251,7 +251,7 @@ func newWorldOpt(t *testing.T, o worldOpt) *world {
 // a remote owner empty.
 func (w *world) registerPool() poolops.RegisterPool {
 	return poolops.RegisterPool{Store: w.C.Store, Addresses: w.led, Params: w.chain, Tip: w.chain, Utxos: w.chain,
-		Pipeline:  txflow.Pipeline{Signers: native.Signers{Vault: w.C.Store}, Min: w.led, Fees: w.led, Bodies: w.led, Assembler: w.led, Confirmer: w.conf, Submitter: w.sub},
+		Pipeline:  txflow.Pipeline{Signers: native.Signers{Vault: w.C.Store.Anchor()}, Min: w.led, Fees: w.led, Bodies: w.led, Assembler: w.led, Confirmer: w.conf, Submitter: w.sub},
 		PoolCerts: w.led, StakeCerts: w.led, TxIDs: w.led, Hasher: w.led, Clock: w.clock, AllowPending: true, Parties: w.C.Registry}
 }
 
@@ -287,8 +287,8 @@ func (w *world) coordinator() multisig.Coordinator {
 func (w *world) collection() pool.Collection {
 	w.t.Helper()
 	var c *pool.Collection
-	err := w.C.Store.View(ctx, func(r ports.Reader) error {
-		raw, err := r.Get(ports.Ref{Name: "mypool", Kind: ports.PoolDescriptor})
+	err := w.C.Store.View(ctx, func(r ports.NamedReader) error {
+		raw, err := r.Get(ports.NamedRef{Name: "mypool", Kind: ports.PoolDescriptor})
 		if err != nil {
 			return err
 		}

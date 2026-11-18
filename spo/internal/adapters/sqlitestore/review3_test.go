@@ -240,7 +240,7 @@ func onWriteConn(t *testing.T, stmt string) {
 // TEMP trigger.
 func TestWriteVerificationCatchesRowsRewrittenBehindTheStore(t *testing.T) {
 	t.Run("rekey, records", func(t *testing.T) {
-		s, path, _ := scratch(t)
+		s, path, _ := scratchPresented(t)
 		putSecret(t, s, skey0, "the kes key")
 		put(t, s, counter, "7")
 		onWriteConn(t, `CREATE TEMP TRIGGER evil AFTER UPDATE OF wrapped_key ON main.records BEGIN UPDATE main.records SET wrapped_key = old.wrapped_key, owner_sealed = old.owner_sealed WHERE id = new.id; END`)
@@ -256,7 +256,7 @@ func TestWriteVerificationCatchesRowsRewrittenBehindTheStore(t *testing.T) {
 		o.Close()
 	})
 	t.Run("rekey, key slots", func(t *testing.T) {
-		s, path, _ := scratch(t)
+		s, path, _ := scratchPresented(t)
 		put(t, s, counter, "7")
 		onWriteConn(t, `CREATE TEMP TRIGGER evil2 AFTER INSERT ON main.keyslots BEGIN UPDATE main.keyslots SET wrapped_key = zeroblob(48) WHERE id = new.id; END`)
 		rk, err := s.ChangePassphraseRekey(ctx, passT(t, "np"))
@@ -271,7 +271,7 @@ func TestWriteVerificationCatchesRowsRewrittenBehindTheStore(t *testing.T) {
 		}
 	})
 	t.Run("update", func(t *testing.T) {
-		s, _, _ := scratch(t)
+		s, _, _ := scratchPresented(t)
 		put(t, s, counter, "1")
 		// A trigger that silently puts the old content back.
 		onWriteConn(t, `CREATE TEMP TRIGGER undo AFTER UPDATE ON main.records BEGIN UPDATE main.records SET nonce = old.nonce, ciphertext = old.ciphertext, wrapped_key = old.wrapped_key, owner_sealed = old.owner_sealed, version = old.version WHERE id = new.id; END`)
@@ -288,7 +288,7 @@ func TestWriteVerificationCatchesRowsRewrittenBehindTheStore(t *testing.T) {
 		}
 	})
 	t.Run("audit row", func(t *testing.T) {
-		s, _, _ := scratch(t)
+		s, _, _ := scratchPresented(t)
 		onWriteConn(t, `CREATE TEMP TRIGGER undo AFTER INSERT ON main.audit BEGIN UPDATE main.audit SET at = 0 WHERE seq = new.seq; END`)
 		err := s.Update(ctx, func(w ports.Writer) error { return w.Put(counter, []byte("2")) })
 		if !errors.Is(err, ErrVerify) {
@@ -469,8 +469,8 @@ func TestMigrationOrderAndSchemaChecks(t *testing.T) {
 	defer s.Close()
 	var v int
 	s.db.QueryRow(`SELECT version FROM schema_version`).Scan(&v)
-	if v != 2 || s.schemaV != 2 {
-		t.Errorf("schema version %d / handle %d, want 2", v, s.schemaV)
+	if want := len(old) + 1; v != want || s.schemaV != want {
+		t.Errorf("schema version %d / handle %d, want %d", v, s.schemaV, len(old)+1)
 	}
 	if err := s.Verify(ctx); err != nil {
 		t.Errorf("verify after migration: %v", err)
@@ -615,7 +615,7 @@ func TestHandleFollowsAnotherHandlesWrites(t *testing.T) {
 		t.Fatalf("a reads %q %v", v, err)
 	}
 	put(t, a, counter, "3")
-	put(t, a, ports.Ref{Name: "q", Kind: ports.KesCounter}, "x")
+	put(t, a, rf("q", ports.KesCounter), "x")
 	if v, err := get(b, counter); err != nil || string(v) != "3" {
 		t.Fatalf("b reads %q %v", v, err)
 	}
@@ -724,7 +724,7 @@ func TestVerifyFlagsAVersionThatGoesBackInTheChain(t *testing.T) {
 
 func TestLockLostMarksTheHandleBroken(t *testing.T) {
 	t.Run("upgrade", func(t *testing.T) {
-		s, _, _ := scratch(t)
+		s, _, _ := scratchPresented(t)
 		s.lock.Close() // flock on a closed descriptor fails: stands in for a failed conversion
 		if rk, err := s.ChangePassphraseRekey(ctx, passT(t, "np")); !errors.Is(err, ErrLockLost) || rk != nil {
 			t.Fatalf("rekey: %v", err)
@@ -741,7 +741,7 @@ func TestLockLostMarksTheHandleBroken(t *testing.T) {
 		s.Close()
 	})
 	t.Run("downgrade", func(t *testing.T) {
-		s, _, _ := scratch(t)
+		s, _, _ := scratchPresented(t)
 		old := downgradeFile
 		downgradeFile = func(*os.File) error { return errors.New("injected") }
 		defer func() { downgradeFile = old }()
@@ -804,7 +804,7 @@ func checkUnchanged(t *testing.T, before, after map[string]string) {
 // ---- F11a, VerifyPayloads ----
 
 func TestRekeyLeavesCleanupToCleanup(t *testing.T) {
-	s, path, _ := scratch(t)
+	s, path, _ := scratchPresented(t)
 	put(t, s, counter, "1")
 	rk, err := s.ChangePassphraseRekey(ctx, passT(t, "np"))
 	if err != nil {
@@ -868,7 +868,7 @@ func TestVerifyPayloads(t *testing.T) {
 		t.Fatalf("VerifyPayloads: %v, want ErrCorrupt", err)
 	}
 	var re *RefError
-	if !errors.As(err, &re) || re.Ref.Name != "" {
+	if !errors.As(err, &re) || !re.Ref.Anchor.IsZero() {
 		t.Errorf("the error carries a name: %v", err)
 	}
 }

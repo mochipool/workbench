@@ -335,8 +335,8 @@ func TestMetadataRecordReadsThroughTheWorkspace(t *testing.T) {
 func TestRecordFilesServeOnlyNamedRecords(t *testing.T) {
 	dir := t.TempDir()
 	st, _ := plainstore.OpenTestnet(dir)
-	ref := ports.Ref{Name: "s_1", Kind: ports.VoteRegistration}
-	if err := st.Update(context.Background(), func(w ports.Writer) error { return w.Put(ref, []byte{0xa0}) }); err != nil {
+	ref := ports.NamedRef{Name: "s_1", Kind: ports.VoteRegistration}
+	if err := st.Update(context.Background(), func(w ports.NamedWriter) error { return w.Put(ref, []byte{0xa0}) }); err != nil {
 		t.Fatal(err)
 	}
 	disk := filepath.Join(dir, "plain.json")

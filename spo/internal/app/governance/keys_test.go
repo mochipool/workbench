@@ -45,7 +45,7 @@ func (g *fakeGen) GenerateMnemonic(context.Context) (*secret.Buffer, error) {
 
 func emptyStore() *memStore {
 	l := &log{}
-	return &memStore{l: l, files: map[ports.Ref][]byte{}, secrets: map[ports.Ref][]byte{}}
+	return &memStore{l: l, files: map[ports.NamedRef][]byte{}, secrets: map[ports.NamedRef][]byte{}}
 }
 
 // A random DRep key pair is stored with its id: the vkey, the sealed skey and
@@ -64,13 +64,13 @@ func TestGenerateDRepKeysRandom(t *testing.T) {
 	if res.Name != "x" || !strings.HasPrefix(res.IDs.Legacy, "drep1") || len(res.IDs.Legacy) != 56 || len(res.IDs.CIP129) != 58 {
 		t.Fatalf("result %+v", res)
 	}
-	if string(st.files[ports.Ref{Name: "x", Kind: ports.DRepID}]) != res.IDs.Legacy {
+	if string(st.files[ports.NamedRef{Name: "x", Kind: ports.DRepID}]) != res.IDs.Legacy {
 		t.Error("the id file holds another form than the legacy id")
 	}
-	if _, ok := st.secrets[ports.Ref{Name: "x", Kind: ports.DRepSKey}]; !ok {
+	if _, ok := st.secrets[ports.NamedRef{Name: "x", Kind: ports.DRepSKey}]; !ok {
 		t.Error("the signing key is not stored as a secret")
 	}
-	if _, ok := st.files[ports.Ref{Name: "x", Kind: ports.DRepMnemonics}]; ok || res.MnemonicStored {
+	if _, ok := st.files[ports.NamedRef{Name: "x", Kind: ports.DRepMnemonics}]; ok || res.MnemonicStored {
 		t.Error("a random key has no mnemonics")
 	}
 }
@@ -83,17 +83,17 @@ func TestGenerateGovernanceKeysMnemonic(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range []struct {
 		name string
-		run  func(st ports.Store, g *fakeGen) (ports.Kind, error)
+		run  func(st ports.NamedStore, g *fakeGen) (ports.Kind, error)
 	}{
-		{"drep", func(st ports.Store, g *fakeGen) (ports.Kind, error) {
+		{"drep", func(st ports.NamedStore, g *fakeGen) (ports.Kind, error) {
 			_, err := GenerateDRepKeys{Store: st, Deriver: g, Mnemonics: g}.Run(ctx, GenerateKeysRequest{Name: "x", Source: KeysMnemonic, Account: 1, Index: 2})
 			return ports.DRepMnemonics, err
 		}},
-		{"cold", func(st ports.Store, g *fakeGen) (ports.Kind, error) {
+		{"cold", func(st ports.NamedStore, g *fakeGen) (ports.Kind, error) {
 			_, err := GenerateCommitteeColdKeys{Store: st, Deriver: g, Mnemonics: g}.Run(ctx, GenerateKeysRequest{Name: "x", Source: KeysMnemonic, Account: 1, Index: 2})
 			return ports.CCColdMnemonics, err
 		}},
-		{"hot", func(st ports.Store, g *fakeGen) (ports.Kind, error) {
+		{"hot", func(st ports.NamedStore, g *fakeGen) (ports.Kind, error) {
 			_, err := GenerateCommitteeHotKeys{Store: st, Deriver: g, Mnemonics: g}.Run(ctx, GenerateKeysRequest{Name: "x", Source: KeysMnemonic, Account: 1, Index: 2})
 			return ports.CCHotMnemonics, err
 		}},
@@ -104,8 +104,14 @@ func TestGenerateGovernanceKeysMnemonic(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			m := st.secrets[ports.Ref{Name: "x", Kind: kind}]
-			if !strings.HasSuffix(string(m), " art\n") {
+			m := st.secrets[ports.NamedRef{Name: "x", Kind: kind}]
+			want := " art\n"
+			if kind == ports.CCColdMnemonics {
+				// the cold mnemonic records the path it was derived at (not 0, 0 here), so a
+				// recovery can check the recovered words against the key identity
+				want = " art\nderivation 1 2\n"
+			}
+			if !strings.HasSuffix(string(m), want) {
 				t.Errorf("mnemonics file %q", m)
 			}
 		})
@@ -132,7 +138,7 @@ func TestGenerateDRepKeysRefusals(t *testing.T) {
 	ctx := context.Background()
 	for _, k := range []ports.Kind{ports.DRepVKey, ports.DRepSKey, ports.DRepHwsFile, ports.DRepID} {
 		st := emptyStore()
-		st.files[ports.Ref{Name: "x", Kind: k}] = []byte("x")
+		st.files[ports.NamedRef{Name: "x", Kind: k}] = []byte("x")
 		_, err := GenerateDRepKeys{Store: st, Keys: &fakeGen{}}.Run(ctx, GenerateKeysRequest{Name: "x", Source: KeysRandom})
 		if !errors.Is(err, ErrExists) || st.writes != 0 {
 			t.Errorf("%s: %v writes=%d", k, err, st.writes)
@@ -140,12 +146,12 @@ func TestGenerateDRepKeysRefusals(t *testing.T) {
 	}
 	// The mnemonics file counts for the mnemonic source only.
 	st := emptyStore()
-	st.files[ports.Ref{Name: "x", Kind: ports.DRepMnemonics}] = []byte("x")
+	st.files[ports.NamedRef{Name: "x", Kind: ports.DRepMnemonics}] = []byte("x")
 	if _, err := (GenerateDRepKeys{Store: st, Keys: &fakeGen{}}).Run(ctx, GenerateKeysRequest{Name: "x", Source: KeysRandom}); err != nil {
 		t.Errorf("a random key ignores the mnemonics file: %v", err)
 	}
 	st = emptyStore()
-	st.files[ports.Ref{Name: "x", Kind: ports.DRepMnemonics}] = []byte("x")
+	st.files[ports.NamedRef{Name: "x", Kind: ports.DRepMnemonics}] = []byte("x")
 	if _, err := (GenerateDRepKeys{Store: st, Deriver: &fakeGen{}, Mnemonics: &fakeGen{}}).Run(ctx, GenerateKeysRequest{Name: "x", Source: KeysMnemonic}); !errors.Is(err, ErrExists) || st.writes != 0 {
 		t.Errorf("mnemonics file: %v", err)
 	}
@@ -193,7 +199,7 @@ func TestGenerateCommitteeKeysWriteHash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := string(st.files[ports.Ref{Name: "m", Kind: ports.CCColdHash}]); got != cold.IDs.Hex+"\n" || !strings.HasPrefix(cold.IDs.Legacy, "cc_cold1") {
+	if got := string(st.files[ports.NamedRef{Name: "m", Kind: ports.CCColdHash}]); got != cold.IDs.Hex+"\n" || !strings.HasPrefix(cold.IDs.Legacy, "cc_cold1") {
 		t.Errorf("hash file %q, ids %+v", got, cold.IDs)
 	}
 	hot, err := GenerateCommitteeHotKeys{Store: st, Keys: &fakeGen{}}.Run(ctx, GenerateKeysRequest{Name: "m", Source: KeysRandom})
@@ -214,9 +220,9 @@ func TestGenerateCommitteeHotKeysReplace(t *testing.T) {
 	ctx := context.Background()
 	st := emptyStore()
 	for _, k := range []ports.Kind{ports.CCHotVKey, ports.CCHotHash, ports.CCHotHwsFile} {
-		st.files[ports.Ref{Name: "m", Kind: k}] = []byte("old")
+		st.files[ports.NamedRef{Name: "m", Kind: k}] = []byte("old")
 	}
-	st.secrets[ports.Ref{Name: "m", Kind: ports.CCHotSKey}] = []byte("old")
+	st.secrets[ports.NamedRef{Name: "m", Kind: ports.CCHotSKey}] = []byte("old")
 	uc := GenerateCommitteeHotKeys{Store: st, Keys: &fakeGen{}}
 	if _, err := uc.Run(ctx, GenerateKeysRequest{Name: "m", Source: KeysRandom}); !errors.Is(err, ErrExists) || st.writes != 0 {
 		t.Fatalf("without Replace: %v writes=%d", err, st.writes)
@@ -224,10 +230,10 @@ func TestGenerateCommitteeHotKeysReplace(t *testing.T) {
 	if _, err := uc.Run(ctx, GenerateKeysRequest{Name: "m", Source: KeysRandom, Replace: true}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := st.files[ports.Ref{Name: "m", Kind: ports.CCHotHwsFile}]; ok {
+	if _, ok := st.files[ports.NamedRef{Name: "m", Kind: ports.CCHotHwsFile}]; ok {
 		t.Error("the old hardware file survived")
 	}
-	if string(st.secrets[ports.Ref{Name: "m", Kind: ports.CCHotSKey}]) == "old" {
+	if string(st.secrets[ports.NamedRef{Name: "m", Kind: ports.CCHotSKey}]) == "old" {
 		t.Error("the old signing key survived")
 	}
 	// Replace is for the hot key only.

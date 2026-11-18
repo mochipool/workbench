@@ -28,7 +28,7 @@ func outboxOf(t *testing.T, w *partyrig.Workspace) []multisig.OutItem {
 func partyNamed(t *testing.T, w *partyrig.Workspace, name string) party.Party {
 	t.Helper()
 	var out party.Party
-	if err := w.Store.View(ctx, func(r ports.Reader) error {
+	if err := w.Store.View(ctx, func(r ports.NamedReader) error {
 		p, err := w.Registry.ByName(r, name)
 		out = p
 		return err
@@ -41,7 +41,7 @@ func partyNamed(t *testing.T, w *partyrig.Workspace, name string) party.Party {
 func registry(t *testing.T, w *partyrig.Workspace) []party.Party {
 	t.Helper()
 	var out []party.Party
-	if err := w.Store.View(ctx, func(r ports.Reader) error {
+	if err := w.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
 		out, err = w.Registry.List(r)
 		return err
@@ -478,7 +478,7 @@ func TestCoordinatorRotationVoidsItsOutstandingRequests(t *testing.T) {
 // spec: SPO-Xparty-IF-008
 func TestNoRotationWithoutTheOldKey(t *testing.T) {
 	s := newScene(t, sceneOpt{})
-	if err := s.B.Store.Update(ctx, func(w ports.Writer) error { return w.Delete(ports.Ref{Name: "local", Kind: ports.PartyKeys}) }); err != nil {
+	if err := s.B.Store.Update(ctx, func(w ports.NamedWriter) error { return w.Delete(ports.NamedRef{Name: "local", Kind: ports.PartyKeys}) }); err != nil {
 		t.Fatal(err)
 	}
 	_, err := s.B.Node().RotateIdentity(ctx, "")

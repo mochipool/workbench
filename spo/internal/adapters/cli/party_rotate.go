@@ -188,7 +188,7 @@ same roles. Requests that were sent to the old identity are void and must be mad
 				}
 				// The open slots of this machine's collections follow the rotation:
 				// a slot is assigned by fingerprint, and a rotation changes it.
-				var hooks []func(ports.Writer, party.Party, party.Party) error
+				var hooks []func(ports.NamedWriter, party.Party, party.Party) error
 				if r.env.TxIDs != nil {
 					if c, cerr := r.coordinator(); cerr == nil {
 						hooks = append(hooks, c.OnRotate)

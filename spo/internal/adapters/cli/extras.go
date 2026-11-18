@@ -256,29 +256,29 @@ func (a *app) messagePassphrase(ctx context.Context, f *extraFlags) (*ports.Secr
 
 // recordRef maps the name of a registration record, as the registration
 // commands print it, to its artefact.
-func recordRef(name string) (ports.Ref, error) {
+func recordRef(name string) (ports.NamedRef, error) {
 	for _, k := range []ports.Kind{ports.CalidusRegistration, ports.VoteRegistration} {
 		if stem, ok := strings.CutSuffix(name, "."+string(k)); ok {
-			ref := ports.Ref{Name: stem, Kind: k}
+			ref := ports.NamedRef{Name: stem, Kind: k}
 			if err := ref.Validate(); err != nil {
-				return ports.Ref{}, fmt.Errorf("--metadata-record %q: %w", name, err)
+				return ports.NamedRef{}, fmt.Errorf("--metadata-record %q: %w", name, err)
 			}
 			return ref, nil
 		}
 	}
-	return ports.Ref{}, fmt.Errorf("--metadata-record %q: give the record's name with its extension, NAME.calidus-registration.json or NAME.vote-registration.cbor, as the registration command printed it", name)
+	return ports.NamedRef{}, fmt.Errorf("--metadata-record %q: give the record's name with its extension, NAME.calidus-registration.json or NAME.vote-registration.cbor, as the registration command printed it", name)
 }
 
 // recordFiles reads the records named by --metadata-record through the
 // workspace and every other path from the next reader.
 type recordFiles struct {
-	store   ports.Store
-	records map[string]ports.Ref
+	store   ports.NamedStore
+	records map[string]ports.NamedRef
 	next    ports.MetadataFileReader
 }
 
-func newRecordFiles(store ports.Store, names []string, next ports.MetadataFileReader) (ports.MetadataFileReader, error) {
-	m := map[string]ports.Ref{}
+func newRecordFiles(store ports.NamedStore, names []string, next ports.MetadataFileReader) (ports.MetadataFileReader, error) {
+	m := map[string]ports.NamedRef{}
 	for _, n := range names {
 		ref, err := recordRef(n)
 		if err != nil {
@@ -299,7 +299,7 @@ func (r recordFiles) ReadMetadataFile(path string) ([]byte, error) {
 		return r.next.ReadMetadataFile(path)
 	}
 	var b []byte
-	err := r.store.View(context.Background(), func(rd ports.Reader) error {
+	err := r.store.View(context.Background(), func(rd ports.NamedReader) error {
 		var e error
 		b, e = rd.Get(ref)
 		return e

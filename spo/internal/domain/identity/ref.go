@@ -86,12 +86,17 @@ const (
 	KindWorkspaceSettings Kind = 22
 	// KindProviderToken is the fixed anchor of provider tokens.
 	KindProviderToken Kind = 23
+	// KindNamedRecord is the derived anchor of a record that is keyed by a
+	// string the use case chooses (a transaction id, a transfer file name, a
+	// fixed word such as "state") and has no owner (ADR 0010 decision 2). The
+	// string enters only the hash and the sealed label record.
+	KindNamedRecord Kind = 24
 )
 
 // Kind codes are part of the binary form and of every stored reference. A
 // code is never reused or renumbered; a new kind takes the next free code.
 // The codes are 1-11 (key and exact-bytes rows, in the order of ADR 0010's
-// table), 12 (pool descriptor), 13 (party fingerprint), 14-23 (the other
+// table), 12 (pool descriptor), 13 (party fingerprint), 14-24 (the other
 // content kinds above).
 
 type kindInfo struct {
@@ -123,6 +128,7 @@ var kinds = map[Kind]kindInfo{
 	KindOwnerRecord:       {"owner-record", 32},
 	KindWorkspaceSettings: {"workspace-settings", 32},
 	KindProviderToken:     {"provider-token", 32},
+	KindNamedRecord:       {"named-record", 32},
 }
 
 // Kinds lists every kind in code order.

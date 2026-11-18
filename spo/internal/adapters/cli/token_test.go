@@ -15,67 +15,83 @@ import (
 )
 
 // fakeSealed is a SealedStore over a plain directory, enough for commands
-// that only use the store and the vault.
+// that only use the store and the vault. It is anchor-level like the sealed
+// store: the commands reach it by name through the label resolver.
 type fakeSealed struct {
-	*plainstore.Store
-	tokens map[string][]byte // the upstream file layout has no place for a provider token
+	plainstore.Anchored
+	tokens map[ports.Ref][]byte // the upstream file layout has no place for a provider token
 }
 
 // tokenWriter keeps provider tokens in memory and passes everything else on.
 type tokenWriter struct {
 	ports.Writer
-	tokens map[string][]byte
+	tokens map[ports.Ref][]byte
 }
 
 func (w tokenWriter) PutSecret(r ports.Ref, s *secret.Buffer) error {
 	if r.Kind != ports.ProviderToken {
 		return w.Writer.PutSecret(r, s)
 	}
-	return s.Use(func(b []byte) error { w.tokens[r.Name] = append([]byte(nil), b...); return nil })
+	return s.Use(func(b []byte) error { w.tokens[r] = append([]byte(nil), b...); return nil })
 }
 
 func (w tokenWriter) Delete(r ports.Ref) error {
 	if r.Kind != ports.ProviderToken {
 		return w.Writer.Delete(r)
 	}
-	delete(w.tokens, r.Name)
+	delete(w.tokens, r)
 	return nil
+}
+
+// Records passes the listing on (the label resolver lists owners and labels).
+func (w tokenWriter) Records(k ports.Kind) ([]ports.Ref, error) {
+	return w.Writer.(ports.RecordLister).Records(k)
+}
+
+// OpenSecret passes the opening of a secret on.
+func (w tokenWriter) OpenSecret(r ports.Ref) (*secret.Buffer, error) {
+	return w.Writer.(ports.SecretOpener).OpenSecret(r)
 }
 
 func (w tokenWriter) Exists(r ports.Ref) (bool, error) {
 	if r.Kind != ports.ProviderToken {
 		return w.Writer.Exists(r)
 	}
-	_, ok := w.tokens[r.Name]
+	_, ok := w.tokens[r]
 	return ok, nil
 }
 
 func (f fakeSealed) Update(ctx context.Context, fn func(ports.Writer) error) error {
-	return f.Store.Update(ctx, func(w ports.Writer) error { return fn(tokenWriter{w, f.tokens}) })
+	return f.Anchored.Update(ctx, func(w ports.Writer) error { return fn(tokenWriter{w, f.tokens}) })
 }
 
 type tokenReader struct {
 	ports.Reader
-	tokens map[string][]byte
+	tokens map[ports.Ref][]byte
+}
+
+// Records passes the listing on (the label resolver lists owners and labels).
+func (r tokenReader) Records(k ports.Kind) ([]ports.Ref, error) {
+	return r.Reader.(ports.RecordLister).Records(k)
 }
 
 func (r tokenReader) Exists(ref ports.Ref) (bool, error) {
 	if ref.Kind != ports.ProviderToken {
 		return r.Reader.Exists(ref)
 	}
-	_, ok := r.tokens[ref.Name]
+	_, ok := r.tokens[ref]
 	return ok, nil
 }
 
 func (f fakeSealed) View(ctx context.Context, fn func(ports.Reader) error) error {
-	return f.Store.View(ctx, func(r ports.Reader) error { return fn(tokenReader{r, f.tokens}) })
+	return f.Anchored.View(ctx, func(r ports.Reader) error { return fn(tokenReader{r, f.tokens}) })
 }
 
 func (f fakeSealed) Open(ctx context.Context, r ports.Ref) (*secret.Buffer, error) {
 	if r.Kind != ports.ProviderToken {
-		return f.Store.Open(ctx, r)
+		return f.Anchored.Open(ctx, r)
 	}
-	b, ok := f.tokens[r.Name]
+	b, ok := f.tokens[r]
 	if !ok {
 		return nil, ports.ErrNotFound
 	}
@@ -126,13 +142,15 @@ func TestProviderTokenStoreAndUse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tokens := map[string][]byte{}
+	tokens := map[ports.Ref][]byte{}
 	cfgs := map[string]WorkspaceConfig{dir: {Network: "preview", Mode: ModeLight, Koios: &KoiosConfig{}}}
 	var out bytes.Buffer
 	w := &wired{}
 	d := opcertDeps(&out, cfgs, w)
 	d.Terminal = passTerm{}
-	d.Sealed = SealedOps{Open: func(string, *secret.Buffer, OpenOptions) (SealedStore, error) { return fakeSealed{fs, tokens}, nil }}
+	d.Sealed = SealedOps{Open: func(string, *secret.Buffer, OpenOptions) (SealedStore, error) {
+		return fakeSealed{fs.Anchor(), tokens}, nil
+	}}
 	run := func(args ...string) error {
 		root := NewRoot(d)
 		root.SetArgs(args)

@@ -125,8 +125,8 @@ func newStore(t *testing.T) (*Store, string) {
 }
 
 var (
-	counter = ports.Ref{Name: "p", Kind: ports.KesCounter}
-	skey0   = ports.Ref{Name: "p", Kind: ports.KesSKey, Num: 0}
+	counter = rf("p", ports.KesCounter)
+	skey0   = rf("p", ports.KesSKey, 0)
 )
 
 func put(t *testing.T, s *Store, ref ports.Ref, data string) {
@@ -140,7 +140,7 @@ func putSecret(t *testing.T, s *Store, ref ports.Ref, data string) {
 	t.Helper()
 	k := secret.Take([]byte(data))
 	defer k.Destroy()
-	if err := s.Update(ctx, func(w ports.Writer) error { return w.PutSecret(ref, k) }); err != nil {
+	if err := s.Update(ctx, func(w ports.Writer) error { return putKeyW(w, ref, k) }); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -167,7 +167,7 @@ func TestFailedUpdateWritesNothing(t *testing.T) {
 	k := secret.Take([]byte("sk"))
 	err := s.Update(ctx, func(w ports.Writer) error {
 		w.Put(counter, []byte("000\n"))
-		w.PutSecret(skey0, k)
+		putKeyW(w, skey0, k)
 		return boom
 	})
 	if !errors.Is(err, boom) {
@@ -191,7 +191,7 @@ func TestUpdateIsAtomicWhenAWriteFails(t *testing.T) {
 	}
 	err := s.Update(ctx, func(w ports.Writer) error {
 		w.Put(counter, []byte("001\n"))
-		return w.Put(ports.Ref{Name: "p", Kind: ports.VrfVKey}, []byte("v"))
+		return w.Put(rf("p", ports.VrfVKey), []byte("v"))
 	})
 	if err == nil {
 		t.Fatal("expected failure")
@@ -268,10 +268,10 @@ func TestSecretsAreNotReadableThroughTheStore(t *testing.T) {
 		if err := w.Put(skey0, []byte("x")); !errors.Is(err, ports.ErrSecretKind) {
 			t.Errorf("Put of a secret kind: %v", err)
 		}
-		if err := w.PutSecret(counter, key); !errors.Is(err, ports.ErrInvalidRef) {
+		if err := putKeyW(w, counter, key); !errors.Is(err, ports.ErrInvalidRef) {
 			t.Errorf("PutSecret of a non-secret kind: %v", err)
 		}
-		return w.PutSecret(skey0, key)
+		return putKeyW(w, skey0, key)
 	})
 	if _, err := get(s, skey0); !errors.Is(err, ports.ErrSecretKind) {
 		t.Errorf("Get of a secret kind: %v", err)
@@ -290,19 +290,25 @@ func TestSecretsAreNotReadableThroughTheStore(t *testing.T) {
 	if _, err := s.Open(ctx, counter); !errors.Is(err, ports.ErrInvalidRef) {
 		t.Errorf("Open of a non-secret kind: %v", err)
 	}
-	if _, err := s.Open(ctx, ports.Ref{Name: "nope", Kind: ports.KesSKey}); !errors.Is(err, ports.ErrNotFound) {
+	if _, err := s.Open(ctx, rf("nope", ports.KesSKey)); !errors.Is(err, ports.ErrNotFound) {
 		t.Errorf("Open of a missing secret: %v", err)
 	}
 }
 
-func TestHostileNamesAreRefused(t *testing.T) {
+// The store is keyed by anchor identity and never sees a name (ADR 0010): what it
+// refuses is a reference with no anchor, an unknown kind or a bad number. Hostile
+// names are refused by ports.NamedRef.Validate (ports tests).
+func TestMalformedRefsAreRefused(t *testing.T) {
 	s, _ := newStore(t)
-	for _, name := range []string{"", "../evil", "a/b", ".hidden", "a..b", "x;rm -rf ~", "$(id)", "a b", "pool\x00", "a[$(id)]"} {
-		err := s.Update(ctx, func(w ports.Writer) error {
-			return w.Put(ports.Ref{Name: name, Kind: ports.KesCounter}, []byte("0"))
-		})
+	for _, ref := range []ports.Ref{
+		{Kind: ports.KesCounter},                                // no anchor
+		{Anchor: anchorOf("a"), Kind: "no.such.kind"},           // unknown kind
+		{Anchor: anchorOf("a"), Kind: ports.KesCounter, Num: 1}, // number on an unnumbered kind
+		{Anchor: anchorOf("a"), Kind: ports.KesVKey, Num: -1},
+	} {
+		err := s.Update(ctx, func(w ports.Writer) error { return w.Put(ref, []byte("0")) })
 		if !errors.Is(err, ports.ErrInvalidRef) {
-			t.Errorf("name %q: %v", name, err)
+			t.Errorf("ref %+v: %v", ref, err)
 		}
 	}
 	if n := count(t, s, "records"); n != 0 {
@@ -325,8 +331,8 @@ func TestVersionsAndAuditRows(t *testing.T) {
 	k := secret.Take([]byte("k"))
 	s.Update(ctx, func(w ports.Writer) error {
 		w.Put(counter, []byte("3"))
-		w.Put(ports.Ref{Name: "p", Kind: ports.KesVKey, Num: 1}, []byte("v"))
-		w.PutSecret(ports.Ref{Name: "p", Kind: ports.KesSKey, Num: 1}, k)
+		w.Put(rf("p", ports.KesVKey, 1), []byte("v"))
+		putKeyW(w, rf("p", ports.KesSKey, 1), k)
 		w.Put(counter, []byte("4")) // repeated put: still one write
 		return nil
 	})
@@ -336,7 +342,9 @@ func TestVersionsAndAuditRows(t *testing.T) {
 	var raw []byte
 	s.db.QueryRow(`SELECT touched FROM audit WHERE seq = 4`).Scan(&raw)
 	var entries []touched
-	if err := cbor.Unmarshal(raw, &entries); err != nil || len(entries) != 3 {
+	// counter, verification key, signing key, and the role history the store's
+	// fixture writes for the signing key's identity
+	if err := cbor.Unmarshal(raw, &entries); err != nil || len(entries) != 4 {
 		t.Fatalf("%v %d entries", err, len(entries))
 	}
 	if b, _ := get(s, counter); string(b) != "4" {
@@ -420,14 +428,14 @@ func TestNoPlaintextInTheFile(t *testing.T) {
 	defer k.Destroy()
 	for i := 0; i < 5; i++ { // several rewrites leave old pages in the WAL / free list
 		if err := s.Update(ctx, func(w ports.Writer) error {
-			w.Put(ports.Ref{Name: poolName, Kind: ports.KesVKey, Num: i}, []byte(publicData))
-			w.Put(ports.Ref{Name: poolName, Kind: ports.NodeVKey}, []byte(publicData))
-			return w.PutSecret(ports.Ref{Name: poolName, Kind: ports.KesSKey, Num: i}, k)
+			w.Put(rf(poolName, ports.KesVKey, i), []byte(publicData))
+			w.Put(rf(poolName, ports.NodeVKey), []byte(publicData))
+			return putKeyW(w, rf(poolName, ports.KesSKey, i), k)
 		}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	s.Update(ctx, func(w ports.Writer) error { return w.Delete(ports.Ref{Name: poolName, Kind: ports.NodeVKey}) })
+	s.Update(ctx, func(w ports.Writer) error { return w.Delete(rf(poolName, ports.NodeVKey)) })
 	markers := [][]byte{[]byte(poolName), []byte(publicData), []byte(secretData), []byte("MARKER"), []byte(testPass)}
 	check := func(when string) {
 		for _, f := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
@@ -513,7 +521,7 @@ func TestInitRefusesExistingFile(t *testing.T) {
 func seedThree(t *testing.T) (*Store, string) {
 	s, path := newStore(t)
 	for i := 0; i < 3; i++ {
-		put(t, s, ports.Ref{Name: "p", Kind: ports.KesVKey, Num: i}, "vkey-"+string(rune('a'+i)))
+		put(t, s, rf("p", ports.KesVKey, i), "vkey-"+string(rune('a'+i)))
 	}
 	return s, path
 }
@@ -527,7 +535,7 @@ func exec(t *testing.T, s *Store, q string, args ...any) {
 
 func TestTamperSwapCiphertexts(t *testing.T) {
 	s, _ := seedThree(t)
-	r0, r1 := ports.Ref{Name: "p", Kind: ports.KesVKey, Num: 0}, ports.Ref{Name: "p", Kind: ports.KesVKey, Num: 1}
+	r0, r1 := rf("p", ports.KesVKey, 0), rf("p", ports.KesVKey, 1)
 	t0, _ := s.tag(r0)
 	t1, _ := s.tag(r1)
 	exec(t, s, `CREATE TEMP TABLE sw AS SELECT nonce, wrapped_key, owner_sealed, ciphertext FROM records WHERE lookup_tag = ?`, t0)
@@ -551,7 +559,7 @@ func TestTamperSwapCiphertexts(t *testing.T) {
 
 func TestTamperSwapLookupTags(t *testing.T) {
 	s, _ := seedThree(t)
-	r0, r1 := ports.Ref{Name: "p", Kind: ports.KesVKey, Num: 0}, ports.Ref{Name: "p", Kind: ports.KesVKey, Num: 1}
+	r0, r1 := rf("p", ports.KesVKey, 0), rf("p", ports.KesVKey, 1)
 	t0, _ := s.tag(r0)
 	t1, _ := s.tag(r1)
 	tmp := []byte("tmp-tag-0123456789abcdef0123456")
@@ -573,10 +581,10 @@ func TestTamperKindClassVersion(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			s, _ := newStore(t)
-			put(t, s, ports.Ref{Name: "p", Kind: ports.KesVKey, Num: 1}, "v")
+			put(t, s, rf("p", ports.KesVKey, 1), "v")
 			exec(t, s, q)
 			trustRows(t, s)
-			if _, err := get(s, ports.Ref{Name: "p", Kind: ports.KesVKey, Num: 1}); !errors.Is(err, ErrCorrupt) {
+			if _, err := get(s, rf("p", ports.KesVKey, 1)); !errors.Is(err, ErrCorrupt) {
 				t.Errorf("Get: %v", err)
 			}
 			// The kind is in the record hash the audit chain covers (M1), as
@@ -809,7 +817,12 @@ func TestSchemaVersion(t *testing.T) {
 
 func TestSlotManagement(t *testing.T) {
 	path := fresh(t)
-	s := openAt(t, path)
+	// opened with the passphrase: a slot is not added on a handle opened through the recovery credential
+	s, err := Open(path, pw())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
 	infos, err := s.Slots(ctx)
 	if err != nil || len(infos) != 2 {
 		t.Fatalf("%v %v", infos, err)
@@ -839,13 +852,13 @@ func TestSlotManagement(t *testing.T) {
 	if len(infos) != 3 {
 		t.Fatalf("a refused removal changed the slots: %d", len(infos))
 	}
-	// A new recovery slot works, and does not need a rekey.
-	txt, rid, err := s2.AddRecoverySlot(ctx)
-	if err != nil || rid == nil {
-		t.Fatal(err)
+	// A second recovery slot is refused in format 3: the recovery key is bound in
+	// every slot (this test added one in format 2 and opened with it).
+	if _, _, err := s2.AddRecoverySlot(ctx); !errors.Is(err, ErrUseRekey) {
+		t.Fatalf("AddRecoverySlot: %v", err)
 	}
 	s2.Close()
-	s4, err := OpenWithRecovery(path, txt)
+	s4, err := Open(path, pw())
 	if err != nil {
 		t.Fatal(err)
 	}

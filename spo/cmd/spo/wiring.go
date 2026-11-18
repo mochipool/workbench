@@ -5,11 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/mochipool/workbench/spo/internal/adapters/cli"
 	"github.com/mochipool/workbench/spo/internal/adapters/config"
 	"github.com/mochipool/workbench/spo/internal/adapters/exportdir"
+	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/adapters/native/n2c"
+	"github.com/mochipool/workbench/spo/internal/adapters/nodeage"
 	"github.com/mochipool/workbench/spo/internal/adapters/sqlitestore"
 	"github.com/mochipool/workbench/spo/internal/adapters/storeaudit"
 	"github.com/mochipool/workbench/spo/internal/adapters/upstreamdir"
@@ -63,9 +66,42 @@ func newDeps(out, errw io.Writer, term cli.Terminal) cli.Deps {
 				r, err := sqlitestore.VerifyFilePayloads(path, pass)
 				return cli.VerifyReport{Head: toHead(r.Head), Notices: r.Notices}, mapStoreErr(err)
 			},
+			Describe:          describe,
+			OpenFactors:       openFactors,
+			VerifyFileFactors: verifyFileFactors,
+			Migrate: func(path string, pass *secret.Buffer, o cli.MigrateOptions) (cli.MigrateReport, error) {
+				s, err := sqlitestore.OpenLegacy(path, pass)
+				if errors.Is(err, sqlitestore.ErrFormat2) {
+					// Not format 1: a format 2 workspace needs only the second step.
+					s2, err := sqlitestore.OpenFormat2(path, pass)
+					if err != nil {
+						return cli.MigrateReport{}, mapStoreErr(err)
+					}
+					defer s2.Close()
+					s2.SetColdSource(coldSource(o.Cold))
+					r, err := s2.Migrate3(context.Background(), "")
+					if err != nil {
+						return cli.MigrateReport{}, mapStoreErr(err)
+					}
+					return cli.MigrateReport{Backup: r.Backup, Format3Only: true, ColdNoWrap: r.ColdNoWrap}, nil
+				}
+				if err != nil {
+					return cli.MigrateReport{}, mapStoreErr(err)
+				}
+				defer s.Close()
+				s.SetColdSource(coldSource(o.Cold))
+				r, err := s.Migrate(context.Background(), sqlitestore.MigrateOptions{Quarantine: o.Quarantine})
+				if err != nil {
+					return cli.MigrateReport{}, mapStoreErr(err)
+				}
+				return cli.MigrateReport{Backup: r.Backup, Backup3: r.Backup3, Records: r.Records, Merged: r.Merged, Added: r.Added, Owners: r.Owners,
+					Rewritten: r.Rewritten, Quarantined: r.Quarantined, Unassigned: r.Unassigned, ColdNoWrap: r.ColdNoWrap}, nil
+			},
 			Restore: func(backup, dest string, pass *secret.Buffer, o cli.RestoreOptions) error {
-				return mapStoreErr(sqlitestore.RestoreWithOptions(backup, dest, pass, sqlitestore.RestoreOptions{
-					Overwrite: o.Overwrite, AllowOlder: o.AllowOlder, AllowOtherWorkspace: o.AllowOtherWorkspace}))
+				return mapStoreErr(sqlitestore.RestoreWithOptions(backup, dest, pass, restoreOptions(o)))
+			},
+			RestoreFactors: func(backup, dest string, in cli.FactorOpen, o cli.RestoreOptions) error {
+				return mapStoreErr(sqlitestore.RestoreWithFactors(backup, dest, factorInputs(in), restoreOptions(o)))
 			},
 		},
 		// A plain-directory workspace is wired only by a build with the
@@ -74,8 +110,10 @@ func newDeps(out, errw io.Writer, term cli.Terminal) cli.Deps {
 		OpenUpstreamSource: func(dir string) (cli.UpstreamSource, error) {
 			return upstreamdir.Open(dir)
 		},
-		OpenExportDir: func(dir string) (ports.Store, error) { return exportdir.Open(dir) },
-		WorkspaceAuditor: func(dir string, store ports.Store, reason string) ports.WorkspaceAuditor {
+		HotSealer:     nodeage.Sealer{},
+		HotDeriver:    native.HotKeyDeriver{},
+		OpenExportDir: func(dir string) (ports.NamedStore, error) { return exportdir.Open(dir) },
+		WorkspaceAuditor: func(dir string, store ports.NamedStore, reason string) ports.WorkspaceAuditor {
 			if plainAudit != nil {
 				store = plainAudit(dir, store)
 			}
@@ -201,7 +239,7 @@ var openPlain func(dir string) (ports.Store, error)
 
 // plainAudit gives a plain directory a place for its audit log (it has no
 // record store); it returns any other store unchanged. Nil in the release.
-var plainAudit func(dir string, store ports.Store) ports.Store
+var plainAudit func(dir string, store ports.NamedStore) ports.NamedStore
 
 // sealedStore adapts *sqlitestore.Store to cli.SealedStore.
 type sealedStore struct{ s *sqlitestore.Store }
@@ -232,10 +270,7 @@ func (w sealedStore) RekeyKeepPassphrase(ctx context.Context, p *secret.Buffer) 
 	return key, mapStoreErr(err)
 }
 
-// List enumerates the artefacts of the sealed workspace (ports.SourceLister),
-// for the workspace export.
-func (w sealedStore) List(ctx context.Context) (ports.SourceListing, error) { return w.s.List(ctx) }
-func (w sealedStore) Notices() []string                                     { return w.s.Notices() }
+func (w sealedStore) Notices() []string { return w.s.Notices() }
 func (w sealedStore) Head() cli.Head {
 	seq, mac := w.s.Head()
 	return cli.Head{Seq: seq, MAC: mac}
@@ -256,7 +291,27 @@ func (w sealedStore) Slots(ctx context.Context) ([]cli.Slot, error) {
 		if x.Kind == "passphrase" {
 			d = fmt.Sprintf("argon2id %d MiB, %d passes, %d lanes", x.KDF.MemoryKiB/1024, x.KDF.Passes, x.KDF.Lanes)
 		}
+		if x.Legacy {
+			d += " legacy (rekey to bind policy): sealed before store format 3, it binds no policy and no recovery key"
+		}
+		if len(x.Factors) > 1 || x.Kind == "fido2-hmac" || x.Kind == "composite" {
+			var fs []string
+			for _, f := range x.Factors {
+				fs = append(fs, f.Kind)
+			}
+			d = strings.Join(fs, " + ")
+		}
 		out = append(out, cli.Slot{ID: x.ID, Kind: x.Kind, Detail: d})
 	}
 	return out, nil
+}
+
+// restoreOptions maps the command tree's restore choices to the store's.
+func restoreOptions(o cli.RestoreOptions) sqlitestore.RestoreOptions {
+	out := sqlitestore.RestoreOptions{Overwrite: o.Overwrite, AllowOlder: o.AllowOlder, AllowOtherWorkspace: o.AllowOtherWorkspace, AllowWeakerPolicy: o.AllowWeakerPolicy}
+	if o.CurrentRecovery != nil {
+		in := factorInputs(*o.CurrentRecovery)
+		out.CurrentRecovery = &in
+	}
+	return out
 }

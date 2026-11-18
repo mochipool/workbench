@@ -247,7 +247,7 @@ func TestEnrollRefusesANodeKeyAnotherPartyHas(t *testing.T) {
 		t.Fatalf("a second party with bob's node key: %v", err)
 	}
 	var ps []party.Party
-	if err := w.C.Store.View(ctx, func(r ports.Reader) error {
+	if err := w.C.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
 		ps, err = w.C.Registry.List(r)
 		return err

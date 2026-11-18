@@ -267,7 +267,7 @@ func TestAttackBodyWithAnUnknownCBORKey(t *testing.T) {
 		NetworkMagic: partyrig.Magic, Purpose: "register"}, 5*time.Minute)
 	var n atomic.Int32
 	bob := w.bobSigner()
-	bob.Signers = countingDir{counting{native.VaultSigner{Vault: w.B.Store}, &n}}
+	bob.Signers = countingDir{counting{native.VaultSigner{Vault: w.B.Store.Anchor()}, &n}}
 	h, err := bob.Handle(ctx, ports.FileReceived(env))
 	if err != nil || h.Refused || h.Effect != "refused" || h.Reason != party.RefuseBodyDecode.String() {
 		t.Fatalf("bob = %+v, %v", h, err)

@@ -48,8 +48,13 @@ func generateStoreVectors(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	defer keys.Destroy()
-	ref := ports.Ref{Name: "mypool", Kind: ports.KesVKey, Num: 3}
-	tag, err := tagFor(keys, ref.Name, string(ref.Kind), ref.Num)
+	ref := rf("mypool", ports.KesVKey, 3)
+	ab, _ := ref.Anchor.MarshalBinary()
+	ownerBlob, err := seal.EncodeOwnerRef(ab, string(ref.Kind), uint64(ref.Num))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tag, err := tagFor(keys, ref.Anchor, string(ref.Kind), ref.Num)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +107,7 @@ func generateStoreVectors(t *testing.T) []byte {
 		WorkspaceID   hx       `json:"workspace_id"`
 		MasterKey     hx       `json:"master_key"`
 		Ref           string   `json:"ref"`
-		Owner         string   `json:"owner"`
+		Owner         string   `json:"owner_blob_content"`
 		LookupTag     hx       `json:"lookup_tag"`
 		SealedNonce   hx       `json:"sealed_nonce"`
 		SealedWrapped hx       `json:"sealed_wrapped_key"`
@@ -123,7 +128,7 @@ func generateStoreVectors(t *testing.T) []byte {
 		History       hx       `json:"history_hash"`
 	}{
 		Comment:     "Pins the store byte layouts. Regenerate only for a deliberate format change: go test ./internal/adapters/sqlitestore -run TestStoreVectors -update",
-		WorkspaceID: ws, MasterKey: pattern(0x10, 32), Ref: ref.String(), Owner: ownerOf(ref), LookupTag: tag,
+		WorkspaceID: ws, MasterKey: pattern(0x10, 32), Ref: ref.String(), Owner: hex.EncodeToString(ownerBlob), LookupTag: tag,
 		SealedNonce: sealed.Nonce, SealedWrapped: sealed.WrappedKey, SealedOwner: sealed.Owner, SealedCT: sealed.Ciphertext,
 		SealedBytes: sealed.Bytes(), RecordHash: hash, Touched: touchedRaw, AuditID: auditID(7), EventAD: evAD,
 		EventsCBOR: events, AuditRow: row, AuditMAC: mac, HeadFile: string(encodeHead(ws, Head{Seq: 7, MAC: mac})),

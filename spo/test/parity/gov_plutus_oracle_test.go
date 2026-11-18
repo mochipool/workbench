@@ -118,7 +118,7 @@ func TestGovGuardrailTransactionsMatchCardanoCLI(t *testing.T) {
 		{"a message", []string{"treasury"}, []string{"guardrails", "test"}},
 	}
 	st2 := mustStore(t, keys.dir)
-	signer := native.VaultSigner{Vault: st2}
+	signer := native.VaultSigner{Vault: st2.Anchor()}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var props []txbuild.ProposalAttachment

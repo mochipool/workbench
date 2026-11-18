@@ -71,7 +71,7 @@ const (
 // composition decides whether the signed transaction is submitted or
 // queued for an online machine, and which signer holds the paying key.
 type SendLovelaces struct {
-	Store     ports.Store
+	Store     ports.NamedStore
 	Signers   ports.SignerDirectory
 	Utxos     ports.UtxoReader
 	Params    ports.ProtocolParametersReader
@@ -196,8 +196,8 @@ type resolved struct {
 	handle        *HandleDestination
 }
 
-func readAddress(r ports.Reader, name string) (chain.Address, bool, error) {
-	ref := ports.Ref{Name: name, Kind: ports.AddrFile}
+func readAddress(r ports.NamedReader, name string) (chain.Address, bool, error) {
+	ref := ports.NamedRef{Name: name, Kind: ports.AddrFile}
 	if err := ref.Validate(); err != nil {
 		return "", false, nil // not a stored name
 	}
@@ -250,7 +250,7 @@ func (uc SendLovelaces) Run(ctx context.Context, req SendRequest) (SendResult, e
 	}
 	var src, dst resolved
 	var payKey custody.KeyRef
-	if err := uc.Store.View(ctx, func(r ports.Reader) error {
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 		// spec: SPO-Ptx-IN-001, SPO-Ptx-IN-002, SPO-01sendLovelaces-IN-001, SPO-Pfiles-INV-002
 		addr, ok, err := readAddress(r, srcName)
 		if err != nil {
@@ -537,7 +537,7 @@ func (uc SendLovelaces) Run(ctx context.Context, req SendRequest) (SendResult, e
 //
 // spec: SPO-01sendLovelaces-IF-004, SPO-01sendLovelaces-IF-005, SPO-01sendLovelaces-IF-006,
 // spec: SPO-01sendLovelaces-IF-007, SPO-Pfiles-IN-002
-func (uc SendLovelaces) resolveDestination(r ports.Reader, word string) (resolved, error) {
+func (uc SendLovelaces) resolveDestination(r ports.NamedReader, word string) (resolved, error) {
 	if name, err := normalizeName(word); err == nil {
 		addr, ok, err := readAddress(r, name)
 		if err != nil {

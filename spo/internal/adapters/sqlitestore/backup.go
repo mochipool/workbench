@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/mochipool/workbench/spo/internal/domain/unlock"
 	"github.com/mochipool/workbench/spo/internal/platform/seal"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 )
@@ -131,7 +132,22 @@ type RestoreOptions struct {
 	// different workspace. Without it such a restore fails with
 	// ErrOtherWorkspace.
 	AllowOtherWorkspace bool
+	// AllowWeakerPolicy lets a backup whose unlock policy ranks weaker
+	// (unlock.Weakens) than the policy of the workspace it replaces do so. It is
+	// honoured only together with CurrentRecovery: restoring an older, weaker
+	// copy of a workspace would otherwise undo a rotation to hardware or strict.
+	AllowWeakerPolicy bool
+	// CurrentRecovery presents the recovery credential of the workspace being
+	// replaced (the recovery key as 32 raw bytes and, under hardware, the second
+	// authenticator): the store opens the current file with it and checks it with
+	// PresentRecovery before anything is replaced. A strict workspace has none, so
+	// it is never replaced by a weaker backup.
+	CurrentRecovery *FactorInputs
 }
+
+// ErrRestoreWeakens: the backup's unlock policy is weaker than the policy of the
+// workspace it would replace.
+var ErrRestoreWeakens = errors.New("sqlitestore: the backup's unlock policy is weaker than the workspace's: restoring it would undo the stronger policy. It needs --allow-weaker-policy and the current recovery credential presented (a strict workspace is never loosened)")
 
 // Restore replaces the workspace at destPath with the backup at backupPath,
 // after verifying the backup with the passphrase. The backup is copied beside
@@ -156,7 +172,17 @@ func Restore(backupPath, destPath string, passphrase *secret.Buffer, overwrite b
 // ErrLocked while any handle has it open. The destination's head file is
 // rewritten from the backup, because a restore is deliberate.
 func RestoreWithOptions(backupPath, destPath string, passphrase *secret.Buffer, o RestoreOptions) error {
-	return restore(backupPath, destPath, credential{seal.SlotPassphrase, passphrase}, o)
+	return restore(backupPath, destPath, credential{kind: seal.SlotPassphrase, buf: passphrase}, o)
+}
+
+// RestoreWithFactors is RestoreWithOptions for a backup of a workspace that
+// unlocks through FIDO2 factors (hardware or strict): the backup is verified
+// through its factor slots (VerifyFileFactors), not with a passphrase.
+func RestoreWithFactors(backupPath, destPath string, in FactorInputs, o RestoreOptions) error {
+	if in.Source == nil {
+		return errors.New("sqlitestore: no factor source")
+	}
+	return restore(backupPath, destPath, credential{kind: credFactors, factors: &in}, o)
 }
 
 // RestoreWithRecovery is Restore with the printed recovery key.
@@ -171,7 +197,7 @@ func RestoreWithRecoveryOptions(backupPath, destPath string, recovery *secret.Bu
 		return err
 	}
 	defer raw.Destroy()
-	return restore(backupPath, destPath, credential{seal.SlotRecovery, raw}, o)
+	return restore(backupPath, destPath, credential{kind: seal.SlotRecovery, buf: raw}, o)
 }
 
 func restore(backupPath, destPath string, cred credential, o RestoreOptions) (err error) {
@@ -233,6 +259,16 @@ func restore(backupPath, destPath string, cred credential, o RestoreOptions) (er
 		return err
 	}
 	if exists {
+		// A weaker backup never replaces a stronger workspace unless the current
+		// recovery credential is presented (before the lock: the presentation opens
+		// the current file).
+		var checked string
+		if checked, err = checkRestorePolicy(ctx, dest, tmpPath, o); err != nil {
+			return err
+		}
+		if afterPolicyCheck != nil {
+			afterPolicyCheck()
+		}
 		// Exclusive lock for the check and the swap: nobody may have the
 		// workspace open, and nobody can open it between the two.
 		lock, lerr := lockFile(dest, true)
@@ -240,6 +276,14 @@ func restore(backupPath, destPath string, cred credential, o RestoreOptions) (er
 			return lerr
 		}
 		defer lock.Close()
+		// The policy check ran before the lock (it opens the file): under the lock
+		// the table must still be the one that was checked.
+		if err = checkpointDest(ctx, dest); err != nil {
+			return err
+		}
+		if now, derr := tableSignatureLocked(dest); checked != "" && (derr != nil || now != checked) {
+			return fmt.Errorf("%w: the workspace's slot table changed while the restore was being checked; nothing was replaced", ErrConflictRestore)
+		}
 		// Only now, under the lock, can the side files be trusted: another
 		// process may have written and closed since the copy began. Fold a
 		// committed WAL into the file before the file is inspected.
@@ -272,6 +316,110 @@ func restore(backupPath, destPath string, cred credential, o RestoreOptions) (er
 		return err
 	}
 	return syncDir(filepath.Dir(dest))
+}
+
+// afterPolicyCheck, when set, runs between the policy check and the lock (a test
+// changes the destination there).
+var afterPolicyCheck func()
+
+// ErrConflictRestore: the destination changed between the check and the swap.
+var ErrConflictRestore = errors.New("sqlitestore: the destination changed during the restore")
+
+// tableSignature is the policy and the slot ids and kinds of a file, read
+// without a key.
+func tableSignature(path string) (string, error) {
+	pol, slots, err := Describe(path)
+	if err != nil {
+		return "", err
+	}
+	return signatureOf(pol, slots), nil
+}
+
+func signatureOf(pol unlock.Policy, slots []SlotInfo) string {
+	sig := string(pol)
+	for _, sl := range slots {
+		sig += fmt.Sprintf("|%x:%s", sl.ID, sl.Kind)
+	}
+	return sig
+}
+
+// tableSignatureLocked is tableSignature for a file this process holds the
+// exclusive lock of (Describe takes a shared one): a read-only immutable read.
+func tableSignatureLocked(path string) (string, error) {
+	var sig string
+	err := withReadOnly(path, func(db *sql.DB) error {
+		m, err := loadMeta(context.Background(), db)
+		if err != nil {
+			return err
+		}
+		t, err := loadTable(context.Background(), db, m.ws, uint64(m.format))
+		if err != nil {
+			return err
+		}
+		sig = signatureOf(t.policy, t.infos())
+		return nil
+	})
+	return sig, err
+}
+
+// checkRestorePolicy refuses a backup that ranks weaker than the destination
+// unless the operator said so AND presented the destination's recovery
+// credential, checked with PresentRecovery on the destination file. A
+// destination whose slot table cannot be read cannot be compared: it is replaced
+// only with both --allow-weaker-policy and --allow-other-workspace (no recovery
+// credential can be presented on a damaged file). It returns the signature of the
+// table that was checked.
+func checkRestorePolicy(ctx context.Context, dest, newPath string, o RestoreOptions) (string, error) {
+	cur, _, err := Describe(dest)
+	if err != nil {
+		if o.AllowWeakerPolicy && o.AllowOtherWorkspace {
+			return "", nil
+		}
+		return "", fmt.Errorf("%w: the policy of the workspace to be replaced cannot be read (%v), so the backup cannot be compared with it; --allow-weaker-policy together with --allow-other-workspace replaces it anyway", ErrRestoreWeakens, err)
+	}
+	sig, err := tableSignature(dest)
+	if err != nil {
+		return "", err
+	}
+	bak, _, err := Describe(newPath)
+	if err != nil {
+		return "", err
+	}
+	if !unlock.Weakens(cur, bak) {
+		return sig, nil
+	}
+	if !o.AllowWeakerPolicy {
+		return "", fmt.Errorf("%w (workspace %s, backup %s)", ErrRestoreWeakens, cur, bak)
+	}
+	if cur == unlock.Strict {
+		return "", fmt.Errorf("%w: a strict workspace has no recovery credential to authorise it", ErrNoRecoveryPath)
+	}
+	in := o.CurrentRecovery
+	if in == nil || in.Recovery == nil {
+		return "", fmt.Errorf("%w: --allow-weaker-policy needs the current recovery credential", ErrRecoveryNotPresented)
+	}
+	var s *Store
+	if cur == unlock.Standard {
+		rk, rerr := in.Recovery(ctx)
+		if rerr != nil {
+			return "", rerr
+		}
+		s, err = open(dest, credential{kind: seal.SlotRecovery, buf: rk}, false, OpenOptions{})
+		rk.Destroy()
+	} else {
+		if in.Source == nil {
+			return "", errors.New("sqlitestore: no factor source to present the recovery authenticator")
+		}
+		s, err = OpenWithFactors(dest, *in, OpenOptions{})
+	}
+	if err != nil {
+		return "", err
+	}
+	defer s.Close()
+	if _, err = s.PresentRecovery(ctx, *in); err != nil {
+		return "", err
+	}
+	return sig, nil
 }
 
 // ErrUncheckpointed: the destination workspace has changes in its -wal file that
@@ -353,4 +501,35 @@ func checkReplace(ctx context.Context, dest, newPath string, newWS []byte, o Res
 		}
 		return nil
 	})
+}
+
+// FileCounts is what a file shows without any key: its workspace id (the genesis
+// nonce) and how many records and audit rows it holds. A file `Init` has just
+// made has the counts of FreshInit and no more.
+type FileCounts struct {
+	WorkspaceID []byte
+	Records     int
+	AuditRows   int
+}
+
+// Inspect reads FileCounts of the workspace file at path, keylessly and
+// read-only.
+func Inspect(path string) (FileCounts, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return FileCounts{}, err
+	}
+	var c FileCounts
+	err = withReadOnly(abs, func(db *sql.DB) error {
+		m, err := loadMeta(context.Background(), db)
+		if err != nil {
+			return err
+		}
+		c.WorkspaceID = append([]byte(nil), m.ws...)
+		if err := db.QueryRow(`SELECT count(*) FROM records`).Scan(&c.Records); err != nil {
+			return err
+		}
+		return db.QueryRow(`SELECT count(*) FROM audit`).Scan(&c.AuditRows)
+	})
+	return c, err
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/fxamacker/cbor/v2"
 	"golang.org/x/crypto/chacha20poly1305"
 
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
@@ -103,13 +104,50 @@ func (s sealer) newMasterKey() (*secret.Buffer, error) { return readSecret(s.ran
 
 // RecordMeta identifies a record for sealing. Every field is bound into the
 // associated data of the payload and the wrapped data key.
+//
+// Two encodings exist (ADR 0010 decision 4). Format 0 (the zero value) is
+// RecordFormat: the record names its owner by anchor identity and number
+// (Anchor, Num). Format 1 is the encoding of the name-keyed store: the record
+// names its owner by the string Owner. Format 1 is read and written only by
+// the migration (which opens the old records and seals the new ones) and by
+// the audit rows, whose sealed events keep their version-1 encoding.
 type RecordMeta struct {
 	WorkspaceID []byte // IDSize bytes
 	RecordID    []byte // IDSize bytes, random, never derived from a name
 	Kind        string
-	Owner       string // owner aggregate identity, at most maxOwner bytes
+	Anchor      []byte // format 2: the binary form of the anchor identity
+	Num         uint64 // format 2: the sequence number of a numbered kind
+	Owner       string // format 1 only: the owner name and number, at most maxOwner bytes
 	Class       string // ClassSecret or ClassSensitive
 	Version     uint64 // record version
+	Format      uint64 // 0 (chosen by the anchor, see format), 1 or 2
+}
+
+// format is the encoding of m: Format when set, otherwise RecordFormat when m
+// has an anchor and LegacyRecordFormat when it has none (the name-keyed store
+// and the audit rows have none).
+func (m RecordMeta) format() uint64 {
+	switch {
+	case m.Format != 0:
+		return m.Format
+	case len(m.Anchor) > 0:
+		return RecordFormat
+	}
+	return LegacyRecordFormat
+}
+
+// ownerBytes is what the owner blob holds: format 2, the canonical CBOR of
+// [anchor, kind, number]; format 1, the owner string.
+func (m RecordMeta) ownerBytes() ([]byte, error) {
+	if m.format() == LegacyRecordFormat {
+		return []byte(m.Owner), nil
+	}
+	return EncodeCanonical([]any{m.Anchor, m.Kind, m.Num})
+}
+
+// EncodeOwnerRef is the content of the owner blob of a format 2 record.
+func EncodeOwnerRef(anchor []byte, kind string, num uint64) ([]byte, error) {
+	return EncodeCanonical([]any{anchor, kind, num})
 }
 
 // ownerBucket is the fixed size of the owner blob's plaintext: a 2-byte big
@@ -121,7 +159,7 @@ const (
 	maxOwner    = ownerBucket - 2
 )
 
-func padOwner(owner string) []byte {
+func padOwner(owner []byte) []byte {
 	b := make([]byte, ownerBucket)
 	binary.BigEndian.PutUint16(b, uint16(len(owner)))
 	copy(b[2:], owner)
@@ -130,28 +168,40 @@ func padOwner(owner string) []byte {
 
 // unpadOwner is the inverse of padOwner. It refuses any other length, an
 // impossible length field and non-zero padding.
-func unpadOwner(b []byte) (string, error) {
+func unpadOwner(b []byte) ([]byte, error) {
 	if len(b) != ownerBucket {
-		return "", ErrFormat
+		return nil, ErrFormat
 	}
 	n := int(binary.BigEndian.Uint16(b))
 	if n > maxOwner {
-		return "", ErrFormat
+		return nil, ErrFormat
 	}
 	for _, x := range b[2+n:] {
 		if x != 0 {
-			return "", fmt.Errorf("%w: non-zero owner padding", ErrFormat)
+			return nil, fmt.Errorf("%w: non-zero owner padding", ErrFormat)
 		}
 	}
-	return string(b[2 : 2+n]), nil
+	return append([]byte(nil), b[2:2+n]...), nil
 }
 
 func (m RecordMeta) validate() error {
 	if len(m.WorkspaceID) != IDSize || len(m.RecordID) != IDSize {
 		return fmt.Errorf("%w: ids must be %d bytes", ErrFormat, IDSize)
 	}
-	if m.Kind == "" || (m.Class != ClassSecret && m.Class != ClassSensitive) || len(m.Owner) > maxOwner {
+	if m.Kind == "" || (m.Class != ClassSecret && m.Class != ClassSensitive && m.Class != ClassSecretCold) || len(m.Owner) > maxOwner {
 		return fmt.Errorf("%w: kind, class or owner", ErrFormat)
+	}
+	switch m.format() {
+	case LegacyRecordFormat:
+		if len(m.Anchor) != 0 || m.Num != 0 {
+			return fmt.Errorf("%w: a format 1 record has no anchor", ErrFormat)
+		}
+	case RecordFormat:
+		if len(m.Anchor) < 2 || len(m.Anchor) > 40 || m.Owner != "" {
+			return fmt.Errorf("%w: a format 2 record needs an anchor and no owner name", ErrFormat)
+		}
+	default:
+		return fmt.Errorf("%w: record format %d", ErrFormat, m.Format)
 	}
 	return nil
 }
@@ -163,16 +213,25 @@ func (m RecordMeta) AD() ([]byte, error) {
 	if err := m.validate(); err != nil {
 		return nil, err
 	}
-	return EncodeCanonical([]any{FormatVersion, m.WorkspaceID, m.RecordID, m.Kind, m.Owner, m.Class, m.Version, PayloadFormat})
+	if m.format() == LegacyRecordFormat {
+		return EncodeCanonical([]any{FormatVersion, m.WorkspaceID, m.RecordID, m.Kind, m.Owner, m.Class, m.Version, PayloadFormat})
+	}
+	// [format version, genesis nonce, record id, kind, anchor identity, number,
+	//  class, record version, payload format] (ADR 0010, Amends ADR 0003).
+	return EncodeCanonical([]any{RecordFormat, m.WorkspaceID, m.RecordID, m.Kind, m.Anchor, m.Num, m.Class, m.Version, PayloadFormat})
 }
 
 // ownerAD is the associated data of the owner blob: canonical CBOR of
 // [format version, workspace id, record id, kind, "owner"].
-func ownerAD(workspaceID, recordID []byte, kind string) ([]byte, error) {
+func ownerAD(format uint64, workspaceID, recordID []byte, kind string) ([]byte, error) {
 	if len(workspaceID) != IDSize || len(recordID) != IDSize || kind == "" {
 		return nil, fmt.Errorf("%w: ids or kind", ErrFormat)
 	}
-	return EncodeCanonical([]any{FormatVersion, workspaceID, recordID, kind, labelOwner})
+	v := uint64(FormatVersion)
+	if format != LegacyRecordFormat {
+		v = RecordFormat
+	}
+	return EncodeCanonical([]any{v, workspaceID, recordID, kind, labelOwner})
 }
 
 // SealedRecord is the stored form of a record payload.
@@ -304,12 +363,17 @@ func (k *Keys) openDataKey(m RecordMeta, r SealedRecord) (*secret.Buffer, []byte
 // OpenOwner returns the owner string of a record, authenticated against the
 // workspace, record id and kind. A rekey needs it to recompute lookup tags.
 func (k *Keys) OpenOwner(workspaceID, recordID []byte, kind string, r SealedRecord) (string, error) {
-	ad, err := ownerAD(workspaceID, recordID, kind)
+	b, err := k.openOwnerBytes(LegacyRecordFormat, workspaceID, recordID, kind, r)
+	return string(b), err
+}
+
+func (k *Keys) openOwnerBytes(format uint64, workspaceID, recordID []byte, kind string, r SealedRecord) ([]byte, error) {
+	ad, err := ownerAD(format, workspaceID, recordID, kind)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	if !r.wellFormed() {
-		return "", ErrFormat
+	if len(r.Owner) < NonceSize+tagSize { // the owner blob is sealed alike for hot and cold records
+		return nil, ErrFormat
 	}
 	var padded []byte
 	err = k.wrap.Use(func(wk []byte) error {
@@ -318,9 +382,104 @@ func (k *Keys) OpenOwner(workspaceID, recordID []byte, kind string, r SealedReco
 		return e
 	})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	return unpadOwner(padded)
+}
+
+// OpenOwnerRef returns the anchor (binary form), kind and number of a format 2
+// record, authenticated against the workspace, record id and kind. The kind in
+// the blob must equal the kind the caller passes.
+func (k *Keys) OpenOwnerRef(workspaceID, recordID []byte, kind string, r SealedRecord) (anchor []byte, num uint64, err error) {
+	b, err := k.openOwnerBytes(RecordFormat, workspaceID, recordID, kind, r)
+	if err != nil {
+		return nil, 0, err
+	}
+	v, err := DecodeOwnerRef(b)
+	if err != nil {
+		return nil, 0, err
+	}
+	if v.Kind != kind {
+		return nil, 0, fmt.Errorf("%w: the owner blob names another kind", ErrAuth)
+	}
+	return v.Anchor, v.Num, nil
+}
+
+// OwnerRef is the decoded owner blob of a format 2 record.
+type OwnerRef struct {
+	Anchor []byte
+	Kind   string
+	Num    uint64
+}
+
+// DecodeOwnerRef reads the content of EncodeOwnerRef, refusing anything else.
+func DecodeOwnerRef(b []byte) (OwnerRef, error) {
+	var a []any
+	if err := cbor.Unmarshal(b, &a); err != nil || len(a) != 3 {
+		return OwnerRef{}, fmt.Errorf("%w: owner blob", ErrFormat)
+	}
+	anchor, ok1 := a[0].([]byte)
+	kind, ok2 := a[1].(string)
+	num, ok3 := a[2].(uint64)
+	if !ok1 || !ok2 || !ok3 {
+		return OwnerRef{}, fmt.Errorf("%w: owner blob", ErrFormat)
+	}
+	again, err := EncodeCanonical([]any{anchor, kind, num})
+	if err != nil || string(again) != string(b) {
+		return OwnerRef{}, fmt.Errorf("%w: owner blob is not canonical", ErrFormat)
+	}
+	return OwnerRef{Anchor: anchor, Kind: kind, Num: num}, nil
+}
+
+// Reseal moves a record from the encoding of old to the encoding of m, under
+// the same keys: the payload is opened under old's associated data and sealed
+// again under m's with a fresh payload nonce, the same data key is re-wrapped
+// under m's associated data, and the owner blob is rewritten from m. The master
+// key and the data key do not change (this is not a rekey). The payload
+// framing is kept: a secret stays a framed secret. The record version may rise (the
+// audit chain wants each change of a record to be the next version).
+func (k *Keys) Reseal(old, m RecordMeta, r SealedRecord) (SealedRecord, error) {
+	if old.Class != m.Class || old.Kind != m.Kind {
+		return SealedRecord{}, fmt.Errorf("%w: reseal changes the owner encoding and the version, not the kind or class", ErrFormat)
+	}
+	dataKey, _, err := k.openDataKey(old, r)
+	if err != nil {
+		return SealedRecord{}, err
+	}
+	defer dataKey.Destroy()
+	oldAD, err := old.AD()
+	if err != nil {
+		return SealedRecord{}, err
+	}
+	pt, err := openToBuffer(dataKey, r.Nonce, r.Ciphertext, oldAD)
+	if err != nil {
+		return SealedRecord{}, err
+	}
+	defer pt.Destroy()
+	newAD, err := m.AD()
+	if err != nil {
+		return SealedRecord{}, err
+	}
+	nonce, err := readBytes(defaultSealer.rand, NonceSize)
+	if err != nil {
+		return SealedRecord{}, err
+	}
+	var ct []byte
+	err = pt.Use(func(p []byte) error {
+		return dataKey.Use(func(dk []byte) error {
+			var e error
+			ct, e = aeadSeal(dk, nonce, p, newAD)
+			return e
+		})
+	})
+	if err != nil {
+		return SealedRecord{}, err
+	}
+	wrapped, owner, err := defaultSealer.wrapUnder(k, m, newAD, dataKey)
+	if err != nil {
+		return SealedRecord{}, err
+	}
+	return SealedRecord{Nonce: nonce, WrappedKey: wrapped, Owner: owner, Ciphertext: ct}, nil
 }
 
 // Rewrap moves a record from k to the keys to: the data key and the owner
@@ -351,7 +510,11 @@ func (s sealer) wrapUnder(k *Keys, m RecordMeta, ad []byte, dataKey *secret.Buff
 	if err != nil {
 		return nil, nil, err
 	}
-	oad, err := ownerAD(m.WorkspaceID, m.RecordID, m.Kind)
+	oad, err := ownerAD(m.format(), m.WorkspaceID, m.RecordID, m.Kind)
+	if err != nil {
+		return nil, nil, err
+	}
+	ob, err := m.ownerBytes()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -362,7 +525,7 @@ func (s sealer) wrapUnder(k *Keys, m RecordMeta, ad []byte, dataKey *secret.Buff
 				return e
 			}
 			wrapped = append(wrapNonce, w...)
-			o, e := aeadSeal(wk, ownerNonce, padOwner(m.Owner), oad)
+			o, e := aeadSeal(wk, ownerNonce, padOwner(ob), oad)
 			owner = append(ownerNonce, o...)
 			return e
 		})

@@ -14,11 +14,12 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 
 | Use case | Specs | Requirements |
 | --- | --- | --- |
-| `ConvertKeptKey` | [`Xcustody`](../extensions/Xcustody.md) | 27 |
+| `ConvertKeptKey` | [`Xcustody`](../extensions/Xcustody.md) | 100 |
 | `DiscoverSources` | [`Xmulti`](../extensions/Xmulti.md) | 55 |
-| `EnrolFactor` | [`Xunlock`](../extensions/Xunlock.md) | 49 |
+| `EnrolFactor` | [`Xunlock`](../extensions/Xunlock.md) | 81 |
 | `EnrollParty` | [`Xparty`](../extensions/Xparty.md) | 69 |
-| `ExportWorkspace` | [`Xcustody`](../extensions/Xcustody.md) | 27 |
+| `ExportNodeKeys` | [`Xcustody`](../extensions/Xcustody.md) | 100 |
+| `ExportWorkspace` | [`Xcustody`](../extensions/Xcustody.md) | 100 |
 | `ImportSigningResponse` | [`Xparty`](../extensions/Xparty.md) | 69 |
 | `ImportWorkspace` | [`Pfiles`](../upstream/patterns/Pfiles.md), [`Xmulti`](../extensions/Xmulti.md) | 106 |
 | `ProtectSigningKey` | [`01protectKey`](../upstream/scripts/01_protectKey.md) | 29 |
@@ -28,7 +29,7 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 | `RotateParty` | [`Xparty`](../extensions/Xparty.md) | 69 |
 | `SealKey` | [`Pfiles`](../upstream/patterns/Pfiles.md) | 51 |
 | `StoreArtefact` | [`Pfiles`](../upstream/patterns/Pfiles.md) | 51 |
-| `UnlockWorkspace` | [`Xunlock`](../extensions/Xunlock.md) | 49 |
+| `UnlockWorkspace` | [`Xunlock`](../extensions/Xunlock.md) | 81 |
 | `UnprotectSigningKey` | [`01protectKey`](../upstream/scripts/01_protectKey.md) | 29 |
 
 ## `transaction-construction`
@@ -146,7 +147,7 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 | --- | --- | --- |
 | `BuildCatalystRegistration` | [`09a`](../upstream/scripts/09a_catalystVote.md) | 48 |
 | `BuildPollAnswer` | [`13a`](../upstream/scripts/13a_spoPoll.md) | 17 |
-| `ExportVotingKeyQr` | [`09a`](../upstream/scripts/09a_catalystVote.md), [`Xcustody`](../extensions/Xcustody.md) | 75 |
+| `ExportVotingKeyQr` | [`09a`](../upstream/scripts/09a_catalystVote.md), [`Xcustody`](../extensions/Xcustody.md) | 148 |
 | `GenerateVotingKey` | [`09a`](../upstream/scripts/09a_catalystVote.md) | 48 |
 | `QueryCatalystVotingPower` | [`09a`](../upstream/scripts/09a_catalystVote.md) | 48 |
 | `SubmitPollAnswer` | [`13b`](../upstream/scripts/13b_sendSpoPoll.md) | 29 |
@@ -228,4 +229,4 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 | [`25a_genAction`](../upstream/scripts/25a_genAction.md) | Generate a governance action file | governance | 75 | draft |
 | [`25b_regAction`](../upstream/scripts/25b_regAction.md) | Submit governance actions | governance, transaction-construction | 71 | draft |
 
-Totals: 73 specs, 2533 requirements, 92 use cases.
+Totals: 73 specs, 2658 requirements, 93 use cases.

@@ -103,7 +103,7 @@ const (
 // Base is what the transaction use cases share. The embedded Pipeline holds
 // the signing and ledger ports and exactly one of Submitter and Queue.
 type Base struct {
-	Store     ports.Store
+	Store     ports.NamedStore
 	Addresses ports.AddressInspector
 	Params    ports.ProtocolParametersReader
 	Tip       ports.TipReader
@@ -170,7 +170,7 @@ func firstLine(b []byte) string {
 	return strings.TrimSpace(line)
 }
 
-func get(r ports.Reader, ref ports.Ref) ([]byte, error) {
+func get(r ports.NamedReader, ref ports.NamedRef) ([]byte, error) {
 	b, err := r.Get(ref)
 	if errors.Is(err, ports.ErrNotFound) {
 		return nil, fmt.Errorf("%w: %s", ErrMissingFile, ref)
@@ -200,8 +200,8 @@ type payer struct {
 }
 
 // readPayer reads and checks the paying address (SPO-Ptx-IN-001, SPO-Ptx-IN-002).
-func (b Base) readPayer(r ports.Reader, name string) (payer, error) {
-	ab, err := get(r, ports.Ref{Name: name, Kind: ports.AddrFile})
+func (b Base) readPayer(r ports.NamedReader, name string) (payer, error) {
+	ab, err := get(r, ports.NamedRef{Name: name, Kind: ports.AddrFile})
 	if err != nil {
 		return payer{}, err
 	}

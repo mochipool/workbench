@@ -69,7 +69,7 @@ func (r *rig) generateAction() (GenerateAction, *fakeLastEnacted) {
 	le := &fakeLastEnacted{m: map[governance.Purpose]chain.Reading[governance.ActionID]{}}
 	r.chain.params.ProtocolMinor = 0
 	r.chain.params.Raw = json.RawMessage(`{"committeeMaxTermLength": 146}`)
-	r.store.files[ports.Ref{Name: "owner", Kind: ports.StakingAddr}] = []byte(stakeTest + "\n")
+	r.store.files[ports.NamedRef{Name: "owner", Kind: ports.StakingAddr}] = []byte(stakeTest + "\n")
 	return GenerateAction{Store: r.store, Actions: fakeActionFiles{}, Params: r.chain, Epoch: r.chain, Constitution: fakeConstitution{chain.None[governance.Constitution]()},
 		LastEnacted: le, Clock: fixedClock{time.Date(2025, 3, 4, 5, 6, 7, 0, time.Local)}, NetworkID: ports.NetworkTestnet,
 		Anchors: AnchorSource{}, AnchorUnverifiedAcknowledged: true}, le
@@ -90,7 +90,7 @@ func TestGenerateActionInfo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Ref != (ports.Ref{Name: "owner_infoaction_250304050607", Kind: ports.GovActionFile}) || res.Action.Deposit != 100_000_000_000 {
+	if res.Ref != (ports.NamedRef{Name: "owner_infoaction_250304050607", Kind: ports.GovActionFile}) || res.Action.Deposit != 100_000_000_000 {
 		t.Fatalf("result %+v", res)
 	}
 	res, err = uc.Run(context.Background(), GenerateActionRequest{Return: strings.ToUpper(stakeTest), Kind: governance.InfoAction, URL: "https://x.org/a.json", Hash: okAnchor})
@@ -307,7 +307,7 @@ func (f fakeRewards) RewardAccount(context.Context, chain.StakeAddress) (chain.R
 func (r *rig) actionFile(name string, kind governance.ActionKind) string {
 	a := governance.Action{Kind: kind, Deposit: 100_000_000_000, Return: chain.StakeAddress(stakeTest), ReturnKey: governance.Credential{Hash: [28]byte{1}}, Anchor: governance.Anchor{URL: "https://x.org/a", Hash: [32]byte{1}}}
 	af, _ := fakeActionFiles{}.BuildActionFile(a)
-	r.store.files[ports.Ref{Name: name, Kind: ports.GovActionFile}] = af.Envelope
+	r.store.files[ports.NamedRef{Name: name, Kind: ports.GovActionFile}] = af.Envelope
 	return name + ".action"
 }
 
@@ -364,7 +364,7 @@ func TestRegisterActionRefusals(t *testing.T) {
 	r := newRig(t)
 	r.online()
 	f1 := r.actionFile("a_1", governance.InfoAction)
-	r.store.files[ports.Ref{Name: "junk", Kind: ports.GovActionFile}] = []byte("junk")
+	r.store.files[ports.NamedRef{Name: "junk", Kind: ports.GovActionFile}] = []byte("junk")
 	good := fakeRewards{registeredStake()}
 	for name, tc := range map[string]struct {
 		err  error
@@ -397,7 +397,7 @@ func TestRegisterActionRefusals(t *testing.T) {
 	// A hardware payer is refused before any chain read.
 	rh := newRig(t)
 	fh := rh.actionFile("a_1", governance.InfoAction)
-	rh.hardware(ports.Ref{Name: "w.payment", Kind: ports.AddrSKey}, ports.AddrHwsFile)
+	rh.hardware(ports.NamedRef{Name: "w.payment", Kind: ports.AddrSKey}, ports.AddrHwsFile)
 	if err := run(rh, good, false, fh); !errors.Is(err, ErrHardwarePayer) || rh.l.count("params") != 0 {
 		t.Errorf("hardware: %v", err)
 	}
@@ -407,15 +407,15 @@ func TestRegisterActionRefusals(t *testing.T) {
 	ta := governance.Action{Kind: governance.TreasuryWithdrawals, Deposit: 1, Return: chain.StakeAddress(stakeTest), ReturnKey: governance.Credential{Hash: [28]byte{1}},
 		Withdrawals: []governance.Withdrawal{{Account: chain.StakeAddress(stakeTest), Key: governance.Credential{Script: true}, Amount: 5}}, Anchor: governance.Anchor{URL: "https://x.org/a"}}
 	taf, _ := fakeActionFiles{}.BuildActionFile(ta)
-	rt.store.files[ports.Ref{Name: "t_1", Kind: ports.GovActionFile}] = taf.Envelope
+	rt.store.files[ports.NamedRef{Name: "t_1", Kind: ports.GovActionFile}] = taf.Envelope
 	if err := run(rt, good, false, "t_1.action"); !errors.Is(err, ErrNeedsKeyCredential) {
 		t.Errorf("script receiver: %v", err)
 	}
 	rt.nothingWritten(t)
 	// A missing signing key or address file, an old protocol, a declined confirmation and a too large transaction.
 	for name, mut := range map[string]func(*rig){
-		"no skey":      func(x *rig) { delete(x.store.files, ports.Ref{Name: "w.payment", Kind: ports.AddrSKey}) },
-		"no addr":      func(x *rig) { delete(x.store.files, ports.Ref{Name: "w.payment", Kind: ports.AddrFile}) },
+		"no skey":      func(x *rig) { delete(x.store.files, ports.NamedRef{Name: "w.payment", Kind: ports.AddrSKey}) },
+		"no addr":      func(x *rig) { delete(x.store.files, ports.NamedRef{Name: "w.payment", Kind: ports.AddrFile}) },
 		"old protocol": func(x *rig) { x.chain.params.ProtocolMajor = 8 },
 		"declined":     func(x *rig) { x.conf.yes = false },
 		"too large":    func(x *rig) { x.chain.params.MaxTxSize = 50 },
@@ -435,7 +435,7 @@ func TestRegisterActionRefusals(t *testing.T) {
 	rs := newRig(t)
 	a := governance.Action{Kind: governance.InfoAction, Deposit: 1, Return: chain.StakeAddress(stakeTest), ReturnKey: governance.Credential{Script: true}, Anchor: governance.Anchor{URL: "https://x.org/a"}}
 	af, _ := fakeActionFiles{}.BuildActionFile(a)
-	rs.store.files[ports.Ref{Name: "s_1", Kind: ports.GovActionFile}] = af.Envelope
+	rs.store.files[ports.NamedRef{Name: "s_1", Kind: ports.GovActionFile}] = af.Envelope
 	if err := run(rs, good, false, "s_1.action"); !errors.Is(err, ErrNeedsKeyCredential) {
 		t.Errorf("script credential: %v", err)
 	}

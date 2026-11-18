@@ -45,7 +45,7 @@ func keyID(t *testing.T, b byte) identity.Ref {
 // spec: SPO-Xidentity-IF-001, SPO-Xidentity-INV-016
 func TestDirectoryPreferenceHardwareThenVaultThenRemote(t *testing.T) {
 	id := keyID(t, 1)
-	idx := fixedIndex{{Role: custody.RolePayment, Identity: id, Name: "w", HasSecret: true, HasHardware: true}}
+	idx := fixedIndex{{Role: custody.RolePayment, Identity: id, HasSecret: true, HasHardware: true}}
 	hw := namedSigner{"device"}
 	remote := Remote{Party: []byte{1}, Holds: func(r identity.Ref) bool { return r == id }, Signer: namedSigner{"party"}}
 	d := Signers{Vault: &stubVault{}, Keys: idx, Hardware: hw, Remotes: []Remote{remote}}
@@ -83,7 +83,7 @@ func TestDirectoryPreferenceHardwareThenVaultThenRemote(t *testing.T) {
 		t.Errorf("an unheld key: %v", err)
 	}
 	// A device key with no device connected is the error users already see.
-	d2 := Signers{Vault: &stubVault{}, Keys: fixedIndex{{Role: custody.RolePayment, Identity: id, Name: "w", HasHardware: true}}}
+	d2 := Signers{Vault: &stubVault{}, Keys: fixedIndex{{Role: custody.RolePayment, Identity: id, HasHardware: true}}}
 	if _, err := d2.SignerFor(key); !errors.Is(err, ports.ErrNoHardwareSigner) {
 		t.Errorf("no hardware signer: %v", err)
 	}
@@ -98,8 +98,8 @@ func TestColdRoleIdentityIsNeverDemandedOverANetwork(t *testing.T) {
 	id := keyID(t, 7)
 	// the same verification key is stored as a payment key and as a pool cold key
 	idx := fixedIndex{
-		{Role: custody.RolePayment, Identity: id, Name: "w"},
-		{Role: custody.RolePoolCold, Identity: id, Name: "p"},
+		{Role: custody.RolePayment, Identity: id},
+		{Role: custody.RolePoolCold, Identity: id},
 	}
 	holds := func(r identity.Ref) bool { return r == id }
 	net := Signers{Keys: idx, Remotes: []Remote{{Party: []byte{1}, Holds: holds, Signer: namedSigner{"net"}, Network: true}}}
@@ -116,7 +116,7 @@ func TestColdRoleIdentityIsNeverDemandedOverANetwork(t *testing.T) {
 	}
 	// A key never recorded in a cold role goes over a network.
 	other := keyID(t, 8)
-	plain := Signers{Keys: fixedIndex{{Role: custody.RolePayment, Identity: other, Name: "x"}},
+	plain := Signers{Keys: fixedIndex{{Role: custody.RolePayment, Identity: other}},
 		Remotes: []Remote{{Party: []byte{1}, Holds: func(r identity.Ref) bool { return r == other }, Signer: namedSigner{"net"}, Network: true}}}
 	if conn, err := plain.Connected(custody.KeyRef{Role: custody.RolePayment, Identity: other}); err != nil || len(conn) != 1 {
 		t.Errorf("a non-cold key over a network: %v %v", conn, err)
@@ -132,4 +132,27 @@ type stubVault struct{}
 
 func (*stubVault) Open(context.Context, ports.Ref) (*secret.Buffer, error) {
 	return nil, errors.New("stub")
+}
+
+// RoleHistory implements ports.KeyIndex: the roles of the homes the index holds
+// for the identity, as a stored history would list them.
+func (f fixedIndex) RoleHistory(_ context.Context, id identity.Ref) (custody.RoleHistory, bool, error) {
+	var h custody.RoleHistory
+	ok := false
+	for _, home := range f {
+		if home.Identity != id {
+			continue
+		}
+		var err error
+		if !ok {
+			h, err = custody.NewRoleHistory(id, home.Role)
+		} else {
+			h, err = h.With(home.Role)
+		}
+		if err != nil {
+			return custody.RoleHistory{}, false, err
+		}
+		ok = true
+	}
+	return h, ok, nil
 }

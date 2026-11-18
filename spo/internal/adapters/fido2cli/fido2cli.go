@@ -55,7 +55,10 @@ type Source struct {
 	Rand io.Reader
 }
 
-var _ ports.FactorSource = (*Source)(nil)
+var (
+	_ ports.FactorSource = (*Source)(nil)
+	_ ports.PINChecker   = (*Source)(nil)
+)
 
 func (s *Source) rng() io.Reader {
 	if s.Rand != nil {
@@ -402,8 +405,51 @@ func (s *Source) Enrol(ctx context.Context, req ports.EnrolRequest) (ports.Enrol
 	return en, nil
 }
 
+// CheckPIN implements ports.PINChecker: it asks the authenticator to verify the
+// PIN with an assertion, with user presence off, for a credential id that cannot
+// exist. libfido2 gets the PIN token first, so a wrong PIN is refused with
+// ErrFactorPIN; a right one reaches the credential lookup and ends with
+// FIDO_ERR_NO_CREDENTIALS, which means "PIN verified". No credential is made and
+// no touch is asked for. (Order and the absence of a touch: read from the CTAP
+// 2.1 flow as libfido2 implements it; unconfirmed on a device, see the
+// real-device checklist.)
+//
+// spec: SPO-Xunlock-IF-006
+func (s *Source) CheckPIN(ctx context.Context, device string, pin *secret.Buffer) error {
+	d, err := s.device(ctx, device)
+	if err != nil {
+		return err
+	}
+	in, err := s.getInfo(ctx, d)
+	if err != nil {
+		return err
+	}
+	prof := in.profile()
+	if err := ports.CheckFactorProfile(prof, ports.NeedsOfSlot&^ports.NeedCredProtect3); err != nil {
+		return err
+	}
+	cred, err := s.random(48)
+	if err != nil {
+		return err
+	}
+	salt, err := s.random(ports.FactorSaltSize)
+	if err != nil {
+		return err
+	}
+	a, err := s.assertRaw(ctx, ports.AssertRequest{Device: d, CredentialID: cred, RPID: "spo.pin-check", Salt: salt, PIN: pin}, prof, true)
+	switch {
+	case err == nil:
+		a.Destroy()
+		return nil
+	case errors.Is(err, ports.ErrFactorNoCredential):
+		return nil
+	}
+	return err
+}
+
 // probe is the touch probe of ADR 0011, "Limit": an assertion with user presence
-// disabled and a PIN token. It runs only with a PIN. Only an answer that returns
+// disabled and a PIN token. It runs with the caller's PIN, and also when the tool
+// prompts for the PIN itself or the authenticator verifies the user. Only an answer that returns
 // an output (whatever its flags) is "touch not enforced", and only a named
 // refusal of the request (FIDO_ERR_UP_REQUIRED, FIDO_ERR_OPERATION_DENIED) is
 // "touch enforced"; a PIN error ends the enrolment; everything else (a
@@ -411,9 +457,6 @@ func (s *Source) Enrol(ctx context.Context, req ports.EnrolRequest) (ports.Enrol
 //
 // spec: SPO-Xunlock-EXT-004, SPO-Xunlock-SEC-004, SPO-Xunlock-OUT-006
 func (s *Source) probe(ctx context.Context, device string, req ports.EnrolRequest, credID []byte, prof ports.FactorProfile) (ports.TouchProbe, error) {
-	if req.PIN == nil {
-		return ports.TouchProbeNotRun, nil
-	}
 	salt, err := s.random(ports.FactorSaltSize)
 	if err != nil {
 		return 0, err

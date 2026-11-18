@@ -171,7 +171,7 @@ func (e env) newKit(t *testing.T, dir string, slot uint64, cliVersion string) ki
 	}
 	k := kit{store: store, file: &transferfile.File{Path: filepath.Join(dir, "offlineTransfer.json"), OfflineCLI: cliVersion}}
 	k.base = stake.Base{Store: store, Addresses: k.led, Params: k.file, Tip: fixedTip{slot}, Utxos: k.file, NetworkID: ports.NetworkTestnet,
-		Pipeline: txflow.Pipeline{Signers: native.Signers{Vault: store}, Min: k.led, Fees: k.led, Bodies: k.led, Assembler: k.led, Queue: k.file,
+		Pipeline: txflow.Pipeline{Signers: native.Signers{Vault: store.Anchor()}, Min: k.led, Fees: k.led, Bodies: k.led, Assembler: k.led, Queue: k.file,
 			Approval: txflow.ApprovalSkip}}
 	return k
 }

@@ -101,7 +101,7 @@ func TestRotationToAnotherNodeKeyIsRefusedAtReceipt(t *testing.T) {
 		t.Fatal(err)
 	}
 	existing := registry(t, s.C)
-	if err := s.C.Store.Update(ctx, func(w ports.Writer) error {
+	if err := s.C.Store.Update(ctx, func(w ports.NamedWriter) error {
 		p, err := party.Enroll(party.Enrollment{Document: parsed, Name: "rogue", Roles: []party.Role{party.RoleSigner}, Confirmation: old.Fingerprint().String()[:19]},
 			existing, s.clock.Now())
 		if err != nil {

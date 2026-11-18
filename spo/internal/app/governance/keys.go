@@ -73,7 +73,7 @@ type keysGenerated struct {
 	auxContent     []byte
 }
 
-func (kit keyKit) run(ctx context.Context, st ports.Store, mn ports.MnemonicGenerator, params ports.ProtocolParametersReader, req GenerateKeysRequest, nm string) (keysGenerated, error) {
+func (kit keyKit) run(ctx context.Context, st ports.NamedStore, mn ports.MnemonicGenerator, params ports.ProtocolParametersReader, req GenerateKeysRequest, nm string) (keysGenerated, error) {
 	var res keysGenerated
 	if req.Account > MaxDerivationIndex || req.Index > MaxDerivationIndex {
 		return res, ErrDerivationRange
@@ -120,18 +120,18 @@ func (kit keyKit) run(ctx context.Context, st ports.Store, mn ports.MnemonicGene
 			return res, ErrProtocolTooOld
 		}
 	}
-	existing := func(r ports.Reader) []ports.Ref {
-		var out []ports.Ref
+	existing := func(r ports.NamedReader) []ports.NamedRef {
+		var out []ports.NamedRef
 		for _, k := range kit.existing {
-			if ok, err := r.Exists(ports.Ref{Name: nm, Kind: k}); err == nil && ok {
-				out = append(out, ports.Ref{Name: nm, Kind: k})
+			if ok, err := r.Exists(ports.NamedRef{Name: nm, Kind: k}); err == nil && ok {
+				out = append(out, ports.NamedRef{Name: nm, Kind: k})
 			}
 		}
 		return out
 	}
-	check := func(r ports.Reader) error {
+	check := func(r ports.NamedReader) error {
 		for _, k := range kit.existing {
-			ref := ports.Ref{Name: nm, Kind: k}
+			ref := ports.NamedRef{Name: nm, Kind: k}
 			ok, err := r.Exists(ref)
 			if err != nil {
 				return err
@@ -141,7 +141,7 @@ func (kit keyKit) run(ctx context.Context, st ports.Store, mn ports.MnemonicGene
 			}
 		}
 		if req.Source == KeysMnemonic {
-			return refuseExisting(r, ports.Ref{Name: nm, Kind: kit.mnemos})
+			return refuseExisting(r, ports.NamedRef{Name: nm, Kind: kit.mnemos})
 		}
 		return nil
 	}
@@ -191,12 +191,19 @@ func (kit keyKit) run(ctx context.Context, st ports.Store, mn ports.MnemonicGene
 	}
 	var file *ports.Secret
 	if words != nil {
-		if file, err = ports.MnemonicFile(words); err != nil {
+		if kit.mnemos == ports.CCColdMnemonics && (req.Account != 0 || req.Index != 0) {
+			// the cold mnemonic records the path it was derived at, so a recovery can
+			// check the recovered words against the key identity
+			file, err = ports.MnemonicFileWithDerivation(words, req.Account, req.Index)
+		} else {
+			file, err = ports.MnemonicFile(words)
+		}
+		if err != nil {
 			return res, err
 		}
 		defer file.Destroy()
 	}
-	err = st.Update(ctx, func(w ports.Writer) error {
+	err = st.Update(ctx, func(w ports.NamedWriter) error {
 		if err := check2(w, kit, nm, req.Replace, existing); err != nil {
 			return err
 		}
@@ -210,21 +217,21 @@ func (kit keyKit) run(ctx context.Context, st ports.Store, mn ports.MnemonicGene
 			}
 		}
 		if file != nil {
-			if err := w.PutSecret(ports.Ref{Name: nm, Kind: kit.mnemos}, file); err != nil {
+			if err := w.PutSecret(ports.NamedRef{Name: nm, Kind: kit.mnemos}, file); err != nil {
 				return err
 			}
 		}
-		if err := w.Put(ports.Ref{Name: nm, Kind: kit.vkey}, pair.VKey); err != nil {
+		if err := w.Put(ports.NamedRef{Name: nm, Kind: kit.vkey}, pair.VKey); err != nil {
 			return err
 		}
 		if onDevice {
-			if err := w.Put(ports.Ref{Name: nm, Kind: kit.hws}, hwsfile); err != nil {
+			if err := w.Put(ports.NamedRef{Name: nm, Kind: kit.hws}, hwsfile); err != nil {
 				return err
 			}
-		} else if err := w.PutSecret(ports.Ref{Name: nm, Kind: kit.skey}, pair.SKey); err != nil {
+		} else if err := w.PutSecret(ports.NamedRef{Name: nm, Kind: kit.skey}, pair.SKey); err != nil {
 			return err
 		}
-		return w.Put(ports.Ref{Name: nm, Kind: kit.aux}, aux)
+		return w.Put(ports.NamedRef{Name: nm, Kind: kit.aux}, aux)
 	})
 	if err != nil {
 		return res, err
@@ -234,14 +241,14 @@ func (kit keyKit) run(ctx context.Context, st ports.Store, mn ports.MnemonicGene
 }
 
 // check2 repeats the refusal inside the update, so a concurrent change cannot slip in.
-func check2(w ports.Writer, kit keyKit, nm string, replace bool, _ func(ports.Reader) []ports.Ref) error {
+func check2(w ports.NamedWriter, kit keyKit, nm string, replace bool, _ func(ports.NamedReader) []ports.NamedRef) error {
 	if replace {
 		return nil
 	}
-	return refuseExisting(w, func() []ports.Ref {
-		var out []ports.Ref
+	return refuseExisting(w, func() []ports.NamedRef {
+		var out []ports.NamedRef
 		for _, k := range kit.existing {
-			out = append(out, ports.Ref{Name: nm, Kind: k})
+			out = append(out, ports.NamedRef{Name: nm, Kind: k})
 		}
 		return out
 	}()...)
@@ -255,7 +262,7 @@ func check2(w ports.Writer, kit keyKit, nm string, replace bool, _ func(ports.Re
 // (upstream leaves orphans after a failure, SPO-21a-PRE-004 port note). The
 // mnemonic is stored as a secret and never returned.
 type GenerateDRepKeys struct {
-	Store     ports.Store
+	Store     ports.NamedStore
 	Keys      ports.DRepKeyGenerator  // KeysRandom
 	Deriver   ports.GovernanceDeriver // KeysMnemonic
 	Mnemonics ports.MnemonicGenerator // KeysMnemonic without given words
@@ -329,7 +336,7 @@ func hashFile(h [28]byte) ([]byte, error) { return []byte(hex.EncodeToString(h[:
 // (upstream 23a, software key types): `<com>.cc-cold.vkey`, `.skey`, `.hash`
 // and, for a mnemonic key, `.mnemonics` (path role 4).
 type GenerateCommitteeColdKeys struct {
-	Store     ports.Store
+	Store     ports.NamedStore
 	Keys      ports.CommitteeColdKeyGenerator
 	Deriver   ports.GovernanceDeriver
 	Mnemonics ports.MnemonicGenerator
@@ -369,7 +376,7 @@ func (uc GenerateCommitteeColdKeys) Run(ctx context.Context, req GenerateKeysReq
 // replaced only on Replace (the answer to upstream's prompt, default No), and
 // the replacement removes the signing key too.
 type GenerateCommitteeHotKeys struct {
-	Store     ports.Store
+	Store     ports.NamedStore
 	Keys      ports.CommitteeHotKeyGenerator
 	Deriver   ports.GovernanceDeriver
 	Mnemonics ports.MnemonicGenerator

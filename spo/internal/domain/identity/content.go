@@ -36,6 +36,8 @@ const (
 	// Tags of kinds that have no owner; their fixed anchor is OwnerlessAnchor.
 	TagWorkspaceSettings Tag = "spo/obj/v1/workspace-settings"
 	TagProviderToken     Tag = "spo/obj/v1/provider-token"
+	// TagNamedRecord anchors a record keyed by a string (NamedAnchor).
+	TagNamedRecord Tag = "spo/obj/v1/named-record"
 )
 
 var tags = map[Tag]Kind{
@@ -50,6 +52,7 @@ var tags = map[Tag]Kind{
 	TagLabel:             KindLabel,
 	TagWorkspaceSettings: KindWorkspaceSettings,
 	TagProviderToken:     KindProviderToken,
+	TagNamedRecord:       KindNamedRecord,
 }
 
 // Tags lists the registered tags, sorted.
@@ -172,4 +175,30 @@ func only(r Ref, k Kind) (Ref, error) {
 		return Ref{}, err
 	}
 	return r, nil
+}
+
+// GroupLabelAnchor is LabelAnchor for a group that is not a kind of owner: the
+// content hash of [TagLabel, [group, name]]. The groups are the store kinds of
+// records keyed by a string (NamedAnchor); they cannot equal a kind of owner,
+// which LabelAnchor takes, because the names of both sets differ.
+func GroupLabelAnchor(group, name string) (Ref, error) {
+	for _, k := range OwnerKinds() {
+		if string(k) == group {
+			return Ref{}, fmt.Errorf("identity: %q is a kind of owner, not a group of named records", group)
+		}
+	}
+	if group == "" {
+		return Ref{}, fmt.Errorf("identity: a group needs a name")
+	}
+	return ContentOf(TagLabel, []any{group, name})
+}
+
+// NamedAnchor is the anchor of a record keyed by a string and owned by no
+// one: the content hash of [TagNamedRecord, [kind, name]] where kind is the
+// store kind of the record.
+func NamedAnchor(kind, name string) (Ref, error) {
+	if kind == "" {
+		return Ref{}, fmt.Errorf("identity: a named record needs a kind")
+	}
+	return ContentOf(TagNamedRecord, []any{kind, name})
 }

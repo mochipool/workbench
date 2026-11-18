@@ -5,6 +5,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"sort"
 
 	"github.com/spf13/cobra"
@@ -22,7 +23,12 @@ func NewRoot(d Deps) *cobra.Command {
 		SilenceErrors: true,
 		// A descriptor that is to receive a secret must be a pipe or a socket,
 		// and is refused before the command does anything (secretout.go).
-		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error { return checkSecretOutFlags(cmd) },
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			if err := a.checkUnlockScope(cmd); err != nil {
+				return err
+			}
+			return checkSecretOutFlags(cmd)
+		},
 	}
 	root.SetOut(d.Out)
 	root.SetErr(d.Err)
@@ -37,6 +43,14 @@ func NewRoot(d Deps) *cobra.Command {
 	root.PersistentFlags().IntVar(&a.passFD, "passphrase-fd", -1,
 		"read the workspace passphrase from this inherited file descriptor (trailing newline stripped) instead of prompting; there is no passphrase flag or variable")
 
+	root.PersistentFlags().IntVar(&a.coldFD, "cold-passphrase-fd", -1,
+		"read the cold-key passphrase (the sub-key of cold-role keys under the standard policy; not the workspace passphrase) from this inherited file descriptor instead of prompting")
+	root.PersistentFlags().IntVar(&a.newColdFD, "new-cold-passphrase-fd", -1,
+		"read the NEW cold-key passphrase of a rotation from this inherited file descriptor instead of prompting")
+	root.PersistentFlags().StringVar(&a.unlock, "unlock", "",
+		"how to unlock the workspace: passphrase, fido2 (a daily authenticator) or recovery-composite (the recovery key typed at a prompt AND the second authenticator) (default: the passphrase when the workspace has a passphrase slot, else fido2)")
+	root.PersistentFlags().StringVar(&a.fido2Device, "fido2-device", "", "the FIDO2 authenticator to use (a device path as fido2-token -L prints it); default: the only one connected")
+	root.PersistentFlags().IntVar(&a.fido2PinFD, "fido2-pin-fd", -1, "read the authenticator PIN from this inherited file descriptor instead of prompting")
 	root.PersistentFlags().BoolVar(&a.acceptRollback, "accept-rollback", false,
 		"open a workspace file that is older than its recorded state (a deliberate restore of an older backup); never saved, and a warning is printed when used")
 
@@ -67,14 +81,16 @@ func NewRoot(d Deps) *cobra.Command {
 	poolCmd.AddCommand(a.poolKeysCommand(), a.vrfCommand(), a.kesCommand(), a.opcertCommand(),
 		a.poolDescriptorCommand(), a.poolCertCommand(), a.poolMetadataCommand(), a.poolRegisterCommand(), a.poolWitnessCommand(),
 		a.poolBLSCommand(), a.poolStatusCommand(), a.poolRetireCertCommand(), a.poolRetireCommand(), a.poolCalidusCommand(),
-		a.poolImportCommand(), a.poolExportInfoCommand())
+		a.poolImportCommand(), a.poolExportInfoCommand(),
+		a.renameCommand(identity.OwnerPool, "pool"), a.mergeCommand(identity.OwnerPool, "pool"))
 	root.AddCommand(poolCmd)
 	root.AddCommand(a.walletCommand(), a.stakeCommand(), a.offlineCommand(), a.addressCommand(), a.txCommand())
 	root.AddCommand(a.drepCommand(), a.committeeCommand(), a.voteCommand(), a.actionCommand())
 	assetCmd := a.assetCommand()
 	assetCmd.AddCommand(a.assetMetaCommand())
-	root.AddCommand(a.policyCommand(), assetCmd, a.workspaceCommand(), a.keyCommand(), a.catalystCommand(), a.pollCommand(), a.partyCommand())
+	root.AddCommand(a.policyCommand(), assetCmd, a.workspaceCommand(), a.keyCommand(), a.catalystCommand(), a.pollCommand(), a.partyCommand(), a.nodeCommand())
 	explainAll(root, d.MapError)
+	a.cleanupAfterEveryCommand(root)
 	return root
 }
 

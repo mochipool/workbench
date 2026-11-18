@@ -73,14 +73,14 @@ func (w *world) policy(name string, lifetime uint64) assets.PolicyGenerated {
 }
 
 func (w *world) gen() GenerateTokenMetadata {
-	return GenerateTokenMetadata{Store: w.store, Signers: native.RegistrySigners{Vault: w.store}, Clock: w.clock, Logos: w.logos}
+	return GenerateTokenMetadata{Store: w.store, Signers: native.RegistrySigners{Vault: w.store.Anchor()}, Clock: w.clock, Logos: w.logos}
 }
 
-func (w *world) read(ref ports.Ref) ([]byte, bool) {
+func (w *world) read(ref ports.NamedRef) ([]byte, bool) {
 	w.t.Helper()
 	var b []byte
 	var ok bool
-	if err := w.store.View(context.Background(), func(r ports.Reader) error {
+	if err := w.store.View(context.Background(), func(r ports.NamedReader) error {
 		v, err := r.Get(ref)
 		if errors.Is(err, ports.ErrNotFound) {
 			return nil
@@ -95,7 +95,7 @@ func (w *world) read(ref ports.Ref) ([]byte, bool) {
 
 func (w *world) record(name string) dassets.Record {
 	w.t.Helper()
-	b, ok := w.read(ports.Ref{Name: name, Kind: ports.AssetFile})
+	b, ok := w.read(ports.NamedRef{Name: name, Kind: ports.AssetFile})
 	if !ok {
 		w.t.Fatalf("no record %s", name)
 	}
@@ -113,8 +113,8 @@ func (w *world) edit(name string, kv map[string]string) {
 	for k, v := range kv {
 		r.Set(k, v)
 	}
-	if err := w.store.Update(context.Background(), func(wr ports.Writer) error {
-		return wr.Put(ports.Ref{Name: name, Kind: ports.AssetFile}, r.Marshal())
+	if err := w.store.Update(context.Background(), func(wr ports.NamedWriter) error {
+		return wr.Put(ports.NamedRef{Name: name, Kind: ports.AssetFile}, r.Marshal())
 	}); err != nil {
 		w.t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestFirstRunCreatesTheRecordAndStops(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Created || res.Sequence != 0 || res.File != (ports.Ref{}) {
+	if !res.Created || res.Sequence != 0 || res.File != (ports.NamedRef{}) {
 		t.Fatalf("result: %+v", res)
 	}
 	rec := w.record("tok.MYTOKEN")
@@ -149,7 +149,7 @@ func TestFirstRunCreatesTheRecordAndStops(t *testing.T) {
 			t.Errorf("%s = %q, want %q", k, rec.Get(k), v)
 		}
 	}
-	if _, ok := w.read(ports.Ref{Name: res.Subject, Kind: ports.TokenRegistration}); ok {
+	if _, ok := w.read(ports.NamedRef{Name: res.Subject, Kind: ports.TokenRegistration}); ok {
 		t.Error("the first run wrote a submission file")
 	}
 	// A {hex} name keeps its hex in hexname and reads hex-<hex> in the store.
@@ -283,8 +283,8 @@ func TestNormaliseAddsDecimalsZeroAndKeepsExistingKeys(t *testing.T) {
 	skel.Set("custom", "kept")
 	skel.Set("metaName", "Alpha")
 	skel.Set("metaDescription", "desc")
-	if err := w.store.Update(context.Background(), func(wr ports.Writer) error {
-		return wr.Put(ports.Ref{Name: "tok.A", Kind: ports.AssetFile}, skel.Marshal())
+	if err := w.store.Update(context.Background(), func(wr ports.NamedWriter) error {
+		return wr.Put(ports.NamedRef{Name: "tok.A", Kind: ports.AssetFile}, skel.Marshal())
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +315,7 @@ func TestInvalidFieldRefusedRecordUntouched(t *testing.T) {
 		t.Fatal(err)
 	}
 	w.fill("tok.A")
-	ref := ports.Ref{Name: "tok.A", Kind: ports.AssetFile}
+	ref := ports.NamedRef{Name: "tok.A", Kind: ports.AssetFile}
 	cases := []struct {
 		name string
 		kv   map[string]string
@@ -370,22 +370,22 @@ func TestPolicyFilesAndHardwareRefusal(t *testing.T) {
 	}
 	w.fill("tok.A")
 	// A hardware signing file: refused before the signing key is looked at, and nothing is written.
-	if err := w.store.Update(context.Background(), func(wr ports.Writer) error {
-		return wr.Put(ports.Ref{Name: "tok", Kind: ports.PolicyHwsFile}, []byte("{}\n"))
+	if err := w.store.Update(context.Background(), func(wr ports.NamedWriter) error {
+		return wr.Put(ports.NamedRef{Name: "tok", Kind: ports.PolicyHwsFile}, []byte("{}\n"))
 	}); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := w.read(ports.Ref{Name: "tok.A", Kind: ports.AssetFile})
+	before, _ := w.read(ports.NamedRef{Name: "tok.A", Kind: ports.AssetFile})
 	_, err := w.gen().Run(context.Background(), GenerateRequest{Asset: "tok.A"})
 	if err == nil || !strings.Contains(err.Error(), "hardware") {
 		t.Fatalf("hardware policy: %v", err)
 	}
-	if after, _ := w.read(ports.Ref{Name: "tok.A", Kind: ports.AssetFile}); !bytes.Equal(before, after) {
+	if after, _ := w.read(ports.NamedRef{Name: "tok.A", Kind: ports.AssetFile}); !bytes.Equal(before, after) {
 		t.Error("the record changed")
 	}
 	// A directory that has a registry signer for hardware would be planned, not refused blind: a
 	// profile without the operation is refused by the plan.
-	if _, err := (GenerateTokenMetadata{Store: w.store, Signers: native.NewSignatureSigners(w.store), Clock: w.clock}).
+	if _, err := (GenerateTokenMetadata{Store: w.store, Signers: native.NewSignatureSigners(w.store.Anchor()), Clock: w.clock}).
 		Run(context.Background(), GenerateRequest{Asset: "tok.A"}); err == nil {
 		t.Error("a directory without the registry capability signed")
 	}

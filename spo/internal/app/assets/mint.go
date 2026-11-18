@@ -45,7 +45,7 @@ var (
 // address, build a body with a mint field and two witnesses, and update the
 // asset record. Exactly one of Submitter and Queue is set.
 type Base struct {
-	Store     ports.Store
+	Store     ports.NamedStore
 	Signers   ports.SignerDirectory
 	Utxos     ports.UtxoReader
 	Params    ports.ProtocolParametersReader
@@ -177,10 +177,10 @@ func (b Base) run(ctx context.Context, req Request, burn bool) (Result, error) {
 	var polHash txbuild.KeyHash
 	var polKey custody.KeyRef
 	var payer payerInfo
-	if err := b.Store.View(ctx, func(r ports.Reader) error {
+	if err := b.Store.View(ctx, func(r ports.NamedReader) error {
 		// spec: SPO-11a-IN-001, SPO-11a-IN-002, SPO-11b-IN-001
 		get := func(k ports.Kind) ([]byte, error) {
-			v, err := r.Get(ports.Ref{Name: policyName, Kind: k})
+			v, err := r.Get(ports.NamedRef{Name: policyName, Kind: k})
 			if errors.Is(err, ports.ErrNotFound) {
 				return nil, fmt.Errorf("%w: %s.%s is missing; create the policy first", ErrPolicyFiles, policyName, k)
 			}
@@ -217,7 +217,7 @@ func (b Base) run(ctx context.Context, req Request, burn bool) (Result, error) {
 		}
 		polHash = txbuild.HashKey(raw)
 
-		ab, err := r.Get(ports.Ref{Name: payerName, Kind: ports.AddrFile})
+		ab, err := r.Get(ports.NamedRef{Name: payerName, Kind: ports.AddrFile})
 		if err != nil {
 			if errors.Is(err, ports.ErrNotFound) {
 				return fmt.Errorf("%w: %s.addr", ErrNoPayer, payerName)
@@ -394,8 +394,8 @@ func (b Base) run(ctx context.Context, req Request, burn bool) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	pending := ports.Ref{Name: bal.Body.ID.String(), Kind: ports.PendingUpdate}
-	if err := b.Store.Update(ctx, func(w ports.Writer) error { return w.Put(pending, pb) }); err != nil {
+	pending := ports.NamedRef{Name: bal.Body.ID.String(), Kind: ports.PendingUpdate}
+	if err := b.Store.Update(ctx, func(w ports.NamedWriter) error { return w.Put(pending, pb) }); err != nil {
 		return Result{}, fmt.Errorf("keep the asset record update until the transaction is confirmed: %w", err)
 	}
 	if b.Queue != nil {
@@ -413,7 +413,7 @@ func (b Base) run(ctx context.Context, req Request, burn bool) (Result, error) {
 		if b.Queue == nil && errors.Is(err, chain.ErrSubmitOutcomeUnknown) {
 			return Result{}, fmt.Errorf("%w\nThe update of the asset record %s stays pending under transaction %s: spo tx settle applies it once the transaction is confirmed, and drops it when it has expired", err, record, bal.Body.ID)
 		}
-		_ = b.Store.Update(ctx, func(w ports.Writer) error { return w.Delete(pending) })
+		_ = b.Store.Update(ctx, func(w ports.NamedWriter) error { return w.Delete(pending) })
 		return Result{}, err
 	}
 	return Result{Result: res, PolicyID: idHex, Record: record, Expiry: expiry, Limited: limited, RecordPending: true}, nil

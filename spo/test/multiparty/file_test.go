@@ -262,9 +262,9 @@ func TestUpstreamWitnessFileIsMarkedUnauthenticated(t *testing.T) {
 	// file the coordinator wrote, sign its body id, put the witness in it.
 	name := pool.TransferFileName("mypool", "bob", opened.CollectionID)
 	var raw []byte
-	if err := w.C.Store.View(ctx, func(r ports.Reader) error {
+	if err := w.C.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
-		raw, err = r.Get(ports.Ref{Name: name, Kind: ports.PoolWitnessFile})
+		raw, err = r.Get(ports.NamedRef{Name: name, Kind: ports.PoolWitnessFile})
 		return err
 	}); err != nil {
 		t.Fatal(err)

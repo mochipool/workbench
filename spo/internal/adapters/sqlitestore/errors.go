@@ -53,6 +53,13 @@ var (
 	// without its shared file lock, so another process may now replace or
 	// rekey the file. Every later operation except Close returns it.
 	ErrLockLost = errors.New("sqlitestore: this handle lost its file lock; close it and open the workspace again")
+	// ErrLegacyFormat: the file is a store of format version 1, which keys its
+	// records by the operator's names. This version opens format 2 (records keyed
+	// by anchor identity, ADR 0010); `spo workspace migrate` converts the file.
+	ErrLegacyFormat = errors.New("sqlitestore: this workspace is in the old format (version 1, records keyed by name); this version reads format 3. Convert it with: spo workspace migrate")
+	// ErrNotLegacy: the file is already in the current format, so there is
+	// nothing to migrate.
+	ErrNotLegacy = errors.New("sqlitestore: this workspace is already in the current format; there is nothing to migrate")
 	// ErrRolledBack: the workspace file is older than the last state recorded
 	// in its head file (see OpenOptions.AcceptRollback).
 	ErrRolledBack = errors.New("sqlitestore: the workspace file is older than the last recorded state; it may have been replaced by an older copy. If you restored an older backup on purpose, open it with AcceptRollback")

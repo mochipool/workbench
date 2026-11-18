@@ -17,7 +17,7 @@ import (
 type CheckStakeAddress struct {
 	// Store resolves a name to its `<name>.staking.addr`; nil means only
 	// literal addresses are accepted.
-	Store     ports.Store
+	Store     ports.NamedStore
 	Addresses ports.AddressInspector
 	Account   ports.RewardAccountReader
 	// Pools adds the pool's name and ticker when the account is delegated
@@ -58,8 +58,8 @@ func (uc CheckStakeAddress) Run(ctx context.Context, word string) (StakeStatus, 
 		name := strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(word, "./"), ".addr"), ".staking")
 		if name != "" && !strings.ContainsAny(name, "/\\") {
 			var found bool
-			err := uc.Store.View(ctx, func(r ports.Reader) error {
-				b, err := r.Get(ports.Ref{Name: name, Kind: ports.StakingAddr})
+			err := uc.Store.View(ctx, func(r ports.NamedReader) error {
+				b, err := r.Get(ports.NamedRef{Name: name, Kind: ports.StakingAddr})
 				if errors.Is(err, ports.ErrNotFound) {
 					return nil
 				}

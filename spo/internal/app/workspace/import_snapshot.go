@@ -26,8 +26,8 @@ type wsSnapshot struct {
 // content of the non-secret ones for the owners the run names.
 type wsOwner struct {
 	name string
-	refs map[ports.Ref]bool
-	data map[ports.Ref][]byte
+	refs map[ports.NamedRef]bool
+	data map[ports.NamedRef][]byte
 }
 
 func (s *wsSnapshot) owner(name string) *wsOwner {
@@ -52,7 +52,7 @@ func (s *wsSnapshot) sameFolded(name string) []string {
 	return out
 }
 
-func (s *wsSnapshot) has(r ports.Ref) bool {
+func (s *wsSnapshot) has(r ports.NamedRef) bool {
 	if s == nil {
 		return false
 	}
@@ -60,7 +60,7 @@ func (s *wsSnapshot) has(r ports.Ref) bool {
 	return o != nil && o.refs[r]
 }
 
-func (s *wsSnapshot) get(r ports.Ref) ([]byte, bool) {
+func (s *wsSnapshot) get(r ports.NamedRef) ([]byte, bool) {
 	if s == nil {
 		return nil, false
 	}
@@ -73,13 +73,13 @@ func (s *wsSnapshot) get(r ports.Ref) ([]byte, bool) {
 }
 
 func (s *wsSnapshot) hasWallet(name string) bool {
-	return s.has(ports.Ref{Name: name, Kind: ports.StakingVKey})
+	return s.has(ports.NamedRef{Name: name, Kind: ports.StakingVKey})
 }
 
 // probeRefs are the artefacts looked for, by name, when the destination cannot
 // list itself.
-func probeRefs(name string) []ports.Ref {
-	return []ports.Ref{
+func probeRefs(name string) []ports.NamedRef {
+	return []ports.NamedRef{
 		{Name: name, Kind: ports.StakingVKey}, {Name: name, Kind: ports.StakingSKey}, {Name: name, Kind: ports.StakingAddr},
 		{Name: name + ".payment", Kind: ports.AddrVKey}, {Name: name + ".payment", Kind: ports.AddrSKey}, {Name: name + ".payment", Kind: ports.AddrFile},
 		{Name: name, Kind: ports.NodeVKey}, {Name: name, Kind: ports.NodeSKey}, {Name: name, Kind: ports.NodeCounter},
@@ -95,14 +95,14 @@ func (u ImportWorkspace) snapshot(ctx context.Context, names []string) (*wsSnaps
 	if u.Dest == nil {
 		return s, nil
 	}
-	add := func(r ports.Ref) {
+	add := func(r ports.NamedRef) {
 		if !ports.IsWorkspaceKind(r.Kind) {
 			return
 		}
 		n := OwnerOf(r)
 		o := s.owners[n]
 		if o == nil {
-			o = &wsOwner{name: n, refs: map[ports.Ref]bool{}, data: map[ports.Ref][]byte{}}
+			o = &wsOwner{name: n, refs: map[ports.NamedRef]bool{}, data: map[ports.NamedRef][]byte{}}
 			s.owners[n] = o
 			s.fold[strings.ToLower(n)] = append(s.fold[strings.ToLower(n)], n)
 		}
@@ -117,7 +117,7 @@ func (u ImportWorkspace) snapshot(ctx context.Context, names []string) (*wsSnaps
 			add(e.Ref)
 		}
 	} else {
-		err := u.Dest.View(ctx, func(rd ports.Reader) error {
+		err := u.Dest.View(ctx, func(rd ports.NamedReader) error {
 			for _, n := range names {
 				for _, r := range probeRefs(n) {
 					if r.Validate() != nil {
@@ -143,7 +143,7 @@ func (u ImportWorkspace) snapshot(ctx context.Context, names []string) (*wsSnaps
 		// the descriptor names the wallets a pool depends on; they are read for
 		// every owner; the owners the run names are read whole.
 		whole := want[strings.ToLower(o.name)]
-		refs := make([]ports.Ref, 0, len(o.refs))
+		refs := make([]ports.NamedRef, 0, len(o.refs))
 		for r := range o.refs {
 			if r.Kind.Secret() {
 				continue
@@ -153,7 +153,7 @@ func (u ImportWorkspace) snapshot(ctx context.Context, names []string) (*wsSnaps
 			}
 		}
 		sort.Slice(refs, func(i, j int) bool { return refs[i].String() < refs[j].String() })
-		err := u.Dest.View(ctx, func(rd ports.Reader) error {
+		err := u.Dest.View(ctx, func(rd ports.NamedReader) error {
 			for _, r := range refs {
 				if b, err := rd.Get(r); err == nil {
 					o.data[r] = b
@@ -179,7 +179,7 @@ func (s *wsSnapshot) conflicts(plan []planned) bool {
 }
 
 func (o *wsOwner) kind() OwnerKind {
-	refs := make([]ports.Ref, 0, len(o.refs))
+	refs := make([]ports.NamedRef, 0, len(o.refs))
 	for r := range o.refs {
 		refs = append(refs, r)
 	}
@@ -192,21 +192,21 @@ func (o *wsOwner) kind() OwnerKind {
 // not belong with (SPO-Xmulti-OUT-011). The incoming artefacts replace existing
 // ones of the same reference. It returns the failures of incoming artefacts by
 // their source reference, and a reason for a failure of an existing artefact.
-func (u ImportWorkspace) checkUnion(ctx context.Context, ws *wsSnapshot, final string, plan []planned) (fails map[ports.Ref]string, general string) {
-	fails = map[ports.Ref]string{}
+func (u ImportWorkspace) checkUnion(ctx context.Context, ws *wsSnapshot, final string, plan []planned) (fails map[ports.NamedRef]string, general string) {
+	fails = map[ports.NamedRef]string{}
 	o := ws.owner(final)
 	if o == nil {
 		return fails, ""
 	}
-	d := ownerData{open: map[ports.Ref][]byte{}, skey: map[ports.Ref]*ports.Secret{}}
-	incoming := map[ports.Ref]ports.Ref{}
+	d := ownerData{open: map[ports.NamedRef][]byte{}, skey: map[ports.NamedRef]*ports.Secret{}}
+	incoming := map[ports.NamedRef]ports.NamedRef{}
 	for _, p := range plan {
 		incoming[p.dst] = p.src
 	}
 	for r, b := range o.data {
 		d.open[r] = b
 	}
-	if v, ok := u.Dest.(ports.Vault); ok {
+	if v, ok := u.Dest.(ports.NamedVault); ok {
 		for r := range o.refs {
 			if _, in := incoming[r]; in || !r.Kind.IsSigningKey() {
 				continue
@@ -257,7 +257,7 @@ func (u ImportWorkspace) commitRun(ctx context.Context, ws *wsSnapshot, names []
 	if len(rows) == 0 {
 		return
 	}
-	err := u.Dest.Update(ctx, func(w ports.Writer) error {
+	err := u.Dest.Update(ctx, func(w ports.NamedWriter) error {
 		if err := verifySnapshot(w, ws, names, plan); err != nil {
 			return err
 		}
@@ -313,11 +313,11 @@ func runReason(err error) string {
 	case errors.Is(err, errConflict):
 		return commitReason(err)
 	}
-	return "the destination could not be written"
+	return "the destination could not be written: " + err.Error()
 }
 
 // verifySnapshot re-reads, inside the transaction, what the run decided from.
-func verifySnapshot(r ports.Reader, ws *wsSnapshot, names []string, plan []planned) error {
+func verifySnapshot(r ports.NamedReader, ws *wsSnapshot, names []string, plan []planned) error {
 	moved := fmt.Errorf("%w", ports.ErrConflict)
 	owners := make([]string, 0, len(ws.owners))
 	for n := range ws.owners {
@@ -326,7 +326,7 @@ func verifySnapshot(r ports.Reader, ws *wsSnapshot, names []string, plan []plann
 	sort.Strings(owners)
 	for _, n := range owners {
 		o := ws.owners[n]
-		refs := make([]ports.Ref, 0, len(o.refs))
+		refs := make([]ports.NamedRef, 0, len(o.refs))
 		for ref := range o.refs {
 			refs = append(refs, ref)
 		}
@@ -354,7 +354,7 @@ func verifySnapshot(r ports.Reader, ws *wsSnapshot, names []string, plan []plann
 	}
 	// What the snapshot did not hold must still be absent: the artefacts of the
 	// plan and the probe set of every name the run looked at.
-	var absent []ports.Ref
+	var absent []ports.NamedRef
 	for _, p := range plan {
 		absent = append(absent, p.dst)
 	}

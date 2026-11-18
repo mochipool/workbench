@@ -16,6 +16,7 @@ import (
 //	recovery key hash = SHA-256("recovery-public-key")
 //	fido2 factor: kind 3, id = 0xaa * 32, credential id = bytes 1..48,
 //	              rp id = "spo." + hex(nonce), hmac salt = 0x33 * 32,
+//	              touch probe result = 1 (enforced),
 //	              output = 0x44 * 32
 //	passphrase factor: kind 1, id = 0x01 * 16, Argon2id 65536 KiB / 3 / 1,
 //	              salt = 0x77 * 16, output = 0x55 * 32
@@ -35,11 +36,11 @@ const (
 
 	vecFIDOKey    = "f81b841f7a37f95455f213972244e98d90d943fdba63709aef5b9b5481b2cf83"
 	vecFIDOCommit = "b9a286d69728c76d4249bfa7e071ccf227b7650f92ffce0f987a201e037c022e"
-	vecFIDOAD     = "886b73706f2f736c6f742d616402501111111111111111111111111111111150222222222222222222222222222222226a6669646f322d686d61638183035820aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa8358300102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30782473706f2e313131313131313131313131313131313131313131313131313131313131313158203333333333333333333333333333333333333333333333333333333333333333582077126485148c9a2ab5672d9ae560db53ea3707237268f67958d53808be810b4d5820b9a286d69728c76d4249bfa7e071ccf227b7650f92ffce0f987a201e037c022e"
+	vecFIDOAD     = "886b73706f2f736c6f742d616402501111111111111111111111111111111150222222222222222222222222222222226a6669646f322d686d61638183035820aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa8458300102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30782473706f2e31313131313131313131313131313131313131313131313131313131313131315820333333333333333333333333333333333333333333333333333333333333333301582077126485148c9a2ab5672d9ae560db53ea3707237268f67958d53808be810b4d5820b9a286d69728c76d4249bfa7e071ccf227b7650f92ffce0f987a201e037c022e"
 
 	vecCompKey    = "d980cdc143d26b8df0d157f39771fdf7643555b9ef6a7e8e49b267b4c0637e9f"
 	vecCompCommit = "82fb9cee78cdd1d69fe493a22d25acaa2aa3bae520a75d06ca3e345a4df097eb"
-	vecCompAD     = "886b73706f2f736c6f742d6164025011111111111111111111111111111111502222222222222222222222222222222269636f6d706f73697465828301500101010101010101010101010101010185686172676f6e3269641a000100000301507777777777777777777777777777777783035820aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa8358300102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30782473706f2e313131313131313131313131313131313131313131313131313131313131313158203333333333333333333333333333333333333333333333333333333333333333582077126485148c9a2ab5672d9ae560db53ea3707237268f67958d53808be810b4d582082fb9cee78cdd1d69fe493a22d25acaa2aa3bae520a75d06ca3e345a4df097eb"
+	vecCompAD     = "886b73706f2f736c6f742d6164025011111111111111111111111111111111502222222222222222222222222222222269636f6d706f73697465828301500101010101010101010101010101010185686172676f6e3269641a000100000301507777777777777777777777777777777783035820aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa8458300102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30782473706f2e31313131313131313131313131313131313131313131313131313131313131315820333333333333333333333333333333333333333333333333333333333333333301582077126485148c9a2ab5672d9ae560db53ea3707237268f67958d53808be810b4d582082fb9cee78cdd1d69fe493a22d25acaa2aa3bae520a75d06ca3e345a4df097eb"
 
 	// cold sub-key of a composite: outputs 0x55*32 then 0x44*32 (passphrase, fido2)
 	// IKM = be32(32) || 0x55*32 || be32(32) || 0x44*32, same salt and info
@@ -56,7 +57,7 @@ func fidoParams() FactorParams {
 		cred[i] = byte(i + 1)
 	}
 	return FactorParams{Kind: FactorFIDO2, ID: rep(0xaa, 32), CredentialID: cred,
-		RPID: "spo." + hex.EncodeToString(rep(0x11, 16)), HMACSalt: rep(0x33, 32)}
+		RPID: "spo." + hex.EncodeToString(rep(0x11, 16)), HMACSalt: rep(0x33, 32), Touch: 1}
 }
 
 func passParams() FactorParams {
@@ -234,12 +235,13 @@ func TestSlotKeySeparation(t *testing.T) {
 	}
 	m.Destroy()
 	for name, mut := range map[string]func(*SlotSpec){
-		"recovery key hash": func(s *SlotSpec) { s.RecoveryPubKeyHash = rep(9, 32) },
-		"hmac-secret salt":  func(s *SlotSpec) { s.Factors[1].HMACSalt = rep(0x34, 32) },
-		"credential id":     func(s *SlotSpec) { s.Factors[1].CredentialID = rep(1, 48) },
-		"relying-party id":  func(s *SlotSpec) { s.Factors[1].RPID = "spo.other" },
-		"argon2id salt":     func(s *SlotSpec) { s.Factors[0].KDFSalt = rep(0x78, 16) },
-		"argon2id passes":   func(s *SlotSpec) { s.Factors[0].KDF.Passes = 4 },
+		"recovery key hash":  func(s *SlotSpec) { s.RecoveryPubKeyHash = rep(9, 32) },
+		"hmac-secret salt":   func(s *SlotSpec) { s.Factors[1].HMACSalt = rep(0x34, 32) },
+		"touch probe result": func(s *SlotSpec) { s.Factors[1].Touch = 2 }, // spec: SPO-Xunlock-SEC-004
+		"credential id":      func(s *SlotSpec) { s.Factors[1].CredentialID = rep(1, 48) },
+		"relying-party id":   func(s *SlotSpec) { s.Factors[1].RPID = "spo.other" },
+		"argon2id salt":      func(s *SlotSpec) { s.Factors[0].KDFSalt = rep(0x78, 16) },
+		"argon2id passes":    func(s *SlotSpec) { s.Factors[0].KDF.Passes = 4 },
 	} {
 		bad := slot
 		bad.Spec = compSpec()
@@ -457,5 +459,58 @@ func TestSlotWithNoRecoveryKeyHashOpens(t *testing.T) {
 	withHash.Spec.RecoveryPubKeyHash = rep(9, 32)
 	if _, err := withHash.Unwrap(o); !errors.Is(err, ErrAuth) {
 		t.Fatalf("a hash added to a slot that had none: %v", err)
+	}
+}
+
+// The policy is bound in the associated data of a slot of store format 3 (both
+// the factor kinds and the passphrase and recovery kinds): a slot opens only
+// under the policy it was made under.
+//
+// spec: SPO-Xunlock-OUT-011
+func TestSlotPolicyIsBoundInAssociatedData(t *testing.T) {
+	master, _ := NewMasterKey()
+	defer master.Destroy()
+	o := outs(rep(0x44, 32))
+	defer destroy(o)
+	s := fidoSpec()
+	s.Policy = "hardware"
+	slot, err := NewFactorSlot(s, o, master)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := slot.Unwrap(o); err != nil {
+		t.Fatal(err)
+	} else {
+		m.Destroy()
+	}
+	for _, other := range []string{"standard", "strict", ""} {
+		changed := slot
+		changed.Spec.Policy = other
+		if _, err := changed.Unwrap(o); !errors.Is(err, ErrAuth) {
+			t.Errorf("policy %q: %v", other, err)
+		}
+	}
+	ws, id := rep(1, IDSize), rep(2, IDSize)
+	pw := secret.Take([]byte("pw"))
+	ps, err := NewBoundPassphraseSlot(ws, id, master, pw, MinKDF(), SlotBinding{Policy: "standard", RecoveryPubKeyHash: rep(9, 32)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := ps.Unwrap(ws, secret.Take([]byte("pw"))); err != nil {
+		t.Fatal(err)
+	} else {
+		m.Destroy()
+	}
+	for name, b := range map[string]*SlotBinding{
+		"another policy": {Policy: "hardware", RecoveryPubKeyHash: rep(9, 32)},
+		"another hash":   {Policy: "standard", RecoveryPubKeyHash: rep(8, 32)},
+		"no hash":        {Policy: "standard"},
+		"legacy":         nil,
+	} {
+		c := ps
+		c.Binding = b
+		if _, err := c.Unwrap(ws, secret.Take([]byte("pw"))); !errors.Is(err, ErrAuth) {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }

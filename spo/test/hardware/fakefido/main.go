@@ -67,6 +67,8 @@ type config struct {
 	Devices []string `json:"devices"`
 	// PIN is the authenticator's PIN; empty means it has none.
 	PIN string `json:"pin"`
+	// Pins gives a device its own PIN (by device path); a device not listed has PIN.
+	Pins map[string]string `json:"pins"`
 	// Options are the getInfo options as `fido2-token -I` prints them (a false
 	// option has the prefix "no"): "clientPin" means a PIN is set, "uv" that
 	// built-in verification is configured. Default: rk, up, plat, clientPin.
@@ -203,10 +205,22 @@ func hasDevice(d string) bool {
 	return false
 }
 
+// curDev is the device the running tool opened; checkPIN compares with its PIN.
+var curDev string
+
 func openDev(d string) {
 	if !hasDevice(d) {
 		fail("fido_dev_open " + d + ": FIDO_ERR_INTERNAL")
 	}
+	curDev = d
+}
+
+// devicePIN is the PIN of the device the tool opened.
+func devicePIN() string {
+	if p, ok := cfg.Pins[curDev]; ok {
+		return p
+	}
+	return cfg.PIN
 }
 
 func token(args []string) {
@@ -342,7 +356,7 @@ func checkPIN(what string) {
 	if len(pin) < 4 || len(pin) > 63 {
 		fail("invalid PIN length")
 	}
-	if pin != cfg.PIN {
+	if pin != devicePIN() {
 		fail(what + ": FIDO_ERR_PIN_INVALID")
 	}
 }
@@ -508,10 +522,12 @@ func assert(args []string) {
 	if o.flags['v'] {
 		uvWant, pinWant = true, true
 	}
+	// libfido2 obtains the PIN token (and the authenticator refuses a wrong PIN)
+	// before the assertion looks for the credential.
+	uv := assertVerify(uvWant, pinWant)
 	if !credValid(rpID, id) || mis("wrongCredential") {
 		fail("fido_dev_get_assert: FIDO_ERR_NO_CREDENTIALS")
 	}
-	uv := assertVerify(uvWant, pinWant)
 	if cfg.credProtect() >= 3 && !uv {
 		// credProtect 3: the credential is invisible to an assertion without verification
 		fail("fido_dev_get_assert: FIDO_ERR_NO_CREDENTIALS")

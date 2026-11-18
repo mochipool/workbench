@@ -100,7 +100,7 @@ func TestXmultiGateBReadsNamesLikeTheConsumers(t *testing.T) {
 
 // poolIDRig is a workspace pool p (cold key 80) and a source that brings the
 // issue counter of that cold key (which anchors the merge) with one more record.
-func poolIDRig(t *testing.T, extra func(s *memStore)) (*Report, *memStore, map[ports.Ref]string) {
+func poolIDRig(t *testing.T, extra func(s *memStore)) (*Report, *memStore, map[ports.NamedRef]string) {
 	tr, dst := newTree(), newMem()
 	putWallet(dst, "w", 40)
 	putPool(dst, "p", 80, descJSON("p", "w", "w"))
@@ -225,9 +225,9 @@ func TestXmultiNextKesSetOfAWorkspacePoolIsAnchoredByItsColdKey(t *testing.T) {
 	putPool(dst, "p", 80, descJSON("p", "w", "w"))
 	kb := rawOf(cold(80).vkey)
 	s := tr.dir("/d")
-	s.put(ports.Ref{Name: "p", Kind: ports.KesSKey, Num: 2}, []byte(`{"type":"KesSigningKey_ed25519_kes_2^6","description":"KES Signing Key","cborHex":"5860`+strings.Repeat("ef", 96)+`"}`))
-	s.put(ports.Ref{Name: "p", Kind: ports.KesVKey, Num: 2}, pool.MarshalEnvelope(pool.Envelope{Type: "KesVerificationKey_ed25519_kes_2^6", Description: "KES Verification Key", CborHex: "5820" + strings.Repeat("ee", 32)}))
-	s.put(ports.Ref{Name: "p", Kind: ports.OpCert, Num: 2}, opcertOf(kb, []byte(strings.Repeat("\xee", 32))))
+	s.put(ports.NamedRef{Name: "p", Kind: ports.KesSKey, Num: 2}, []byte(`{"type":"KesSigningKey_ed25519_kes_2^6","description":"KES Signing Key","cborHex":"5860`+strings.Repeat("ef", 96)+`"}`))
+	s.put(ports.NamedRef{Name: "p", Kind: ports.KesVKey, Num: 2}, pool.MarshalEnvelope(pool.Envelope{Type: "KesVerificationKey_ed25519_kes_2^6", Description: "KES Verification Key", CborHex: "5820" + strings.Repeat("ee", 32)}))
+	s.put(ports.NamedRef{Name: "p", Kind: ports.OpCert, Num: 2}, opcertOf(kb, []byte(strings.Repeat("\xee", 32))))
 	s.put(ref("p", ports.NodeCounter), pool.IssueCounter{Next: 3, ColdVKey: coldVK(80)}.Envelope())
 	s.put(ref("p", ports.KesCounter), pool.FormatCounter(2))
 	s.put(ref("p", ports.KesCounterNext), pool.FormatCounter(3))
@@ -245,7 +245,7 @@ type racingDest struct {
 	done bool
 }
 
-func (d *racingDest) Update(c context.Context, fn func(ports.Writer) error) error {
+func (d *racingDest) Update(c context.Context, fn func(ports.NamedWriter) error) error {
 	if !d.done {
 		d.done = true
 		d.hook()
@@ -388,11 +388,11 @@ func TestOracleReportsEachViolation(t *testing.T) {
 		}},
 		{"opcert of another cold key", "names another cold key", func(tr *memTree, dst *memStore, st *invState) {
 			pw(dst, "x", 80, "")
-			dst.put(ports.Ref{Name: "x", Kind: ports.OpCert, Num: 1}, opcertOf(rawOf(cold(81).vkey), make([]byte, 32)))
+			dst.put(ports.NamedRef{Name: "x", Kind: ports.OpCert, Num: 1}, opcertOf(rawOf(cold(81).vkey), make([]byte, 32)))
 		}},
 		{"pool without cold key material but with disagreeing counter and opcert", "more than one cold key", func(tr *memTree, dst *memStore, st *invState) {
 			dst.put(ref("x", ports.NodeCounter), pool.IssueCounter{Next: 2, ColdVKey: coldVK(80)}.Envelope())
-			dst.put(ports.Ref{Name: "x", Kind: ports.OpCert, Num: 1}, opcertOf(rawOf(cold(81).vkey), make([]byte, 32)))
+			dst.put(ports.NamedRef{Name: "x", Kind: ports.OpCert, Num: 1}, opcertOf(rawOf(cold(81).vkey), make([]byte, 32)))
 		}},
 		{"descriptor poolID of another pool", "poolID is not the pool id", func(tr *memTree, dst *memStore, st *invState) {
 			putWallet(dst, "w", 40)
@@ -409,12 +409,12 @@ func TestOracleReportsEachViolation(t *testing.T) {
 		}},
 		{"address of another payment key", "is not derived from the payment key", func(tr *memTree, dst *memStore, st *invState) {
 			pk := putPayment(dst, "x", 3)
-			dst.put(ports.Ref{Name: "x.payment", Kind: ports.AddrFile}, addrOf(pair(9, "PaymentSigningKeyShelley_ed25519", "PaymentVerificationKeyShelley_ed25519", "Payment").vkey))
+			dst.put(ports.NamedRef{Name: "x.payment", Kind: ports.AddrFile}, addrOf(pair(9, "PaymentSigningKeyShelley_ed25519", "PaymentVerificationKeyShelley_ed25519", "Payment").vkey))
 			_ = pk
 		}},
 		{"stake and payment keys nothing ties", "nothing ties together", func(tr *memTree, dst *memStore, st *invState) {
 			putWallet(dst, "x", 40)
-			dst.put(ports.Ref{Name: "x.payment", Kind: ports.AddrVKey}, payment(3).vkey)
+			dst.put(ports.NamedRef{Name: "x.payment", Kind: ports.AddrVKey}, payment(3).vkey)
 		}},
 		{"descriptor names no wallet", "no wallet of the workspace has that name", func(tr *memTree, dst *memStore, st *invState) {
 			pw(dst, "x", 80, descJSON("x", "ghost", "ghost"))
@@ -453,7 +453,7 @@ func TestOracleReportsEachViolation(t *testing.T) {
 		{"pool the run did not replace names a wallet the run changed", "the run changed the wallet a pool it did not replace names", func(tr *memTree, dst *memStore, st *invState) {
 			putWallet(dst, "w", 41)
 			pw(dst, "q", 82, descJSON("q", "w", "w"))
-			st.pres = append(st.pres, map[ports.Ref]string{ref("w", ports.StakingVKey): string(pair(40, "StakeSigningKeyShelley_ed25519", "StakeVerificationKeyShelley_ed25519", "Stake").vkey), ref("q", ports.PoolDescriptor): string(dst.files[ref("q", ports.PoolDescriptor)])})
+			st.pres = append(st.pres, map[ports.NamedRef]string{ref("w", ports.StakingVKey): string(pair(40, "StakeSigningKeyShelley_ed25519", "StakeVerificationKeyShelley_ed25519", "Stake").vkey), ref("q", ports.PoolDescriptor): string(dst.files[ref("q", ports.PoolDescriptor)])})
 		}},
 	}
 	for _, c := range cases {

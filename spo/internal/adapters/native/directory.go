@@ -7,6 +7,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 )
 
 // Signers is the SignerDirectory of this client (ADR 0010 decision 3): it maps
@@ -63,9 +64,7 @@ func (s Signers) index() ports.KeyIndex {
 		return s.Keys
 	}
 	if st, ok := s.Vault.(ports.Store); ok {
-		if idx, err := ports.NewStoreKeyIndex(st); err == nil {
-			return idx
-		}
+		return labels.NewIndex(st)
 	}
 	return nil
 }

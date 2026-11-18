@@ -169,12 +169,12 @@ func (r *resolver) find(from *found, value string) (g *found, name, note, why st
 // either has one, must be byte-equal.
 func (r *resolver) sameKeys(g *found) string {
 	for _, c := range []struct {
-		ref   ports.Ref
+		ref   ports.NamedRef
 		label string
 		need  bool
 	}{
-		{ports.Ref{Name: g.name, Kind: ports.StakingVKey}, "stake", true},
-		{ports.Ref{Name: g.name + ".payment", Kind: ports.AddrVKey}, "payment", false},
+		{ports.NamedRef{Name: g.name, Kind: ports.StakingVKey}, "stake", true},
+		{ports.NamedRef{Name: g.name + ".payment", Kind: ports.AddrVKey}, "payment", false},
 	} {
 		wsb, inWs := r.ws.get(c.ref)
 		var srcb []byte
@@ -196,7 +196,7 @@ func (r *resolver) sameKeys(g *found) string {
 	return ""
 }
 
-func hasRef(refs []ports.Ref, r ports.Ref) bool {
+func hasRef(refs []ports.NamedRef, r ports.NamedRef) bool {
 	for _, x := range refs {
 		if x == r {
 			return true
@@ -209,7 +209,7 @@ func hasRef(refs []ports.Ref, r ports.Ref) bool {
 // stake key hash (or its address) so the operator can recognise it.
 func (r *resolver) boundNote(field, name string) string {
 	id := ""
-	if b, ok := r.ws.get(ports.Ref{Name: name, Kind: ports.StakingVKey}); ok {
+	if b, ok := r.ws.get(ports.NamedRef{Name: name, Kind: ports.StakingVKey}); ok {
 		if env, err := pool.ParseEnvelope(b); err == nil {
 			if k, err := env.Key32(); err == nil {
 				id = fmt.Sprintf("stake key hash %x", txbuild.HashKey(k))
@@ -217,7 +217,7 @@ func (r *resolver) boundNote(field, name string) string {
 		}
 	}
 	if id == "" {
-		if b, ok := r.ws.get(ports.Ref{Name: name, Kind: ports.StakingAddr}); ok {
+		if b, ok := r.ws.get(ports.NamedRef{Name: name, Kind: ports.StakingAddr}); ok {
 			id = "stake address " + strings.TrimSpace(string(b))
 		}
 	}
@@ -233,6 +233,18 @@ func (r *resolver) boundNote(field, name string) string {
 func (r *resolver) resolveRef(from *found, field, value string) (stored, note, why string) {
 	if value == "" {
 		return value, "", ""
+	}
+	// The payer of an open registration is a payment key identity (ADR 0010): upstream
+	// names the payment account of a wallet `<wallet>.payment`, and the wallet is the
+	// owner the name stands for.
+	if field == fieldPayer || (strings.HasPrefix(field, "regWitness.witnesses[") && strings.HasSuffix(value, paymentStem)) {
+		if base, ok := strings.CutSuffix(value, paymentStem); ok && base != "" {
+			st, n, w := r.resolveRef(from, field+" (the wallet of the payment account)", base)
+			if w != "" {
+				return "", "", w
+			}
+			return st + paymentStem, n, ""
+		}
 	}
 	g, name, note, why := r.find(from, value)
 	if why != "" {
@@ -588,7 +600,17 @@ type nameRef struct {
 	field string
 	name  string
 	self  bool
+	// payer is set for the paying wallet of an open registration and for its
+	// witness slot: the name stands for a payment key, not for a stake key.
+	payer bool
 }
+
+// fieldPayer is the descriptor field that names the payer of a registration, and
+// paymentStem the suffix of the payment account of a wallet in the upstream layout.
+const (
+	fieldPayer  = "regWitness.regPayName"
+	paymentStem = ".payment"
+)
 
 // refField is a name-bearing string value of a descriptor, with its place in
 // the bytes.

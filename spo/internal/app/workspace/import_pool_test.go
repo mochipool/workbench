@@ -115,7 +115,7 @@ func (f *fakePools) uc(m *fakeFetcher, st *memStore) ImportPoolFromChain {
 
 func descriptor(t *testing.T, st *memStore, name string) map[string]any {
 	t.Helper()
-	b, ok := st.files[ports.Ref{Name: name, Kind: ports.PoolDescriptor}]
+	b, ok := st.files[ports.NamedRef{Name: name, Kind: ports.PoolDescriptor}]
 	if !ok {
 		t.Fatalf("no descriptor for %s", name)
 	}
@@ -234,7 +234,7 @@ func TestExportThenImportOffline(t *testing.T) {
 	if _, err := off.Run(context.Background(), ImportPoolRequest{Name: "apex", Source: PoolInfoSource{InfoFile: sink.files["apex.info.json"]}}); err != nil {
 		t.Fatal(err)
 	}
-	ref := ports.Ref{Name: "apex", Kind: ports.PoolDescriptor}
+	ref := ports.NamedRef{Name: "apex", Kind: ports.PoolDescriptor}
 	if !bytes.Equal(online.files[ref], offline.files[ref]) {
 		t.Errorf("descriptors differ\n%s\n%s", online.files[ref], offline.files[ref])
 	}
@@ -549,7 +549,7 @@ func TestImportWithKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []ports.Ref{
+	want := []ports.NamedRef{
 		{Name: "mypool", Kind: ports.NodeSKey}, {Name: "mypool", Kind: ports.NodeVKey}, {Name: "mypool", Kind: ports.NodeCounter},
 		{Name: "mypool", Kind: ports.VrfSKey}, {Name: "mypool", Kind: ports.VrfVKey}, {Name: "mypool", Kind: ports.PoolDescriptor},
 		{Name: "owner.payment", Kind: ports.AddrSKey}, {Name: "owner.payment", Kind: ports.AddrVKey}, {Name: "owner.payment", Kind: ports.AddrFile},
@@ -567,37 +567,37 @@ func TestImportWithKeys(t *testing.T) {
 	if res.CounterNext != 18 {
 		t.Errorf("counter %d", res.CounterNext)
 	}
-	ic, err := pool.ParseIssueCounter(st.files[ports.Ref{Name: "mypool", Kind: ports.NodeCounter}])
+	ic, err := pool.ParseIssueCounter(st.files[ports.NamedRef{Name: "mypool", Kind: ports.NodeCounter}])
 	if err != nil || ic.Next != 18 {
 		t.Errorf("counter file %+v %v", ic, err)
 	}
-	if !strings.Contains(string(st.files[ports.Ref{Name: "mypool", Kind: ports.NodeCounter}]), "Next certificate issue number: 18") {
+	if !strings.Contains(string(st.files[ports.NamedRef{Name: "mypool", Kind: ports.NodeCounter}]), "Next certificate issue number: 18") {
 		t.Error("counter description")
 	}
-	if got := string(st.files[ports.Ref{Name: "owner", Kind: ports.StakingAddr}]); got != m.stakeAddr+"\n" {
+	if got := string(st.files[ports.NamedRef{Name: "owner", Kind: ports.StakingAddr}]); got != m.stakeAddr+"\n" {
 		t.Errorf("stake address %q", got)
 	}
-	if !strings.HasPrefix(string(st.files[ports.Ref{Name: "owner.payment", Kind: ports.AddrFile}]), "addr_test1q") {
-		t.Errorf("payment address %q", st.files[ports.Ref{Name: "owner.payment", Kind: ports.AddrFile}])
+	if !strings.HasPrefix(string(st.files[ports.NamedRef{Name: "owner.payment", Kind: ports.AddrFile}]), "addr_test1q") {
+		t.Errorf("payment address %q", st.files[ports.NamedRef{Name: "owner.payment", Kind: ports.AddrFile}])
 	}
 	// The certificates decode: registration with the deposit, delegation to the pool.
 	led := native.Ledger{}
-	reg, err := led.DecodeCertificate(st.files[ports.Ref{Name: "owner", Kind: ports.StakingCert}])
+	reg, err := led.DecodeCertificate(st.files[ports.NamedRef{Name: "owner", Kind: ports.StakingCert}])
 	if err != nil || reg.Kind != stake.CertRegistration || reg.Deposit != 2_000_000 {
 		t.Errorf("registration %+v %v", reg, err)
 	}
-	del, err := led.DecodeCertificate(st.files[ports.Ref{Name: "owner", Kind: ports.DelegCert}])
+	del, err := led.DecodeCertificate(st.files[ports.NamedRef{Name: "owner", Kind: ports.DelegCert}])
 	if err != nil || del.Kind != stake.CertPoolDelegation || del.Pool != m.poolID {
 		t.Errorf("delegation %+v %v", del, err)
 	}
 	// The verification keys are the keys' own, and the signing keys are stored as they came (SPO-0x-SEC-001).
-	if !bytes.Equal(st.files[ports.Ref{Name: "mypool", Kind: ports.NodeVKey}], m.coldV) ||
-		!bytes.Equal(st.files[ports.Ref{Name: "mypool", Kind: ports.VrfVKey}], m.vrfV) {
+	if !bytes.Equal(st.files[ports.NamedRef{Name: "mypool", Kind: ports.NodeVKey}], m.coldV) ||
+		!bytes.Equal(st.files[ports.NamedRef{Name: "mypool", Kind: ports.VrfVKey}], m.vrfV) {
 		t.Error("derived verification keys differ from the generated ones")
 	}
 	var cold []byte
 	_ = m.cold.Use(func(b []byte) error { cold = append([]byte(nil), b...); return nil })
-	if !bytes.Equal(st.files[ports.Ref{Name: "mypool", Kind: ports.NodeSKey}], cold) {
+	if !bytes.Equal(st.files[ports.NamedRef{Name: "mypool", Kind: ports.NodeSKey}], cold) {
 		t.Error("the cold key was changed")
 	}
 	// Owner and rewards account are in the descriptor (SPO-0x-OUT-014, SPO-0x-OUT-015); none is missing.
@@ -610,7 +610,7 @@ func TestImportWithKeys(t *testing.T) {
 		t.Errorf("accounts %+v", res.Accounts)
 	}
 	// The descriptor passes the checks the registration makes.
-	pd, err := pool.ParseDescriptor(st.files[ports.Ref{Name: "mypool", Kind: ports.PoolDescriptor}])
+	pd, err := pool.ParseDescriptor(st.files[ports.NamedRef{Name: "mypool", Kind: ports.PoolDescriptor}])
 	if err != nil || pd.Require(pool.FieldName, pool.FieldPledge, pool.FieldCost, pool.FieldMargin, pool.FieldPoolID) != nil {
 		t.Errorf("descriptor: %v", err)
 	}
@@ -633,7 +633,7 @@ func TestAccountThatMatchesNothing(t *testing.T) {
 	if !res.RewardsMissing || res.Accounts[0].Owner || res.Accounts[0].Reward || !res.Accounts[0].Complete {
 		t.Errorf("%+v", res)
 	}
-	if _, ok := st.files[ports.Ref{Name: "owner", Kind: ports.StakingCert}]; !ok {
+	if _, ok := st.files[ports.NamedRef{Name: "owner", Kind: ports.StakingCert}]; !ok {
 		t.Error("the certificate of an unmatched account is not made")
 	}
 }
@@ -707,7 +707,7 @@ func TestRefusedKeysWriteNothing(t *testing.T) {
 	}
 	// A destination that exists is refused (SPO-0x-PRE-006, SPO-0x-PRE-008).
 	st := newMem()
-	st.put(ports.Ref{Name: "owner", Kind: ports.StakingSKey}, []byte("x"))
+	st.put(ports.NamedRef{Name: "owner", Kind: ports.StakingSKey}, []byte("x"))
 	if _, err := m.pools.uc(m.meta, st).Run(context.Background(), m.req("mypool")); err == nil || len(st.files) != 1 {
 		t.Errorf("existing stake key: %v", err)
 	}
@@ -719,13 +719,13 @@ func TestRefusedKeysWriteNothing(t *testing.T) {
 	if err != nil || len(res.Accounts) != 1 || res.Accounts[0].Complete {
 		t.Fatalf("%v %+v", err, res.Accounts)
 	}
-	if _, ok := st.files[ports.Ref{Name: "half.payment", Kind: ports.AddrSKey}]; !ok {
+	if _, ok := st.files[ports.NamedRef{Name: "half.payment", Kind: ports.AddrSKey}]; !ok {
 		t.Error("the payment key of a half account was not imported")
 	}
-	if _, ok := st.files[ports.Ref{Name: "half", Kind: ports.StakingCert}]; ok {
+	if _, ok := st.files[ports.NamedRef{Name: "half", Kind: ports.StakingCert}]; ok {
 		t.Error("a half account got a certificate")
 	}
-	if _, ok := st.files[ports.Ref{Name: "skip.payment", Kind: ports.AddrSKey}]; ok {
+	if _, ok := st.files[ports.NamedRef{Name: "skip.payment", Kind: ports.AddrSKey}]; ok {
 		t.Error("a given-up account was imported")
 	}
 }
@@ -736,7 +736,7 @@ func TestRefusedKeysWriteNothing(t *testing.T) {
 func TestExistingPool(t *testing.T) {
 	m := newMine(t, true, true)
 	st := newMem()
-	st.put(ports.Ref{Name: "mypool", Kind: ports.PoolDescriptor}, []byte("{}"))
+	st.put(ports.NamedRef{Name: "mypool", Kind: ports.PoolDescriptor}, []byte("{}"))
 	for _, cont := range []bool{false, true} {
 		r := m.req("mypool")
 		r.ContinueExisting = cont
@@ -750,7 +750,7 @@ func TestExistingPool(t *testing.T) {
 	}
 	// A cold key from an earlier import: asked, then added to, the delegation certificate uses it.
 	st = newMem()
-	st.put(ports.Ref{Name: "mypool", Kind: ports.NodeVKey}, m.coldV)
+	st.put(ports.NamedRef{Name: "mypool", Kind: ports.NodeVKey}, m.coldV)
 	r := m.req("mypool")
 	r.Cold, r.VRF = nil, nil
 	if _, err := m.pools.uc(m.meta, st).Run(context.Background(), r); !errors.Is(err, ErrPoolPartExists) {
@@ -760,7 +760,7 @@ func TestExistingPool(t *testing.T) {
 	if _, err := m.pools.uc(m.meta, st).Run(context.Background(), r); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := st.files[ports.Ref{Name: "owner", Kind: ports.DelegCert}]; !ok {
+	if _, ok := st.files[ports.NamedRef{Name: "owner", Kind: ports.DelegCert}]; !ok {
 		t.Error("the delegation certificate needs the earlier cold key")
 	}
 }
@@ -776,7 +776,7 @@ func TestNoDelegationWithoutColdKey(t *testing.T) {
 	if err != nil || res.Accounts[0].Delegation {
 		t.Fatalf("%v %+v", err, res.Accounts)
 	}
-	if _, ok := st.files[ports.Ref{Name: "owner", Kind: ports.DelegCert}]; ok {
+	if _, ok := st.files[ports.NamedRef{Name: "owner", Kind: ports.DelegCert}]; ok {
 		t.Error("a delegation certificate without a cold key")
 	}
 }
@@ -791,7 +791,7 @@ func TestDryRun(t *testing.T) {
 	if err != nil || len(st.files) != 0 || len(res.Descriptor) == 0 || len(res.Written) != 0 || !res.DryRun {
 		t.Fatalf("%v %d", err, len(st.files))
 	}
-	st.put(ports.Ref{Name: "mypool", Kind: ports.NodeSKey}, []byte("x"))
+	st.put(ports.NamedRef{Name: "mypool", Kind: ports.NodeSKey}, []byte("x"))
 	r.ContinueExisting = true
 	if _, err := m.pools.uc(m.meta, st).Run(context.Background(), r); err == nil {
 		t.Error("a dry run did not see the existing key")

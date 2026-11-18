@@ -202,8 +202,8 @@ func (s *scene) bobApproves() multisig.Review {
 func (s *scene) collection() pool.Collection {
 	s.t.Helper()
 	var c pool.Collection
-	err := s.C.Store.View(ctx, func(r ports.Reader) error {
-		raw, err := r.Get(ports.Ref{Name: s.ref.Name, Kind: ports.MultisigCollection})
+	err := s.C.Store.View(ctx, func(r ports.NamedReader) error {
+		raw, err := r.Get(ports.NamedRef{Name: s.ref.Name, Kind: ports.MultisigCollection})
 		if err != nil {
 			return err
 		}
@@ -251,7 +251,7 @@ func (s *scene) sealFrom(from, to *partyrig.Workspace, body party.Body, now, exp
 	}
 	defer local.Destroy()
 	var rcpt party.Party
-	err = from.Store.View(ctx, func(r ports.Reader) error {
+	err = from.Store.View(ctx, func(r ports.NamedReader) error {
 		ps, err := from.Registry.List(r)
 		for _, p := range ps {
 			if p.Fingerprint == to.Identity.Fingerprint {

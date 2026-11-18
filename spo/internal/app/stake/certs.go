@@ -15,7 +15,7 @@ import (
 // content is the text envelope cardano-cli writes.
 type CertificateGenerated struct {
 	Name        string // the wallet the certificate is stored under
-	Ref         ports.Ref
+	Ref         ports.NamedRef
 	Certificate stk.Certificate
 }
 
@@ -27,7 +27,7 @@ const MinConwayMajor = 9
 // key to a pool (upstream 05b). It never touches the chain: it does not check
 // that the pool or the stake address is registered (SPO-05b-INV-001).
 type GenerateDelegationCertificate struct {
-	Store ports.Store
+	Store ports.NamedStore
 	Certs ports.CertificateBuilder
 }
 
@@ -57,8 +57,8 @@ func (uc GenerateDelegationCertificate) Run(ctx context.Context, req DelegationR
 		return CertificateGenerated{}, err
 	}
 	var spec stk.Spec
-	err = uc.Store.View(ctx, func(r ports.Reader) error {
-		vk, err := get(r, ports.Ref{Name: name, Kind: ports.StakingVKey})
+	err = uc.Store.View(ctx, func(r ports.NamedReader) error {
+		vk, err := get(r, ports.NamedRef{Name: name, Kind: ports.StakingVKey})
 		if err != nil {
 			return err
 		}
@@ -71,7 +71,7 @@ func (uc GenerateDelegationCertificate) Run(ctx context.Context, req DelegationR
 			spec.Pool = word.Pool
 			return nil
 		}
-		cold, err := get(r, ports.Ref{Name: word.Name, Kind: ports.NodeVKey})
+		cold, err := get(r, ports.NamedRef{Name: word.Name, Kind: ports.NodeVKey})
 		if err != nil {
 			return fmt.Errorf("the pool word %q is neither a pool id nor a stored pool: %w", req.Pool, err)
 		}
@@ -89,16 +89,16 @@ func (uc GenerateDelegationCertificate) Run(ctx context.Context, req DelegationR
 	if err != nil {
 		return CertificateGenerated{}, err
 	}
-	return store(ctx, uc.Store, uc.Certs, spec, ports.Ref{Name: name, Kind: ports.DelegCert})
+	return store(ctx, uc.Store, uc.Certs, spec, ports.NamedRef{Name: name, Kind: ports.DelegCert})
 }
 
 // store builds a certificate and writes its envelope under ref in one update.
-func store(ctx context.Context, st ports.Store, b ports.CertificateBuilder, spec stk.Spec, ref ports.Ref) (CertificateGenerated, error) {
+func store(ctx context.Context, st ports.NamedStore, b ports.CertificateBuilder, spec stk.Spec, ref ports.NamedRef) (CertificateGenerated, error) {
 	cert, err := b.BuildCertificate(spec)
 	if err != nil {
 		return CertificateGenerated{}, err
 	}
-	if err := st.Update(ctx, func(w ports.Writer) error { return w.Put(ref, cert.Envelope) }); err != nil {
+	if err := st.Update(ctx, func(w ports.NamedWriter) error { return w.Put(ref, cert.Envelope) }); err != nil {
 		return CertificateGenerated{}, fmt.Errorf("store %s: %w", ref, err)
 	}
 	return CertificateGenerated{Name: ref.Name, Ref: ref, Certificate: cert}, nil
@@ -108,7 +108,7 @@ func store(ctx context.Context, st ports.Store, b ports.CertificateBuilder, spec
 // votes of a stake key to a DRep, always-abstain or always-no-confidence
 // (upstream 22a). It does not check that the DRep is registered.
 type GenerateVoteDelegationCertificate struct {
-	Store ports.Store
+	Store ports.NamedStore
 	Certs ports.CertificateBuilder
 	// Params gives the era gate (SPO-22a-PRE-001). Nil skips it.
 	Params ports.ProtocolParametersReader
@@ -152,8 +152,8 @@ func (uc GenerateVoteDelegationCertificate) Run(ctx context.Context, req VoteDel
 		}
 	}
 	var spec stk.Spec
-	err = uc.Store.View(ctx, func(r ports.Reader) error {
-		vk, err := get(r, ports.Ref{Name: name, Kind: ports.StakingVKey})
+	err = uc.Store.View(ctx, func(r ports.NamedReader) error {
+		vk, err := get(r, ports.NamedRef{Name: name, Kind: ports.StakingVKey})
 		if err != nil {
 			return err
 		}
@@ -168,7 +168,7 @@ func (uc GenerateVoteDelegationCertificate) Run(ctx context.Context, req VoteDel
 		}
 		// A local DRep wins over the keywords (SPO-22a-IF-002, form 5).
 		if word.Name != "" {
-			dk, err := r.Get(ports.Ref{Name: word.Name, Kind: ports.DRepVKey})
+			dk, err := r.Get(ports.NamedRef{Name: word.Name, Kind: ports.DRepVKey})
 			if err == nil {
 				dh, err := vkeyHash(dk)
 				if err != nil {
@@ -190,7 +190,7 @@ func (uc GenerateVoteDelegationCertificate) Run(ctx context.Context, req VoteDel
 	if err != nil {
 		return CertificateGenerated{}, err
 	}
-	return store(ctx, uc.Store, uc.Certs, spec, ports.Ref{Name: name, Kind: ports.VoteDelegCert})
+	return store(ctx, uc.Store, uc.Certs, spec, ports.NamedRef{Name: name, Kind: ports.VoteDelegCert})
 }
 
 // GenerateDeregistrationCertificate makes the certificate that retires a
@@ -199,7 +199,7 @@ func (uc GenerateVoteDelegationCertificate) Run(ctx context.Context, req VoteDel
 // certificate carries the key deposit the chain holds for it, so the refund
 // of 08b matches (SPO-08a-EXT-002).
 type GenerateDeregistrationCertificate struct {
-	Store     ports.Store
+	Store     ports.NamedStore
 	Addresses ports.AddressInspector
 	Certs     ports.CertificateBuilder
 	// Account is where the account state comes from: the node, Koios or the
@@ -240,8 +240,8 @@ func (uc GenerateDeregistrationCertificate) Run(ctx context.Context, name string
 		return DeregistrationCertificateResult{}, err
 	}
 	var addr chain.StakeAddress
-	err = uc.Store.View(ctx, func(r ports.Reader) error {
-		b, err := get(r, ports.Ref{Name: w, Kind: ports.StakingAddr})
+	err = uc.Store.View(ctx, func(r ports.NamedReader) error {
+		b, err := get(r, ports.NamedRef{Name: w, Kind: ports.StakingAddr})
 		if err != nil {
 			return err
 		}
@@ -268,7 +268,7 @@ func (uc GenerateDeregistrationCertificate) Run(ctx context.Context, name string
 	if _, err := ans.Account.Apply(spec); err != nil {
 		return DeregistrationCertificateResult{}, err
 	}
-	gen, err := store(ctx, uc.Store, uc.Certs, spec, ports.Ref{Name: w, Kind: ports.StakingDeregCert})
+	gen, err := store(ctx, uc.Store, uc.Certs, spec, ports.NamedRef{Name: w, Kind: ports.StakingDeregCert})
 	if err != nil {
 		return DeregistrationCertificateResult{}, err
 	}

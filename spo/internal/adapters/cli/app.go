@@ -14,6 +14,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/platform/secretfd"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 )
 
 // Files of a workspace directory.
@@ -33,12 +34,36 @@ type app struct {
 	workspace string
 	upstream  bool
 	passFD    int
+	unlock    string // --unlock
+	// pins are the authenticator PINs this command has read, one per role ("daily",
+	// "recovery"), in guarded memory owned by the app and destroyed when the
+	// command ends (destroyPINs). A role whose authenticator has no PIN holds a nil
+	// entry. The PIN of one role is never offered to another.
+	pins        map[string]*secret.Buffer
+	fido2Device string
+	fido2PinFD  int
+	// coldFD and newColdFD are --cold-passphrase-fd and --new-cold-passphrase-fd;
+	// coldPass and newColdPass hold what was read (guarded memory, destroyed by
+	// destroyCold).
+	coldFD, newColdFD     int
+	coldPass, newColdPass *secret.Buffer
+	// recText is the recovery key typed to open a recovery-composite session (guarded
+	// memory, destroyed by destroyPINs): the rotation that recovers the workspace
+	// presents it again as the proof, without asking twice.
+	recText *secret.Buffer
+	// keepRecovery is set by the one command (workspace rotate) that presents the recovery
+	// key typed for its session a second time, as the proof; any other command destroys
+	// what it read at once.
+	keepRecovery bool
+	// recoveryFD is --recovery-key-in-fd of the rotation that opens a recovery-composite
+	// session: the key the session needs is read from it instead of the terminal.
+	recoveryFD int
 	// acceptRollback is --accept-rollback: never persisted, announced when used.
 	acceptRollback bool
 }
 
 func newApp(d Deps) *app {
-	a := &app{d: d, term: d.Terminal, passFD: -1}
+	a := &app{d: d, term: d.Terminal, recoveryFD: -1, passFD: -1, fido2PinFD: -1, coldFD: -1, newColdFD: -1}
 	if a.term == nil {
 		a.term = NewTerminal(0, d.Err)
 	}
@@ -160,10 +185,20 @@ func (l *noticeLog) close(errp *error) {
 
 // session is an open workspace.
 type session struct {
-	Store  ports.Store
-	Sealed SealedStore // nil for the upstream layout
-	Pass   *secret.Buffer
-	log    noticeLog
+	// Store is the name-level view of the workspace (the label resolver over
+	// Anchored): the commands and use cases address artefacts by name through it.
+	Store ports.NamedStore
+	// Anchored is the workspace as the anchor-level store: the signers and the key
+	// index use it.
+	Anchored ports.Store
+	Sealed   SealedStore // nil for the upstream layout
+	// Pass is the passphrase this session was opened with; nil in a factor session.
+	Pass *secret.Buffer
+	// factorSession is true when the workspace was unlocked through FIDO2 factors
+	// (the hardware policy has no passphrase). Re-authentication, backup
+	// verification and every other use of "the passphrase" branch on it.
+	factorSession bool
+	log           noticeLog
 	// waiting is true when the command waits for confirmation after its own
 	// work; canWait that a provider can say where a transaction is; lateWait is
 	// set by a command that decides only after it has submitted whether it must
@@ -185,6 +220,9 @@ func (s *session) Close() error {
 		}
 	}
 	s.Pass.Destroy()
+	if s.log.a != nil {
+		s.log.a.destroyPINs()
+	}
 	return err
 }
 
@@ -196,6 +234,9 @@ func (s *session) closeInto(errp *error) {
 		s.log.close(errp)
 	}
 	s.Pass.Destroy()
+	if s.log.a != nil {
+		s.log.a.destroyPINs()
+	}
 }
 
 // open opens the workspace: sealed by default, the upstream layout only with
@@ -215,25 +256,51 @@ func (a *app) open(ctx context.Context) (*session, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &session{Store: st}, nil
+		return &session{Store: labels.Named(st), Anchored: st}, nil
 	}
 	if !exists(a.workspaceFile()) {
 		return nil, fmt.Errorf("no workspace in %s (%s not found); create one with: spo init --network <name>. To bring in a directory in the upstream file layout, run: spo workspace import <dir>", a.workspace, WorkspaceFile)
 	}
-	pass, err := a.readPassphrase(ctx)
-	if err != nil {
-		return nil, err
-	}
 	o := OpenOptions{AcceptRollback: a.acceptRollback}
-	if o.AcceptRollback {
-		fmt.Fprintln(a.d.Err, "warning: --accept-rollback is set: if the workspace file is older than its recorded state, it is accepted and its state recorded as the new head. This is for a deliberate restore of an older backup only.")
-	}
-	st, err := a.d.Sealed.Open(a.workspaceFile(), pass, o)
+	factors, err := a.useFactors()
 	if err != nil {
-		pass.Destroy()
 		return nil, err
 	}
-	s := &session{Store: st, Sealed: st, Pass: pass, log: noticeLog{a: a, st: st}}
+	var pass *secret.Buffer
+	var st SealedStore
+	if factors {
+		if o.AcceptRollback {
+			fmt.Fprintln(a.d.Err, "warning: --accept-rollback is set: the file's own state is recorded as the new head.")
+		}
+		if st, err = a.d.Sealed.OpenFactors(a.workspaceFile(), a.factorOpen(), o); err != nil {
+			a.destroyPINs()
+			if errors.Is(err, ErrWrongPassphrase) {
+				// a factor session has no passphrase: say what was presented
+				if a.unlock == "recovery-composite" {
+					return nil, errors.New("the recovery credential presented (the recovery key and its authenticator) is not the current one for this workspace: a rotation replaces the recovery key and the recovery authenticator, so the old ones no longer open it")
+				}
+				return nil, errors.New("the authenticator presented does not open this workspace: it holds no credential of any slot, or its PIN or touch was refused")
+			}
+			return nil, err
+		}
+		// A factor session has no passphrase: Pass stays nil, and the code that
+		// needs "the passphrase of this session" branches on factorSession.
+	} else {
+		if pass, err = a.readPassphrase(ctx); err != nil {
+			return nil, err
+		}
+		if o.AcceptRollback {
+			fmt.Fprintln(a.d.Err, "warning: --accept-rollback is set: if the workspace file is older than its recorded state, it is accepted and its state recorded as the new head. This is for a deliberate restore of an older backup only.")
+		}
+		if st, err = a.d.Sealed.Open(a.workspaceFile(), pass, o); err != nil {
+			pass.Destroy()
+			return nil, err
+		}
+	}
+	if cf, ok := st.(ColdFactors); ok {
+		cf.SetColdSource(a.coldOpen())
+	}
+	s := &session{Store: labels.Named(st), Anchored: st, Sealed: st, Pass: pass, factorSession: factors, log: noticeLog{a: a, st: st}}
 	s.log.flush()
 	return s, nil
 }

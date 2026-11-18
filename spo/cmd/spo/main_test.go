@@ -17,6 +17,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/adapters/sqlitestore"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 )
 
 // These tests run the real command tree on the real adapters (sealed store,
@@ -26,16 +27,21 @@ import (
 
 const (
 	testPass = "correct horse battery staple"
-	poolName = "testpool-quartz"
+	// testColdPass is the cold-key passphrase (the sub-key of cold-role keys under
+	// the standard policy) that fakeTerm answers when a command asks for it and the
+	// test did not script it.
+	testColdPass = "cold sub-key passphrase, not the workspace one"
+	poolName     = "testpool-quartz"
 )
 
 // fakeTerm is a terminal with scripted secret answers; it never touches stdin.
 type fakeTerm struct {
-	out     *bytes.Buffer
-	secrets []string // consumed in order; "@LASTGROUP" types the last group shown on out
-	lines   []string
-	asked   []string
-	rows    int // the height this terminal reports, when set (an 80 column window)
+	coldAsked bool // the previous prompt was the cold-key passphrase (its repeat is answered alike)
+	out       *bytes.Buffer
+	secrets   []string // consumed in order; "@LASTGROUP" types the last group shown on out
+	lines     []string
+	asked     []string
+	rows      int // the height this terminal reports, when set (an 80 column window)
 }
 
 // Size is the window the terminal reports, when it has one: a real two-owner
@@ -45,6 +51,11 @@ func (f *fakeTerm) Size() (int, int, bool) { return 80, f.rows, f.rows > 0 }
 
 func (f *fakeTerm) ReadSecret(_ context.Context, prompt string) (*secret.Buffer, error) {
 	f.asked = append(f.asked, prompt)
+	if strings.Contains(strings.ToLower(prompt), "cold-key passphrase") || (f.coldAsked && prompt == "Repeat it: ") {
+		f.coldAsked = !f.coldAsked || prompt != "Repeat it: "
+		return secret.Take([]byte(testColdPass)), nil
+	}
+	f.coldAsked = false
 	if len(f.secrets) == 0 {
 		return nil, cli.ErrNoTerminal
 	}
@@ -361,16 +372,16 @@ func TestKesGenerateAndOpcertIssueOnASealedWorkspace(t *testing.T) {
 	coldHex := hex.EncodeToString(seed)
 	pf, _ := fdIn(t, "")
 	pf.Close()
-	st, err := sqlitestore.Open(filepath.Join(dir, cli.WorkspaceFile), secret.Take([]byte(testPass)))
+	st, err := openCold(filepath.Join(dir, cli.WorkspaceFile), secret.Take([]byte(testPass)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = st.Update(context.Background(), func(w ports.Writer) error {
-		if err := w.PutSecret(ports.Ref{Name: poolName, Kind: ports.NodeSKey},
+	err = labels.Named(st).Update(context.Background(), func(w ports.NamedWriter) error {
+		if err := w.PutSecret(ports.NamedRef{Name: poolName, Kind: ports.NodeSKey},
 			secret.Take([]byte(`{"type":"StakePoolSigningKey_ed25519","description":"","cborHex":"5820`+coldHex+`"}`))); err != nil {
 			return err
 		}
-		return w.Put(ports.Ref{Name: poolName, Kind: ports.NodeVKey},
+		return w.Put(ports.NamedRef{Name: poolName, Kind: ports.NodeVKey},
 			[]byte(`{"type":"StakePoolVerificationKey_ed25519","description":"","cborHex":"5820`+hex.EncodeToString(vk)+`"}`))
 	})
 	st.Close()
@@ -401,12 +412,12 @@ func TestKesGenerateAndOpcertIssueOnASealedWorkspace(t *testing.T) {
 	step("store", "verify")
 
 	// The KES signing key, read back through the vault, as hex to look for.
-	st, err = sqlitestore.Open(filepath.Join(dir, cli.WorkspaceFile), secret.Take([]byte(testPass)))
+	st, err = openCold(filepath.Join(dir, cli.WorkspaceFile), secret.Take([]byte(testPass)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var kesSKeyHex string
-	buf, err := st.Open(context.Background(), ports.Ref{Name: poolName, Kind: ports.KesSKey, Num: 0})
+	buf, err := labels.Named(st).Open(context.Background(), ports.NamedRef{Name: poolName, Kind: ports.KesSKey, Num: 0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -507,25 +518,30 @@ func TestPassphraseChange(t *testing.T) {
 	dir := copyWorkspace(t)
 	_, oldKey := template(t)
 	newPass := "a different long passphrase"
-	nf, nfd := fdIn(t, "short\n")
-	if _, err := withPass(t, dir, testPass, "store", "passphrase", "change", "--new-passphrase-fd", nfd); err == nil {
+	// every attempt types the old passphrase again on its own descriptor
+	change := func(newText string, extra ...string) (string, error) {
+		of, ofd := fdIn(t, testPass+"\n")
+		nf, nfd := fdIn(t, newText+"\n")
+		defer of.Close()
+		defer nf.Close()
+		return withPass(t, dir, testPass, append([]string{"store", "passphrase", "change", "--old-passphrase-fd", ofd, "--new-passphrase-fd", nfd}, extra...)...)
+	}
+	if _, err := change("short"); err == nil {
 		t.Fatal("short new passphrase accepted")
 	}
-	nf.Close()
-	nf, nfd = fdIn(t, newPass+"\n")
-	defer nf.Close()
-	rf, rfd := fdOut(t)
-	out, err := withPass(t, dir, testPass, "store", "passphrase", "change", "--new-passphrase-fd", nfd, "--recovery-key-fd", rfd)
+	// without the recovery key nothing changes
+	if _, err := change(newPass); err == nil {
+		t.Fatal("a passphrase change without the recovery key went ahead")
+	}
+	kf, kfd := fdIn(t, oldKey+"\n")
+	defer kf.Close()
+	out, err := change(newPass, "--recovery-key-in-fd", kfd)
 	if err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
-	newKey := strings.TrimSpace(contents(rf))
-	if !recoveryKeyRE.MatchString(newKey) || newKey == oldKey {
-		t.Fatalf("new recovery key %q", newKey)
-	}
-	notLeaked(t, out, testPass, newPass, newKey)
-	if !strings.Contains(out, "previous recovery key no longer works") {
-		t.Errorf("the output does not say the old recovery key is revoked:\n%s", out)
+	notLeaked(t, out, testPass, newPass, oldKey)
+	if !strings.Contains(out, "recovery key is unchanged") {
+		t.Errorf("the output does not say the recovery key is unchanged:\n%s", out)
 	}
 	if _, err := withPass(t, dir, testPass, "store", "verify"); err == nil {
 		t.Error("the old passphrase still opens the workspace")
@@ -533,13 +549,70 @@ func TestPassphraseChange(t *testing.T) {
 	if _, err := withPass(t, dir, newPass, "store", "verify"); err != nil {
 		t.Errorf("the new passphrase does not open it: %v", err)
 	}
-	// The old recovery key is dead, the new one opens the workspace.
-	if err := recoverWith(t, dir, oldKey, "any new passphrase here", nil); err == nil || !strings.Contains(err.Error(), "does not open this workspace") {
-		t.Errorf("old recovery key: %v", err)
+	// the recovery key is the one it was
+	if err := recoverWith(t, dir, oldKey, "a third passphrase value", nil); err != nil {
+		t.Errorf("the recovery key stopped working: %v", err)
 	}
-	if err := recoverWith(t, dir, newKey, "a third passphrase value", nil); err != nil {
-		t.Errorf("new recovery key: %v", err)
+}
+
+// A passphrase change needs the OLD passphrase typed again, apart from the one the
+// session was opened with: with the recovery key and the new passphrase but no
+// second typing, or a wrong one, nothing changes.
+//
+// spec: SPO-Xunlock-PRE-036
+func TestPassphraseChangeNeedsTheOldPassphraseTypedAgain(t *testing.T) {
+	_, oldKey := template(t)
+	attempt := func(t *testing.T, dir string, oldText *string, term *fakeTerm) error {
+		t.Helper()
+		nf, nfd := fdIn(t, "a different long passphrase\n")
+		kf, kfd := fdIn(t, oldKey+"\n")
+		pf, pfd := fdIn(t, testPass+"\n")
+		defer nf.Close()
+		defer kf.Close()
+		defer pf.Close()
+		args := []string{"-C", dir, "--passphrase-fd", pfd, "store", "passphrase", "change", "--new-passphrase-fd", nfd, "--recovery-key-in-fd", kfd}
+		if oldText != nil {
+			of, ofd := fdIn(t, *oldText+"\n")
+			defer of.Close()
+			args = append(args, "--old-passphrase-fd", ofd)
+		}
+		_, err := exec(t, term, args...)
+		return err
 	}
+	unchanged := func(t *testing.T, dir string) {
+		t.Helper()
+		if _, err := withPass(t, dir, testPass, "store", "verify"); err != nil {
+			t.Errorf("a refused change altered the passphrase: %v", err)
+		}
+	}
+	t.Run("no second typing, no terminal", func(t *testing.T) {
+		dir := copyWorkspace(t)
+		if err := attempt(t, dir, nil, nil); err == nil || !strings.Contains(err.Error(), "--old-passphrase-fd") {
+			t.Fatalf("%v", err)
+		}
+		unchanged(t, dir)
+	})
+	t.Run("a wrong old passphrase", func(t *testing.T) {
+		dir := copyWorkspace(t)
+		wrong := "not the old passphrase at all"
+		if err := attempt(t, dir, &wrong, nil); err == nil || !strings.Contains(err.Error(), "old passphrase") {
+			t.Fatalf("%v", err)
+		}
+		unchanged(t, dir)
+	})
+	t.Run("typed at a prompt", func(t *testing.T) {
+		dir := copyWorkspace(t)
+		term := &fakeTerm{secrets: []string{testPass}}
+		if err := attempt(t, dir, nil, term); err != nil {
+			t.Fatalf("%v", err)
+		}
+		if len(term.asked) == 0 || !strings.Contains(term.asked[0], "Old passphrase") {
+			t.Errorf("the old passphrase was not asked for: %q", term.asked)
+		}
+		if _, err := withPass(t, dir, "a different long passphrase", "store", "verify"); err != nil {
+			t.Errorf("the new passphrase does not open it: %v", err)
+		}
+	})
 }
 
 // recoverWith runs `store recover` with the key and the new passphrase on
@@ -628,7 +701,10 @@ func TestRecoveryKeyNewTypeBack(t *testing.T) {
 	}
 
 	// Three wrong entries: the command fails and says the old key is already gone.
-	term := &fakeTerm{secrets: []string{"AAAA", "BBBB", "CCCC"}}
+	// the current recovery key is asked for first (review 2: the passphrase alone
+	// does not replace the recovery path)
+	shown := regexp.MustCompile(`(?m)^\s*([A-Z2-7]{4}(?:-[A-Z2-7]{4}){13})\s*$`)
+	term := &fakeTerm{secrets: []string{oldKey, "AAAA", "BBBB", "CCCC"}}
 	pf, pfd := fdIn(t, testPass+"\n")
 	out, err := exec(t, term, "-C", dir, "--passphrase-fd", pfd, "store", "recovery-key", "new")
 	pf.Close()
@@ -646,14 +722,15 @@ func TestRecoveryKeyNewTypeBack(t *testing.T) {
 	}
 
 	// One typo, then the right group (lower case is fine).
-	term = &fakeTerm{secrets: []string{"ZZZZ", "@LASTGROUP"}}
+	key1 := shown.FindStringSubmatch(out)[1]
+	term = &fakeTerm{secrets: []string{key1, "ZZZZ", "@LASTGROUP"}}
 	pf, pfd = fdIn(t, testPass+"\n")
 	out, err = exec(t, term, "-C", dir, "--passphrase-fd", pfd, "store", "recovery-key", "new")
 	pf.Close()
 	if err != nil || !strings.Contains(out, "Recovery key confirmed") || !strings.Contains(out, "previous recovery key no longer works") {
 		t.Fatalf("%v\n%s", err, out)
 	}
-	if len(term.asked) != 2 {
+	if len(term.asked) != 3 {
 		t.Errorf("prompts: %v", term.asked)
 	}
 	// --remove-old is gone: a rekey always revokes.
@@ -763,4 +840,22 @@ func TestProviderAndModeCommands(t *testing.T) {
 	if out, err := withPass(t, dir, testPass, "provider", "token", "clear", "koios"); err != nil || !strings.Contains(out, "removed") {
 		t.Errorf("%v\n%s", err, out)
 	}
+}
+
+// testColdSource presents testColdPass as the cold-key passphrase, for a test that
+// opens the sealed store itself and writes or reads a cold-role key.
+func testColdSource() *sqlitestore.ColdSource {
+	return &sqlitestore.ColdSource{Passphrase: func(context.Context, bool) (*secret.Buffer, error) {
+		return secret.Take([]byte(testColdPass)), nil
+	}}
+}
+
+// openCold is sqlitestore.Open with the cold source of testColdSource set, for a
+// test that opens the store itself.
+func openCold(path string, pass *secret.Buffer) (*sqlitestore.Store, error) {
+	st, err := sqlitestore.Open(path, pass)
+	if err == nil {
+		st.SetColdSource(testColdSource())
+	}
+	return st, err
 }

@@ -103,7 +103,8 @@ var (
 // the 128 of the envelope, spec SPO-09a-EXT-005) and encrypts it with the PIN
 // (domain/catalyst). The key bytes are wiped; the payload is the caller's.
 type VotingKeyQR struct {
-	Vault ports.Vault
+	// Vault opens the key by the name of its owner (the label resolver, ADR 0010).
+	Vault ports.NamedVault
 	// Random supplies the salt and nonce; crypto/rand when nil.
 	Random io.Reader
 }
@@ -113,7 +114,7 @@ func (v VotingKeyQR) VotingKeyQRPayload(ctx context.Context, name string, pin do
 	if v.Vault == nil {
 		return nil, errors.New("the store cannot release signing keys")
 	}
-	env, err := v.Vault.Open(ctx, ports.Ref{Name: name, Kind: ports.VotingSKey})
+	env, err := v.Vault.Open(ctx, ports.NamedRef{Name: name, Kind: ports.VotingSKey})
 	if err != nil {
 		return nil, fmt.Errorf("open the voting signing key: %w", err)
 	}

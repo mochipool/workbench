@@ -139,10 +139,10 @@ type stakeInputs struct {
 }
 
 // readStake reads `<w>.staking.addr` and the holder of `<w>.staking.skey`.
-func readStake(r ports.Reader, w string, needAddr bool) (stakeInputs, error) {
+func readStake(r ports.NamedReader, w string, needAddr bool) (stakeInputs, error) {
 	out := stakeInputs{name: w}
 	if needAddr {
-		b, err := get(r, ports.Ref{Name: w, Kind: ports.StakingAddr})
+		b, err := get(r, ports.NamedRef{Name: w, Kind: ports.StakingAddr})
 		if err != nil {
 			return out, err
 		}
@@ -235,7 +235,7 @@ func (uc RegisterStakeAddress) Run(ctx context.Context, req RegisterRequest) (Re
 	}
 	var pay payer
 	var st stakeInputs
-	if err := uc.Store.View(ctx, func(r ports.Reader) error {
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
 		if st, err = readStake(r, w, true); err != nil {
 			return err
@@ -295,8 +295,8 @@ func (uc RegisterStakeAddress) Run(ctx context.Context, req RegisterRequest) (Re
 		return Result{}, err
 	}
 	// The transaction left the machine: now the certificate artefact.
-	if err := uc.Store.Update(ctx, func(wr ports.Writer) error {
-		return wr.Put(ports.Ref{Name: w, Kind: ports.StakingCert}, cert.Envelope)
+	if err := uc.Store.Update(ctx, func(wr ports.NamedWriter) error {
+		return wr.Put(ports.NamedRef{Name: w, Kind: ports.StakingCert}, cert.Envelope)
 	}); err != nil {
 		return Result{}, fmt.Errorf("the transaction was sent, but the certificate file could not be stored: %w", err)
 	}
@@ -367,9 +367,9 @@ func (uc RegisterPoolDelegation) Run(ctx context.Context, req DelegationRegister
 	var pay payer
 	var st stakeInputs
 	var raw []byte
-	if err := uc.Store.View(ctx, func(r ports.Reader) error {
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
-		if raw, err = get(r, ports.Ref{Name: w, Kind: ports.DelegCert}); err != nil {
+		if raw, err = get(r, ports.NamedRef{Name: w, Kind: ports.DelegCert}); err != nil {
 			return err
 		}
 		if st, err = readStake(r, w, false); err != nil {
@@ -507,9 +507,9 @@ func (uc RegisterVoteDelegation) Run(ctx context.Context, req DelegationRegister
 	var pay payer
 	var st stakeInputs
 	var raw []byte
-	if err := uc.Store.View(ctx, func(r ports.Reader) error {
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
-		if raw, err = get(r, ports.Ref{Name: w, Kind: ports.VoteDelegCert}); err != nil {
+		if raw, err = get(r, ports.NamedRef{Name: w, Kind: ports.VoteDelegCert}); err != nil {
 			return err
 		}
 		if st, err = readStake(r, w, false); err != nil {
@@ -638,9 +638,9 @@ func (uc DeregisterStakeAddress) Run(ctx context.Context, req RegisterRequest) (
 	var pay payer
 	var st stakeInputs
 	var raw []byte
-	if err := uc.Store.View(ctx, func(r ports.Reader) error {
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
-		if raw, err = get(r, ports.Ref{Name: w, Kind: ports.StakingDeregCert}); err != nil {
+		if raw, err = get(r, ports.NamedRef{Name: w, Kind: ports.StakingDeregCert}); err != nil {
 			return err
 		}
 		if st, err = readStake(r, w, true); err != nil {

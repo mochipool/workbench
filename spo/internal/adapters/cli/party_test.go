@@ -211,7 +211,7 @@ func TestScopeNarrowsAtOnceAndWideningAsks(t *testing.T) {
 	f := s.bob
 	scope := func() party.Scope {
 		var p party.Party
-		f.st.View(context.Background(), func(r ports.Reader) error { p, _ = partystore.Registry{}.ByName(r, "coord"); return nil })
+		f.st.View(context.Background(), func(r ports.NamedReader) error { p, _ = partystore.Registry{}.ByName(r, "coord"); return nil })
 		return p.Scope
 	}
 	if got := scope(); got.Unscoped || len(got.Pools) != 1 {

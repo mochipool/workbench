@@ -24,6 +24,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 	"github.com/mochipool/workbench/spo/test/multiparty/partyrig"
 	"github.com/mochipool/workbench/spo/test/plainstore"
 )
@@ -164,10 +165,10 @@ func bagOpener(open func(string) (*filebag.Bag, error)) func(string) (FileBag, e
 	}
 }
 
-func realKit(st ports.Store) *PartyKit {
-	var v ports.Vault
+func realKit(st ports.NamedStore) *PartyKit {
+	var v ports.NamedVault
 	if st != nil {
-		v, _ = st.(ports.Vault)
+		v, _ = st.(ports.NamedVault)
 	}
 	reg := partystore.Registry{}
 	return &PartyKit{Kit: envelope.Kit{Store: st, Vault: v}, Registry: reg, SetScope: reg.SetScope, Replay: partystore.Replay{}, Addresses: native.Ledger{},
@@ -183,9 +184,9 @@ func (f *pfix) deps(term Terminal) Deps {
 	return Deps{
 		Out: &f.out, Err: &f.err, Terminal: term, Config: memConfig(cfgs),
 		Sealed: SealedOps{Open: func(string, *secret.Buffer, OpenOptions) (SealedStore, error) {
-			return fakeSealed{Store: f.st, tokens: map[string][]byte{}}, nil
+			return fakeSealed{Anchored: f.st.Anchor(), tokens: map[ports.Ref][]byte{}}, nil
 		}},
-		OpenUpstream: func(dir string) (ports.Store, error) { return plainstore.OpenTestnet(dir) },
+		OpenUpstream: plainstore.Upstream,
 		Wire: func(st ports.Store, o WireOptions) (*Env, error) {
 			led := native.Ledger{}
 			env := &Env{Mode: o.Mode, NetworkID: ports.NetworkTestnet, Clock: f.clock, Genesis: f.ch, Tip: f.ch,
@@ -201,7 +202,7 @@ func (f *pfix) deps(term Terminal) Deps {
 				v, _ = st.(ports.Vault)
 			}
 			env.Signers = native.Signers{Vault: v}
-			env.Party = realKit(st)
+			env.Party = realKit(labels.Named(st))
 			if f.edit != nil {
 				f.edit(env, env.Party)
 			}
@@ -264,7 +265,7 @@ func (f forbid) ReadLine(_ context.Context, p string) (string, error) {
 func (f *pfix) events() []string {
 	f.t.Helper()
 	var out []string
-	err := f.st.View(context.Background(), func(r ports.Reader) error {
+	err := f.st.View(context.Background(), func(r ports.NamedReader) error {
 		es, err := multisig.Events(r)
 		for _, e := range es {
 			out = append(out, e.Kind+" "+e.Reason+" "+e.Detail)

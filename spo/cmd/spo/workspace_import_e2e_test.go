@@ -244,6 +244,12 @@ func TestPTYGuidedImport(t *testing.T) {
 	p.wait("Passphrase")
 	p.typeText(testPass)
 	p.send(keyEnter)
+	p.wait("Cold-key passphrase") // the pool's cold key is sealed under a sub-key of its own
+	p.typeText(testColdPass)
+	p.send(keyEnter)
+	p.wait("Repeat it")
+	p.typeText(testColdPass)
+	p.send(keyEnter)
 	p.wait("2 owner(s) of 2 imported")
 	p.send(keyEsc) // back to the menu, still searching
 	p.send(keyEsc) // end the search
@@ -252,7 +258,7 @@ func TestPTYGuidedImport(t *testing.T) {
 		t.Fatalf("spo tui exited with %v", st)
 	}
 	p.checkRestored()
-	p.noSecretAnywhere(testPass, "battery staple")
+	p.noSecretAnywhere(testPass, "battery staple", testColdPass)
 
 	desc, err := withPass(t, dir, testPass, "pool", "descriptor", "show", "p")
 	if err != nil {

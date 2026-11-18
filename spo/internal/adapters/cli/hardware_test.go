@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,14 +33,20 @@ func (f *fakeHW) Profile() custody.Profile {
 	return custody.HardwareProfile(f.vendor, "8.0.8", func(string, string) bool { return true })
 }
 
+// hwKeys counts the keys exported by every fake device: each is its own key.
+var hwKeys int
+
 func (f *fakeHW) ExportHardwareKey(_ context.Context, key custody.KeyRef, path string) (ports.HardwareKey, error) {
 	f.keys = append(f.keys, key)
 	f.paths = append(f.paths, path)
 	if f.fail != nil {
 		return ports.HardwareKey{}, f.fail
 	}
+	// each exported key is its own key: the store gives an identity to one owner only
+	hwKeys++
+	vk := genVKeyHex[:len(genVKeyHex)-2] + fmt.Sprintf("%02x", 0x40+hwKeys)
 	return ports.HardwareKey{
-		VKey:        []byte(`{"type":"PaymentVerificationKeyShelley_ed25519","description":"Payment Hardware Verification Key","cborHex":"` + genVKeyHex + `"}`),
+		VKey:        []byte(`{"type":"PaymentVerificationKeyShelley_ed25519","description":"Payment Hardware Verification Key","cborHex":"` + vk + `"}`),
 		SigningFile: []byte(`{"type":"PaymentHWSigningFileShelley_ed25519","description":"Payment Hardware Signing File","path":["1852H"],"cborXPubKeyHex":"5840` + strings.Repeat("00", 64) + `"}`),
 	}, nil
 }

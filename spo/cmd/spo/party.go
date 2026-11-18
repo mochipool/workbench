@@ -11,6 +11,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/adapters/tailcat"
 	"github.com/mochipool/workbench/spo/internal/adapters/transferfile"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 )
 
 // derpRegion is a self-hosted relay region for the tailcat server. It is nil in
@@ -46,13 +47,18 @@ func partyAddresses() ports.AddressInspector { return native.Ledger{} }
 // wireParty gives the Env the multi-party stack over the workspace's store
 // (nil in the probe that only inspects what a command needs).
 func wireParty(env *cli.Env, store ports.Store) {
-	var vault ports.Vault
+	var named ports.NamedStore
+	var vault ports.NamedVault
 	if store != nil {
-		vault, _ = store.(ports.Vault)
+		ns := labels.Named(store)
+		named = ns
+		if _, ok := store.(ports.Vault); ok {
+			vault = ns
+		}
 	}
 	reg := partystore.Registry{}
 	env.Party = &cli.PartyKit{
-		Kit:            envelope.Kit{Store: store, Vault: vault},
+		Kit:            envelope.Kit{Store: named, Vault: vault},
 		Registry:       reg,
 		SetScope:       reg.SetScope,
 		Replay:         partystore.Replay{},

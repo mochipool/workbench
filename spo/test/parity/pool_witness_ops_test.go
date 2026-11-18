@@ -75,7 +75,7 @@ func TestPoolWitnessSignInfoClearMatchUpstream(t *testing.T) {
 	store, _, led, tip, clock := e.poolKit(t, r.port, tipSlot, 0, time.Now())
 	appr := &yesApprover{}
 	sign := poolops.SignWitnessFile{Store: store, Tip: tip, Clock: clock, Viewer: native.TxViewer{}, TxIDs: led,
-		Signers: native.Signers{Vault: store}, Approver: appr, NetworkMagic: 2}
+		Signers: native.Signers{Vault: store.Anchor()}, Approver: appr, NetworkMagic: 2}
 	res, err := sign.Run(bg, poolops.SignRequest{File: original, Key: "./own2"})
 	if err != nil {
 		t.Fatal(err)

@@ -16,7 +16,7 @@ var ErrKesKeyExists = errors.New("a KES key with the next number already exists"
 // GenerateKesKey creates the KES key pair for the next operational
 // certificate (upstream 04c_genKESKeys).
 type GenerateKesKey struct {
-	Store  ports.Store
+	Store  ports.NamedStore
 	KeyGen ports.KesKeyGenerator
 }
 
@@ -33,7 +33,7 @@ type KesKeyGenerated struct {
 func (uc GenerateKesKey) Run(ctx context.Context, poolName string) (KesKeyGenerated, error) {
 	// Check before generating, so a refusal costs nothing and creates nothing.
 	var number int
-	if err := uc.Store.View(ctx, func(r ports.Reader) error {
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
 		_, number, err = plan(r, poolName)
 		return err
@@ -47,7 +47,7 @@ func (uc GenerateKesKey) Run(ctx context.Context, poolName string) (KesKeyGenera
 	}
 	defer pair.SKey.Destroy()
 
-	err = uc.Store.Update(ctx, func(w ports.Writer) error {
+	err = uc.Store.Update(ctx, func(w ports.NamedWriter) error {
 		// Re-check inside the transaction: the state may have moved.
 		state, n, err := plan(w, poolName)
 		if err != nil {
@@ -56,17 +56,17 @@ func (uc GenerateKesKey) Run(ctx context.Context, poolName string) (KesKeyGenera
 		if n != number {
 			return ports.ErrConflict
 		}
-		if err := w.Put(ports.Ref{Name: poolName, Kind: ports.KesVKey, Num: n}, pair.VKey); err != nil {
+		if err := w.Put(ports.NamedRef{Name: poolName, Kind: ports.KesVKey, Num: n}, pair.VKey); err != nil {
 			return err
 		}
-		if err := w.PutSecret(ports.Ref{Name: poolName, Kind: ports.KesSKey, Num: n}, pair.SKey); err != nil {
+		if err := w.PutSecret(ports.NamedRef{Name: poolName, Kind: ports.KesSKey, Num: n}, pair.SKey); err != nil {
 			return err
 		}
 		cur, _ := state.Current()
-		if err := w.Put(ports.Ref{Name: poolName, Kind: ports.KesCounter}, pool.FormatCounter(cur)); err != nil {
+		if err := w.Put(ports.NamedRef{Name: poolName, Kind: ports.KesCounter}, pool.FormatCounter(cur)); err != nil {
 			return err
 		}
-		return w.Put(ports.Ref{Name: poolName, Kind: ports.KesCounterNext}, pool.FormatCounter(state.NextNumber()))
+		return w.Put(ports.NamedRef{Name: poolName, Kind: ports.KesCounterNext}, pool.FormatCounter(state.NextNumber()))
 	})
 	if err != nil {
 		return KesKeyGenerated{}, err
@@ -76,12 +76,12 @@ func (uc GenerateKesKey) Run(ctx context.Context, poolName string) (KesKeyGenera
 
 // plan loads the KES state, applies the refusals and returns the state after
 // generation with the number of the key to generate.
-func plan(r ports.Reader, poolName string) (pool.KesState, int, error) {
-	current, err := readCounter(r, ports.Ref{Name: poolName, Kind: ports.KesCounter})
+func plan(r ports.NamedReader, poolName string) (pool.KesState, int, error) {
+	current, err := readCounter(r, ports.NamedRef{Name: poolName, Kind: ports.KesCounter})
 	if err != nil {
 		return pool.KesState{}, 0, err
 	}
-	next, err := readCounter(r, ports.Ref{Name: poolName, Kind: ports.KesCounterNext})
+	next, err := readCounter(r, ports.NamedRef{Name: poolName, Kind: ports.KesCounterNext})
 	if err != nil {
 		return pool.KesState{}, 0, err
 	}
@@ -90,7 +90,7 @@ func plan(r ports.Reader, poolName string) (pool.KesState, int, error) {
 		return pool.KesState{}, 0, err
 	}
 	for _, k := range []ports.Kind{ports.KesVKey, ports.KesSKey} {
-		exists, err := r.Exists(ports.Ref{Name: poolName, Kind: k, Num: n})
+		exists, err := r.Exists(ports.NamedRef{Name: poolName, Kind: k, Num: n})
 		if err != nil {
 			return pool.KesState{}, 0, err
 		}
@@ -101,7 +101,7 @@ func plan(r ports.Reader, poolName string) (pool.KesState, int, error) {
 	return state, n, nil
 }
 
-func readCounter(r ports.Reader, ref ports.Ref) (*int, error) {
+func readCounter(r ports.NamedReader, ref ports.NamedRef) (*int, error) {
 	b, err := r.Get(ref)
 	if errors.Is(err, ports.ErrNotFound) {
 		return nil, nil

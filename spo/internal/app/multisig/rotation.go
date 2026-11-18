@@ -17,8 +17,8 @@ import (
 // operator's confirmation replaces the enrollment (AcceptRotation).
 
 var (
-	localKeysRef = ports.Ref{Name: "local", Kind: ports.PartyKeys}
-	localDocRef  = ports.Ref{Name: "local", Kind: ports.PartyIdentity}
+	localKeysRef = ports.NamedRef{Name: "local", Kind: ports.PartyKeys}
+	localDocRef  = ports.NamedRef{Name: "local", Kind: ports.PartyIdentity}
 )
 
 // Rotation errors.
@@ -78,7 +78,7 @@ func (n Node) authoriseRotation(now time.Time, sender party.Party, m party.Rotat
 // onRotation is the one effect of a Rotation message: the statement is stored
 // as pending, in the transaction that records the message id. The registry is
 // not touched, whatever transport carried the message (SPO-Xparty-INV-031).
-func (n Node) onRotation(w ports.Writer, o ports.OpenedEnvelope, m party.RotationAnnouncement, via ports.TransportKind, now time.Time) (Handled, error) {
+func (n Node) onRotation(w ports.NamedWriter, o ports.OpenedEnvelope, m party.RotationAnnouncement, via ports.TransportKind, now time.Time) (Handled, error) {
 	h := Handled{Type: party.TypeRotation, Sender: o.Sender().Fingerprint, HasSender: true}
 	st, err := readSigner(w)
 	if err != nil {
@@ -169,7 +169,7 @@ func compareStrings(a, b string) int {
 // verifies.
 func (n Node) PendingRotations(ctx context.Context) ([]PendingRotation, error) {
 	var out []PendingRotation
-	err := n.Store.View(ctx, func(r ports.Reader) error {
+	err := n.Store.View(ctx, func(r ports.NamedReader) error {
 		st, err := readSigner(r)
 		if err != nil {
 			return err
@@ -216,10 +216,10 @@ type RotationAccepted struct {
 // fingerprint as typed by the operator; nothing else accepts a rotation.
 //
 // spec: SPO-Xparty-INV-032, SPO-Xparty-INV-033, SPO-Xparty-PR-006
-func (n Node) AcceptRotation(ctx context.Context, name string, a party.RotationAcceptance, hooks ...func(w ports.Writer, retired, next party.Party) error) (RotationAccepted, error) {
+func (n Node) AcceptRotation(ctx context.Context, name string, a party.RotationAcceptance, hooks ...func(w ports.NamedWriter, retired, next party.Party) error) (RotationAccepted, error) {
 	var res RotationAccepted
 	now := n.Clock.Now()
-	err := n.Store.Update(ctx, func(w ports.Writer) error {
+	err := n.Store.Update(ctx, func(w ports.NamedWriter) error {
 		st, err := readSigner(w)
 		if err != nil {
 			return err
@@ -279,7 +279,7 @@ func (n Node) AcceptRotation(ctx context.Context, name string, a party.RotationA
 // RejectRotation drops the pending announcement of a party. The enrollment is
 // not touched.
 func (n Node) RejectRotation(ctx context.Context, name string) error {
-	return n.Store.Update(ctx, func(w ports.Writer) error {
+	return n.Store.Update(ctx, func(w ports.NamedWriter) error {
 		st, err := readSigner(w)
 		if err != nil {
 			return err
@@ -310,7 +310,7 @@ func (n Node) RejectRotation(ctx context.Context, name string) error {
 // sealed to the party with that fingerprint, so a response to it is refused
 // (SPO-Xparty-PRE-005) and a new request goes to the new identity
 // (SPO-Xparty-INV-033).
-func voidSlotRequests(w ports.Writer, to string, now time.Time) (int, error) {
+func voidSlotRequests(w ports.NamedWriter, to string, now time.Time) (int, error) {
 	st, err := readCoord(w)
 	if err != nil {
 		return 0, err
@@ -390,7 +390,7 @@ type RotationDone struct {
 func (n Node) RotateIdentity(ctx context.Context, label string) (RotationDone, error) {
 	now := n.Clock.Now()
 	var peers []party.Party
-	if err := n.Store.View(ctx, func(r ports.Reader) error {
+	if err := n.Store.View(ctx, func(r ports.NamedReader) error {
 		if err := undeliveredRotations(r, now); err != nil {
 			return err
 		}
@@ -410,7 +410,7 @@ func (n Node) RotateIdentity(ctx context.Context, label string) (RotationDone, e
 	}
 	defer g.Keys.Destroy()
 	done := RotationDone{Old: g.Old, New: g.Identity.Fingerprint(), Document: g.Document}
-	err = n.Store.Update(ctx, func(w ports.Writer) error {
+	err = n.Store.Update(ctx, func(w ports.NamedWriter) error {
 		cur, err := w.Get(localDocRef)
 		if err != nil {
 			return err
@@ -493,7 +493,7 @@ func (n Node) RotateIdentity(ctx context.Context, label string) (RotationDone, e
 // undeliveredRotations refuses, with ErrRotationUndelivered, while an
 // announcement of an earlier rotation is still waiting in the outbox and has
 // not expired.
-func undeliveredRotations(r ports.Reader, now time.Time) error {
+func undeliveredRotations(r ports.NamedReader, now time.Time) error {
 	items, err := readOutbox(r)
 	if err != nil {
 		return err
@@ -517,7 +517,7 @@ const RotationAnnouncementLifetime = 7 * 24 * time.Hour
 
 // voidAllSlotRequests removes every outstanding request of every open
 // collection this machine coordinates (it was sealed by the old identity).
-func voidAllSlotRequests(w ports.Writer, now time.Time) (int, error) {
+func voidAllSlotRequests(w ports.NamedWriter, now time.Time) (int, error) {
 	st, err := readCoord(w)
 	if err != nil {
 		return 0, err

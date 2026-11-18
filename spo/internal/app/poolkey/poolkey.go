@@ -50,7 +50,7 @@ func trimDir(s string) string { return strings.TrimPrefix(s, "./") }
 
 func plainName(s string) (string, error) {
 	s = trimDir(s)
-	if err := (ports.Ref{Name: s, Kind: ports.CalidusVKey}).Validate(); err != nil {
+	if err := (ports.NamedRef{Name: s, Kind: ports.CalidusVKey}).Validate(); err != nil {
 		return "", fmt.Errorf("%w: %q", ErrBadName, s)
 	}
 	return s, nil
@@ -64,7 +64,7 @@ func plainName(s string) (string, error) {
 // returned. There is no random-seed path: cardano-signer always derives, from a
 // given or a fresh phrase.
 type GenerateCalidusKey struct {
-	Store     ports.Store
+	Store     ports.NamedStore
 	Deriver   ports.CalidusKeyDeriver
 	Mnemonics ports.MnemonicGenerator // when no phrase is given
 }
@@ -111,11 +111,11 @@ func (uc GenerateCalidusKey) Run(ctx context.Context, req GenerateCalidusKeyRequ
 	if _, err := custody.PlanGeneration(req.Place, custody.RoleCalidus); err != nil {
 		return res, err
 	}
-	refs := []ports.Ref{
+	refs := []ports.NamedRef{
 		{Name: nm, Kind: ports.CalidusVKey}, {Name: nm, Kind: ports.CalidusSKey}, {Name: nm, Kind: ports.CalidusHwsFile},
 		{Name: nm, Kind: ports.CalidusMnemonics}, {Name: nm, Kind: ports.CalidusID},
 	}
-	if err := uc.Store.View(ctx, func(r ports.Reader) error { return refuseExisting(r, refs...) }); err != nil {
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error { return refuseExisting(r, refs...) }); err != nil {
 		return res, err
 	}
 	var words *ports.Secret
@@ -146,7 +146,7 @@ func (uc GenerateCalidusKey) Run(ctx context.Context, req GenerateCalidusKeyRequ
 		return res, err
 	}
 	defer file.Destroy()
-	err = uc.Store.Update(ctx, func(w ports.Writer) error {
+	err = uc.Store.Update(ctx, func(w ports.NamedWriter) error {
 		if err := refuseExisting(w, refs...); err != nil {
 			return err
 		}
@@ -167,7 +167,7 @@ func (uc GenerateCalidusKey) Run(ctx context.Context, req GenerateCalidusKeyRequ
 	return CalidusKeyGenerated{Name: nm, VKey: pair.VKey, PublicKey: pub, ID: id, MnemonicStored: true}, nil
 }
 
-func refuseExisting(r ports.Reader, refs ...ports.Ref) error {
+func refuseExisting(r ports.NamedReader, refs ...ports.NamedRef) error {
 	for _, ref := range refs {
 		ok, err := r.Exists(ref)
 		if err != nil {
@@ -188,7 +188,7 @@ func refuseExisting(r ports.Reader, refs ...ports.Ref) error {
 // The pool cold key is demanded through a signing plan before anything is
 // built: a hardware or remote cold key is refused up front.
 type GenerateCalidusRegistration struct {
-	Store   ports.Store
+	Store   ports.NamedStore
 	Signers ports.SignerDirectory
 	// Clock names the file and, when no nonce is given and Tip is nil, gives
 	// the nonce.
@@ -228,7 +228,7 @@ type CalidusRegistrationRequest struct {
 
 // CalidusRegistrationGenerated is the result. All of it is public.
 type CalidusRegistrationGenerated struct {
-	Ref        ports.Ref // the registration file
+	Ref        ports.NamedRef // the registration file
 	PoolID     chain.PoolID
 	PoolBech   string
 	CalidusPub [32]byte
@@ -267,22 +267,22 @@ func (uc GenerateCalidusRegistration) Run(ctx context.Context, req CalidusRegist
 	var haveSKey, haveHws bool
 	var cold custody.KeyRef
 	var coldErr error
-	err = uc.Store.View(ctx, func(r ports.Reader) error {
+	err = uc.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
-		if calVKey, err = r.Get(ports.Ref{Name: cal, Kind: ports.CalidusVKey}); err != nil {
+		if calVKey, err = r.Get(ports.NamedRef{Name: cal, Kind: ports.CalidusVKey}); err != nil {
 			if errors.Is(err, ports.ErrNotFound) {
-				return fmt.Errorf("%w: %s", ErrMissingFile, ports.Ref{Name: cal, Kind: ports.CalidusVKey})
+				return fmt.Errorf("%w: %s", ErrMissingFile, ports.NamedRef{Name: cal, Kind: ports.CalidusVKey})
 			}
 			return err
 		}
-		if haveSKey, err = r.Exists(ports.Ref{Name: pl, Kind: ports.NodeSKey}); err != nil {
+		if haveSKey, err = r.Exists(ports.NamedRef{Name: pl, Kind: ports.NodeSKey}); err != nil {
 			return err
 		}
-		if haveHws, err = r.Exists(ports.Ref{Name: pl, Kind: ports.NodeHwsFile}); err != nil {
+		if haveHws, err = r.Exists(ports.NamedRef{Name: pl, Kind: ports.NodeHwsFile}); err != nil {
 			return err
 		}
 		optional := func(k ports.Kind) []byte {
-			b, err := r.Get(ports.Ref{Name: pl, Kind: k})
+			b, err := r.Get(ports.NamedRef{Name: pl, Kind: k})
 			if err != nil {
 				return nil
 			}
@@ -386,8 +386,8 @@ func (uc GenerateCalidusRegistration) Run(ctx context.Context, req CalidusRegist
 	if err != nil {
 		return res, err
 	}
-	ref := ports.Ref{Name: pl + "_" + now.Format("060102150405"), Kind: ports.CalidusRegistration}
-	if err := uc.Store.Update(ctx, func(w ports.Writer) error {
+	ref := ports.NamedRef{Name: pl + "_" + now.Format("060102150405"), Kind: ports.CalidusRegistration}
+	if err := uc.Store.Update(ctx, func(w ports.NamedWriter) error {
 		if err := refuseExisting(w, ref); err != nil { // SPO-15-PRE-005
 			return err
 		}

@@ -12,7 +12,7 @@ import (
 // software keys). The signing key goes into the store; `enc` is not ported
 // at generation (same decision as 04c).
 type GenerateVrfKeys struct {
-	Store  ports.Store
+	Store  ports.NamedStore
 	KeyGen ports.VrfKeyGenerator
 }
 
@@ -33,7 +33,7 @@ func (uc GenerateVrfKeys) Run(ctx context.Context, req GenerateVrfKeysRequest) (
 	if _, err := custody.PlanGeneration(req.Place, custody.RoleVRF); err != nil {
 		return VrfKeysGenerated{}, err
 	}
-	if err := uc.Store.View(ctx, func(r ports.Reader) error { return vrfPlan(r, req.Pool) }); err != nil {
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error { return vrfPlan(r, req.Pool) }); err != nil {
 		return VrfKeysGenerated{}, err
 	}
 	pair, err := uc.KeyGen.GenerateVRF(ctx)
@@ -42,14 +42,14 @@ func (uc GenerateVrfKeys) Run(ctx context.Context, req GenerateVrfKeysRequest) (
 	}
 	defer pair.SKey.Destroy()
 
-	err = uc.Store.Update(ctx, func(w ports.Writer) error {
+	err = uc.Store.Update(ctx, func(w ports.NamedWriter) error {
 		if err := vrfPlan(w, req.Pool); err != nil {
 			return err
 		}
-		if err := w.Put(ports.Ref{Name: req.Pool, Kind: ports.VrfVKey}, pair.VKey); err != nil {
+		if err := w.Put(ports.NamedRef{Name: req.Pool, Kind: ports.VrfVKey}, pair.VKey); err != nil {
 			return err
 		}
-		return w.PutSecret(ports.Ref{Name: req.Pool, Kind: ports.VrfSKey}, pair.SKey)
+		return w.PutSecret(ports.NamedRef{Name: req.Pool, Kind: ports.VrfSKey}, pair.SKey)
 	})
 	if err != nil {
 		return VrfKeysGenerated{}, err
@@ -57,6 +57,6 @@ func (uc GenerateVrfKeys) Run(ctx context.Context, req GenerateVrfKeysRequest) (
 	return VrfKeysGenerated{Pool: req.Pool, VKey: pair.VKey}, nil
 }
 
-func vrfPlan(r ports.Reader, poolName string) error {
+func vrfPlan(r ports.NamedReader, poolName string) error {
 	return refuseExisting(r, ErrVrfKeyExists, poolName, ports.VrfVKey, ports.VrfSKey)
 }

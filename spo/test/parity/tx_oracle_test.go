@@ -215,7 +215,7 @@ func TestTxMatchesCardanoCLI(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		signer := native.VaultSigner{Vault: store}
+		signer := native.VaultSigner{Vault: store.Anchor()}
 		payKey := porttest.Key(t, store, custody.RolePayment, "w")
 		p := func(n string) string { return filepath.Join(keys.dir, n) }
 

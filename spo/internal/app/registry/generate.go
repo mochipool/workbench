@@ -48,7 +48,7 @@ var (
 // store is read or written (SPO-12a-IN-002); a policy whose key a registry
 // signer holds is signed in the signer.
 type GenerateTokenMetadata struct {
-	Store   ports.Store
+	Store   ports.NamedStore
 	Signers ports.SignerDirectory
 	Clock   ports.Clock
 	// Logos reads the file `metaLogoPNG` names; nil refuses a record that
@@ -68,14 +68,14 @@ type Generated struct {
 	// done (SPO-12a-OUT-001). The operator fills in the meta fields and runs
 	// again.
 	Created bool
-	Record  ports.Ref
+	Record  ports.NamedRef
 	Subject string
 	// Sequence is the sequence number of the new entry (the record's number
 	// plus one); zero when Created.
 	Sequence uint64
 	Entry    tokenmeta.Entry
 	// File is the stored submission file; the zero Ref when Created.
-	File ports.Ref
+	File ports.NamedRef
 }
 
 // recordFields lists the keys of the record in the order a first run writes
@@ -154,7 +154,7 @@ func (uc GenerateTokenMetadata) Run(ctx context.Context, req GenerateRequest) (G
 	if err != nil {
 		return Generated{}, err
 	}
-	recRef := ports.Ref{Name: dassets.RecordName(ref.Policy, ref.Asset), Kind: ports.AssetFile}
+	recRef := ports.NamedRef{Name: dassets.RecordName(ref.Policy, ref.Asset), Kind: ports.AssetFile}
 
 	var script []byte
 	var idHex string
@@ -162,10 +162,10 @@ func (uc GenerateTokenMetadata) Run(ctx context.Context, req GenerateRequest) (G
 	var haveRec, hasVKey bool
 	var keyRef custody.KeyRef
 	var policyVKey [32]byte
-	if err := uc.Store.View(ctx, func(r ports.Reader) error {
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
 		get := func(k ports.Kind) ([]byte, error) {
-			v, err := r.Get(ports.Ref{Name: policyName, Kind: k})
+			v, err := r.Get(ports.NamedRef{Name: policyName, Kind: k})
 			if errors.Is(err, ports.ErrNotFound) {
 				return nil, fmt.Errorf("%w: %s.%s is missing", ErrPolicyFiles, policyName, k)
 			}
@@ -190,7 +190,7 @@ func (uc GenerateTokenMetadata) Run(ctx context.Context, req GenerateRequest) (G
 		}
 		// The policy's verification key, when the store has one, is the
 		// identity demanded of the signer (hasVKey).
-		if vk, err := r.Get(ports.Ref{Name: policyName, Kind: ports.PolicyVKey}); err == nil {
+		if vk, err := r.Get(ports.NamedRef{Name: policyName, Kind: ports.PolicyVKey}); err == nil {
 			if policyVKey, err = cose.VKeyFromEnvelope(vk); err != nil {
 				return fmt.Errorf("%s.policy.vkey: %w", policyName, err)
 			}
@@ -230,7 +230,7 @@ func (uc GenerateTokenMetadata) Run(ctx context.Context, req GenerateRequest) (G
 	if !haveRec {
 		validBefore := dassets.ValidBefore(dassets.Expiry(script))
 		rec := firstRun(asset, name, validBefore, now)
-		if err := uc.Store.Update(ctx, func(w ports.Writer) error {
+		if err := uc.Store.Update(ctx, func(w ports.NamedWriter) error {
 			if ok, err := w.Exists(recRef); err != nil || ok {
 				if err == nil {
 					err = ports.ErrConflict
@@ -323,8 +323,8 @@ func (uc GenerateTokenMetadata) Run(ctx context.Context, req GenerateRequest) (G
 	rec.Set("sequenceNumber", strconv.FormatUint(seq, 10))
 	rec.Set("lastUpdate", now.Format(time.RFC1123Z))
 	rec.Set("lastAction", "created Token-Registry-JSON")
-	file := ports.Ref{Name: subject, Kind: ports.TokenRegistration}
-	if err := uc.Store.Update(ctx, func(w ports.Writer) error {
+	file := ports.NamedRef{Name: subject, Kind: ports.TokenRegistration}
+	if err := uc.Store.Update(ctx, func(w ports.NamedWriter) error {
 		if err := w.Put(recRef, rec.Marshal()); err != nil {
 			return err
 		}

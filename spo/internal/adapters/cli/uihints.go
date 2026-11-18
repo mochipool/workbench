@@ -12,17 +12,24 @@ import (
 // cmd/spo, so a new secret descriptor cannot reach an interactive driver
 // unclassified.
 var secretFDFlags = map[string]string{
-	"passphrase-fd":         uihint.SecretIn,
-	"new-passphrase-fd":     uihint.SecretIn,
-	"password-fd":           uihint.SecretIn,
-	"recovery-key-in-fd":    uihint.SecretIn,
-	"mnemonic-in-fd":        uihint.SecretIn,
-	"pin-fd":                uihint.SecretIn,
-	"token-fd":              uihint.SecretIn,
-	"message-passphrase-fd": uihint.SecretIn,
-	"protection-key-fd":     uihint.SecretIn,
-	"recovery-key-fd":       uihint.SecretOut,
-	"password-out-fd":       uihint.SecretOut,
+	"passphrase-fd":          uihint.SecretIn,
+	"new-passphrase-fd":      uihint.SecretIn,
+	"old-passphrase-fd":      uihint.SecretIn,
+	"cold-passphrase-fd":     uihint.SecretIn,
+	"new-cold-passphrase-fd": uihint.SecretIn,
+	"password-fd":            uihint.SecretIn,
+	"recovery-key-in-fd":     uihint.SecretIn,
+	"mnemonic-in-fd":         uihint.SecretIn,
+	"pin-fd":                 uihint.SecretIn,
+	"fido2-pin-fd":           uihint.SecretIn,
+	"recovery-pin-fd":        uihint.SecretIn,
+	"old-recovery-pin-fd":    uihint.SecretIn,
+	"new-fido2-pin-fd":       uihint.SecretIn,
+	"token-fd":               uihint.SecretIn,
+	"message-passphrase-fd":  uihint.SecretIn,
+	"protection-key-fd":      uihint.SecretIn,
+	"recovery-key-fd":        uihint.SecretOut,
+	"password-out-fd":        uihint.SecretOut,
 }
 
 // MarkForUI annotates a command tree for an interactive driver: secret

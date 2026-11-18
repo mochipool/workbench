@@ -8,9 +8,9 @@ import (
 	"testing"
 
 	"github.com/mochipool/workbench/spo/internal/adapters/cli"
-	"github.com/mochipool/workbench/spo/internal/adapters/sqlitestore"
 	"github.com/mochipool/workbench/spo/internal/adapters/storeaudit"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
@@ -22,12 +22,12 @@ func singleSourceEvents(t *testing.T, dir string) []storeaudit.Event {
 	var evs []storeaudit.Event
 	var err error
 	if _, serr := os.Stat(filepath.Join(dir, cli.WorkspaceFile)); serr == nil {
-		st, oerr := sqlitestore.Open(filepath.Join(dir, cli.WorkspaceFile), secret.Take([]byte(testPass)))
+		st, oerr := openCold(filepath.Join(dir, cli.WorkspaceFile), secret.Take([]byte(testPass)))
 		if oerr != nil {
 			t.Fatal(oerr)
 		}
 		defer st.Close()
-		evs, err = storeaudit.Events(context.Background(), st)
+		evs, err = storeaudit.Events(context.Background(), labels.Named(st))
 	} else {
 		evs, err = storeaudit.Events(context.Background(), plainstore.AuditStore(dir))
 	}

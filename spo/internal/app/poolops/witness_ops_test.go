@@ -46,7 +46,7 @@ func pendingWitness(t *testing.T) (*prig, pool.TransferFile) {
 func (r *prig) witnessSigner(ok bool) (SignWitnessFile, *witnessApprover) {
 	a := &witnessApprover{answer: ok}
 	return SignWitnessFile{Store: r.store, Tip: r.chain, Clock: r.clock, Viewer: native.TxViewer{}, TxIDs: r.led,
-		Signers: pdir{native.VaultSigner{Vault: r.store}, r.store}, Approver: a}, a
+		Signers: pdir{native.VaultSigner{Vault: r.store.Anchor()}, r.store}, Approver: a}, a
 }
 
 // spec: SPO-05d-IF-003, SPO-05d-IF-004

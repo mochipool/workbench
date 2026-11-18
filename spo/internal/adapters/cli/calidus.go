@@ -208,7 +208,7 @@ to a payment of yours to put it on the chain:
 	return cmd
 }
 
-func recordFileName(r ports.Ref) string { return r.Name + "." + string(r.Kind) }
+func recordFileName(r ports.NamedRef) string { return r.Name + "." + string(r.Kind) }
 
 func (a *app) calidusStatusCommand() *cobra.Command {
 	var cf chainFlags

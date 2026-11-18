@@ -25,6 +25,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/stake"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
@@ -142,14 +143,15 @@ func (f recFees) EstimateFee(p chain.ProtocolParameters, b txbuild.TxBody, n uin
 // for: a key with only a hardware file, or none, has no signer here.
 type pdir struct {
 	s     ports.Signer
-	store ports.Store
+	store ports.NamedStore
 }
 
 func (d pdir) SignerFor(k custody.KeyRef) (ports.Signer, error) {
-	idx, err := ports.NewStoreKeyIndex(d.store)
-	if err != nil {
-		return nil, err
+	anchored, ok := labels.AnchorOf(d.store)
+	if !ok {
+		return nil, errors.New("the test store has no anchor level")
 	}
+	idx := labels.NewIndex(anchored)
 	homes, err := idx.Homes(context.Background(), k.Identity)
 	if err != nil {
 		return nil, err
@@ -347,7 +349,7 @@ func (r *prig) mustGenerate() GeneratedPool {
 }
 
 func (r *prig) pipeline(queue bool) txflow.Pipeline {
-	signer := native.VaultSigner{Vault: r.store}
+	signer := native.VaultSigner{Vault: r.store.Anchor()}
 	p := txflow.Pipeline{Signers: pdir{signer, r.store}, Min: r.led, Fees: recFees{r.led, r.calls}, Bodies: r.led, Assembler: r.led, Confirmer: r.conf, Canonicalizer: idCanon{}}
 	if queue {
 		p.Queue = r.queue
@@ -375,22 +377,22 @@ var externalFP = party.Fingerprint{0xe1, 0xe2}
 // fakeParties resolves party names to fingerprints; it implements only ByName.
 type fakeParties map[string]party.Fingerprint
 
-func (f fakeParties) ByName(_ ports.Reader, name string) (party.Party, error) {
+func (f fakeParties) ByName(_ ports.NamedReader, name string) (party.Party, error) {
 	if fp, ok := f[name]; ok {
 		return party.Party{Name: name, Fingerprint: fp}, nil
 	}
 	return party.Party{}, ports.ErrNotFound
 }
-func (fakeParties) ByFingerprint(ports.Reader, party.Fingerprint) (party.Party, error) {
+func (fakeParties) ByFingerprint(ports.NamedReader, party.Fingerprint) (party.Party, error) {
 	return party.Party{}, ports.ErrNotFound
 }
-func (fakeParties) List(ports.Reader) ([]party.Party, error) { return nil, nil }
-func (fakeParties) Put(ports.Writer, party.Party) error      { return nil }
-func (fakeParties) SetScope(ports.Writer, string, party.Scope) (party.Party, error) {
+func (fakeParties) List(ports.NamedReader) ([]party.Party, error) { return nil, nil }
+func (fakeParties) Put(ports.NamedWriter, party.Party) error      { return nil }
+func (fakeParties) SetScope(ports.NamedWriter, string, party.Scope) (party.Party, error) {
 	return party.Party{}, nil
 }
-func (fakeParties) Revoke(ports.Writer, string) (party.Party, error) { return party.Party{}, nil }
-func (fakeParties) Rotate(ports.Writer, party.Fingerprint, party.Party, party.Party) error {
+func (fakeParties) Revoke(ports.NamedWriter, string) (party.Party, error) { return party.Party{}, nil }
+func (fakeParties) Rotate(ports.NamedWriter, party.Fingerprint, party.Party, party.Party) error {
 	return nil
 }
 
@@ -468,9 +470,9 @@ func (r *prig) nothingChanged(before string, what string) {
 }
 
 // readerOf gives a read-only view of the rig's store.
-func readerOf(r *prig) ports.Reader {
-	var out ports.Reader
-	_ = r.store.View(context.Background(), func(rd ports.Reader) error { out = rd; return nil })
+func readerOf(r *prig) ports.NamedReader {
+	var out ports.NamedReader
+	_ = r.store.View(context.Background(), func(rd ports.NamedReader) error { out = rd; return nil })
 	return out
 }
 

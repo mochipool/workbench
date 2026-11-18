@@ -2,15 +2,21 @@ package plainstore
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/mochipool/workbench/spo/internal/adapters/config"
 	"github.com/mochipool/workbench/spo/internal/adapters/upstreamdir"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 )
 
 var ctx = context.Background()
@@ -30,12 +36,12 @@ func TestUpstreamNamesAndLockedMode(t *testing.T) {
 	s, dir := open(t)
 	key := secret.Take([]byte(`{"type":"KesSigningKey_ed25519_kes_2^6"}`))
 	defer key.Destroy()
-	err := s.Update(ctx, func(w ports.Writer) error {
-		w.Put(ports.Ref{Name: "mypool", Kind: ports.KesVKey, Num: 7}, []byte("v"))
-		w.PutSecret(ports.Ref{Name: "mypool", Kind: ports.KesSKey, Num: 7}, key)
-		w.Put(ports.Ref{Name: "mypool", Kind: ports.KesCounter}, []byte("007\n"))
-		w.Put(ports.Ref{Name: "mypool", Kind: ports.KesCounterNext}, []byte("007\n"))
-		return w.Put(ports.Ref{Name: "mypool", Kind: ports.KesVKey, Num: 1000}, []byte("v"))
+	err := s.Update(ctx, func(w ports.NamedWriter) error {
+		w.Put(ports.NamedRef{Name: "mypool", Kind: ports.KesVKey, Num: 7}, vk("KesVerificationKey_ed25519_kes_2^6", "kes7"))
+		w.PutSecret(ports.NamedRef{Name: "mypool", Kind: ports.KesSKey, Num: 7}, key)
+		w.Put(ports.NamedRef{Name: "mypool", Kind: ports.KesCounter}, []byte("007\n"))
+		w.Put(ports.NamedRef{Name: "mypool", Kind: ports.KesCounterNext}, []byte("007\n"))
+		return w.Put(ports.NamedRef{Name: "mypool", Kind: ports.KesVKey, Num: 1000}, vk("KesVerificationKey_ed25519_kes_2^6", "kes1000"))
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -50,8 +56,8 @@ func TestUpstreamNamesAndLockedMode(t *testing.T) {
 		}
 	}
 	// A locked file can be replaced (upstream: unlock, write, lock).
-	if err := s.Update(ctx, func(w ports.Writer) error {
-		return w.Put(ports.Ref{Name: "mypool", Kind: ports.KesCounter}, []byte("008\n"))
+	if err := s.Update(ctx, func(w ports.NamedWriter) error {
+		return w.Put(ports.NamedRef{Name: "mypool", Kind: ports.KesCounter}, []byte("008\n"))
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -65,8 +71,8 @@ func TestUpstreamNamesAndLockedMode(t *testing.T) {
 func TestFailedUpdateWritesNothing(t *testing.T) {
 	s, dir := open(t)
 	boom := errors.New("boom")
-	err := s.Update(ctx, func(w ports.Writer) error {
-		w.Put(ports.Ref{Name: "p", Kind: ports.KesCounter}, []byte("000\n"))
+	err := s.Update(ctx, func(w ports.NamedWriter) error {
+		w.Put(ports.NamedRef{Name: "p", Kind: ports.KesCounter}, []byte("000\n"))
 		return boom
 	})
 	if !errors.Is(err, boom) {
@@ -79,8 +85,8 @@ func TestFailedUpdateWritesNothing(t *testing.T) {
 
 func TestReadYourWritesAndDelete(t *testing.T) {
 	s, _ := open(t)
-	ref := ports.Ref{Name: "p", Kind: ports.KesCounter}
-	err := s.Update(ctx, func(w ports.Writer) error {
+	ref := ports.NamedRef{Name: "p", Kind: ports.KesCounter}
+	err := s.Update(ctx, func(w ports.NamedWriter) error {
 		if _, err := w.Get(ref); !errors.Is(err, ports.ErrNotFound) {
 			t.Errorf("before put: %v", err)
 		}
@@ -97,7 +103,7 @@ func TestReadYourWritesAndDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.View(ctx, func(r ports.Reader) error {
+	s.View(ctx, func(r ports.NamedReader) error {
 		if ok, _ := r.Exists(ref); ok {
 			t.Error("deleted artefact persisted")
 		}
@@ -108,16 +114,16 @@ func TestReadYourWritesAndDelete(t *testing.T) {
 // Secrets are only reachable through the vault side of the adapter.
 func TestSecretsAreNotReadableThroughTheStore(t *testing.T) {
 	s, _ := open(t)
-	ref := ports.Ref{Name: "p", Kind: ports.KesSKey, Num: 0}
+	ref := ports.NamedRef{Name: "p", Kind: ports.KesSKey, Num: 0}
 	key := secret.Take([]byte("skey-bytes"))
 	defer key.Destroy()
-	s.Update(ctx, func(w ports.Writer) error {
+	s.Update(ctx, func(w ports.NamedWriter) error {
 		if err := w.Put(ref, []byte("x")); !errors.Is(err, ports.ErrSecretKind) {
 			t.Errorf("Put of a secret kind: %v", err)
 		}
 		return w.PutSecret(ref, key)
 	})
-	s.View(ctx, func(r ports.Reader) error {
+	s.View(ctx, func(r ports.NamedReader) error {
 		if _, err := r.Get(ref); !errors.Is(err, ports.ErrSecretKind) {
 			t.Errorf("Get of a secret kind: %v", err)
 		}
@@ -140,8 +146,8 @@ func TestSecretsAreNotReadableThroughTheStore(t *testing.T) {
 func TestHostileNamesAreRefused(t *testing.T) {
 	s, dir := open(t)
 	for _, name := range []string{"", "../evil", "a/b", ".hidden", "a..b", "x;rm -rf ~", "$(id)", "a b", "pool\x00", "a[$(id)]"} {
-		err := s.Update(ctx, func(w ports.Writer) error {
-			return w.Put(ports.Ref{Name: name, Kind: ports.KesCounter}, []byte("0"))
+		err := s.Update(ctx, func(w ports.NamedWriter) error {
+			return w.Put(ports.NamedRef{Name: name, Kind: ports.KesCounter}, []byte("0"))
 		})
 		if !errors.Is(err, ports.ErrInvalidRef) {
 			t.Errorf("name %q: %v", name, err)
@@ -163,9 +169,13 @@ func TestCertificateArtefactNames(t *testing.T) {
 		ports.StakingDeregCert: "w.staking.dereg-cert", ports.DRepVKey: "w.drep.vkey",
 	}
 	for round := 0; round < 2; round++ {
-		err := s.Update(ctx, func(w ports.Writer) error {
+		err := s.Update(ctx, func(w ports.NamedWriter) error {
 			for k := range want {
-				if err := w.Put(ports.Ref{Name: "w", Kind: k}, []byte{byte('0' + round)}); err != nil {
+				data := []byte{byte('0' + round)}
+				if k == ports.DRepVKey { // a key is an identity: the same key is written both rounds
+					data = vk("DRepVerificationKey_ed25519", "w drep")
+				}
+				if err := w.Put(ports.NamedRef{Name: "w", Kind: k}, data); err != nil {
 					return err
 				}
 			}
@@ -180,7 +190,7 @@ func TestCertificateArtefactNames(t *testing.T) {
 		if err != nil || st.Mode().Perm() != 0o400 {
 			t.Errorf("%s: %v %v", name, st, err)
 		}
-		if b, _ := os.ReadFile(filepath.Join(dir, name)); string(b) != "1" {
+		if b, _ := os.ReadFile(filepath.Join(dir, name)); string(b) != "1" && k != ports.DRepVKey {
 			t.Errorf("%s was not replaced: %q", name, b)
 		}
 		if k.Secret() {
@@ -201,7 +211,7 @@ func TestPoolArtefactNamesAndModes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[ports.Ref]struct {
+	want := map[ports.NamedRef]struct {
 		file string
 		mode os.FileMode
 	}{
@@ -216,7 +226,7 @@ func TestPoolArtefactNamesAndModes(t *testing.T) {
 		{Name: "p_o_17", Kind: ports.PoolWitnessFile}:      {"p_o_17.witness", 0o644},
 		{Name: "p_p.node_17", Kind: ports.PoolWitnessFile}: {"p_p.node_17.witness", 0o644},
 	}
-	if err := st.Update(context.Background(), func(w ports.Writer) error {
+	if err := st.Update(context.Background(), func(w ports.NamedWriter) error {
 		for ref := range want {
 			if err := w.Put(ref, []byte("x")); err != nil {
 				return err
@@ -233,8 +243,8 @@ func TestPoolArtefactNamesAndModes(t *testing.T) {
 		}
 	}
 	// The ITN signing key is secret: it is read through the vault, never Get.
-	if err := st.View(context.Background(), func(r ports.Reader) error {
-		if _, err := r.Get(ports.Ref{Name: "p", Kind: ports.PoolItnSKey}); !errors.Is(err, ports.ErrSecretKind) {
+	if err := st.View(context.Background(), func(r ports.NamedReader) error {
+		if _, err := r.Get(ports.NamedRef{Name: "p", Kind: ports.PoolItnSKey}); !errors.Is(err, ports.ErrSecretKind) {
 			t.Errorf("%v", err)
 		}
 		return nil
@@ -242,11 +252,11 @@ func TestPoolArtefactNamesAndModes(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Replacing and deleting a file that is not 0400 works.
-	if err := st.Update(context.Background(), func(w ports.Writer) error {
-		if err := w.Put(ports.Ref{Name: "p_o_17", Kind: ports.PoolWitnessFile}, []byte("y")); err != nil {
+	if err := st.Update(context.Background(), func(w ports.NamedWriter) error {
+		if err := w.Put(ports.NamedRef{Name: "p_o_17", Kind: ports.PoolWitnessFile}, []byte("y")); err != nil {
 			return err
 		}
-		return w.Delete(ports.Ref{Name: "p", Kind: ports.PoolMetadata})
+		return w.Delete(ports.NamedRef{Name: "p", Kind: ports.PoolMetadata})
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +271,7 @@ func TestPoolArtefactNamesAndModes(t *testing.T) {
 func TestModesOfUnlockedArtefacts(t *testing.T) {
 	dir := t.TempDir()
 	st, _ := OpenTestnet(dir)
-	want := map[ports.Ref]os.FileMode{
+	want := map[ports.NamedRef]os.FileMode{
 		{Name: "p", Kind: ports.PoolMetadata}:           0o444,
 		{Name: "p", Kind: ports.PoolExtendedMetadata}:   0o444,
 		{Name: "p", Kind: ports.PoolAdditionalMetadata}: 0o644,
@@ -271,13 +281,17 @@ func TestModesOfUnlockedArtefacts(t *testing.T) {
 		{Name: "pol", Kind: ports.PolicyScript}:         0o400,
 		{Name: "p", Kind: ports.NodeVKey}:               0o400,
 	}
-	err := st.Update(ctx, func(w ports.Writer) error {
+	err := st.Update(ctx, func(w ports.NamedWriter) error {
 		for r := range want {
-			if err := w.Put(r, []byte("{}")); err != nil {
+			data := []byte("{}")
+			if r.Kind == ports.NodeVKey {
+				data = vk("StakePoolVerificationKey_ed25519", "p cold")
+			}
+			if err := w.Put(r, data); err != nil {
 				return err
 			}
 		}
-		return w.PutSecret(ports.Ref{Name: "v", Kind: ports.CatalystQRCode}, secret.Take([]byte("png")))
+		return w.PutSecret(ports.NamedRef{Name: "v", Kind: ports.CatalystQRCode}, secret.Take([]byte("png")))
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -366,5 +380,64 @@ func TestRefusesMainnet(t *testing.T) {
 	}
 	if _, err := OpenTestnet(main); !errors.Is(err, ErrMainnet) {
 		t.Errorf("the helper opened a mainnet directory: %v", err)
+	}
+}
+
+// vk is a verification key envelope of a type, made from a label.
+func vk(typ, label string) []byte {
+	sum := sha256.Sum256([]byte("plainstore test " + label))
+	pub := ed25519.NewKeyFromSeed(sum[:]).Public().(ed25519.PublicKey)
+	return []byte(fmt.Sprintf(`{"type":%q,"description":"","cborHex":"5820%s"}`, typ, hex.EncodeToString(pub)))
+}
+
+// The plain directory stays name-based on disk: an anchor is mapped to a file name
+// at this edge, and a rename (one label) moves the files of the owner.
+//
+// spec: SPO-Xidentity-INV-021
+func TestRenameMovesTheFilesOfTheOwner(t *testing.T) {
+	dir := t.TempDir()
+	st, err := OpenTestnet(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Update(ctx, func(w ports.NamedWriter) error {
+		if err := w.Put(ports.NamedRef{Name: "a.payment", Kind: ports.AddrVKey}, vk("PaymentVerificationKeyShelley_ed25519", "a pay")); err != nil {
+			return err
+		}
+		if err := w.Put(ports.NamedRef{Name: "a", Kind: ports.StakingVKey}, vk("StakeVerificationKeyShelley_ed25519", "a stake")); err != nil {
+			return err
+		}
+		return w.Put(ports.NamedRef{Name: "a.payment", Kind: ports.AddrFile}, []byte("addr_test1qz\n"))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"a.payment.vkey", "a.staking.vkey", "a.payment.addr"} {
+		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
+			t.Fatalf("%s: %v", f, err)
+		}
+	}
+	if err := st.Anchor().Update(ctx, func(w ports.Writer) error { return labels.Rename(w, identity.OwnerWallet, "a", "b") }); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"b.payment.vkey", "b.staking.vkey", "b.payment.addr"} {
+		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
+			t.Errorf("after the rename %s: %v", f, err)
+		}
+	}
+	for _, f := range []string{"a.payment.vkey", "a.staking.vkey", "a.payment.addr"} {
+		if _, err := os.Stat(filepath.Join(dir, f)); err == nil {
+			t.Errorf("%s was not moved", f)
+		}
+	}
+	if err := st.View(ctx, func(r ports.NamedReader) error {
+		if _, err := r.Get(ports.NamedRef{Name: "b", Kind: ports.StakingVKey}); err != nil {
+			return err
+		}
+		if ok, _ := r.Exists(ports.NamedRef{Name: "a", Kind: ports.StakingVKey}); ok {
+			t.Error("the old name still answers")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }

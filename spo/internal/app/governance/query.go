@@ -33,7 +33,7 @@ type QueryFilter struct {
 // no form is refused with a hint to use `all`.
 //
 // spec: SPO-24c-IF-001, SPO-24c-IF-002, SPO-24c-IF-003, SPO-24c-IF-004, SPO-24c-IF-005, SPO-24c-IF-006, SPO-24c-IF-007, SPO-24c-IF-008, SPO-24c-IF-009, SPO-24c-IN-001
-func ParseQueryWords(ctx context.Context, st ports.Store, words []string) (QueryFilter, error) {
+func ParseQueryWords(ctx context.Context, st ports.NamedStore, words []string) (QueryFilter, error) {
 	var f QueryFilter
 	if len(words) == 0 {
 		return f, errors.New("a vote query needs at least one word: an action id, a voter, a stake account, an action type or `all`")
@@ -122,15 +122,15 @@ func kindFold(lower string) governance.ActionKind {
 
 // fileWord tries `<w>.drep.id`, `<w>.cc-hot.hash`, `<w>.pool.id`, the verification
 // keys and `<w>.staking.addr`.
-func fileWord(ctx context.Context, st ports.Store, w string, f *QueryFilter) (bool, error) {
+func fileWord(ctx context.Context, st ports.NamedStore, w string, f *QueryFilter) (bool, error) {
 	nm := trimDir(w)
 	if nm == "" || strings.ContainsAny(nm, "/\\") {
 		return false, nil
 	}
 	found := false
-	err := st.View(ctx, func(r ports.Reader) error {
+	err := st.View(ctx, func(r ports.NamedReader) error {
 		try := func(k ports.Kind) ([]byte, bool, error) {
-			b, err := r.Get(ports.Ref{Name: nm, Kind: k})
+			b, err := r.Get(ports.NamedRef{Name: nm, Kind: k})
 			if errors.Is(err, ports.ErrNotFound) {
 				return nil, false, nil
 			}
@@ -213,7 +213,7 @@ func fileWord(ctx context.Context, st ports.Store, w string, f *QueryFilter) (bo
 // Summaries, the three percentages are the provider's own voting summary
 // (light mode, SPO-24c-MODE-005) and only the thresholds are computed here.
 type QueryVote struct {
-	Store     ports.Store
+	Store     ports.NamedStore
 	Actions   ports.GovActionReader
 	Dists     ports.StakeDistributionReader
 	Summaries ports.VotingSummaryReader

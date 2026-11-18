@@ -21,7 +21,7 @@ import (
 // SendLovelaces and the same pipeline (txflow); what is its own is the
 // selection of assets and the layout of the two outputs.
 type SendAssets struct {
-	Store     ports.Store
+	Store     ports.NamedStore
 	Signers   ports.SignerDirectory
 	Utxos     ports.UtxoReader
 	Params    ports.ProtocolParametersReader
@@ -114,7 +114,7 @@ func (uc SendAssets) Run(ctx context.Context, req SendAssetsRequest) (SendAssets
 	var src, dst resolved
 	var payKey custody.KeyRef
 	sels := append([]assets.Selection(nil), req.Selections...)
-	if err := uc.Store.View(ctx, func(r ports.Reader) error {
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 		// The source files are checked first, then the destination, both
 		// before the asset selection is resolved (SPO-01sendAssets-IF-002).
 		addr, ok, err := readAddress(r, srcName)
@@ -263,12 +263,12 @@ func hasForceAda(sels []assets.Selection) bool {
 // fingerprint of its asset.
 //
 // spec: SPO-01sendAssets-IF-014, SPO-Pfiles-OUT-033
-func resolveAssetFile(r ports.Reader, s assets.Selection) (assets.Selection, error) {
+func resolveAssetFile(r ports.NamedReader, s assets.Selection) (assets.Selection, error) {
 	name := s.File
 	if i := strings.LastIndexByte(name, '.'); i >= 0 {
 		name = assets.RecordName(name[:i], name[i+1:])
 	}
-	ref := ports.Ref{Name: name, Kind: ports.AssetFile}
+	ref := ports.NamedRef{Name: name, Kind: ports.AssetFile}
 	if err := ref.Validate(); err != nil {
 		return s, fmt.Errorf("%w: the asset %q is not a fingerprint, a policy id with a name, or the name of an asset file", assets.ErrBadSelection, s.Input)
 	}

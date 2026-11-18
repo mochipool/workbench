@@ -193,7 +193,7 @@ type govOutcome struct {
 	payer   string
 	res     governance.Result
 	// stored are the artefacts written, by name.
-	stored  []ports.Ref
+	stored  []ports.NamedRef
 	details []string
 	notes   []string
 	// extra lines printed last (the ids the proposals will have).
@@ -257,9 +257,9 @@ func credText(c dgov.Credential) string {
 // readPublic reads one stored public artefact; it returns nil when it is
 // missing, because the details are a courtesy and the use case reports the
 // real refusal.
-func readPublic(ctx context.Context, st ports.Store, ref ports.Ref) []byte {
+func readPublic(ctx context.Context, st ports.NamedStore, ref ports.NamedRef) []byte {
 	var out []byte
-	_ = st.View(ctx, func(r ports.Reader) error {
+	_ = st.View(ctx, func(r ports.NamedReader) error {
 		b, err := r.Get(ref)
 		if err == nil {
 			out = b

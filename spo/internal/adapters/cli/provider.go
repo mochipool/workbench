@@ -175,7 +175,7 @@ never printed.`,
 			if tok.Len() == 0 {
 				return errors.New("the token is empty")
 			}
-			if err := s.Store.Update(cmd.Context(), func(w ports.Writer) error { return w.PutSecret(tokenRef(rec), tok) }); err != nil {
+			if err := s.Store.Update(cmd.Context(), func(w ports.NamedWriter) error { return w.PutSecret(tokenRef(rec), tok) }); err != nil {
 				return err
 			}
 			fmt.Fprintf(a.d.Out, "The %s API token is stored in the workspace.\n", providerTitle(args[0]))
@@ -200,7 +200,7 @@ never printed.`,
 				return err
 			}
 			defer s.Close()
-			err = s.Store.Update(cmd.Context(), func(w ports.Writer) error { return w.Delete(tokenRef(rec)) })
+			err = s.Store.Update(cmd.Context(), func(w ports.NamedWriter) error { return w.Delete(tokenRef(rec)) })
 			if errors.Is(err, ports.ErrNotFound) {
 				fmt.Fprintln(a.d.Out, "No token was stored.")
 				return nil

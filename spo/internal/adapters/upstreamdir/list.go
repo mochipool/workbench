@@ -33,7 +33,7 @@ func init() {
 		ports.UpstreamEncryptedSKey: ".upstream-encrypted.skey",
 	} {
 		ext := ext
-		layout[k] = func(r ports.Ref) string { return r.Name + ext }
+		layout[k] = func(r ports.NamedRef) string { return r.Name + ext }
 	}
 	// The Catalyst QR code is secret and so is written by PutSecret at 0400,
 	// stricter than upstream's default mode (SPO-Pfiles-INV-004) on purpose.
@@ -63,16 +63,14 @@ type pattern struct {
 
 var (
 	patternsOnce sync.Once
-	patterns     []pattern
+	patterns     []pattern // the artefacts of an upstream workspace
+	allPatterns  []pattern // those and this program's own records
 )
 
 func buildPatterns() {
 	const nameMark, numMark = "@NAME@", 424242
 	for k, fn := range layout {
-		if notUpstream[k] {
-			continue
-		}
-		sample := fn(ports.Ref{Name: nameMark, Kind: k, Num: numMark})
+		sample := fn(ports.NamedRef{Name: nameMark, Kind: k, Num: numMark})
 		q := regexp.QuoteMeta(sample)
 		q = strings.Replace(q, regexp.QuoteMeta(nameMark), `(.+)`, 1)
 		numbered := k.Numbered()
@@ -83,14 +81,21 @@ func buildPatterns() {
 		if numbered {
 			lit -= len(strconv.Itoa(numMark))
 		}
-		patterns = append(patterns, pattern{kind: k, re: regexp.MustCompile("^" + q + "$"), numbered: numbered, literal: lit})
-	}
-	sort.Slice(patterns, func(i, j int) bool {
-		if patterns[i].literal != patterns[j].literal {
-			return patterns[i].literal > patterns[j].literal
+		p := pattern{kind: k, re: regexp.MustCompile("^" + q + "$"), numbered: numbered, literal: lit}
+		allPatterns = append(allPatterns, p)
+		if !notUpstream[k] {
+			patterns = append(patterns, p)
 		}
-		return patterns[i].kind < patterns[j].kind
-	})
+	}
+	for _, ps := range [][]pattern{patterns, allPatterns} {
+		ps := ps
+		sort.Slice(ps, func(i, j int) bool {
+			if ps[i].literal != ps[j].literal {
+				return ps[i].literal > ps[j].literal
+			}
+			return ps[i].kind < ps[j].kind
+		})
+	}
 }
 
 // RefOf maps an upstream file name to the artefact it holds. The most
@@ -99,14 +104,26 @@ func buildPatterns() {
 // that Ref.Validate refuses, is not an artefact.
 //
 // spec: SPO-Pfiles-IN-001, SPO-Pfiles-IN-003
-func RefOf(file string) (ports.Ref, bool) {
+func RefOf(file string) (ports.NamedRef, bool) {
 	patternsOnce.Do(buildPatterns)
+	return refOf(file, patterns)
+}
+
+// RefOfAny is RefOf for a directory that also holds this program's own records
+// (the plain directory store of the tests keeps the party and multi-party
+// records beside the upstream files).
+func RefOfAny(file string) (ports.NamedRef, bool) {
+	patternsOnce.Do(buildPatterns)
+	return refOf(file, allPatterns)
+}
+
+func refOf(file string, patterns []pattern) (ports.NamedRef, bool) {
 	for _, p := range patterns {
 		m := p.re.FindStringSubmatch(file)
 		if m == nil {
 			continue
 		}
-		ref := ports.Ref{Name: m[1], Kind: p.kind}
+		ref := ports.NamedRef{Name: m[1], Kind: p.kind}
 		if p.numbered {
 			n, err := strconv.Atoi(m[2])
 			if err != nil {
@@ -122,7 +139,7 @@ func RefOf(file string) (ports.Ref, bool) {
 		}
 		return ref, true
 	}
-	return ports.Ref{}, false
+	return ports.NamedRef{}, false
 }
 
 // reasonFor explains why a file is not an artefact, when it is a file the
@@ -144,6 +161,16 @@ func reasonFor(file string) string {
 // symbolic links and special files are never followed; this program's own
 // temporary files are skipped.
 func (s *Source) List(ctx context.Context) (ports.SourceListing, error) {
+	return s.list(ctx, RefOf)
+}
+
+// ListAll is List for a directory that also holds this program's own records
+// (a function, so that Source keeps the method set of a reader).
+func ListAll(ctx context.Context, s *Source) (ports.SourceListing, error) {
+	return s.list(ctx, RefOfAny)
+}
+
+func (s *Source) list(ctx context.Context, refOf func(string) (ports.NamedRef, bool)) (ports.SourceListing, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ents, err := os.ReadDir(s.dir)
@@ -170,7 +197,7 @@ func (s *Source) List(ctx context.Context) (ports.SourceListing, error) {
 			out.Unknown = append(out.Unknown, ports.SourceUnknown{File: name, Reason: "not a regular file"})
 			continue
 		}
-		ref, ok := RefOf(name)
+		ref, ok := refOf(name)
 		if !ok {
 			out.Unknown = append(out.Unknown, ports.SourceUnknown{File: name, Reason: reasonFor(name)})
 			continue
@@ -182,9 +209,12 @@ func (s *Source) List(ctx context.Context) (ports.SourceListing, error) {
 
 // FileName returns the upstream file name of a reference, for reports and
 // for tests that compare directories.
-func FileName(r ports.Ref) (string, error) {
+func FileName(r ports.NamedRef) (string, error) {
 	if err := r.Validate(); err != nil {
 		return "", err
+	}
+	if _, isID := ports.IdentityName(r.Name); isID {
+		return "", fmt.Errorf("%w: a directory has file names, not identities", ports.ErrInvalidRef)
 	}
 	fn, ok := layout[r.Kind]
 	if !ok {

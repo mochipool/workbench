@@ -92,7 +92,7 @@ func issueUseCase(t *testing.T, dir, genesis string) poolops.IssueOperationalCer
 	clock := systemclock.Clock{}
 	g := genesisfile.Shelley{Path: genesis}
 	return poolops.IssueOperationalCertificate{
-		Store: store, Signers: native.Signers{Vault: store},
+		Store: store, Signers: native.Signers{Vault: store.Anchor()},
 		Tip: offline.Tip{Clock: clock, Genesis: g}, Genesis: g,
 		Counters: offline.Counters{}, Clock: clock, AllowUnverified: true,
 	}
@@ -220,7 +220,7 @@ func TestOpCertMatchesCardanoCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	signer := native.VaultSigner{Vault: store}
+	signer := native.VaultSigner{Vault: store.Anchor()}
 	cold, _ := pool.ParseEnvelope([]byte(readFile(t, dir, "mypool.node.vkey")))
 	coldRaw, _ := cold.Key32()
 	kesEnv, _ := pool.ParseEnvelope([]byte(readFile(t, dir, "kes.vkey")))
@@ -286,7 +286,7 @@ func TestOpCertMatchesCardanoCLI(t *testing.T) {
 	}
 }
 
-func coldKeyRef(t *testing.T, st ports.Store, owner string) custody.Key[custody.PoolCold] {
+func coldKeyRef(t *testing.T, st ports.NamedStore, owner string) custody.Key[custody.PoolCold] {
 	t.Helper()
 	k, err := custody.As[custody.PoolCold](porttest.Key(t, st, custody.RolePoolCold, owner))
 	if err != nil {

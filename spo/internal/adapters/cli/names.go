@@ -12,6 +12,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/platform/uihint"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 )
 
 // ErrSealed means the workspace is sealed and no passphrase was given, so its
@@ -45,8 +46,9 @@ func WorkspaceNames(ctx context.Context, d Deps, dir string, upstream, acceptRol
 	a := newApp(d)
 	a.workspace, a.upstream = dir, upstream
 	var (
-		st     ports.Store
-		lister ports.SourceLister
+		st       ports.NamedStore
+		anchored ports.Store
+		lister   ports.SourceLister
 	)
 	if upstream {
 		if exists(a.workspaceFile()) || d.OpenUpstream == nil {
@@ -56,7 +58,7 @@ func WorkspaceNames(ctx context.Context, d Deps, dir string, upstream, acceptRol
 		if err != nil {
 			return nil, err
 		}
-		st = s
+		st, anchored = labels.Named(s), s
 	} else {
 		if !exists(a.workspaceFile()) {
 			return nil, nil
@@ -69,7 +71,7 @@ func WorkspaceNames(ctx context.Context, d Deps, dir string, upstream, acceptRol
 			return nil, err
 		}
 		defer s.Close()
-		st = s
+		st, anchored = labels.Named(s), s
 	}
 	lister, ok := st.(ports.SourceLister)
 	if !ok {
@@ -95,13 +97,13 @@ func WorkspaceNames(ctx context.Context, d Deps, dir string, upstream, acceptRol
 		}
 		out[class] = sortedKeys(set)
 	}
-	out[uihint.ClassParty] = partyNames(ctx, d, a, st)
+	out[uihint.ClassParty] = partyNames(ctx, d, a, st, anchored)
 	return out, nil
 }
 
 // partyNames lists the enrolled parties of a sealed workspace; the registry
 // is wired as any party command wires it, offline and without the network.
-func partyNames(ctx context.Context, d Deps, a *app, st ports.Store) []string {
+func partyNames(ctx context.Context, d Deps, a *app, st ports.NamedStore, anchored ports.Store) []string {
 	if a.upstream || d.Wire == nil {
 		return nil
 	}
@@ -109,12 +111,12 @@ func partyNames(ctx context.Context, d Deps, a *app, st ports.Store) []string {
 	if cfg, err := d.Config.Load(a.workspace); err == nil {
 		o.Config, o.HaveConfig = cfg, true
 	}
-	env, err := d.Wire(st, o)
+	env, err := d.Wire(anchored, o)
 	if err != nil || env == nil || env.Party == nil || env.Party.Registry == nil {
 		return nil
 	}
 	var names []string
-	_ = st.View(ctx, func(r ports.Reader) error {
+	_ = st.View(ctx, func(r ports.NamedReader) error {
 		ps, err := env.Party.Registry.List(r)
 		for _, p := range ps {
 			names = append(names, p.Name)

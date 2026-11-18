@@ -19,7 +19,7 @@ func (r *rig) putCert(t *testing.T, kind ports.Kind, spec stk.Spec) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.store.files[ports.Ref{Name: "w", Kind: kind}] = c.Envelope
+	r.store.files[ports.NamedRef{Name: "w", Kind: kind}] = c.Envelope
 	r.l.calls = nil
 }
 
@@ -94,19 +94,19 @@ func TestRegisterPoolDelegationRefusals(t *testing.T) {
 			r.rewards.r = chain.Unknown[chain.RewardAccount]("not in the file")
 		}, stk.ErrUnknown},
 		{"the certificate file is missing", func(r *rig, _ *RegisterPoolDelegation) {
-			delete(r.store.files, ports.Ref{Name: "w", Kind: ports.DelegCert})
+			delete(r.store.files, ports.NamedRef{Name: "w", Kind: ports.DelegCert})
 		}, ErrMissingFile},
 		{"the certificate is a vote delegation", func(r *rig, _ *RegisterPoolDelegation) {
 			r.putCert(t, ports.DelegCert, stk.Spec{Kind: stk.CertVoteDelegation, DRep: stk.DRep{Kind: stk.DRepAbstain}})
 		}, ErrWrongCertificate},
 		{"the certificate is garbage", func(r *rig, _ *RegisterPoolDelegation) {
-			r.store.files[ports.Ref{Name: "w", Kind: ports.DelegCert}] = []byte("garbage")
+			r.store.files[ports.NamedRef{Name: "w", Kind: ports.DelegCert}] = []byte("garbage")
 		}, nil},
 		{"no stake signing key", func(r *rig, _ *RegisterPoolDelegation) {
-			delete(r.store.files, ports.Ref{Name: "w", Kind: ports.StakingSKey})
+			delete(r.store.files, ports.NamedRef{Name: "w", Kind: ports.StakingSKey})
 		}, ErrNoSigningKey},
 		{"a hardware stake key", func(r *rig, _ *RegisterPoolDelegation) {
-			r.device(t, ports.Ref{Name: "w", Kind: ports.StakingSKey})
+			r.device(t, ports.NamedRef{Name: "w", Kind: ports.StakingSKey})
 		}, nil},
 		{"the stake key is not the certificate's", func(r *rig, _ *RegisterPoolDelegation) { r.signer.mode = "stake-with-payment-key" }, nil},
 		{"declined", func(r *rig, _ *RegisterPoolDelegation) { r.conf.yes = false }, ErrDeclined},
@@ -247,7 +247,7 @@ func TestRegisterVoteDelegationRefusals(t *testing.T) {
 	}{
 		{"a pre-Conway protocol is refused before any file is read", func(r *rig, _ *RegisterVoteDelegation) {
 			r.chain.params.ProtocolMajor = 8
-			delete(r.store.files, ports.Ref{Name: "w", Kind: ports.VoteDelegCert})
+			delete(r.store.files, ports.NamedRef{Name: "w", Kind: ports.VoteDelegCert})
 		}, ErrProtocolTooOld},
 		{"the DRep is not registered", func(_ *rig, uc *RegisterVoteDelegation) { uc.DReps = &fakeDReps{r: chain.None[chain.DRepState]()} }, ErrDRepNotRegistered},
 		{"the DRep state is unknown", func(_ *rig, uc *RegisterVoteDelegation) {
@@ -261,10 +261,10 @@ func TestRegisterVoteDelegationRefusals(t *testing.T) {
 		// Decision (SPO-22b-IN-002): upstream leaves a form it cannot read
 		// undecided and skips the DRep check; the use case refuses it.
 		{"an unknown certificate form is an error, not a skipped check", func(r *rig, _ *RegisterVoteDelegation) {
-			r.store.files[ports.Ref{Name: "w", Kind: ports.VoteDelegCert}] = []byte("envelope:{\"Kind\":\"future\"}")
+			r.store.files[ports.NamedRef{Name: "w", Kind: ports.VoteDelegCert}] = []byte("envelope:{\"Kind\":\"future\"}")
 		}, nil},
 		{"the certificate file is missing", func(r *rig, _ *RegisterVoteDelegation) {
-			delete(r.store.files, ports.Ref{Name: "w", Kind: ports.VoteDelegCert})
+			delete(r.store.files, ports.NamedRef{Name: "w", Kind: ports.VoteDelegCert})
 		}, ErrMissingFile},
 		{"declined", func(r *rig, _ *RegisterVoteDelegation) { r.conf.yes = false }, ErrDeclined},
 	}

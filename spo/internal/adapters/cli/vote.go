@@ -158,7 +158,7 @@ func voteDetails(ctx context.Context, s *session, env *Env, files []string) []st
 			if !ok {
 				continue
 			}
-			raw := readPublic(ctx, s.Store, ports.Ref{Name: stem, Kind: k})
+			raw := readPublic(ctx, s.Store, ports.NamedRef{Name: stem, Kind: k})
 			if raw == nil {
 				break
 			}

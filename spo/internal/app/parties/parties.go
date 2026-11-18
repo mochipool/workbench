@@ -25,8 +25,8 @@ import (
 )
 
 var (
-	localKeys = ports.Ref{Name: "local", Kind: ports.PartyKeys}
-	localDoc  = ports.Ref{Name: "local", Kind: ports.PartyIdentity}
+	localKeys = ports.NamedRef{Name: "local", Kind: ports.PartyKeys}
+	localDoc  = ports.NamedRef{Name: "local", Kind: ports.PartyIdentity}
 )
 
 // Refusals.
@@ -46,7 +46,7 @@ var (
 // in guarded memory, stored as a Secret record, and the signed public
 // document (SPO-Xparty-INV-001, INV-003). It refuses when one exists.
 type InitIdentity struct {
-	Store ports.Store
+	Store ports.NamedStore
 	Kit   ports.IdentityKit
 	Clock ports.Clock
 }
@@ -75,8 +75,8 @@ func (uc InitIdentity) Run(ctx context.Context, req InitRequest) (InitResult, er
 		return InitResult{}, err
 	}
 	defer g.Keys.Destroy()
-	err = uc.Store.Update(ctx, func(w ports.Writer) error {
-		for _, ref := range []ports.Ref{localKeys, localDoc} {
+	err = uc.Store.Update(ctx, func(w ports.NamedWriter) error {
+		for _, ref := range []ports.NamedRef{localKeys, localDoc} {
 			if ok, err := w.Exists(ref); err != nil {
 				return err
 			} else if ok {
@@ -97,7 +97,7 @@ func (uc InitIdentity) Run(ctx context.Context, req InitRequest) (InitResult, er
 // ExportIdentity returns the local public identity document
 // (SPO-Xparty-IF-001): it holds no secret and no tailcat address.
 type ExportIdentity struct {
-	Store ports.Store
+	Store ports.NamedStore
 	Kit   ports.IdentityKit
 }
 
@@ -107,7 +107,7 @@ type ExportIdentity struct {
 // spec: SPO-Xparty-IF-001
 func (uc ExportIdentity) Run(ctx context.Context) (InitResult, error) {
 	var raw []byte
-	err := uc.Store.View(ctx, func(r ports.Reader) error {
+	err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
 		raw, err = r.Get(localDoc)
 		return err
@@ -134,7 +134,7 @@ func (uc ExportIdentity) Run(ctx context.Context) (InitResult, error) {
 // what to show (the last four groups, not the first four), Run takes what was
 // typed and compares it with the document.
 type Enroll struct {
-	Store    ports.Store
+	Store    ports.NamedStore
 	Kit      ports.IdentityKit
 	Registry ports.PartyRegistry
 	Clock    ports.Clock
@@ -218,7 +218,7 @@ func (uc Enroll) Run(ctx context.Context, req EnrollRequest) (party.Party, error
 		pools = append(pools, c)
 	}
 	var out party.Party
-	err = uc.Store.Update(ctx, func(w ports.Writer) error {
+	err = uc.Store.Update(ctx, func(w ports.NamedWriter) error {
 		// A party does not enroll itself.
 		if own, err := w.Get(localDoc); err == nil {
 			if d, err := uc.Kit.ParseDocument(own); err == nil && d.Identity.Fingerprint() == doc.Identity.Fingerprint() {
@@ -253,13 +253,13 @@ func (uc Enroll) Run(ctx context.Context, req EnrollRequest) (party.Party, error
 // unassign the unfilled slots that were assigned to the party, in the same
 // transaction.
 type Revoke struct {
-	Store    ports.Store
+	Store    ports.NamedStore
 	Registry ports.PartyRegistry
 	Clock    ports.Clock
 	// Hooks run inside the transaction with the revoked party, so that
 	// whatever refers to it by name (witness collections, queued
 	// envelopes) changes with it. multisig.Coordinator.OnRevoke is one.
-	Hooks []func(w ports.Writer, revoked party.Party) error
+	Hooks []func(w ports.NamedWriter, revoked party.Party) error
 }
 
 // Run revokes the party named locally.
@@ -267,7 +267,7 @@ type Revoke struct {
 // spec: SPO-Xparty-IF-003, SPO-Xparty-INV-005, SPO-Xparty-OUT-004
 func (uc Revoke) Run(ctx context.Context, name string) (party.Party, error) {
 	var out party.Party
-	err := uc.Store.Update(ctx, func(w ports.Writer) error {
+	err := uc.Store.Update(ctx, func(w ports.NamedWriter) error {
 		p, err := uc.Registry.Revoke(w, name)
 		if err != nil {
 			return err
@@ -285,14 +285,14 @@ func (uc Revoke) Run(ctx context.Context, name string) (party.Party, error) {
 
 // List shows the enrolled parties, by local name.
 type List struct {
-	Store    ports.Store
+	Store    ports.NamedStore
 	Registry ports.PartyRegistry
 }
 
 // Run reads the registry.
 func (uc List) Run(ctx context.Context) ([]party.Party, error) {
 	var out []party.Party
-	err := uc.Store.View(ctx, func(r ports.Reader) error {
+	err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
 		out, err = uc.Registry.List(r)
 		return err

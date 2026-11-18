@@ -217,7 +217,7 @@ func TestWalletCliParity(t *testing.T) {
 	diff(t, "03a cli after refusal", up, keySnapshot(t, portDir, "owner"))
 }
 
-func walletUC(st ports.Store, network uint8) wallet.GenerateWalletAccount {
+func walletUC(st ports.NamedStore, network uint8) wallet.GenerateWalletAccount {
 	k := native.SoftwareKeys{}
 	return wallet.GenerateWalletAccount{Store: st, Payment: k, Stake: k, Mnemonics: k, Deriver: k, Addresses: native.Ledger{}, NetworkID: network}
 }

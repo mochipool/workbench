@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"io"
 	"strings"
 
@@ -170,7 +171,7 @@ for without echo or read from --message-passphrase-fd N), --utxo-limit N,
 	send.Flags().BoolVar(&yes, "yes", false, "approve without asking (the summary is still printed)")
 	extra.add(send, &messages, extraSend)
 	addSubmitFlags(send, &flags, true)
-	w.AddCommand(a.walletNewCommand(), send, a.walletSendAssetsCommand(), a.claimRewardsCommand())
+	w.AddCommand(a.walletNewCommand(), send, a.walletSendAssetsCommand(), a.claimRewardsCommand(), a.renameCommand(identity.OwnerWallet, "wallet"), a.mergeCommand(identity.OwnerWallet, "wallet"))
 	return w
 }
 

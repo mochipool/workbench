@@ -34,7 +34,7 @@ var (
 // profile and exported through Hardware; with no Hardware wired it is refused
 // by the generation plan before any effect (ADR 0008).
 type GeneratePaymentAccount struct {
-	Store     ports.Store
+	Store     ports.NamedStore
 	KeyGen    ports.PaymentKeyGenerator
 	Addresses ports.AddressBuilder
 	NetworkID uint8 // the workspace's network (ports.NetworkMainnet or NetworkTestnet)
@@ -80,8 +80,8 @@ func (uc GeneratePaymentAccount) Run(ctx context.Context, req GeneratePaymentReq
 	if _, err := hwkeys.Plan(uc.Hardware, req.Place, custody.RolePayment); err != nil {
 		return PaymentAccountGenerated{}, err
 	}
-	check := func(r ports.Reader) error {
-		return refuseExisting(r, ErrAccountExists, ports.Ref{Name: name, Kind: ports.AddrVKey}, ports.AddrSKey, ports.AddrHwsFile, ports.AddrFile)
+	check := func(r ports.NamedReader) error {
+		return refuseExisting(r, ErrAccountExists, ports.NamedRef{Name: name, Kind: ports.AddrVKey}, ports.AddrSKey, ports.AddrHwsFile, ports.AddrFile)
 	}
 	if err := uc.Store.View(ctx, check); err != nil {
 		return PaymentAccountGenerated{}, err
@@ -109,25 +109,25 @@ func (uc GeneratePaymentAccount) Run(ctx context.Context, req GeneratePaymentReq
 	if err != nil {
 		return PaymentAccountGenerated{}, fmt.Errorf("build address: %w", err)
 	}
-	err = uc.Store.Update(ctx, func(w ports.Writer) error {
+	err = uc.Store.Update(ctx, func(w ports.NamedWriter) error {
 		if err := check(w); err != nil {
 			return err
 		}
-		if err := w.Put(ports.Ref{Name: name, Kind: ports.AddrVKey}, pair.VKey); err != nil {
+		if err := w.Put(ports.NamedRef{Name: name, Kind: ports.AddrVKey}, pair.VKey); err != nil {
 			return err
 		}
 		if onDevice {
 			// A hardware key leaves no secret: the signing file names the device path.
-			if err := w.Put(ports.Ref{Name: name, Kind: ports.AddrHwsFile}, hwsfile); err != nil {
+			if err := w.Put(ports.NamedRef{Name: name, Kind: ports.AddrHwsFile}, hwsfile); err != nil {
 				return err
 			}
-		} else if err := w.PutSecret(ports.Ref{Name: name, Kind: ports.AddrSKey}, pair.SKey); err != nil {
+		} else if err := w.PutSecret(ports.NamedRef{Name: name, Kind: ports.AddrSKey}, pair.SKey); err != nil {
 			return err
 		}
 		// Decision (spec correction): cardano-cli 11.2.3.0's `address build`
 		// writes the address with no trailing newline, so the file has none
 		// (SPO-Pfiles-OUT-001 said it had one).
-		return w.Put(ports.Ref{Name: name, Kind: ports.AddrFile}, []byte(addr))
+		return w.Put(ports.NamedRef{Name: name, Kind: ports.AddrFile}, []byte(addr))
 	})
 	if err != nil {
 		return PaymentAccountGenerated{}, err
@@ -137,15 +137,15 @@ func (uc GeneratePaymentAccount) Run(ctx context.Context, req GeneratePaymentReq
 
 // refuseExisting returns sentinel (wrapped with the reference) when the
 // first reference or any of the further kinds of the same name exists.
-func refuseExisting(r ports.Reader, sentinel error, first ports.Ref, more ...ports.Kind) error {
-	refs := []ports.Ref{first}
+func refuseExisting(r ports.NamedReader, sentinel error, first ports.NamedRef, more ...ports.Kind) error {
+	refs := []ports.NamedRef{first}
 	for _, k := range more {
-		refs = append(refs, ports.Ref{Name: first.Name, Kind: k})
+		refs = append(refs, ports.NamedRef{Name: first.Name, Kind: k})
 	}
 	return refuseRefs(r, sentinel, refs...)
 }
 
-func refuseRefs(r ports.Reader, sentinel error, refs ...ports.Ref) error {
+func refuseRefs(r ports.NamedReader, sentinel error, refs ...ports.NamedRef) error {
 	for _, ref := range refs {
 		exists, err := r.Exists(ref)
 		if err != nil {

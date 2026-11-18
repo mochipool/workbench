@@ -64,7 +64,7 @@ func TestImportReadsTheChainOnceAndWritesWhatWasConfirmed(t *testing.T) {
 	if dry.Info.RewardAddr != first.RewardAddr || res.Info.RewardAddr != first.RewardAddr {
 		t.Errorf("shown %q, written %q, confirmed %q", dry.Info.RewardAddr, res.Info.RewardAddr, first.RewardAddr)
 	}
-	if d := descriptor(t, st, "apex"); strings.Contains(string(st.files[ports.Ref{Name: "apex", Kind: ports.PoolDescriptor}]), "evilreplaced") || d == nil {
+	if d := descriptor(t, st, "apex"); strings.Contains(string(st.files[ports.NamedRef{Name: "apex", Kind: ports.PoolDescriptor}]), "evilreplaced") || d == nil {
 		t.Error("the descriptor holds the second answer")
 	}
 }

@@ -14,7 +14,9 @@ import (
 	"github.com/mochipool/workbench/spo/internal/adapters/toolchain"
 	"github.com/mochipool/workbench/spo/internal/domain/keyfile"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
+	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 )
 
 const (
@@ -198,9 +200,11 @@ func TestKeyConvertWithoutGPGNamesTheTool(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := copyWorkspace(t)
-	if out, err := withPass(t, dir, testPass, "workspace", "import", src, "--keep-encrypted"); err != nil {
-		t.Fatalf("%v\n%s", err, out)
+	enc, err := os.ReadFile(filepath.Join(src, "w.skey"))
+	if err != nil {
+		t.Fatal(err)
 	}
+	plantKept(t, dir, "w", enc)
 	pf, pfd := fdIn(t, "Pa55word!Correct-horse\n")
 	defer pf.Close()
 	pp, ppfd := fdIn(t, testPass+"\n")
@@ -238,14 +242,14 @@ func execTC(t *testing.T, term *fakeTerm, args ...string) (string, error) {
 // again undecrypted and turn the kept key into a sealed one with key convert.
 // Only run where the toolchain manifest is available (SPO_TOOLCHAIN).
 //
-// spec: SPO-Xcustody-OUT-003, SPO-Xcustody-PR-001, SPO-Ckey-EXT-001, SPO-Ckey-EXT-002
+// spec: SPO-Xcustody-OUT-003, SPO-Xcustody-IF-008, SPO-Xcustody-PR-001, SPO-Ckey-EXT-001, SPO-Ckey-EXT-002
 func TestEncryptedKeysThroughGPG(t *testing.T) {
 	if os.Getenv(toolchain.EnvVar) == "" {
 		t.Skip("SPO_TOOLCHAIN is not set: the gpg path needs the toolchain manifest (run inside nix run .#spo or source the parity env)")
 	}
 	const upstreamPass = "Pa55word!Correct-horse"
 	src := upstreamDir(t)
-	walletKey := ports.Ref{Name: iWallet, Kind: ports.AddrSKey}
+	walletKey := ports.NamedRef{Name: iWallet, Kind: ports.AddrSKey}
 	original := cborOf(t, filepath.Join(src, iWallet+".skey"))
 
 	// 1. A sealed workspace holding the source, exported with a password.
@@ -285,29 +289,47 @@ func TestEncryptedKeysThroughGPG(t *testing.T) {
 		t.Error("the key did not survive export and import")
 	}
 
-	// 3. Imported undecrypted: it cannot sign, is never exported, and key
-	// convert makes it a sealed key.
+	// 3. --defer-encrypted leaves the encrypted file in the source and refuses its
+	// owner: nothing of it is stored. --keep-encrypted is gone and names the
+	// new flag.
 	dir3 := copyWorkspace(t)
-	if out, err = withPass(t, dir3, testPass, "workspace", "import", target, "--owner", iWallet, "--keep-encrypted"); err != nil {
-		t.Fatalf("%v\n%s", err, out)
+	out, err = withPass(t, dir3, testPass, "workspace", "import", target, "--owner", iWallet, "--defer-encrypted")
+	if err == nil || !strings.Contains(out, "left in the source") {
+		t.Fatalf("a deferred import: %v\n%s", err, out)
 	}
-	pw3, pwfd3 := fdIn(t, "Wrong-Passw0rd-1\n")
-	defer pw3.Close()
-	pp3, ppfd3 := fdIn(t, testPass+"\n")
-	defer pp3.Close()
-	if out, err = execTC(t, nil, "-C", dir3, "--passphrase-fd", ppfd3, "key", "convert", iWallet, "--password-fd", pwfd3); err == nil {
-		t.Fatalf("a wrong password converted the key:\n%s", out)
+	if out, err = withPass(t, dir3, testPass, "workspace", "import", target, "--owner", iWallet, "--keep-encrypted"); err == nil || !strings.Contains(err.Error(), "--defer-encrypted") {
+		t.Fatalf("--keep-encrypted: %v\n%s", err, out)
 	}
-	pw4, pwfd4 := fdIn(t, upstreamPass+"\n")
-	defer pw4.Close()
-	pp4, ppfd4 := fdIn(t, testPass+"\n")
-	defer pp4.Close()
-	if out, err = execTC(t, nil, "-C", dir3, "--passphrase-fd", ppfd4, "key", "convert", iWallet, "--password-fd", pwfd4); err != nil {
-		t.Fatalf("%v\n%s", err, out)
+	st, err := openCold(filepath.Join(dir3, cli.WorkspaceFile), secret.Take([]byte(testPass)))
+	if err != nil {
+		t.Fatal(err)
 	}
-	notLeaked(t, out, upstreamPass, original)
-	if got := secretHex(t, dir3, walletKey); got != original {
-		t.Error("key convert produced another key")
+	refs, _ := st.ListRecords(context.Background())
+	st.Close()
+	for _, r := range refs {
+		if r.Kind == ports.UpstreamEncryptedSKey {
+			t.Errorf("a deferred import stored %v", r)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(target)); err != nil {
+		t.Fatal("the source directory is gone")
+	}
+}
+
+// plantKept stores a record in upstream's encrypted form, as an import of an
+// older release did: the one way left to make one, since no import creates it.
+func plantKept(t *testing.T, dir, stem string, enc []byte) {
+	t.Helper()
+	st, err := openCold(filepath.Join(dir, cli.WorkspaceFile), secret.Take([]byte(testPass)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	err = labels.Named(st).Update(context.Background(), func(w ports.NamedWriter) error {
+		return w.PutSecret(ports.NamedRef{Name: stem, Kind: ports.UpstreamEncryptedSKey}, secret.Take(append([]byte(nil), enc...)))
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

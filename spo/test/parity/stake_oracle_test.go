@@ -187,19 +187,33 @@ func TestStakeTransactionsMatchCardanoCLI(t *testing.T) {
 	params := testParams(t)
 	led := native.Ledger{}
 	keys := e.newKeys(t, false)
-	store, err := plainstore.OpenTestnet(keys.dir)
+	// The vault is a directory of its own: it holds the payment key `w` and, as
+	// <name>.staking.*, the stake key of the wallet `s`. In keys.dir the same stake key
+	// is the verification key `s`, and one key under two names would be two wallets
+	// holding one identity (ADR 0010).
+	vdir := t.TempDir()
+	for _, n := range []string{"w.skey", "w.vkey"} {
+		b, err := os.ReadFile(filepath.Join(keys.dir, n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(vdir, n), b, 0o400); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, err := plainstore.OpenTestnet(vdir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	signer := native.VaultSigner{Vault: store}
+	signer := native.VaultSigner{Vault: store.Anchor()}
 	p := func(n string) string { return filepath.Join(keys.dir, n) }
 	// The vault reads the stake key as <name>.staking.skey.
 	skeyRaw, _ := os.ReadFile(p("s.skey"))
-	if err := os.WriteFile(p("w.staking.skey"), skeyRaw, 0o400); err != nil {
+	if err := os.WriteFile(filepath.Join(vdir, "w.staking.skey"), skeyRaw, 0o400); err != nil {
 		t.Fatal(err)
 	}
 	vkeyRaw, _ := os.ReadFile(p("s.vkey")) // the verification key beside it (found by identity)
-	if err := os.WriteFile(p("w.staking.vkey"), vkeyRaw, 0o400); err != nil {
+	if err := os.WriteFile(filepath.Join(vdir, "w.staking.vkey"), vkeyRaw, 0o400); err != nil {
 		t.Fatal(err)
 	}
 	payKey := porttest.Key(t, store, custody.RolePayment, "w")
