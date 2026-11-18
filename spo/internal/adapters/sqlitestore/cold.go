@@ -105,7 +105,13 @@ type ColdSource struct {
 }
 
 // SetColdSource wires the cold sub-key factor of this handle.
+//
+// A read-only layout handle takes none: a cold-role record is never opened from it,
+// so no factor may be wired to it (defence in depth).
 func (s *Store) SetColdSource(c *ColdSource) {
+	if s.layoutRO {
+		return
+	}
 	s.mu.Lock()
 	s.cold = c
 	s.mu.Unlock()
@@ -2087,6 +2093,10 @@ func checkRecoveredIdentity(ctx context.Context, pt *secret.Buffer, want identit
 // derives the record's identity (a verification-key derivation is not the
 // store's), which is checked where the key is used or recovered.
 func (s *Store) VerifyColdPayloads(ctx context.Context) (int, error) {
+	if s.layoutRO {
+		// a read-only layout handle never opens a cold-role record, and asks for no factor
+		return 0, ErrLayoutColdRecord
+	}
 	release, err := s.enter(ctx)
 	if err != nil {
 		return 0, err

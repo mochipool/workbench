@@ -39,6 +39,9 @@ type SnapshotCredential struct {
 	Recovery *secret.Buffer
 	// Factors presents FIDO2 factors (a hardware or strict workspace).
 	Factors *FactorInputs
+	// master is the master key of a layout unlock (LayoutUnlock); only this package
+	// sets it.
+	master *secret.Buffer
 }
 
 // ErrSnapshotPlatform: this build has no file locking, so a snapshot cannot be
@@ -50,7 +53,7 @@ var ErrSnapshotCredential = errors.New("sqlitestore: a snapshot needs exactly on
 
 func (c SnapshotCredential) resolve() (credential, func(), error) {
 	n := 0
-	for _, set := range []bool{c.Passphrase != nil, c.Recovery != nil, c.Factors != nil} {
+	for _, set := range []bool{c.Passphrase != nil, c.Recovery != nil, c.Factors != nil, c.master != nil} {
 		if set {
 			n++
 		}
@@ -61,6 +64,8 @@ func (c SnapshotCredential) resolve() (credential, func(), error) {
 	switch {
 	case c.Passphrase != nil:
 		return credential{kind: seal.SlotPassphrase, buf: c.Passphrase}, func() {}, nil
+	case c.master != nil:
+		return credential{kind: credMaster, buf: c.master}, func() {}, nil
 	case c.Recovery != nil:
 		raw, err := seal.DecodeRecoveryKey(c.Recovery)
 		if err != nil {

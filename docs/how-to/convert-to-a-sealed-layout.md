@@ -15,7 +15,7 @@ Run it again and only what changed is written. A record that did not change has 
 * **It is not a second workspace.** You cannot open it, write to it or sign with it. The SQLite file (`workspace.spo`) stays the only store you can write to. Nothing was retired, renamed or marked.
 * **It does not replace `store backup`.** A backup is the whole sealed file and restores with `store restore`. A layout is read back with `store verify --layout` and `store convert --from-layout` (below).
 * **It cannot sign with a cold key.** Cold-role records are carried exactly as they are stored. Nothing here opens one.
-* **There is no read-only open yet.** `spo -C DIR` on a layout arrives in a later work package. To work from a layout you import it into a workspace first.
+* **You can read it, not write it.** `spo -C DIR --pin PIN` opens a layout read-only for the few commands that only read ([below](#open-a-layout-read-only-spo--c-dir---pin-pin)). To write, or to sign with a key, import the layout into a workspace first.
 
 ## Before you run it
 
@@ -104,6 +104,45 @@ The check has two passes.
 **A head that fails stops the check.** The command names it, says why, names the newest head below it that did verify, and says that you may use that one with `--at SEQ` if you accept that state; the pin still has to accept it. A directory with junk in the next head's name is such a case. `--at` naming a head that is not in the directory is refused.
 
 **Limits.** At most 100,000 heads; an object is at most 4 MiB; a manifest that claims more than 100,000 records or 500,000 audit rows is refused before anything is fetched; at most eight objects are read at once. A layout at those limits needs under 1 GiB of memory (the snapshot is held in memory, up to 256 MiB of fields, twice while the scratch file is written and read back). Measured on a layout with 50,000 audit rows and 200 records (199 MiB, warm cache): checking the objects took about 0.3 s and 81 MiB of heap, and writing and verifying the scratch file 0.75 s and 205 MiB; the whole process peaked at 271 MiB. The worst case at the limits (about 600,000 rows) is estimated, not measured.
+
+## Open a layout read-only: `spo -C DIR --pin PIN`
+
+```
+spo -C /srv/spo-layout --pin PIN store slots
+```
+
+When `-C` names a directory that is a sealed layout (it has `heads/` and no `workspace.spo`), `spo` opens it read-only. **A pin is required**, in the forms above except `local` (that is the pin this machine keeps for a layout it exported, and here the layout is the directory itself, so give the printed pin or the long-lived pin). Without one the command refuses, before it asks for anything, and says how to get one.
+
+**The top-level `--pin` is only for a layout.** If `-C` names a directory that holds a workspace file (`workspace.spo`), with or without a `heads/` directory, or one with no `heads/` directory, the command is refused first, before the pin is looked at, with an error that says what the directory holds. A sink that planted a `workspace.spo` among the objects of your layout cannot get a command to open it as a workspace. The mode is decided once at the start of the command; a file that appears later changes nothing. `store verify --layout DIR --pin PIN`, `store restore` and `store backups` have a `--pin` of their own and work from an ordinary workspace as before.
+
+A damaged or forged directory is refused as `store verify --layout` refuses it, and nothing runs.
+
+**How it works.** The command runs the two passes of `store verify --layout`, writes the checked rows into a private scratch store file (a directory of mode 0700 in your temporary directory), and opens that file read-only. The layout directory is never written: its files, modes and times are the same after every command. The scratch file is removed when the command ends, on success, on a refusal, on Ctrl-C and on a crash; one that a killed process left behind (a day old or more, named `spo-layout-open-*`) is removed by the next open. Nothing in it is your workspace.
+
+**Read-only is not a convention.** The handle refuses every write with one error: "this is a sealed layout opened read-only; convert it into a workspace to change it: spo store convert --from-layout DIR --pin PIN".
+
+**What works:**
+
+| Command | Result |
+| --- | --- |
+| `store slots` | Lists the slots (and the cold records that are out of step). |
+| `store verify` | The same as `store verify --layout DIR --pin PIN`, byte for byte. `--at` and `--locked` apply. `--deep` also opens the scratch file and decrypts every record (a cold-role record only as far as the workspace key goes). `--locked` with `--deep` is refused. |
+| `workspace slot list`, `workspace policy show` | Print what the slots object says. |
+| `workspace checkpoint-key show` | Prints the checkpoint key record, or says there is none. |
+| `version`, `toolchain check` | Do not use the directory. |
+
+**What is refused, and why.** Every other command is refused with the error above, before the terminal, the credential or an authenticator is asked. They write (a key, a certificate, a counter, an audit event), or they need the configuration `spo.toml` or the transfer file or a place for their own files, and a layout holds none of these. This includes `pool opcert issue`, `pool kes generate`, `wallet send`, `store backup`, `workspace export` and `node export`. A test walks the command tree, so a command added later is refused until it is classified.
+
+**Keys.**
+
+* **Cold-role records are never opened from a layout.** Opening one would change the salt of its cold factor in the file, and a read-only open cannot, so every open would show the authenticator the same salt. Opening one through the handle fails with a message that says so and names the conversion, and **no cold factor (no passphrase, no touch) is ever asked for**.
+* A hot secret can be opened through the handle without any write, but no command in this release offers it: signing with a hot key records a counter or an audit row, and the commands that sign need the configuration. So **signing, with a hot key or a cold one, is not possible from a layout**: convert it into a workspace first (`store convert --from-layout`, below).
+
+**Not audited.** A read-only open writes no audit row, so what you read from a layout is not in the audit chain. The command prints a note that says so.
+
+**Touches.** The credential is presented **once** for a read-only open: the unlock of the slot table keeps its key, and the scratch file and the read-only handle are made from it. For a `hardware` or `strict` layout that costs the authenticator the same assertions as one presentation for a `store verify` of a workspace (the tests count the assertions of the stand-in tools). `store verify` of a layout without `--deep` presents the credential twice (the store verifies the scratch file through it again); with `--deep` once. A passphrase never opens a hardware or strict layout, and `--unlock recovery-composite` is refused. None of this has been run on a real authenticator.
+
+**Recovery on a new machine.** With only the directory, the pin and your credential you can look first: `spo -C /media/backup/spo-layout --pin PIN store slots` and `store verify --deep`. Then convert it into a workspace as in the next section. The layout stays a read-only artefact; the SQLite file is the only store you write to.
 
 ## Recover on a new machine from only the layout and a pin
 

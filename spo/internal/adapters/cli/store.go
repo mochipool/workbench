@@ -91,6 +91,10 @@ func (a *app) storeCommand() *cobra.Command {
 	return cmd
 }
 
+// errLockedWithDeep is the refusal of --locked together with --deep, the same for
+// --layout and for -C naming a layout.
+const errLockedWithDeep = "--locked asks for no credential and --deep decrypts every record; give one of them"
+
 func (a *app) storeVerify() *cobra.Command {
 	var backupFile, checkpointFile, checkpointPin string
 	var deep, withCold bool
@@ -145,11 +149,32 @@ cannot.
 			if a.upstream {
 				return errors.New(errUpstreamStore)
 			}
-			if layoutDir != "" {
-				if backupFile != "" || checkpointFile != "" || deep || withCold {
-					return errors.New("--layout goes with --pin, --at and --locked only")
+			if layoutDir == "" && a.inLayout() {
+				// -C names a sealed layout: it is checked, with the pin of --pin
+				if backupFile != "" || checkpointFile != "" || withCold {
+					return errors.New("-C names a sealed layout: store verify checks it with --pin, --at, --locked and --deep only")
 				}
-				return a.verifyLayout(cmd.Context(), layoutDir, checkpointPin, layoutAt, cmd.Flags().Changed("at"), layoutLockedOnly)
+				if layoutLockedOnly && deep {
+					return errors.New(errLockedWithDeep)
+				}
+				pin := checkpointPin
+				if pin == "" {
+					pin = a.layPin
+				}
+				return a.verifyLayout(cmd.Context(), a.workspace, pin, layoutAt, cmd.Flags().Changed("at"), layoutLockedOnly, deep)
+			}
+			if layoutDir != "" {
+				if backupFile != "" || checkpointFile != "" || withCold {
+					return errors.New("--layout goes with --pin, --at, --locked and --deep only")
+				}
+				if layoutLockedOnly && deep {
+					return errors.New(errLockedWithDeep)
+				}
+				return a.verifyLayout(cmd.Context(), layoutDir, checkpointPin, layoutAt, cmd.Flags().Changed("at"), layoutLockedOnly, deep)
+			}
+			if checkpointPin != "" && backupFile == "" && checkpointFile == "" {
+				// a pin alone checks the sealed layout -C names, and -C is not one
+				return fmt.Errorf("--pin alone checks the sealed layout that -C names, and -C %s is not one: %s (nothing was read, asked or changed); for a layout elsewhere use --layout DIR, for a backup --backup FILE --checkpoint FILE", textsafe.Quote(a.workspace), shapeOf(a.workspace).why())
 			}
 			if cmd.Flags().Changed("at") || layoutLockedOnly {
 				return errors.New("--at and --locked go with --layout")

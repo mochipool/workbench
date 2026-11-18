@@ -697,6 +697,12 @@ func (a *app) cleanupAfterEveryCommand(root *cobra.Command) {
 		if run := c.RunE; run != nil {
 			c.RunE = func(cmd *cobra.Command, args []string) error {
 				defer a.destroyPINs()
+				defer a.closeLayout() // the scratch store file of a layout opened read-only, on every exit
+				if a.inLayout() && LayoutAccess(cmd) == LayoutOpens {
+					if err := a.layoutSetup(cmd.Context()); err != nil {
+						return err
+					}
+				}
 				return run(cmd, args)
 			}
 		} else if run := c.Run; run != nil {

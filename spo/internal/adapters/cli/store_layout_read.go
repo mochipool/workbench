@@ -54,6 +54,9 @@ func (a *app) layoutPinOf(text string, dir LayoutDir) (layoutread.Pin, error) {
 		}
 		return p, nil
 	}
+	if a.inLayout() {
+		return layoutread.Pin{}, errors.New("--pin local is the pin this machine keeps for a layout it exported, beside the workspace file; -C names the layout itself, so give the pin that \"store convert --to-layout\" printed or the long-lived pin of the checkpoint key (nothing was asked)")
+	}
 	info, err := a.workspaceInfo()
 	if err != nil {
 		return layoutread.Pin{}, fmt.Errorf("--pin local needs the workspace on this machine, which holds the pin: %w", err)
@@ -120,7 +123,18 @@ func (a *app) layoutLocked(ctx context.Context, flag, dirArg, pinText string, at
 	if err != nil {
 		return LayoutDir{}, "", nil, err
 	}
-	dir, err := a.d.LayoutRead.Open(path, a.workspaceFile())
+	home := a.workspaceFile()
+	if a.inLayout() {
+		// -C names a layout: the directory the reader would treat as the workspace
+		// directory is the layout itself, which it refuses; the pin file it would keep
+		// beside the workspace file is not kept for an opened layout
+		h, herr := a.layoutHome()
+		if herr != nil {
+			return LayoutDir{}, "", nil, herr
+		}
+		home = filepath.Join(h, WorkspaceFile)
+	}
+	dir, err := a.d.LayoutRead.Open(path, home)
 	if err != nil {
 		return LayoutDir{}, "", nil, safeError(err)
 	}
@@ -164,7 +178,11 @@ func (a *app) printLayoutPin(lr *layoutread.Locked) {
 // verifyLayout is `store verify --layout DIR --pin PIN [--at SEQ] [--locked]`. It
 // changes nothing in the directory and nothing in any workspace: its one scratch
 // file is made in a private directory of its own, and removed.
-func (a *app) verifyLayout(ctx context.Context, dirArg, pinText string, at uint64, hasAt, lockedOnly bool) error {
+//
+// With deep the credential is presented once and kept (LayoutRead.Session): the
+// scratch file is then opened read-only and every record is decrypted (a cold-role
+// record only as far as the workspace key goes).
+func (a *app) verifyLayout(ctx context.Context, dirArg, pinText string, at uint64, hasAt, lockedOnly, deep bool) error {
 	dir, path, lr, err := a.layoutLocked(ctx, "--layout", dirArg, pinText, at, hasAt)
 	if err != nil {
 		return err
@@ -188,6 +206,15 @@ func (a *app) verifyLayout(ctx context.Context, dirArg, pinText string, at uint6
 	}
 	defer a.destroyPINs()
 	keys, writer := a.d.LayoutRead.Credential(pass, fo)
+	var sess LayoutSession
+	if deep {
+		if a.d.LayoutRead.Session == nil {
+			return errors.New("--deep is not available in this build")
+		}
+		sess = a.d.LayoutRead.Session(pass, fo)
+		defer sess.Close()
+		keys, writer = sess, sess
+	}
 	un, err := layoutread.CheckUnlocked(ctx, layoutread.UnlockedInput{Reader: dir.Reader, Locked: lr, Keys: keys})
 	if err != nil {
 		return a.layoutUnlockError(err, fo != nil)
@@ -206,9 +233,26 @@ func (a *app) verifyLayout(ctx context.Context, dirArg, pinText string, at uint6
 	if err != nil {
 		return fmt.Errorf("the rows rebuilt from the layout do not form a workspace that verifies: %w", safeError(a.layoutUnlockError(err, fo != nil)))
 	}
-	_ = f // the whole temporary directory is removed on return
 	fmt.Fprintln(a.d.Out, "The rows rebuilt from the layout were written to a private scratch store file, which passed the store's own full verification (the audit chain, every record hash the chain recorded, the slot table and its policy); the scratch file was removed.")
-	fmt.Fprintln(a.d.Out, "No record was decrypted and no cold-role factor was asked for: cold-role records are carried as they are and are not opened by this check.")
+	if deep {
+		st, oerr := sess.OpenReadOnly(f.Path)
+		if oerr != nil {
+			return fmt.Errorf("the rows rebuilt from the layout do not open read-only: %w", safeError(oerr))
+		}
+		pv, ok := st.(PayloadVerifier)
+		if !ok {
+			st.Close()
+			return errors.New("--deep is not available in this build")
+		}
+		verr := pv.VerifyPayloads(ctx)
+		st.Close()
+		if verr != nil {
+			return fmt.Errorf("a record of the layout did not decrypt: %w", safeError(verr))
+		}
+		fmt.Fprintln(a.d.Out, "Every record was also decrypted under the workspace keys (--deep). A cold-role record was opened only as far as the workspace key goes, and no cold-role factor was asked for: cold-role records are never opened from a layout.")
+	} else {
+		fmt.Fprintln(a.d.Out, "No record was decrypted and no cold-role factor was asked for: cold-role records are carried as they are and are not opened by this check.")
+	}
 	a.printLayoutPin(lr)
 	fmt.Fprintln(a.d.Out, "The layout directory was not changed, and no workspace was.")
 	return nil

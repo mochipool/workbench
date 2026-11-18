@@ -1170,6 +1170,9 @@ func (s *Store) Open(ctx context.Context, ref ports.Ref) (*secret.Buffer, error)
 	b, err := s.openOrdinary(ctx, ref)
 	release()
 	if err != nil && errors.Is(err, errColdRecord) {
+		if s.layoutRO {
+			return nil, &RefError{ref, ErrLayoutColdRecord}
+		}
 		return s.openCold(ctx, ref)
 	}
 	return b, err

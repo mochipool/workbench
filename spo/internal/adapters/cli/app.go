@@ -63,6 +63,15 @@ type app struct {
 	recoveryFD int
 	// acceptRollback is --accept-rollback: never persisted, announced when used.
 	acceptRollback bool
+	// layPin is --pin: the pin of the layout -C names (a sealed layout opened
+	// read-only). lay is that open while a command runs (layoutopen.go); layHome is
+	// the private directory it keeps its scratch store file in.
+	layPin string
+	// layMode is what -C names, decided once by layoutRefuse at the start of the
+	// command and never recomputed from the directory.
+	layMode layoutMode
+	lay     *layoutOpen
+	layHome string
 }
 
 func newApp(d Deps) *app {
@@ -73,7 +82,12 @@ func newApp(d Deps) *app {
 	return a
 }
 
-func (a *app) workspaceFile() string { return filepath.Join(a.workspace, WorkspaceFile) }
+func (a *app) workspaceFile() string {
+	if a.lay != nil {
+		return a.lay.file // the verified scratch store file of a layout opened read-only
+	}
+	return filepath.Join(a.workspace, WorkspaceFile)
+}
 
 func exists(path string) bool {
 	_, err := os.Lstat(path)
@@ -245,6 +259,18 @@ func (s *session) closeInto(errp *error) {
 // open opens the workspace: sealed by default, the upstream layout only with
 // --upstream-layout.
 func (a *app) open(ctx context.Context) (*session, error) {
+	if a.lay != nil {
+		return a.openLayoutSession()
+	}
+	// The mode of -C is decided by the root's pre-run. A command that got here
+	// without that decision, or as a layout command without the read-only open,
+	// must not fall through to an ordinary open of whatever the directory holds.
+	switch a.layMode {
+	case modeUndecided:
+		return nil, errors.New("internal error: the workspace was asked for before the command's checks ran; nothing was opened")
+	case modeLayout:
+		return nil, fmt.Errorf("%w (internal error: the layout was not opened for this command; nothing was opened)", ErrLayoutReadOnly)
+	}
 	if a.upstream {
 		if exists(a.workspaceFile()) {
 			return nil, fmt.Errorf("%s holds a sealed workspace (%s); --upstream-layout works on a plain directory only. Drop the flag, or use another directory", a.workspace, WorkspaceFile)

@@ -129,6 +129,12 @@ func (o *layoutOpener) Close() {
 // opens only through factors. The master key is destroyed as soon as the keys are
 // derived. The caller closes the opener.
 func OpenLayoutKeys(ctx context.Context, meta ports.SnapshotMeta, slots []ports.SnapshotSlot, c SnapshotCredential) (ports.ObjectOpener, error) {
+	return openLayoutKeys(ctx, meta, slots, c, nil)
+}
+
+// openLayoutKeys is OpenLayoutKeys; with keep set, a copy of the master key is
+// handed back in *keep (the caller destroys it).
+func openLayoutKeys(ctx context.Context, meta ports.SnapshotMeta, slots []ports.SnapshotSlot, c SnapshotCredential, keep **secret.Buffer) (ports.ObjectOpener, error) {
 	t, err := tableOfSnapshot(meta, slots)
 	if err != nil {
 		return nil, err
@@ -150,13 +156,26 @@ func OpenLayoutKeys(ctx context.Context, meta ports.SnapshotMeta, slots []ports.
 		return nil, err
 	}
 	defer master.Destroy()
+	if keep != nil {
+		cp, cerr := copySecret(master)
+		if cerr != nil {
+			return nil, cerr
+		}
+		*keep = cp
+	}
 	keys, err := seal.DeriveKeys(master)
 	if err != nil {
+		if keep != nil {
+			(*keep).Destroy()
+		}
 		return nil, err
 	}
 	sealer, err := keys.ObjectSealer()
 	if err != nil {
 		keys.Destroy()
+		if keep != nil {
+			(*keep).Destroy()
+		}
 		return nil, err
 	}
 	return &layoutOpener{keys: keys, sealer: sealer, epoch: append([]byte(nil), meta.KeyEpoch...), ws: append([]byte(nil), meta.WorkspaceID...)}, nil
@@ -171,4 +190,71 @@ func OpenLayoutKeys(ctx context.Context, meta ports.SnapshotMeta, slots []ports.
 func WriteLayoutFile(ctx context.Context, path string, snap ports.Snapshot, c SnapshotCredential) error {
 	snap.Meta.SchemaVersion = int64(len(migrations))
 	return WriteSnapshotFile(ctx, path, snap, c)
+}
+
+// ErrLayoutReadOnly is what every write on a handle opened from a sealed layout
+// returns (ADR 0012 stage 3, the owner decision on its scope: the SQLite file is
+// the only writable store). ErrLayoutColdRecord is what opening a cold-role record
+// on such a handle returns: a read-only open cannot rotate the per-use salt, so
+// each open would show the authenticator the same salt, and no cold factor is ever
+// asked for.
+var (
+	ErrLayoutReadOnly   = errors.New("this is a sealed layout opened read-only; convert it into a workspace to change it: spo store convert --from-layout DIR --pin PIN")
+	ErrLayoutColdRecord = errors.New("this is a sealed layout opened read-only, and a cold-role record is never opened from it (a read-only open cannot rotate the per-use salt of its cold factor); convert the layout into a workspace to use the key: spo store convert --from-layout DIR --pin PIN")
+)
+
+// LayoutUnlock holds the master key one unlock of a layout's slot table derived,
+// so that the scratch file of a read-only open and the open itself need no second
+// presentation of the credential. The master key is checked against the key epoch
+// of the slots object before it is kept (the unlock does that), and the scratch
+// file is built from the same slot table, so nothing the credential proves is
+// skipped; what is not repeated is only the presentation. It is guarded memory and
+// Close destroys it.
+type LayoutUnlock struct {
+	master *secret.Buffer
+}
+
+// UnlockLayout is OpenLayoutKeys that also keeps the master key for WriteFile and
+// OpenReadOnly. The caller closes both the opener and the LayoutUnlock.
+func UnlockLayout(ctx context.Context, meta ports.SnapshotMeta, slots []ports.SnapshotSlot, c SnapshotCredential) (ports.ObjectOpener, *LayoutUnlock, error) {
+	var kept *secret.Buffer
+	op, err := openLayoutKeys(ctx, meta, slots, c, &kept)
+	if err != nil {
+		return nil, nil, err
+	}
+	return op, &LayoutUnlock{master: kept}, nil
+}
+
+// WriteFile is WriteLayoutFile through the kept master key: the file is verified
+// by the store's own verification, and the audit chain, the record hashes and the
+// policy are checked as ever.
+func (u *LayoutUnlock) WriteFile(ctx context.Context, path string, snap ports.Snapshot) error {
+	if u == nil || u.master == nil {
+		return errors.New("sqlitestore: the layout unlock is closed")
+	}
+	return WriteLayoutFile(ctx, path, snap, SnapshotCredential{master: u.master})
+}
+
+// OpenReadOnly opens the scratch file written by WriteFile as a read-only handle
+// of a sealed layout: every write fails with ErrLayoutReadOnly and a cold-role
+// record with ErrLayoutColdRecord. The handle has no cold source, so no factor can
+// be asked for through it.
+func (u *LayoutUnlock) OpenReadOnly(path string) (*Store, error) {
+	if u == nil || u.master == nil {
+		return nil, errors.New("sqlitestore: the layout unlock is closed")
+	}
+	st, err := open(path, credential{kind: credMaster, buf: u.master}, true, OpenOptions{})
+	if err != nil {
+		return nil, err
+	}
+	st.layoutRO = true
+	return st, nil
+}
+
+// Close destroys the kept master key. It is safe to call twice.
+func (u *LayoutUnlock) Close() {
+	if u != nil && u.master != nil {
+		u.master.Destroy()
+		u.master = nil
+	}
 }

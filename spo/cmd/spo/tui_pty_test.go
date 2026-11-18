@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -97,8 +98,12 @@ func startTUI(t *testing.T, dir string, r, c uint16, extraArgs ...string) *ptyTU
 	p := &ptyTUI{t: t, master: master, exit: make(chan struct{}), scr: newVT(int(r), int(c))}
 	args := append([]string{os.Args[0], "-C", dir}, extraArgs...)
 	args = append(args, "tui")
+	// the child unlocks a workspace (256 MiB of Argon2id) while this process is
+	// idle: hand the runtime's free memory back first, and give the child a heap
+	// limit as TestMain gives this process one (main_test.go, testMemoryLimit)
+	debug.FreeOSMemory()
 	proc, err := os.StartProcess(os.Args[0], args, &os.ProcAttr{
-		Env:   append(os.Environ(), "SPO_PTY_CHILD=1", "TERM=xterm-256color"),
+		Env:   append(os.Environ(), "SPO_PTY_CHILD=1", "TERM=xterm-256color", fmt.Sprintf("GOMEMLIMIT=%d", testMemoryLimit)),
 		Files: []*os.File{slave, slave, slave},
 		Sys:   &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0},
 	})

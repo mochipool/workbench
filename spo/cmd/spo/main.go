@@ -11,6 +11,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/spf13/cobra"
+
 	"github.com/mochipool/workbench/spo/internal/adapters/cli"
 	"github.com/mochipool/workbench/spo/internal/adapters/fido2cli"
 	"github.com/mochipool/workbench/spo/internal/adapters/toolchain"
@@ -57,10 +59,7 @@ func run() int {
 		return 1
 	}
 
-	root := cli.NewRoot(deps)
-	cli.MarkForUI(root)
-	cli.AttachCompletion(root, deps)
-	root.AddCommand(tuiCommand(buildDeps))
+	root := buildRoot(deps)
 	if err := root.ExecuteContext(ctx); err != nil {
 		if errors.Is(err, secret.ErrMemoryLimit) {
 			err = errors.New(cli.MemlockAdvice)
@@ -69,6 +68,16 @@ func run() int {
 		return cli.ExitCode(err)
 	}
 	return 0
+}
+
+// buildRoot is the command tree of the binary: the tree of the cli package, the
+// marks the terminal UI reads, the completion and the tui command.
+func buildRoot(deps cli.Deps) *cobra.Command {
+	root := cli.NewRoot(deps)
+	cli.MarkForUI(root)
+	cli.AttachCompletion(root, deps)
+	root.AddCommand(tuiCommand(buildDeps))
+	return root
 }
 
 // buildDeps wires the adapters to the command tree and loads the toolchain.
