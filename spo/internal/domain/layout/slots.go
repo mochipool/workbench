@@ -31,6 +31,10 @@ const (
 	// StoreFormat is the only store format this layout carries (ADR 0011).
 	StoreFormat = 3
 	maxSlots    = 256
+	// MaxSlotsObject bounds the stored slots object. It is plaintext and decoded
+	// from the directory before anything is known about it; a store holds at most
+	// 64 slots (ports.SnapshotMaxSlots) of at most 4 KiB each.
+	MaxSlotsObject = 256 << 10
 )
 
 var (
@@ -199,8 +203,8 @@ func EncodeSlotsObject(epoch []byte, s SlotsObject) ([]byte, error) {
 	}
 	need := HeaderSize + lengthSize + len(c)
 	bucket, err := BucketFor(need)
-	if err != nil {
-		return nil, formatErr("a slots object of %d bytes does not fit the largest bucket of %d bytes", need, MaxBucket)
+	if err != nil || bucket > MaxSlotsObject {
+		return nil, formatErr("a slots object of %d bytes is larger than the bound of %d bytes", need, MaxSlotsObject)
 	}
 	out := make([]byte, bucket)
 	out[0] = FormatSlots
@@ -215,6 +219,9 @@ func EncodeSlotsObject(epoch []byte, s SlotsObject) ([]byte, error) {
 // smallest one, a format byte other than 0x02, non-zero padding, a meta key
 // epoch that is not the header's, and CBOR that is not canonical.
 func ParseSlotsObject(stored []byte) ([]byte, SlotsObject, error) {
+	if len(stored) > MaxSlotsObject {
+		return nil, SlotsObject{}, formatErr("a slots object of %d bytes is larger than the bound of %d bytes", len(stored), MaxSlotsObject)
+	}
 	h, err := ParseHeader(stored)
 	if err != nil {
 		return nil, SlotsObject{}, err

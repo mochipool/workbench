@@ -54,6 +54,26 @@ func newDeps(out, errw io.Writer, term cli.Terminal) cli.Deps {
 			}
 			return layoutexport.Dir{Writer: d, Reader: d, Lister: d, Locker: d, Pins: d}, nil
 		},
+		LayoutRead: cli.LayoutReadOps{
+			Open: func(dir, workspaceFile string) (cli.LayoutDir, error) {
+				d, err := layoutdir.OpenExisting(dir, workspaceFile)
+				if err != nil {
+					return cli.LayoutDir{}, err
+				}
+				return cli.LayoutDir{Reader: d, Pins: d, Close: d.Close}, nil
+			},
+			Tables: layoutTables{},
+			Credential: func(pass *secret.Buffer, factors *cli.FactorOpen) (ports.LayoutKeyOpener, ports.SnapshotFileWriter) {
+				var c sqlitestore.SnapshotCredential
+				if factors != nil {
+					in := factorInputs(*factors)
+					c = sqlitestore.SnapshotCredential{Factors: &in}
+				} else {
+					c = sqlitestore.SnapshotCredential{Passphrase: pass}
+				}
+				return layoutCred{c}, layoutCred{c}
+			},
+		},
 		Sealed: cli.SealedOps{
 			Init: func(path string, pass *secret.Buffer) (*secret.Buffer, error) {
 				k, err := sqlitestore.Init(path, pass)
@@ -405,4 +425,36 @@ func openSink(ctx context.Context, url string) (backupsink.Sink, error) {
 		return backupsink.Sink{Kind: ports.SinkS3, Writer: s, Reader: s, Lister: s, Ranger: s, Probe: s}, nil
 	}
 	return backupsink.Sink{}, errors.New("a sink is s3://bucket/prefix or dir:/absolute/path")
+}
+
+// layoutTables is the store's unlock-policy check on the slot table of a layout.
+type layoutTables struct{}
+
+func (layoutTables) CheckSlotTable(m ports.SnapshotMeta, s []ports.SnapshotSlot) error {
+	return mapStoreErr(sqlitestore.CheckLayoutSlotTable(m, s))
+}
+
+// layoutCred binds one credential to the unlock of a layout's slot table and to
+// the writing of the scratch store file.
+type layoutCred struct {
+	c sqlitestore.SnapshotCredential
+}
+
+func (l layoutCred) OpenLayoutKeys(ctx context.Context, m ports.SnapshotMeta, s []ports.SnapshotSlot) (ports.ObjectOpener, error) {
+	o, err := sqlitestore.OpenLayoutKeys(ctx, m, s, l.c)
+	if err != nil {
+		if errors.Is(err, sqlitestore.ErrNoFactorSlot) {
+			return nil, cli.ErrWrongPassphrase
+		}
+		return nil, mapStoreErr(err)
+	}
+	return o, nil
+}
+
+func (l layoutCred) WriteSnapshotFile(ctx context.Context, path string, snap ports.Snapshot) error {
+	err := sqlitestore.WriteLayoutFile(ctx, path, snap, l.c)
+	if errors.Is(err, sqlitestore.ErrNoFactorSlot) {
+		return cli.ErrWrongPassphrase
+	}
+	return mapStoreErr(err)
 }

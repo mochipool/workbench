@@ -71,7 +71,7 @@ Creates the directory if needed, then `spo.toml` and `workspace.spo`. Refuses wh
 ### `store verify`
 
 ```
-spo store verify [--backup FILE] [--checkpoint FILE.checkpoint --pin PIN]
+spo store verify [--backup FILE] [--checkpoint FILE.checkpoint --pin PIN] [--layout DIR --pin PIN [--at SEQ] [--locked]]
 ```
 
 Opens the workspace (or `FILE`) read-only and checks every record's authentication and the audit chain. Writes nothing. Prints the chain head (sequence number and MAC, hex) and every notice, among them "N cold records without a recovery wrap" (same rule as `store slots`). It also notes each cold record that was healed from its previous wrap, and it FAILS (non-zero exit) while a cold record is out of step with the workspace: a header kind that does not match the policy, a FIDO2 credential that belongs to no current daily slot, or a record a rotation or recovery left under its old factor (`--leave-unreachable`); each is named as `kind/label`. `--with-cold-factor` asks for the factor with no read snapshot held. It does not need `--accept-rollback`.
@@ -101,13 +101,18 @@ spo store backups --sink URL [--pin <workspace id>:ck:<key hash>] [--below SEQ]
 
 Lists the backups of this workspace id in the sink, newest first (sequence, size, SHA-256, object name, and whether a checkpoint sits beside it). With `--pin` it also reads the checkpoints (at most 16) and says whether each verifies against the pinned key hash. SPO-Xbackup-OUT-016. A name under the workspace's prefix that does not parse is listed as `unrecognised (ignored)`. It asks for no passphrase and downloads nothing. Names that a sink supplied are printed quoted, with control and non-printable characters escaped.
 
+With `--layout DIR --pin PIN` the sealed object layout in `DIR` is checked and nothing is changed (SPO-Xlayout-IF-002). `--pin` is required: `<workspace id>:layout:<sequence>:<head hash>`, the long-lived `<workspace id>:ck:<key hash>[:<minimum sequence>]`, or `local`. A locked pass (pin, head chain, signatures, slots object and manifest root by hash, the unlock-policy check) asks for no credential; `--locked` stops there. An unlocked pass opens every object with the workspace credential (never a passphrase for `hardware` or `strict`; `--unlock recovery-composite` is refused), checks INV-007 to INV-011 and INV-017, and writes the rebuilt rows into a private scratch store file that must pass the store's full verification. A failing head stops the check and is named; `--at SEQ` uses an older head the pin accepts. The slot table that picks the credential must be one the pin vouches for (the pinned head's, or a later one that is not weaker, binds the same recovery key and names only this workspace's RP id), else the check refuses before any prompt (PRE-028); a signature counts only for a key the pin vouches for (PRE-029); the slots object is at most 256 KiB (PRE-027). SPO-Xlayout-PRE-020 to PRE-026, OUT-020 to OUT-022, INV-024 to INV-026.
+
 ### `store convert`
 
 ```
 spo store convert --to-layout DIR [--no-checkpoint] [--adopt-layout] [--checkpoint-device PATH] [--checkpoint-pin-fd N]
+spo store convert --from-layout DIR --pin PIN [--at SEQ] [--force] [--allow-older] [--allow-other-workspace] [--allow-weaker-policy ...] [--accept-lower-counters] [--network NAME]
 ```
 
-ADR 0012 stage 3, work package 3 ([Xlayout](../../spec/extensions/Xlayout.md); how-to: [Convert a workspace to a sealed layout](../how-to/convert-to-a-sealed-layout.md)). Writes the workspace into the local directory `DIR` as sealed, padded, content-named objects (`objects/<aa>/<hash>`), the manifest, the plaintext slots object and a head note (`heads/<sequence, 20 digits>`). The workspace file is not changed and stays the only writable store; nothing is retired. Only the direction workspace to layout exists: there is no verifier, read-only open or import yet.
+`--from-layout` checks the layout as `store verify --layout` does and installs it as the workspace through the path of `store restore`: the counter rule, the weaker-policy refusal, older or diverged, another workspace and the checkpoint-key carry all apply, and an existing workspace needs `--force`. It never writes a store file onto the destination itself, opens no record payload, retires nothing, and records the layout pin beside the new workspace so a later `--to-layout` continues the chain. In an empty directory it writes `spo.toml` (`--network` is needed) and, since nothing was replaced, says that no counter was compared (as `store restore` now does into an empty directory). The layout pin is recorded only for a head note the workspace would have written. `--pin`, `--at` and the restore flags are refused with `--to-layout`, the checkpoint flags with `--from-layout`. A hardware or strict layout costs two authenticator touches for a verify and three for an import. SPO-Xlayout-IF-003, OUT-023, OUT-024, PRE-025, PRE-026. The text below is the `--to-layout` direction.
+
+ADR 0012 stage 3, work package 3 ([Xlayout](../../spec/extensions/Xlayout.md); how-to: [Convert a workspace to a sealed layout](../how-to/convert-to-a-sealed-layout.md)). Writes the workspace into the local directory `DIR` as sealed, padded, content-named objects (`objects/<aa>/<hash>`), the manifest, the plaintext slots object and a head note (`heads/<sequence, 20 digits>`). The workspace file is not changed and stays the only writable store; nothing is retired. The other direction, and the check of a layout, are described above; there is no read-only open yet.
 
 | Option | Meaning |
 | --- | --- |

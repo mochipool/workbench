@@ -94,8 +94,11 @@ func (a *app) storeCommand() *cobra.Command {
 func (a *app) storeVerify() *cobra.Command {
 	var backupFile, checkpointFile, checkpointPin string
 	var deep, withCold bool
+	var layoutDir string
+	var layoutAt uint64
+	var layoutLockedOnly bool
 	verify := &cobra.Command{
-		Use:   "verify [--backup FILE] [--deep] [--checkpoint FILE --pin PIN]",
+		Use:   "verify [--backup FILE] [--deep] [--checkpoint FILE --pin PIN] [--layout DIR --pin PIN [--at SEQ] [--locked]]",
 		Short: "Check that the stored records match the authenticated audit chain; print the chain head",
 		Long: `Open the workspace (or --backup FILE) read-only with its passphrase and check
 the database schema, the audit chain, and that the stored bytes of every record
@@ -116,11 +119,40 @@ against the pinned key hash (user presence and verification included), then the
 file's SHA-256, size, workspace id, head and slot-table hash against the signed
 statement. It does not open the backup; run store verify --backup FILE for that.
 
+With --layout DIR --pin PIN the sealed object layout in DIR (see "store convert
+--to-layout") is checked and nothing is changed, neither the directory nor any
+workspace. --pin is required, and is the exact pin of a head
+(<workspace id>:layout:<sequence>:<head hash>, what the export printed), the
+long-lived pin of the checkpoint key (<workspace id>:ck:<key hash>[:<minimum
+sequence>]: every head up to the one used must carry a signature of that key, and
+with a minimum sequence an older copy is refused) or "local" (the pin this machine
+keeps for a layout it exported). The check has two passes. The locked pass asks for
+no credential: the pin, the chain of heads, the signatures, and the slots object
+and the manifest root fetched by hash. A head that fails stops the check and is
+named; the heads below it are used only when you say so with --at SEQ, which the
+pin must still accept. The unlocked pass (skipped with --locked) opens the
+manifest and every object with the credential of the workspace (its passphrase,
+or the daily authenticator for hardware and strict; never a passphrase for those,
+never the recovery composite), checks every object against the manifest, the
+owner of each record and the slot table, and writes the rebuilt rows into a
+private scratch store file that must pass the store's full verification. Cold-role
+records are never opened. Both passes print what they established and what they
+cannot.
+
 ` + headAdvice,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if a.upstream {
 				return errors.New(errUpstreamStore)
+			}
+			if layoutDir != "" {
+				if backupFile != "" || checkpointFile != "" || deep || withCold {
+					return errors.New("--layout goes with --pin, --at and --locked only")
+				}
+				return a.verifyLayout(cmd.Context(), layoutDir, checkpointPin, layoutAt, cmd.Flags().Changed("at"), layoutLockedOnly)
+			}
+			if cmd.Flags().Changed("at") || layoutLockedOnly {
+				return errors.New("--at and --locked go with --layout")
 			}
 			if checkpointFile != "" || checkpointPin != "" {
 				return a.verifyCheckpointPair(backupFile, checkpointFile, checkpointPin)
@@ -208,7 +240,10 @@ statement. It does not open the backup; run store verify --backup FILE for that.
 	}
 	verify.Flags().StringVar(&backupFile, "backup", "", "verify this backup file instead of the workspace")
 	verify.Flags().StringVar(&checkpointFile, "checkpoint", "", "verify the backup given by --backup against this checkpoint file (with --pin; no passphrase is asked)")
-	verify.Flags().StringVar(&checkpointPin, "pin", "", "the long-lived pin <workspace id>:ck:<checkpoint key hash>[:<minimum sequence>] for --checkpoint")
+	verify.Flags().StringVar(&checkpointPin, "pin", "", "with --checkpoint: the long-lived pin <workspace id>:ck:<checkpoint key hash>[:<minimum sequence>]; with --layout: the pin of the layout (<workspace id>:layout:<sequence>:<head hash>, that long-lived pin, or local)")
+	verify.Flags().StringVar(&layoutDir, "layout", "", "check the sealed object layout in this local directory (needs --pin); nothing is changed")
+	verify.Flags().Uint64Var(&layoutAt, "at", 0, "with --layout: use this head instead of the newest one that verifies (it must satisfy the pin)")
+	verify.Flags().BoolVar(&layoutLockedOnly, "locked", false, "with --layout: only the checks that need no credential (the pins, heads, signatures, slots object and manifest root)")
 	verify.Flags().BoolVar(&deep, "deep", false, "also decrypt every record under the current keys")
 	verify.Flags().BoolVar(&withCold, "with-cold-factor", false, "also open every cold-role record with a fresh factor presentation (a touch, or the cold-key passphrase), read-only")
 	return verify
@@ -317,16 +352,144 @@ func (a *app) verifyCopy(s *session, path string) (VerifyReport, error) {
 	return a.d.Sealed.VerifyFile(path, s.Pass)
 }
 
+// restoreFlags are the choices of the restore path, shared by `store restore` and
+// `store convert --from-layout`: the same rules apply to both.
+type restoreFlags struct {
+	acceptLower         bool
+	force, older, other bool
+	weaker              bool
+	network             string
+	recInFD, recPinFD   int
+	curRecDevice        string
+}
+
+// bind registers the flags the restore path takes.
+func (rf *restoreFlags) bind(cmd *cobra.Command) {
+	cmd.Flags().BoolVar(&rf.acceptLower, "accept-lower-counters", false, "go on although the counters of the workspace being replaced cannot be fully read because its file is unusable (it does not parse, fails verification, or is older than its head file): the restored workspace may hold LOWER operational certificate and KES counters. Never honoured for a credential problem, and what can be read is still carried")
+	cmd.Flags().BoolVar(&rf.force, "force", false, "replace an existing workspace")
+	cmd.Flags().BoolVar(&rf.older, "allow-older", false, "allow a backup that is older than the workspace or has diverged from it (discards the changes made since; the operational certificate and KES counters of the workspace are carried forward, never lowered)")
+	cmd.Flags().BoolVar(&rf.other, "allow-other-workspace", false, "DANGEROUS: allow a backup of a different workspace to replace this one; the current workspace and everything in it is lost (needs --force)")
+	cmd.Flags().StringVar(&rf.network, "network", "", "network for a new spo.toml when the directory has none")
+	cmd.Flags().BoolVar(&rf.weaker, "allow-weaker-policy", false, "allow a backup with a weaker unlock policy than the workspace's; needs --force and the current recovery credential")
+	cmd.Flags().IntVar(&rf.recInFD, "recovery-key-in-fd", -1, "read the CURRENT workspace's recovery key from this inherited file descriptor instead of prompting (with --allow-weaker-policy)")
+	cmd.Flags().IntVar(&rf.recPinFD, "recovery-pin-fd", -1, "read the PIN of the current recovery authenticator from this file descriptor (with --allow-weaker-policy under hardware)")
+	cmd.Flags().StringVar(&rf.curRecDevice, "current-recovery-device", "", "the authenticator of the CURRENT recovery composite (hardware workspace, with --allow-weaker-policy)")
+}
+
+// restoreSetup is what the restore needs of the workspace directory, decided
+// before anything is asked.
+type restoreSetup struct {
+	haveCfg bool
+	cfg     WorkspaceConfig
+}
+
+// restorePrecheck refuses what can be refused without a secret: no spo.toml and
+// no --network, an unknown network, and the flags that need --force.
+func (a *app) restorePrecheck(rf *restoreFlags) (restoreSetup, error) {
+	var su restoreSetup
+	su.haveCfg = exists(a.configPath())
+	if !su.haveCfg && rf.network == "" {
+		return su, fmt.Errorf("%s has no %s; pass --network to write one for the restored workspace", a.workspace, configFile)
+	}
+	if !su.haveCfg {
+		p, err := a.requirePreset(rf.network)
+		if err != nil {
+			return su, err
+		}
+		su.cfg = WorkspaceConfig{Network: p.Name, Mode: ModeOffline}
+	}
+	if rf.weaker && !rf.force {
+		return su, errors.New("--allow-weaker-policy replaces an existing workspace and needs --force")
+	}
+	return su, nil
+}
+
+// restoreRun installs the verified backup file at backupPath as the workspace,
+// by the one restore path: the policy, rollback, counter, other-workspace and
+// checkpoint-key rules all apply. held, when not nil, is the passphrase the
+// caller already read (a standard workspace); it is not destroyed here.
+func (a *app) restoreRun(ctx context.Context, rf *restoreFlags, su restoreSetup, backupPath, label string, sha []byte, held *secret.Buffer) error {
+	replacing := exists(a.workspaceFile())
+	byFactors := false
+	if a.d.Sealed.Describe != nil {
+		bi, err := a.d.Sealed.Describe(backupPath)
+		if err != nil {
+			return fmt.Errorf("the backup cannot be read as a workspace: %w", err)
+		}
+		byFactors = bi.Policy == "hardware" || bi.Policy == "strict"
+	}
+	var report RestoreReport
+	ropts := RestoreOptions{Report: &report, AcceptLowerCounters: rf.acceptLower, ExpectedSHA256: sha, Overwrite: rf.force, AllowOlder: rf.older, AllowOtherWorkspace: rf.other, AllowWeakerPolicy: rf.weaker}
+	if rf.weaker {
+		if !rf.force {
+			return errors.New("--allow-weaker-policy replaces an existing workspace and needs --force")
+		}
+		cur, cleanup, err := a.currentRecoveryForRestore(ctx, rf.recInFD, rf.recPinFD, rf.curRecDevice)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		ropts.CurrentRecovery = cur
+	}
+	if ropts.CurrentRecovery == nil {
+		// The destination's own recovery material, presented only if the
+		// credential given for the backup does not open the workspace being
+		// replaced (its slots changed since the backup): the callbacks prompt
+		// (or read --recovery-key-in-fd) when the store calls them, and not
+		// before.
+		ropts.CurrentRecovery = a.lazyCurrentRecovery(rf.recInFD, rf.recPinFD, rf.curRecDevice)
+	}
+	var pass *secret.Buffer
+	if byFactors {
+		if a.d.Factors == nil || a.d.Sealed.RestoreFactors == nil {
+			return errors.New("the backup is of a workspace that unlocks through FIDO2 factors, and this binary has no FIDO2 factor source (the libfido2 tools are not in the toolchain manifest): nothing was asked")
+		}
+	} else if held != nil {
+		pass = held
+	} else {
+		var err error
+		if pass, err = a.readPassphrase(ctx); err != nil {
+			return err
+		}
+		defer pass.Destroy()
+	}
+	if err := os.MkdirAll(a.workspace, 0o700); err != nil {
+		return err
+	}
+	if rf.other {
+		fmt.Fprintln(a.d.Err, "warning: --allow-other-workspace: the current workspace file is replaced by one that is not its own history.")
+	}
+	if rf.weaker {
+		fmt.Fprintln(a.d.Err, "warning: --allow-weaker-policy: the restored workspace has a weaker unlock policy than the one it replaces.")
+	}
+	var rerr error
+	if byFactors {
+		rerr = a.d.Sealed.RestoreFactors(backupPath, a.workspaceFile(), a.factorOpen(), ropts)
+	} else {
+		rerr = a.d.Sealed.Restore(backupPath, a.workspaceFile(), pass, ropts)
+	}
+	if rerr != nil {
+		return rerr
+	}
+	if !su.haveCfg {
+		if err := a.d.Config.Create(a.workspace, su.cfg); err != nil {
+			return err
+		}
+	}
+	a.restoredKeyHash = report.CheckpointKeyHash
+	a.printCounterReport(report)
+	fmt.Fprintf(a.d.Out, "Restored %s from %s after verifying it.\n", a.workspaceFile(), label)
+	if !replacing {
+		fmt.Fprintln(a.d.Out, "No workspace was replaced, so no operational certificate or KES counter was compared with anything: the restored workspace holds the counters of the file it came from, which may be behind the chain. Before issuing an operational certificate for any pool, check its counter on chain (spo pool opcert counter POOL) and give the certificate the next number.")
+	}
+	return nil
+}
+
 func (a *app) storeRestore() *cobra.Command {
 	var (
-		sinkURL, pinText    string
-		belowSeq            uint64
-		acceptLower         bool
-		force, older, other bool
-		weaker              bool
-		network             string
-		recInFD, recPinFD   int
-		curRecDevice        string
+		sinkURL, pinText string
+		belowSeq         uint64
+		rf               = restoreFlags{recInFD: -1, recPinFD: -1}
 	)
 	restore := &cobra.Command{
 		Use:   "restore [<backup>] [--sink <URL> --pin <PIN>] [--force] [--allow-older] [--allow-weaker-policy ...] [--network N]",
@@ -395,100 +558,22 @@ one in mode offline (change it with: spo mode set).`,
 				}
 				// every combination that can be checked without the file is checked
 				// before anything is downloaded
-				if other && !force {
+				if rf.other && !rf.force {
 					return errors.New("--allow-other-workspace replaces an existing workspace and needs --force")
 				}
-				if exists(a.workspaceFile()) && !force {
+				if exists(a.workspaceFile()) && !rf.force {
 					return fmt.Errorf("a workspace already exists in %s; pass --force to replace it (nothing was downloaded)", a.workspace)
 				}
 				if pinText == "" {
 					return errors.New("--sink needs --pin PIN: the pin that store backup --sink printed (a restore without a pin is refused)")
 				}
 			}
-			haveCfg := exists(a.configPath())
-			if !haveCfg && network == "" {
-				return fmt.Errorf("%s has no %s; pass --network to write one for the restored workspace", a.workspace, configFile)
-			}
-			var cfg WorkspaceConfig
-			if !haveCfg {
-				p, err := a.requirePreset(network)
-				if err != nil {
-					return err
-				}
-				cfg = WorkspaceConfig{Network: p.Name, Mode: ModeOffline}
-			}
-			if weaker && !force {
-				return errors.New("--allow-weaker-policy replaces an existing workspace and needs --force")
+			su, err := a.restorePrecheck(&rf)
+			if err != nil {
+				return err
 			}
 			run := func(backupPath, label string, sha []byte) error {
-				byFactors := false
-				if a.d.Sealed.Describe != nil {
-					bi, err := a.d.Sealed.Describe(backupPath)
-					if err != nil {
-						return fmt.Errorf("the backup cannot be read as a workspace: %w", err)
-					}
-					byFactors = bi.Policy == "hardware" || bi.Policy == "strict"
-				}
-				var report RestoreReport
-				ropts := RestoreOptions{Report: &report, AcceptLowerCounters: acceptLower, ExpectedSHA256: sha, Overwrite: force, AllowOlder: older, AllowOtherWorkspace: other, AllowWeakerPolicy: weaker}
-				if weaker {
-					if !force {
-						return errors.New("--allow-weaker-policy replaces an existing workspace and needs --force")
-					}
-					cur, cleanup, err := a.currentRecoveryForRestore(cmd.Context(), recInFD, recPinFD, curRecDevice)
-					if err != nil {
-						return err
-					}
-					defer cleanup()
-					ropts.CurrentRecovery = cur
-				}
-				if ropts.CurrentRecovery == nil {
-					// The destination's own recovery material, presented only if the
-					// credential given for the backup does not open the workspace being
-					// replaced (its slots changed since the backup): the callbacks prompt
-					// (or read --recovery-key-in-fd) when the store calls them, and not
-					// before.
-					ropts.CurrentRecovery = a.lazyCurrentRecovery(recInFD, recPinFD, curRecDevice)
-				}
-				var pass *secret.Buffer
-				if byFactors {
-					if a.d.Factors == nil || a.d.Sealed.RestoreFactors == nil {
-						return errors.New("the backup is of a workspace that unlocks through FIDO2 factors, and this binary has no FIDO2 factor source (the libfido2 tools are not in the toolchain manifest): nothing was asked")
-					}
-				} else {
-					var err error
-					if pass, err = a.readPassphrase(cmd.Context()); err != nil {
-						return err
-					}
-					defer pass.Destroy()
-				}
-				if err := os.MkdirAll(a.workspace, 0o700); err != nil {
-					return err
-				}
-				if other {
-					fmt.Fprintln(a.d.Err, "warning: --allow-other-workspace: the current workspace file is replaced by one that is not its own history.")
-				}
-				if weaker {
-					fmt.Fprintln(a.d.Err, "warning: --allow-weaker-policy: the restored workspace has a weaker unlock policy than the one it replaces.")
-				}
-				var rerr error
-				if byFactors {
-					rerr = a.d.Sealed.RestoreFactors(backupPath, a.workspaceFile(), a.factorOpen(), ropts)
-				} else {
-					rerr = a.d.Sealed.Restore(backupPath, a.workspaceFile(), pass, ropts)
-				}
-				if rerr != nil {
-					return rerr
-				}
-				if !haveCfg {
-					if err := a.d.Config.Create(a.workspace, cfg); err != nil {
-						return err
-					}
-				}
-				a.restoredKeyHash = report.CheckpointKeyHash
-				a.printCounterReport(report)
-				fmt.Fprintf(a.d.Out, "Restored %s from %s after verifying it.\n", a.workspaceFile(), label)
-				return nil
+				return a.restoreRun(cmd.Context(), &rf, su, backupPath, label, sha, nil)
 			}
 			if sinkURL == "" {
 				return run(args[0], args[0], nil)
@@ -502,16 +587,8 @@ one in mode offline (change it with: spo mode set).`,
 	}
 	restore.Flags().StringVar(&sinkURL, "sink", "", "restore from a sink instead of a file: s3://bucket/prefix or dir:/absolute/path (needs --pin)")
 	restore.Flags().StringVar(&pinText, "pin", "", "the pin that store backup --sink printed, with --sink: the exact pin (workspace id:head sequence:head hash:file sha256), or the long-lived pin <workspace id>:ck:<checkpoint key hash>[:<minimum sequence>], which restores the newest backup whose checkpoint verifies")
-	restore.Flags().BoolVar(&acceptLower, "accept-lower-counters", false, "go on although the counters of the workspace being replaced cannot be fully read because its file is unusable (it does not parse, fails verification, or is older than its head file): the restored workspace may hold LOWER operational certificate and KES counters. Never honoured for a credential problem, and what can be read is still carried")
 	restore.Flags().Uint64Var(&belowSeq, "below", 0, "with a long-lived pin: start the search below this head sequence (after a refusal that names a sequence, or a limit stop); an older backup than a verified one is restored only this way")
-	restore.Flags().BoolVar(&force, "force", false, "replace an existing workspace")
-	restore.Flags().BoolVar(&older, "allow-older", false, "allow a backup that is older than the workspace or has diverged from it (discards the changes made since; the operational certificate and KES counters of the workspace are carried forward, never lowered)")
-	restore.Flags().BoolVar(&other, "allow-other-workspace", false, "DANGEROUS: allow a backup of a different workspace to replace this one; the current workspace and everything in it is lost (needs --force)")
-	restore.Flags().StringVar(&network, "network", "", "network for a new spo.toml when the directory has none")
-	restore.Flags().BoolVar(&weaker, "allow-weaker-policy", false, "allow a backup with a weaker unlock policy than the workspace's; needs --force and the current recovery credential")
-	restore.Flags().IntVar(&recInFD, "recovery-key-in-fd", -1, "read the CURRENT workspace's recovery key from this inherited file descriptor instead of prompting (with --allow-weaker-policy)")
-	restore.Flags().IntVar(&recPinFD, "recovery-pin-fd", -1, "read the PIN of the current recovery authenticator from this file descriptor (with --allow-weaker-policy under hardware)")
-	restore.Flags().StringVar(&curRecDevice, "current-recovery-device", "", "the authenticator of the CURRENT recovery composite (hardware workspace, with --allow-weaker-policy)")
+	rf.bind(restore)
 	return restore
 }
 

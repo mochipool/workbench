@@ -228,3 +228,34 @@ func TestLayoutIsPure(t *testing.T) {
 		t.Fatal("the layout package was not found")
 	}
 }
+
+// ADR 0012 stage 3: the layout reader reaches the directory, the keys, the store
+// and scratch space only through ports. It imports no adapter, no platform
+// package (no seal, no secret), no os, no net and no process package, and no
+// other use case.
+//
+// spec: SPO-Xlayout-INV-027
+func TestLayoutReadUseCaseImportsOnlyPorts(t *testing.T) {
+	uc := module + "/internal/app/layoutread"
+	seen := false
+	for _, p := range load(t) {
+		if p.ImportPath != uc {
+			continue
+		}
+		seen = true
+		for _, imp := range p.Imports {
+			switch {
+			case strings.HasPrefix(imp, module+"/internal/adapters"),
+				strings.HasPrefix(imp, module+"/internal/platform"),
+				strings.HasPrefix(imp, module+"/internal/app"),
+				imp == "os", strings.HasPrefix(imp, "os/"),
+				imp == "net", strings.HasPrefix(imp, "net/"),
+				imp == "io/ioutil", imp == "io/fs", imp == "syscall", imp == "unsafe", imp == "crypto/rand", imp == "math/rand":
+				t.Errorf("%s imports %s; the layout reader touches the world only through ports", uc, imp)
+			}
+		}
+	}
+	if !seen {
+		t.Fatal("the layoutread package was not found")
+	}
+}
