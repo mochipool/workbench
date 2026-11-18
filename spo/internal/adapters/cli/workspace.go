@@ -92,6 +92,16 @@ are, and leaves that pool unusable until you fix it.`,
 			w := a.d.Out
 			defer warnColdNoWrap(a.d.Err, rep) // runs last: the warning is the end of the output
 			defer a.migrateCopies(ctx, w, rep, pass, removeCopies)
+			defer func() {
+				// a migrated workspace has no checkpoint key by construction
+				if a.d.Sealed.Describe != nil {
+					if info, derr := a.d.Sealed.Describe(a.workspaceFile()); derr == nil {
+						if n := noCheckpointKeyNotice(info.Policy); n != "" {
+							fmt.Fprintln(w, n)
+						}
+					}
+				}
+			}()
 			if rep.Format3Only {
 				fmt.Fprintf(w, "Migrated %s from store format 2 to format 3: the workspace now has the policy standard, and its passphrase and recovery slots are unchanged.\n", a.workspaceFile())
 				fmt.Fprintf(w, "The old file is kept as %s\n", rep.Backup)

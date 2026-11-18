@@ -372,5 +372,12 @@ func (a *app) restoreLatestFromSink(cmd *cobra.Command, url, pinText string, bel
 		return safeError(err)
 	}
 	fmt.Fprintf(a.d.Out, "The checkpoint of %s verified against the pinned key: sequence %d, signed %s.\n", safe(res.Name), res.Statement.Seq, res.Statement.Time.UTC().Format("2006-01-02T15:04:05Z"))
+	line, ok := pinKeyLine(pin.KeyHash, a.restoredKeyHash)
+	if ok {
+		fmt.Fprintln(a.d.Out, line)
+	} else {
+		fmt.Fprintln(a.d.Err, line)
+		fmt.Fprintln(a.d.Out, "The restored workspace's checkpoint key hash is NOT the pin's (see the warning).")
+	}
 	return nil
 }

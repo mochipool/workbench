@@ -698,3 +698,69 @@ func sortStrings(s []string) {
 		}
 	}
 }
+
+// A restore does not silently drop the checkpoint key: a backup with none, over a
+// workspace that has one, carries the key and says so; a backup with a different
+// key keeps its own and the warning names both hashes; a restore from the
+// long-lived pin says whether the restored file's key is the pin's.
+//
+// spec: SPO-Xbackup-PRE-020
+func TestRestoreCarriesOrReportsTheCheckpointKey(t *testing.T) {
+	rig := newFidoRig(t, "seed-checkpoint-restore-key", "")
+	_, oldRec := template(t)
+	dir := copyWorkspace(t)
+	c := fidoCmd{t, rig, dir, true}
+	before := filepath.Join(t.TempDir(), "before.bak")
+	if o, err := c.run(nil, "store", "backup", before); err != nil {
+		t.Fatalf("%v\n%s", err, o)
+	}
+	out, err := c.run(map[string]string{"--checkpoint-pin-fd": fidoPIN3}, "workspace", "checkpoint-key", "enroll", "--checkpoint-device", dev2)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	h1 := keyHashRE.FindStringSubmatch(out)[1]
+	// (1) the backup made before the enrolment holds no key
+	out, err = c.run(nil, "pool", "keys", "generate", poolName)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	out, err = c.run(nil, "store", "restore", before, "--force", "--allow-older")
+	if err != nil || !strings.Contains(out, "carried the checkpoint key") || !strings.Contains(out, h1) {
+		t.Fatalf("a restore that carried the key does not say so: %v\n%s", err, out)
+	}
+	if shown, err := c.run(nil, "workspace", "checkpoint-key", "show"); err != nil || !strings.Contains(shown, h1) {
+		t.Fatalf("the checkpoint key was dropped by the restore: %v\n%s", err, shown)
+	}
+	// (2) a backup with key 1, then the key is replaced by key 2
+	withK1 := filepath.Join(t.TempDir(), "k1.bak")
+	if o, err := c.run(map[string]string{"--checkpoint-pin-fd": fidoPIN3}, "store", "backup", withK1, "--checkpoint-device", dev2); err != nil {
+		t.Fatalf("%v\n%s", err, o)
+	}
+	out, err = c.run(map[string]string{"--checkpoint-pin-fd": fidoPIN, "--recovery-key-in-fd": oldRec}, "workspace", "checkpoint-key", "enroll", "--checkpoint-device", dev0)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	h2 := keyHashRE.FindStringSubmatch(out)[1]
+	if h1 == h2 {
+		t.Fatal("the same key twice")
+	}
+	out, err = c.run(nil, "store", "restore", withK1, "--force", "--allow-older")
+	if err != nil || !strings.Contains(out, h1) || !strings.Contains(out, h2) || !strings.Contains(out, "no longer match") {
+		t.Fatalf("a restore that replaced the key does not name both hashes: %v\n%s", err, out)
+	}
+	if shown, _ := c.run(nil, "workspace", "checkpoint-key", "show"); !strings.Contains(shown, h1) || strings.Contains(shown, h2) {
+		t.Fatalf("the backup's own key was not kept:\n%s", shown)
+	}
+	// (3) the long-lived pin: the restored file's key is the pin's
+	sink := filepath.Join(t.TempDir(), "sink")
+	out, err = c.run(map[string]string{"--checkpoint-pin-fd": fidoPIN3}, "store", "backup", "--sink", "dir:"+sink, "--checkpoint-device", dev2)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	lp := longPinRE.FindStringSubmatch(out)[1]
+	fresh := t.TempDir()
+	out, err = withPass(t, fresh, testPass, "store", "restore", "--sink", "dir:"+sink, "--pin", lp, "--network", "preview")
+	if err != nil || !strings.Contains(out, "checkpoint key hash is the pin's") {
+		t.Fatalf("%v\n%s", err, out)
+	}
+}

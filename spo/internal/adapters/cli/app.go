@@ -39,9 +39,12 @@ type app struct {
 	// "recovery"), in guarded memory owned by the app and destroyed when the
 	// command ends (destroyPINs). A role whose authenticator has no PIN holds a nil
 	// entry. The PIN of one role is never offered to another.
-	pins        map[string]*secret.Buffer
-	fido2Device string
-	fido2PinFD  int
+	pins map[string]*secret.Buffer
+	// restoredKeyHash is the checkpoint key hash of the file the last restore
+	// installed (nil: none).
+	restoredKeyHash []byte
+	fido2Device     string
+	fido2PinFD      int
 	// coldFD and newColdFD are --cold-passphrase-fd and --new-cold-passphrase-fd;
 	// coldPass and newColdPass hold what was read (guarded memory, destroyed by
 	// destroyCold).

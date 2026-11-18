@@ -379,3 +379,37 @@ func TestStoreSlotsNamesColdRecordsOutOfStep(t *testing.T) {
 		t.Fatalf("%v\n%s", err, out)
 	}
 }
+
+// The line a restore from the long-lived pin prints about the restored file's
+// checkpoint key: equal to the pin's, or a warning.
+//
+// spec: SPO-Xbackup-PRE-020
+func TestPinKeyLine(t *testing.T) {
+	h := []byte{1, 2, 3}
+	if l, ok := pinKeyLine(h, h); !ok || !strings.Contains(l, "is the pin's") {
+		t.Errorf("%q %v", l, ok)
+	}
+	if l, ok := pinKeyLine(h, []byte{9}); ok || !strings.Contains(l, "warning") || !strings.Contains(l, "do not verify") {
+		t.Errorf("%q %v", l, ok)
+	}
+	if l, ok := pinKeyLine(h, nil); ok || !strings.Contains(l, "no checkpoint key") {
+		t.Errorf("%q %v", l, ok)
+	}
+}
+
+// Only the policies that may use an S3 sink are told that no checkpoint key is
+// enrolled (after init and migrate).
+//
+// spec: SPO-Xbackup-PRE-022
+func TestNoCheckpointKeyNoticeIsForHardwareAndStrictOnly(t *testing.T) {
+	for _, p := range []string{"hardware", "strict"} {
+		if n := noCheckpointKeyNotice(p); !strings.Contains(n, "No checkpoint key is enrolled") || !strings.Contains(n, "spo workspace checkpoint-key enroll") {
+			t.Errorf("%s: %q", p, n)
+		}
+	}
+	for _, p := range []string{"standard", ""} {
+		if n := noCheckpointKeyNotice(p); n != "" {
+			t.Errorf("%q: %q", p, n)
+		}
+	}
+}
