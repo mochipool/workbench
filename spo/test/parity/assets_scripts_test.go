@@ -92,13 +92,13 @@ func (w assetsWorld) ledger(t *testing.T, dir string, slot uint64) (wallet.SendL
 	}
 	file := &transferfile.File{Path: filepath.Join(dir, "offlineTransfer.json"), OfflineCLI: w.cliVersion}
 	led := native.Ledger{}
-	sl := wallet.SendLovelaces{Store: store, Signers: native.Signers{Vault: store}, Utxos: file, Params: file, Tip: fixedTip{slot},
+	sl := wallet.SendLovelaces{Store: store, Signers: native.Signers{Vault: store.Anchor()}, Utxos: file, Params: file, Tip: fixedTip{slot},
 		Addresses: led, Min: led, Fees: led, Bodies: led, Assembler: led, Queue: file,
 		NetworkID: ports.NetworkTestnet, Approval: wallet.ApprovalSkip, Files: upstreamdir.MetadataFiles{}, Encrypter: native.CIP83{}}
-	sa := wallet.SendAssets{Store: store, Signers: native.Signers{Vault: store}, Utxos: file, Params: file, Tip: fixedTip{slot},
+	sa := wallet.SendAssets{Store: store, Signers: native.Signers{Vault: store.Anchor()}, Utxos: file, Params: file, Tip: fixedTip{slot},
 		Addresses: led, Min: led, Fees: led, Bodies: led, Assembler: led, Queue: file,
 		NetworkID: ports.NetworkTestnet, Approval: wallet.ApprovalSkip, Files: upstreamdir.MetadataFiles{}, Encrypter: native.CIP83{}}
-	base := appassets.Base{Store: store, Signers: native.Signers{Vault: store}, Utxos: file, Params: file, Tip: fixedTip{slot},
+	base := appassets.Base{Store: store, Signers: native.Signers{Vault: store.Anchor()}, Utxos: file, Params: file, Tip: fixedTip{slot},
 		Addresses: led, Policies: led, Min: led, Fees: led, Bodies: led, Assembler: led, Queue: file,
 		Clock: fixedClock{time.Date(2026, 11, 16, 9, 51, 2, 0, time.FixedZone("", 3600))}, NetworkID: ports.NetworkTestnet,
 		Approval: txflow.ApprovalSkip, Files: upstreamdir.MetadataFiles{}, Encrypter: native.CIP83{}}

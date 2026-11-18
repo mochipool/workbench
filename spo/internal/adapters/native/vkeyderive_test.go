@@ -130,6 +130,9 @@ func TestVKeyDeriverPolicyAndCalidus(t *testing.T) {
 func TestVKeyDeriverUnsupportedAndMalformed(t *testing.T) {
 	ctx := context.Background()
 	var d VKeyDeriver
+	// KES and VRF keys are derivable since `node export` and the import of a hot
+	// key by stem pair them with their verification key (SPO-Xcustody-PRE-009);
+	// BLS is not.
 	for name, g := range map[string]func(context.Context) (ports.KeyPair, error){
 		"kes": KeyGen{}.GenerateKES, "vrf": KeyGen{}.GenerateVRF,
 	} {
@@ -137,7 +140,8 @@ func TestVKeyDeriverUnsupportedAndMalformed(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := d.DeriveVerificationKey(ctx, kp.SKey); !errors.Is(err, ports.ErrKeyTypeUnsupported) {
+		got, err := d.DeriveVerificationKey(ctx, kp.SKey)
+		if err != nil || !bytes.Equal(got, vkeyRaw(t, kp.VKey)) {
 			t.Fatalf("%s: %v", name, err)
 		}
 		kp.SKey.Destroy()

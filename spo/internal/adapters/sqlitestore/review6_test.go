@@ -25,7 +25,7 @@ func TestR6RestoreWindowLeavesOldWALBesideNewDB(t *testing.T) {
 	t.Cleanup(func() { beforeUnlock = old })
 	beforeUnlock = func() {
 		beforeUnlock = nil
-		ro, err := open(path, credential{seal.SlotPassphrase, pwT(t)}, true, OpenOptions{})
+		ro, err := open(path, credential{kind: seal.SlotPassphrase, buf: pwT(t)}, true, OpenOptions{})
 		if err != nil {
 			t.Error(err)
 			return
@@ -150,7 +150,7 @@ func TestR6RestoreOverHotWALChecksTheCheckpointedState(t *testing.T) {
 func TestR6RekeyCommitErrorKeepsTheKey(t *testing.T) {
 	old := execCommit
 	t.Cleanup(func() { execCommit = old })
-	s, path, _ := scratch(t)
+	s, path, _ := scratchPresented(t)
 	execCommit = func(context.Context, *sql.Conn) error { return errors.New("injected: fsync failed") }
 	rk, err := s.ChangePassphraseRekey(ctx, passT(t, "np"))
 	execCommit = old

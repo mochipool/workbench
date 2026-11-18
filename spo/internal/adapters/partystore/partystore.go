@@ -1,5 +1,5 @@
 // Package partystore implements ports.PartyRegistry and ports.ReplayLog over
-// ports.Store records. It keeps no state of its own: every method takes the
+// ports.NamedStore records. It keeps no state of its own: every method takes the
 // Reader or Writer of the caller's transaction, so a registry change or a
 // replay entry commits together with the effect it belongs to
 // (SPO-Xparty-INV-007).
@@ -26,8 +26,8 @@ import (
 )
 
 var (
-	recordsRef = ports.Ref{Name: "all", Kind: ports.PartyRecords}
-	replayRef  = ports.Ref{Name: "log", Kind: ports.PartyReplay}
+	recordsRef = ports.NamedRef{Name: "all", Kind: ports.PartyRecords}
+	replayRef  = ports.NamedRef{Name: "log", Kind: ports.PartyReplay}
 )
 
 // ErrCorrupt: a stored record does not parse or does not match itself.
@@ -122,7 +122,7 @@ func fromJSON(j partyJSON) (party.Party, error) {
 	return p, nil
 }
 
-func load(r ports.Reader) ([]party.Party, error) {
+func load(r ports.NamedReader) ([]party.Party, error) {
 	b, err := r.Get(recordsRef)
 	if errors.Is(err, ports.ErrNotFound) {
 		return nil, nil
@@ -145,7 +145,7 @@ func load(r ports.Reader) ([]party.Party, error) {
 	return out, nil
 }
 
-func store(w ports.Writer, ps []party.Party) error {
+func store(w ports.NamedWriter, ps []party.Party) error {
 	slices.SortFunc(ps, func(a, b party.Party) int {
 		switch {
 		case a.Name < b.Name:
@@ -166,9 +166,9 @@ func store(w ports.Writer, ps []party.Party) error {
 	return w.Put(recordsRef, b)
 }
 
-func (Registry) List(r ports.Reader) ([]party.Party, error) { return load(r) }
+func (Registry) List(r ports.NamedReader) ([]party.Party, error) { return load(r) }
 
-func (Registry) ByFingerprint(r ports.Reader, fp party.Fingerprint) (party.Party, error) {
+func (Registry) ByFingerprint(r ports.NamedReader, fp party.Fingerprint) (party.Party, error) {
 	ps, err := load(r)
 	if err != nil {
 		return party.Party{}, err
@@ -181,7 +181,7 @@ func (Registry) ByFingerprint(r ports.Reader, fp party.Fingerprint) (party.Party
 	return party.Party{}, ports.ErrNotFound
 }
 
-func (Registry) ByName(r ports.Reader, name string) (party.Party, error) {
+func (Registry) ByName(r ports.NamedReader, name string) (party.Party, error) {
 	ps, err := load(r)
 	if err != nil {
 		return party.Party{}, err
@@ -196,7 +196,7 @@ func (Registry) ByName(r ports.Reader, name string) (party.Party, error) {
 
 // Put adds p. It refuses a name or fingerprint already present, so enrolling
 // the same identity twice or reusing a name changes nothing.
-func (Registry) Put(w ports.Writer, p party.Party) error {
+func (Registry) Put(w ports.NamedWriter, p party.Party) error {
 	ps, err := load(w)
 	if err != nil {
 		return err
@@ -219,7 +219,7 @@ func (Registry) Put(w ports.Writer, p party.Party) error {
 // (SPO-Xparty-INV-010) and returns the party. A request already received is
 // checked against the scope as it is when the operator approves it, not as it
 // was when the request arrived (SPO-Xparty-INV-016).
-func (Registry) SetScope(w ports.Writer, name string, scope party.Scope) (party.Party, error) {
+func (Registry) SetScope(w ports.NamedWriter, name string, scope party.Scope) (party.Party, error) {
 	ps, err := load(w)
 	if err != nil {
 		return party.Party{}, err
@@ -235,7 +235,7 @@ func (Registry) SetScope(w ports.Writer, name string, scope party.Scope) (party.
 }
 
 // Revoke sets the named party to revoked and returns it.
-func (Registry) Revoke(w ports.Writer, name string) (party.Party, error) {
+func (Registry) Revoke(w ports.NamedWriter, name string) (party.Party, error) {
 	ps, err := load(w)
 	if err != nil {
 		return party.Party{}, err
@@ -256,7 +256,7 @@ func (Registry) Revoke(w ports.Writer, name string) (party.Party, error) {
 
 // Rotate replaces the record of old by retired and adds next, in one write: no
 // state of the store has both active, and none has neither (SPO-Xparty-INV-032).
-func (Registry) Rotate(w ports.Writer, old party.Fingerprint, retired, next party.Party) error {
+func (Registry) Rotate(w ports.NamedWriter, old party.Fingerprint, retired, next party.Party) error {
 	ps, err := load(w)
 	if err != nil {
 		return err
@@ -314,7 +314,7 @@ type entry struct {
 	expires int64
 }
 
-func loadReplay(r ports.Reader, now time.Time) ([]entry, error) {
+func loadReplay(r ports.NamedReader, now time.Time) ([]entry, error) {
 	b, err := r.Get(replayRef)
 	if errors.Is(err, ports.ErrNotFound) {
 		return nil, nil
@@ -351,7 +351,7 @@ func loadReplay(r ports.Reader, now time.Time) ([]entry, error) {
 	return out, nil
 }
 
-func (Replay) Seen(r ports.Reader, id party.MessageID, now time.Time) (bool, error) {
+func (Replay) Seen(r ports.NamedReader, id party.MessageID, now time.Time) (bool, error) {
 	es, err := loadReplay(r, now)
 	if err != nil {
 		return false, err
@@ -365,7 +365,7 @@ func (Replay) Seen(r ports.Reader, id party.MessageID, now time.Time) (bool, err
 }
 
 // Record adds id until expires and drops expired entries in the same write.
-func (Replay) Record(w ports.Writer, sender party.Fingerprint, id party.MessageID, expires, now time.Time) error {
+func (Replay) Record(w ports.NamedWriter, sender party.Fingerprint, id party.MessageID, expires, now time.Time) error {
 	es, err := loadReplay(w, now)
 	if err != nil {
 		return err

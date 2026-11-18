@@ -1,0 +1,6 @@
+store.db is a store of format 2 (identity-keyed records, passphrase and recovery
+slots only, schema version 1). It was NOT made by a format 2 Init: the format 3
+code already existed when it was generated. It was produced by the unchanged
+format 1 -> 2 conversion code (migrateTo2) run over ../legacy-v1/store.db, by
+format2fixture_gen_test.go (build tag format2fixture). It holds no real secret;
+the passphrase is "legacy fixture passphrase".

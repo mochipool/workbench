@@ -19,7 +19,7 @@ func hexString(b []byte) string { return hex.EncodeToString(b) }
 // The subject is classified in upstream's order (SPO-15-IF-005); the provider
 // behind Reader answers for registered pools only.
 type QueryCalidus struct {
-	Store ports.Store
+	Store ports.NamedStore
 	// Reader is nil in offline mode, which has no provider (SPO-15-PRE-006).
 	Reader ports.CalidusKeyReader
 }
@@ -82,12 +82,12 @@ func (uc QueryCalidus) classify(ctx context.Context, s string) (ports.CalidusFil
 	var out ports.CalidusFilter
 	var found bool
 	var ferr error
-	err := uc.Store.View(ctx, func(r ports.Reader) error {
+	err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 		get := func(k ports.Kind) ([]byte, bool) {
 			if !validName(s, k) {
 				return nil, false
 			}
-			b, err := r.Get(ports.Ref{Name: s, Kind: k})
+			b, err := r.Get(ports.NamedRef{Name: s, Kind: k})
 			return b, err == nil
 		}
 		pubOf := func(b []byte) (string, bool) {
@@ -111,7 +111,7 @@ func (uc QueryCalidus) classify(ctx context.Context, s string) (ports.CalidusFil
 			if id := strings.TrimSpace(string(b)); validCalidusID(id) {
 				out, found = ports.CalidusFilter{IDBech: id}, true
 			} else {
-				ferr = fmt.Errorf("%w: %s holds no valid Calidus id", ErrBadSubject, ports.Ref{Name: s, Kind: ports.CalidusID})
+				ferr = fmt.Errorf("%w: %s holds no valid Calidus id", ErrBadSubject, ports.NamedRef{Name: s, Kind: ports.CalidusID})
 			}
 			return nil
 		}
@@ -170,4 +170,6 @@ func (uc QueryCalidus) classify(ctx context.Context, s string) (ports.CalidusFil
 	return ports.CalidusFilter{}, fmt.Errorf("%w: %q", ErrBadSubject, s)
 }
 
-func validName(s string, k ports.Kind) bool { return (ports.Ref{Name: s, Kind: k}).Validate() == nil }
+func validName(s string, k ports.Kind) bool {
+	return (ports.NamedRef{Name: s, Kind: k}).Validate() == nil
+}

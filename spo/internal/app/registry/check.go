@@ -31,7 +31,7 @@ var (
 // 12b_checkAssetMetaServer, with the checks its port notes ask for). It reads
 // the store and the registry, and writes nothing.
 type CheckTokenMetadata struct {
-	Store    ports.Store
+	Store    ports.NamedStore
 	Registry ports.TokenRegistryReader
 	// Logos reads the file the record's metaLogoPNG names, to compare it with
 	// the registry's logo; nil leaves the logo uncompared.
@@ -123,11 +123,11 @@ func (uc CheckTokenMetadata) Run(ctx context.Context, req CheckRequest) (Checked
 	var res Checked
 	var rec dassets.Record
 	if ref, err := dassets.ParseRef(arg); err == nil {
-		name := ports.Ref{Name: dassets.RecordName(ref.Policy, ref.Asset), Kind: ports.AssetFile}
+		name := ports.NamedRef{Name: dassets.RecordName(ref.Policy, ref.Asset), Kind: ports.AssetFile}
 		var b []byte
 		var found bool
 		if name.Validate() == nil {
-			if err := uc.Store.View(ctx, func(r ports.Reader) error {
+			if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 				v, err := r.Get(name)
 				switch {
 				case err == nil:

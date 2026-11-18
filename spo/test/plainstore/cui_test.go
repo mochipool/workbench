@@ -19,9 +19,9 @@ import (
 // spec: SPO-Cui-OUT-001, SPO-Cui-OUT-002, SPO-Cui-INV-004
 func TestFilesAreLockedAndRewrittenWithoutBeingUnlocked(t *testing.T) {
 	s, dir := open(t)
-	ref := ports.Ref{Name: "p", Kind: ports.KesCounter}
+	ref := ports.NamedRef{Name: "p", Kind: ports.KesCounter}
 	path := filepath.Join(dir, "p.kes.counter")
-	if err := s.Update(ctx, func(w ports.Writer) error { return w.Put(ref, []byte("000\n")) }); err != nil {
+	if err := s.Update(ctx, func(w ports.NamedWriter) error { return w.Put(ref, []byte("000\n")) }); err != nil {
 		t.Fatal(err)
 	}
 	mode := func() os.FileMode {
@@ -35,7 +35,7 @@ func TestFilesAreLockedAndRewrittenWithoutBeingUnlocked(t *testing.T) {
 		t.Fatalf("mode %o, want 0400", mode())
 	}
 	boom := errors.New("boom")
-	if err := s.Update(ctx, func(w ports.Writer) error {
+	if err := s.Update(ctx, func(w ports.NamedWriter) error {
 		w.Put(ref, []byte("999\n"))
 		return boom
 	}); !errors.Is(err, boom) {
@@ -44,7 +44,7 @@ func TestFilesAreLockedAndRewrittenWithoutBeingUnlocked(t *testing.T) {
 	if b, _ := os.ReadFile(path); string(b) != "000\n" || mode() != 0o400 {
 		t.Fatalf("a failed rewrite changed the file: %q %o", b, mode())
 	}
-	if err := s.Update(ctx, func(w ports.Writer) error { return w.Put(ref, []byte("001\n")) }); err != nil {
+	if err := s.Update(ctx, func(w ports.NamedWriter) error { return w.Put(ref, []byte("001\n")) }); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(path); string(b) != "001\n" || mode() != 0o400 {

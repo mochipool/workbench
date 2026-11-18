@@ -139,9 +139,22 @@ type VerificationKeyDeriver interface {
 	DeriveVerificationKey(ctx context.Context, skeyEnvelope *Secret) ([]byte, error)
 }
 
+// ColdMnemonicVKeyDeriver derives, from the words kept in a cold mnemonic record
+// (the file as the generator stored it), the verification key envelope of the
+// committee cold key on the path the generator uses by default
+// (1852H/1815H/0H/4/0, account 0 and index 0), with the same derivation the
+// generator uses (ports.GovernanceDeriver.DeriveCommitteeCold). The store uses it
+// on recovery to check that a recovered mnemonic belongs to the key identity of the
+// signing key beside it. The record does not say which account and index the
+// mnemonic was derived with, so a mnemonic made with another account or index
+// derives another key: the check cannot tell that from a planted record.
+type ColdMnemonicVKeyDeriver interface {
+	DeriveColdMnemonicVKey(ctx context.Context, mnemonicFile *Secret) (vkeyEnvelope []byte, err error)
+}
+
 // SourceEntry is one recognised artefact of a directory.
 type SourceEntry struct {
-	Ref Ref
+	Ref NamedRef
 }
 
 // SourceUnknown is a file that is no artefact of the catalogue.
@@ -156,9 +169,10 @@ type SourceListing struct {
 	Unknown []SourceUnknown
 }
 
-// SourceLister enumerates the artefacts of a store by the naming rules of
-// Pfiles. The upstream-layout adapter implements it from its name mapping;
-// the sealed store implements it from its records.
+// SourceLister enumerates the artefacts of a name-level store by the naming
+// rules of Pfiles. The upstream-layout adapter implements it from its name
+// mapping; the label resolver (ports/labels) implements it over a store from
+// its records and labels.
 type SourceLister interface {
 	List(ctx context.Context) (SourceListing, error)
 }
@@ -182,6 +196,11 @@ type AuditEvent struct {
 	Read         string // what was read, "reward balance and stake deposit"
 	Source       string // the one provider the read rested on
 	SingleSource bool   // --single-source was given and was needed
+
+	// Detail is a list of "name=value" facts of the operation: the slot ids a
+	// rotation removed, the recipient identifier and files of a node export. It
+	// holds identifiers and names, never key material.
+	Detail []string
 }
 
 // WorkspaceAuditor records AuditEvents. The use case records before it

@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/domain/keyfile"
+	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -23,12 +25,12 @@ import (
 // left out and the report says so. Nothing of the source changes.
 type ExportWorkspace struct {
 	// Source, SourceVault and Lister read the sealed store.
-	Source      ports.Store
-	SourceVault ports.Vault
+	Source      ports.NamedStore
+	SourceVault ports.NamedVault
 	Lister      ports.SourceLister
 	// Dest is the destination directory (exportdir). It must refuse a
 	// secret that is not an encrypted signing key.
-	Dest ports.Store
+	Dest ports.NamedStore
 	// Encryptor makes upstream's encrypted form; required.
 	// Decryptor, when set, checks that each encrypted key opens again with
 	// the password before it is written (SPO-01protectKey-INV-001).
@@ -71,7 +73,7 @@ func (u ExportWorkspace) Run(ctx context.Context, opts ExportOptions) (*Report, 
 	if err != nil {
 		return nil, err
 	}
-	byOwner := map[string][]ports.Ref{}
+	byOwner := map[string][]ports.NamedRef{}
 	for _, e := range listing.Entries {
 		if !ports.IsWorkspaceKind(e.Ref.Kind) {
 			continue
@@ -130,9 +132,9 @@ func upstreamForm(pw *ports.Secret) (*ports.Secret, error) {
 	return out, err
 }
 
-func (u ExportWorkspace) exportOwner(ctx context.Context, owner string, refs []ports.Ref, opts ExportOptions, pw *ports.Secret, rep *Report) OwnerReport {
+func (u ExportWorkspace) exportOwner(ctx context.Context, owner string, refs []ports.NamedRef, opts ExportOptions, pw *ports.Secret, rep *Report) OwnerReport {
 	sort.Slice(refs, func(i, j int) bool { return refs[i].String() < refs[j].String() })
-	results := map[ports.Ref]*ArtefactReport{}
+	results := map[ports.NamedRef]*ArtefactReport{}
 	var plan []planned
 	var toDestroy []*ports.Secret
 	defer func() {
@@ -150,7 +152,7 @@ func (u ExportWorkspace) exportOwner(ctx context.Context, owner string, refs []p
 		switch {
 		case !r.Kind.Secret():
 			var b []byte
-			err := u.Source.View(ctx, func(rd ports.Reader) error {
+			err := u.Source.View(ctx, func(rd ports.NamedReader) error {
 				var e error
 				b, e = rd.Get(r)
 				return e
@@ -158,6 +160,9 @@ func (u ExportWorkspace) exportOwner(ctx context.Context, owner string, refs []p
 			if err != nil {
 				fail("could not be read")
 				continue
+			}
+			if r.Kind == ports.PoolDescriptor {
+				b = u.descriptorWithNames(ctx, b)
 			}
 			plan = append(plan, planned{dst: r, data: b})
 		case r.Kind == ports.UpstreamEncryptedSKey:
@@ -279,4 +284,43 @@ func encryptEnvelope(ctx context.Context, enc ports.KeyEncryptor, dec ports.KeyD
 		}
 	}
 	return ports.TakeSecret(keyfile.EncryptedEnvelope(info.Type, info.Description, encrHex))
+}
+
+// descriptorWithNames writes the labels back into a pool descriptor: a descriptor
+// of the workspace refers to its owners, its reward account and the payer of an
+// open registration by key hash (ADR 0010 decision 2), and the upstream scripts
+// read names. Each reference that is an identity is replaced by the label of the
+// owner that lists it (`<label>.payment` for the payment account of a wallet that
+// has one); a reference that is a name, or whose owner has no label, is left as it
+// is.
+func (u ExportWorkspace) descriptorWithNames(ctx context.Context, b []byte) []byte {
+	d, err := pool.ParseDescriptor(b)
+	if err != nil {
+		return b
+	}
+	out := b
+	_ = u.Source.View(ctx, func(rd ports.NamedReader) error {
+		lab, ok := rd.(ports.OwnerLabeler)
+		if !ok {
+			return nil
+		}
+		changed, err := d.MapRefs(func(place, old string) (string, error) {
+			if _, isID := ports.IdentityName(old); !isID {
+				return old, nil
+			}
+			name, stem, err := lab.LabelOfIdentity(identity.OwnerWallet, old)
+			if err != nil {
+				return old, nil
+			}
+			if place == pool.RefPayer && stem {
+				name += ".payment"
+			}
+			return name, nil
+		})
+		if err == nil && changed {
+			out = d.Render()
+		}
+		return nil
+	})
+	return out
 }

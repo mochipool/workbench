@@ -18,7 +18,7 @@ func TestR5ReadOnlyCloseKeepsCommittedWAL(t *testing.T) {
 	s, path, _ := scratch(t)
 	put(t, s, counter, "1")
 	s.Close()
-	ro, err := open(path, credential{seal.SlotPassphrase, pwT(t)}, true, OpenOptions{})
+	ro, err := open(path, credential{kind: seal.SlotPassphrase, buf: pwT(t)}, true, OpenOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func TestR5VerifyFileConcurrentWriter(t *testing.T) {
 	s, path, _ := scratch(t)
 	put(t, s, counter, "1")
 	s.Close()
-	ro, err := open(path, credential{seal.SlotPassphrase, pwT(t)}, true, OpenOptions{})
+	ro, err := open(path, credential{kind: seal.SlotPassphrase, buf: pwT(t)}, true, OpenOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestR5FailedOpenConcurrentWithWriterLosesNothing(t *testing.T) {
 		}
 		put(t, w, counter, "2")
 	}
-	_, err := open(path, credential{seal.SlotPassphrase, passT(t, "wrong")}, true, OpenOptions{})
+	_, err := open(path, credential{kind: seal.SlotPassphrase, buf: passT(t, "wrong")}, true, OpenOptions{})
 	if !errors.Is(err, ErrWrongCredential) {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestR5CommitRunsDetachedFromTheCallersContext(t *testing.T) {
 		seen, detached = true, c.Done() == nil
 		return old(c, conn)
 	}
-	s, _, _ := scratch(t)
+	s, _, _ := scratchPresented(t)
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	if err := s.Update(cctx, func(w ports.Writer) error { return w.Put(counter, []byte("1")) }); err != nil {
@@ -178,7 +178,7 @@ func TestR5CommitRunsDetachedFromTheCallersContext(t *testing.T) {
 func TestR5RekeyOutcomeUnknownReturnsTheKey(t *testing.T) {
 	old := execCommit
 	t.Cleanup(func() { execCommit = old })
-	s, path, _ := scratch(t)
+	s, path, _ := scratchPresented(t)
 	execCommit = func(c context.Context, conn *sql.Conn) error {
 		if err := old(c, conn); err != nil { // the rekey is on disk
 			return err

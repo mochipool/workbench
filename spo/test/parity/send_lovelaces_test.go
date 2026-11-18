@@ -160,7 +160,7 @@ func (e env) goSend(t *testing.T, dir string, req wallet.SendRequest, slot uint6
 	file := &transferfile.File{Path: filepath.Join(dir, "offlineTransfer.json"), OfflineCLI: cliVersion}
 	led := native.Ledger{}
 	uc := wallet.SendLovelaces{
-		Store: store, Signers: native.Signers{Vault: store}, Utxos: file, Params: file, Tip: fixedTip{slot},
+		Store: store, Signers: native.Signers{Vault: store.Anchor()}, Utxos: file, Params: file, Tip: fixedTip{slot},
 		Addresses: led, Min: led, Fees: led, Bodies: led, Assembler: led, Queue: file,
 		NetworkID: ports.NetworkTestnet, Approval: wallet.ApprovalSkip,
 	}

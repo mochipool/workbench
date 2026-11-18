@@ -21,7 +21,7 @@ func withExtraMember(t *testing.T, env []byte) []byte {
 }
 
 // An encrypted envelope with a member other than type, description and
-// encrHex is neither imported (with or without --keep-encrypted) nor exported.
+// encrHex is neither imported (with or without --defer-encrypted) nor exported.
 //
 // spec: SPO-Xcustody-INV-005
 func TestEncryptedEnvelopeWithAnExtraMemberIsRefusedOnImportAndExport(t *testing.T) {
@@ -31,7 +31,7 @@ func TestEncryptedEnvelopeWithAnExtraMemberIsRefusedOnImportAndExport(t *testing
 
 	for _, keep := range []bool{true, false} {
 		dst := newMem()
-		opts := ImportOptions{Owners: []string{"mypool"}, KeepEncrypted: keep}
+		opts := ImportOptions{Owners: []string{"mypool"}, DeferEncrypted: keep}
 		rep, _ := importer(src, dst, &fakeGPG{}).Run(context.Background(), opts)
 		if rep != nil && rep.Failed() == 0 {
 			t.Errorf("keep=%v: the import accepted the envelope", keep)

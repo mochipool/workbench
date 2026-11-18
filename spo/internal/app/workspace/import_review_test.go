@@ -128,7 +128,7 @@ func TestXmultiDryRunPlanEqualsRealRun(t *testing.T) {
 		req := sc.req
 		req.DryRun = true
 		dry, errDry := multi(t, tr, dst).Import(ctx(), req)
-		if len(dst.files) != len(func() map[ports.Ref]string { _, d := sc.build(); return d.snapshot() }()) {
+		if len(dst.files) != len(func() map[ports.NamedRef]string { _, d := sc.build(); return d.snapshot() }()) {
 			t.Errorf("%s: the dry run wrote", sc.name)
 		}
 		tr2, dst2 := sc.build()
@@ -348,7 +348,7 @@ func TestXmultiRenameOntoWorkspaceOwner(t *testing.T) {
 	}
 }
 
-func build2(build func() (*memTree, *memStore)) map[ports.Ref]string {
+func build2(build func() (*memTree, *memStore)) map[ports.NamedRef]string {
 	_, d := build()
 	return d.snapshot()
 }
@@ -480,16 +480,16 @@ func TestXmultiRenameCarriesEveryArtefact(t *testing.T) {
 	tr, dst := newTree(), newMem()
 	d := tr.dir("/d")
 	pay, stake := payment(1), pair(40, "StakeSigningKeyShelley_ed25519", "StakeVerificationKeyShelley_ed25519", "Stake")
-	d.put(ports.Ref{Name: "w.payment", Kind: ports.AddrSKey}, pay.skey)
-	d.put(ports.Ref{Name: "w.payment", Kind: ports.AddrVKey}, pay.vkey)
-	d.put(ports.Ref{Name: "w.payment", Kind: ports.AddrFile}, addrOf(pay.vkey))
-	d.put(ports.Ref{Name: "w.payment", Kind: ports.AddrHwsFile}, []byte(`{"type":"PaymentHW"}`))
-	d.put(ports.Ref{Name: "w", Kind: ports.StakingSKey}, encryptedOf(t, stake, "Correct-Horse-9"))
-	d.put(ports.Ref{Name: "w", Kind: ports.StakingVKey}, stake.vkey)
-	d.put(ports.Ref{Name: "w", Kind: ports.StakingHwsFile}, []byte(`{"type":"StakeHW"}`))
+	d.put(ports.NamedRef{Name: "w.payment", Kind: ports.AddrSKey}, pay.skey)
+	d.put(ports.NamedRef{Name: "w.payment", Kind: ports.AddrVKey}, pay.vkey)
+	d.put(ports.NamedRef{Name: "w.payment", Kind: ports.AddrFile}, addrOf(pay.vkey))
+	d.put(ports.NamedRef{Name: "w.payment", Kind: ports.AddrHwsFile}, []byte(`{"type":"PaymentHW"}`))
+	d.put(ports.NamedRef{Name: "w", Kind: ports.StakingSKey}, encryptedOf(t, stake, "Correct-Horse-9"))
+	d.put(ports.NamedRef{Name: "w", Kind: ports.StakingVKey}, stake.vkey)
+	d.put(ports.NamedRef{Name: "w", Kind: ports.StakingHwsFile}, []byte(`{"type":"StakeHW"}`))
 	putPool(d, "pl", 80, "")
-	d.put(ports.Ref{Name: "pl", Kind: ports.NodeHwsFile}, []byte(`{"type":"NodeHW"}`))
-	d.put(ports.Ref{Name: "pl_0001_abc", Kind: ports.PoolWitnessFile}, []byte(`{"type":"Witness"}`))
+	d.put(ports.NamedRef{Name: "pl", Kind: ports.NodeHwsFile}, []byte(`{"type":"NodeHW"}`))
+	d.put(ports.NamedRef{Name: "pl_0001_abc", Kind: ports.PoolWitnessFile}, []byte(`{"type":"Witness"}`))
 	u := multi(t, tr, dst)
 	u.Decryptor = g
 	pw := sec("Correct-Horse-9")
@@ -498,13 +498,13 @@ func TestXmultiRenameCarriesEveryArtefact(t *testing.T) {
 	if err != nil || rep.Failed() != 0 {
 		t.Fatalf("%v %+v", err, rep)
 	}
-	var want []ports.Ref
+	var want []ports.NamedRef
 	for r := range d.files {
 		n := strings.Replace(r.Name, "w", "w2", 1)
 		if strings.HasPrefix(r.Name, "pl") {
 			n = strings.Replace(r.Name, "pl", "pl2", 1)
 		}
-		want = append(want, ports.Ref{Name: n, Kind: r.Kind, Num: r.Num})
+		want = append(want, ports.NamedRef{Name: n, Kind: r.Kind, Num: r.Num})
 	}
 	for _, w := range want {
 		if _, ok := dst.files[w]; !ok {
@@ -535,34 +535,22 @@ func TestXmultiRenameCarriesEveryArtefact(t *testing.T) {
 	}
 }
 
-// An upstream-encrypted key kept in its encrypted form is stored under the
-// new name too.
+// A deferred upstream-encrypted key is left in the source under a rename too: no
+// record of it is stored under the old or the new name.
 //
 // spec: SPO-Xmulti-IN-004
-func TestXmultiRenameKeepsEncryptedKeyUnderNewName(t *testing.T) {
+func TestXmultiRenameWithDeferredEncryptedKeyStoresNothing(t *testing.T) {
 	tr, dst := newTree(), newMem()
 	stake := pair(40, "StakeSigningKeyShelley_ed25519", "StakeVerificationKeyShelley_ed25519", "Stake")
-	tr.dir("/d").put(ports.Ref{Name: "w", Kind: ports.StakingSKey}, encryptedOf(t, stake, "Correct-Horse-9"))
-	tr.dir("/d").put(ports.Ref{Name: "w", Kind: ports.StakingVKey}, stake.vkey)
-	rep, err := multi(t, tr, dst).Import(ctx(), ImportRequest{ImportOptions: ImportOptions{KeepEncrypted: true}, Dirs: []string{"/d"}, All: true,
+	tr.dir("/d").put(ports.NamedRef{Name: "w", Kind: ports.StakingSKey}, encryptedOf(t, stake, "Correct-Horse-9"))
+	tr.dir("/d").put(ports.NamedRef{Name: "w", Kind: ports.StakingVKey}, stake.vkey)
+	rep, err := multi(t, tr, dst).Import(ctx(), ImportRequest{ImportOptions: ImportOptions{DeferEncrypted: true}, Dirs: []string{"/d"}, All: true,
 		Renames: []Rename{{From: Selector{Name: "w"}, To: "w2"}}})
-	if err != nil || rep.Failed() != 0 {
+	if err != nil || rep.Failed() != 1 {
 		t.Fatalf("%v %+v", err, rep)
 	}
-	n := 0
-	for r := range dst.files {
-		if r.Kind == ports.UpstreamEncryptedSKey {
-			n++
-			if !strings.HasPrefix(r.Name, "w2") || OwnerOf(r) != "w2" {
-				t.Errorf("kept key stored as %v (owner %s)", r, OwnerOf(r))
-			}
-		}
-		if OwnerOf(r) == "w" {
-			t.Errorf("old name stored: %v", r)
-		}
-	}
-	if n != 1 {
-		t.Errorf("%d kept keys", n)
+	if len(dst.files) != 0 {
+		t.Errorf("stored %v", dst.files)
 	}
 }
 
@@ -748,26 +736,26 @@ type failingDest struct {
 }
 
 type failingWriter struct {
-	ports.Writer
+	ports.NamedWriter
 	owner string
 }
 
-func (w failingWriter) Put(r ports.Ref, b []byte) error {
+func (w failingWriter) Put(r ports.NamedRef, b []byte) error {
 	if OwnerOf(r) == w.owner {
 		return errors.New("disk full")
 	}
-	return w.Writer.Put(r, b)
+	return w.NamedWriter.Put(r, b)
 }
 
-func (w failingWriter) PutSecret(r ports.Ref, b *ports.Secret) error {
+func (w failingWriter) PutSecret(r ports.NamedRef, b *ports.Secret) error {
 	if OwnerOf(r) == w.owner {
 		return errors.New("disk full")
 	}
-	return w.Writer.PutSecret(r, b)
+	return w.NamedWriter.PutSecret(r, b)
 }
 
-func (d failingDest) Update(c context.Context, fn func(ports.Writer) error) error {
-	return d.memStore.Update(c, func(w ports.Writer) error { return fn(failingWriter{w, d.owner}) })
+func (d failingDest) Update(c context.Context, fn func(ports.NamedWriter) error) error {
+	return d.memStore.Update(c, func(w ports.NamedWriter) error { return fn(failingWriter{w, d.owner}) })
 }
 
 // When a write fails at run time, nothing of the run is stored (one
@@ -820,25 +808,28 @@ type recordingDest struct {
 }
 
 type recordingWriter struct {
-	ports.Writer
+	ports.NamedWriter
 	seen map[string]bool
 	d    recordingDest
 }
 
-func (w recordingWriter) note(r ports.Ref) {
+func (w recordingWriter) note(r ports.NamedRef) {
 	if n := OwnerOf(r); !w.seen[n] {
 		w.seen[n] = true
 		*w.d.order = append(*w.d.order, n)
 	}
 }
-func (w recordingWriter) Put(r ports.Ref, b []byte) error { w.note(r); return w.Writer.Put(r, b) }
-func (w recordingWriter) PutSecret(r ports.Ref, b *ports.Secret) error {
+func (w recordingWriter) Put(r ports.NamedRef, b []byte) error {
 	w.note(r)
-	return w.Writer.PutSecret(r, b)
+	return w.NamedWriter.Put(r, b)
+}
+func (w recordingWriter) PutSecret(r ports.NamedRef, b *ports.Secret) error {
+	w.note(r)
+	return w.NamedWriter.PutSecret(r, b)
 }
 
-func (d recordingDest) Update(c context.Context, fn func(ports.Writer) error) error {
-	return d.memStore.Update(c, func(w ports.Writer) error { return fn(recordingWriter{w, map[string]bool{}, d}) })
+func (d recordingDest) Update(c context.Context, fn func(ports.NamedWriter) error) error {
+	return d.memStore.Update(c, func(w ports.NamedWriter) error { return fn(recordingWriter{w, map[string]bool{}, d}) })
 }
 
 // A name in the descriptor that no source owner has is not silently satisfied

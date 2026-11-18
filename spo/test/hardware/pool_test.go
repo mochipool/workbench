@@ -78,8 +78,8 @@ func TestPoolRegistrationWithLedgerColdKeyPayerAndOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := w.Store.Update(ctx, func(wr ports.Writer) error {
-		return wr.Put(ports.Ref{Name: "hw", Kind: ports.DelegCert}, dc.Envelope)
+	if err := w.Store.Update(ctx, func(wr ports.NamedWriter) error {
+		return wr.Put(ports.NamedRef{Name: "hw", Kind: ports.DelegCert}, dc.Envelope)
 	}); err != nil {
 		t.Fatal(err)
 	}

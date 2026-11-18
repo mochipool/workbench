@@ -135,7 +135,7 @@ type outcome struct {
 	payer   string
 	stake.Result
 	// stored are the artefacts written, by name.
-	stored []ports.Ref
+	stored []ports.NamedRef
 }
 
 // stakeWallet is the wallet name a stake name is kept under: the use cases
@@ -144,7 +144,7 @@ func stakeWallet(s string) string {
 	return strings.TrimSuffix(strings.TrimPrefix(s, "./"), ".staking")
 }
 
-func artefact(r ports.Ref) string { return r.Name + "." + string(r.Kind) }
+func artefact(r ports.NamedRef) string { return r.Name + "." + string(r.Kind) }
 
 // report prints what happened after a transaction was sent or queued. With
 // --yes no summary was shown before, so it is printed here, with what the
@@ -307,7 +307,7 @@ was made, so the answer is unknown and the command refuses until you pass
 					return f.hint(err)
 				}
 				a.report(outcome{kind: "stake registration", account: args[0], payer: args[1], Result: res,
-					stored: []ports.Ref{{Name: stakeWallet(args[0]), Kind: ports.StakingCert}}}, &f, env, wo)
+					stored: []ports.NamedRef{{Name: stakeWallet(args[0]), Kind: ports.StakingCert}}}, &f, env, wo)
 				return nil
 			})
 		},
@@ -374,7 +374,7 @@ second source or --single-source; a mode that cannot read pools at all needs
 			}
 			spec := envSpec{flags: &f.chain, config: true, needs: needs, extras: &f.extra}
 			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, wo WireOptions) error {
-				var stored []ports.Ref
+				var stored []ports.NamedRef
 				if !f.stored {
 					gen, err := stake.GenerateDelegationCertificate{Store: s.Store, Certs: env.Certs}.Run(ctx, stake.DelegationRequest{Pool: args[1], Delegator: args[0]})
 					if err != nil {
@@ -467,7 +467,7 @@ the summary lists each check that was not made.`,
 			}
 			spec := envSpec{flags: &f.chain, config: true, needs: needs, extras: &f.extra}
 			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, wo WireOptions) error {
-				var stored []ports.Ref
+				var stored []ports.NamedRef
 				if !f.stored {
 					gen, err := stake.GenerateVoteDelegationCertificate{Store: s.Store, Certs: env.Certs, Params: env.Params}.
 						Run(ctx, stake.VoteDelegationRequest{Target: args[1], Delegator: args[0]})
@@ -531,7 +531,7 @@ summary names the sources and says when it was one.`,
 				if err != nil {
 					return f.hint(err)
 				}
-				a.report(outcome{kind: "stake deregistration", account: args[0], payer: args[1], Result: res, stored: []ports.Ref{gen.Ref}}, &f, env, wo)
+				a.report(outcome{kind: "stake deregistration", account: args[0], payer: args[1], Result: res, stored: []ports.NamedRef{gen.Ref}}, &f, env, wo)
 				return nil
 			})
 		},

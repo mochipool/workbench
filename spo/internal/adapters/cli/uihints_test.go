@@ -96,8 +96,8 @@ func seedUpstream(t *testing.T) (string, Deps) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Update(context.Background(), func(w ports.Writer) error {
-		for _, r := range []ports.Ref{
+	if err := st.Update(context.Background(), func(w ports.NamedWriter) error {
+		for _, r := range []ports.NamedRef{
 			{Name: "w1.payment", Kind: ports.AddrFile}, {Name: "w2", Kind: ports.AddrFile},
 			{Name: "w1", Kind: ports.StakingVKey}, {Name: "pool1", Kind: ports.NodeVKey}, {Name: "pol", Kind: ports.PolicyVKey},
 		} {
@@ -110,7 +110,7 @@ func seedUpstream(t *testing.T) (string, Deps) {
 		t.Fatal(err)
 	}
 	return dir, Deps{Out: &bytes.Buffer{}, Err: &bytes.Buffer{},
-		OpenUpstream: func(d string) (ports.Store, error) { return plainstore.OpenTestnet(d) }}
+		OpenUpstream: plainstore.Upstream}
 }
 
 func TestWorkspaceNamesListsNamesByClassAndNothingElse(t *testing.T) {

@@ -17,6 +17,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 )
 
 // Signing key envelope types the vault signer uses for a transaction
@@ -47,7 +48,7 @@ func (v VaultSigner) index() (ports.KeyIndex, error) {
 		return v.Keys, nil
 	}
 	if st, ok := v.Vault.(ports.Store); ok {
-		return ports.NewStoreKeyIndex(st)
+		return labels.NewIndex(st), nil
 	}
 	return nil, errors.New("the vault signer has no index to find keys by identity")
 }

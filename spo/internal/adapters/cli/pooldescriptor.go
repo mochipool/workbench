@@ -322,10 +322,10 @@ func poolArg(s string) (string, error) {
 
 var errNoDescriptor = errors.New("there is no pool descriptor: create it with `spo pool descriptor new <pool>`")
 
-func readDescriptorOf(ctx context.Context, store ports.Store, name string) (*pool.Descriptor, error) {
+func readDescriptorOf(ctx context.Context, store ports.NamedStore, name string) (*pool.Descriptor, error) {
 	var d *pool.Descriptor
-	err := store.View(ctx, func(r ports.Reader) error {
-		b, err := r.Get(ports.Ref{Name: name, Kind: ports.PoolDescriptor})
+	err := store.View(ctx, func(r ports.NamedReader) error {
+		b, err := r.Get(ports.NamedRef{Name: name, Kind: ports.PoolDescriptor})
 		if errors.Is(err, ports.ErrNotFound) {
 			return fmt.Errorf("%w (pool %s)", errNoDescriptor, name)
 		}
@@ -408,8 +408,8 @@ then signs elsewhere and its slot stays open until its witness is imported.
 				if err := validateWhole(d); err != nil {
 					return err
 				}
-				ref := ports.Ref{Name: name, Kind: ports.PoolDescriptor}
-				if err := s.Store.Update(ctx, func(w ports.Writer) error {
+				ref := ports.NamedRef{Name: name, Kind: ports.PoolDescriptor}
+				if err := s.Store.Update(ctx, func(w ports.NamedWriter) error {
 					if ok, err := w.Exists(ref); err != nil {
 						return err
 					} else if ok {
@@ -501,8 +501,8 @@ refused, and so is any change while a witness collection is open.`,
 					return err
 				}
 				var certMade bool
-				err = s.Store.Update(ctx, func(w ports.Writer) error {
-					ref := ports.Ref{Name: name, Kind: ports.PoolDescriptor}
+				err = s.Store.Update(ctx, func(w ports.NamedWriter) error {
+					ref := ports.NamedRef{Name: name, Kind: ports.PoolDescriptor}
 					b, err := w.Get(ref)
 					if errors.Is(err, ports.ErrNotFound) {
 						return fmt.Errorf("%w (pool %s)", errNoDescriptor, name)

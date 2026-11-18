@@ -18,26 +18,26 @@ import (
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
-// memStore is an in-memory ports.Store, ports.Vault and ports.SourceLister
+// memStore is an in-memory ports.NamedStore, ports.NamedVault and ports.SourceLister
 // that enforces the secret-kind rules of the real stores.
 type memStore struct {
 	mu         sync.Mutex
-	files      map[ports.Ref][]byte
+	files      map[ports.NamedRef][]byte
 	unknown    []ports.SourceUnknown
 	updates    int
 	failPut    error
 	failUpdate error
 }
 
-func newMem() *memStore { return &memStore{files: map[ports.Ref][]byte{}} }
+func newMem() *memStore { return &memStore{files: map[ports.NamedRef][]byte{}} }
 
 type memTx struct {
 	s     *memStore
-	stage map[ports.Ref][]byte
-	del   map[ports.Ref]bool
+	stage map[ports.NamedRef][]byte
+	del   map[ports.NamedRef]bool
 }
 
-func (t *memTx) cur(r ports.Ref) ([]byte, bool) {
+func (t *memTx) cur(r ports.NamedRef) ([]byte, bool) {
 	if t.del[r] {
 		return nil, false
 	}
@@ -48,7 +48,7 @@ func (t *memTx) cur(r ports.Ref) ([]byte, bool) {
 	return b, ok
 }
 
-func (t *memTx) Get(r ports.Ref) ([]byte, error) {
+func (t *memTx) Get(r ports.NamedRef) ([]byte, error) {
 	if r.Kind.Secret() {
 		return nil, ports.ErrSecretKind
 	}
@@ -58,8 +58,8 @@ func (t *memTx) Get(r ports.Ref) ([]byte, error) {
 	}
 	return append([]byte(nil), b...), nil
 }
-func (t *memTx) Exists(r ports.Ref) (bool, error) { _, ok := t.cur(r); return ok, nil }
-func (t *memTx) Put(r ports.Ref, d []byte) error {
+func (t *memTx) Exists(r ports.NamedRef) (bool, error) { _, ok := t.cur(r); return ok, nil }
+func (t *memTx) Put(r ports.NamedRef, d []byte) error {
 	if r.Kind.Secret() {
 		return ports.ErrSecretKind
 	}
@@ -69,24 +69,24 @@ func (t *memTx) Put(r ports.Ref, d []byte) error {
 	t.stage[r] = append([]byte(nil), d...)
 	return nil
 }
-func (t *memTx) PutSecret(r ports.Ref, b *secret.Buffer) error {
+func (t *memTx) PutSecret(r ports.NamedRef, b *secret.Buffer) error {
 	if !r.Kind.Secret() {
 		return ports.ErrInvalidRef
 	}
 	return b.Use(func(d []byte) error { t.stage[r] = append([]byte(nil), d...); return nil })
 }
-func (t *memTx) Delete(r ports.Ref) error { t.del[r] = true; return nil }
+func (t *memTx) Delete(r ports.NamedRef) error { t.del[r] = true; return nil }
 
-func (s *memStore) View(_ context.Context, fn func(ports.Reader) error) error {
+func (s *memStore) View(_ context.Context, fn func(ports.NamedReader) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return fn(&memTx{s: s, stage: map[ports.Ref][]byte{}, del: map[ports.Ref]bool{}})
+	return fn(&memTx{s: s, stage: map[ports.NamedRef][]byte{}, del: map[ports.NamedRef]bool{}})
 }
 
-func (s *memStore) Update(_ context.Context, fn func(ports.Writer) error) error {
+func (s *memStore) Update(_ context.Context, fn func(ports.NamedWriter) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	t := &memTx{s: s, stage: map[ports.Ref][]byte{}, del: map[ports.Ref]bool{}}
+	t := &memTx{s: s, stage: map[ports.NamedRef][]byte{}, del: map[ports.NamedRef]bool{}}
 	if err := fn(t); err != nil {
 		return err
 	}
@@ -103,7 +103,7 @@ func (s *memStore) Update(_ context.Context, fn func(ports.Writer) error) error 
 	return nil
 }
 
-func (s *memStore) Open(_ context.Context, r ports.Ref) (*secret.Buffer, error) {
+func (s *memStore) Open(_ context.Context, r ports.NamedRef) (*secret.Buffer, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, ok := s.files[r]
@@ -125,12 +125,12 @@ func (s *memStore) List(context.Context) (ports.SourceListing, error) {
 	return l, nil
 }
 
-func (s *memStore) put(r ports.Ref, d []byte) { s.files[r] = d }
+func (s *memStore) put(r ports.NamedRef, d []byte) { s.files[r] = d }
 
-func (s *memStore) snapshot() map[ports.Ref]string {
+func (s *memStore) snapshot() map[ports.NamedRef]string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := map[ports.Ref]string{}
+	out := map[ports.NamedRef]string{}
 	for r, b := range s.files {
 		out[r] = string(b)
 	}
@@ -322,24 +322,24 @@ func workspaceFixture(t *testing.T) (*memStore, map[string]keyPair) {
 		"stake": pair(40, "StakeSigningKeyShelley_ed25519", "StakeVerificationKeyShelley_ed25519", "Stake"),
 		"cold":  cold(80),
 	}
-	s.put(ports.Ref{Name: "w.payment", Kind: ports.AddrSKey}, k["pay"].skey)
-	s.put(ports.Ref{Name: "w.payment", Kind: ports.AddrVKey}, k["pay"].vkey)
-	s.put(ports.Ref{Name: "w.payment", Kind: ports.AddrFile}, addrOf(k["pay"].vkey))
-	s.put(ports.Ref{Name: "w", Kind: ports.StakingSKey}, k["stake"].skey)
-	s.put(ports.Ref{Name: "w", Kind: ports.StakingVKey}, k["stake"].vkey)
-	s.put(ports.Ref{Name: "w", Kind: ports.PaymentMnemonics}, []byte("abandon ability able about above absent absorb abstract absurd abuse access accident account accuse achieve acid acoustic acquire across act action actor actress actual\n"))
-	s.put(ports.Ref{Name: "mypool", Kind: ports.NodeSKey}, k["cold"].skey)
-	s.put(ports.Ref{Name: "mypool", Kind: ports.NodeVKey}, k["cold"].vkey)
+	s.put(ports.NamedRef{Name: "w.payment", Kind: ports.AddrSKey}, k["pay"].skey)
+	s.put(ports.NamedRef{Name: "w.payment", Kind: ports.AddrVKey}, k["pay"].vkey)
+	s.put(ports.NamedRef{Name: "w.payment", Kind: ports.AddrFile}, addrOf(k["pay"].vkey))
+	s.put(ports.NamedRef{Name: "w", Kind: ports.StakingSKey}, k["stake"].skey)
+	s.put(ports.NamedRef{Name: "w", Kind: ports.StakingVKey}, k["stake"].vkey)
+	s.put(ports.NamedRef{Name: "w", Kind: ports.PaymentMnemonics}, []byte("abandon ability able about above absent absorb abstract absurd abuse access accident account accuse achieve acid acoustic acquire across act action actor actress actual\n"))
+	s.put(ports.NamedRef{Name: "mypool", Kind: ports.NodeSKey}, k["cold"].skey)
+	s.put(ports.NamedRef{Name: "mypool", Kind: ports.NodeVKey}, k["cold"].vkey)
 	var vk [32]byte
 	env, _ := pool.ParseEnvelope(k["cold"].vkey)
 	kb, _ := env.Key32()
 	copy(vk[:], kb)
-	s.put(ports.Ref{Name: "mypool", Kind: ports.NodeCounter}, pool.IssueCounter{Next: 2, ColdVKey: vk}.Envelope())
-	s.put(ports.Ref{Name: "mypool", Kind: ports.KesCounter}, pool.FormatCounter(1))
-	s.put(ports.Ref{Name: "mypool", Kind: ports.KesCounterNext}, pool.FormatCounter(2))
+	s.put(ports.NamedRef{Name: "mypool", Kind: ports.NodeCounter}, pool.IssueCounter{Next: 2, ColdVKey: vk}.Envelope())
+	s.put(ports.NamedRef{Name: "mypool", Kind: ports.KesCounter}, pool.FormatCounter(1))
+	s.put(ports.NamedRef{Name: "mypool", Kind: ports.KesCounterNext}, pool.FormatCounter(2))
 	kes := []byte(`{"type":"KesSigningKey_ed25519_kes_2^6","description":"KES Signing Key","cborHex":"5860` + strings.Repeat("ab", 96) + `"}`)
-	s.put(ports.Ref{Name: "mypool", Kind: ports.KesSKey, Num: 1}, kes)
-	s.put(ports.Ref{Name: "mypool", Kind: ports.KesVKey, Num: 1}, pool.MarshalEnvelope(pool.Envelope{Type: "KesVerificationKey_ed25519_kes_2^6", Description: "KES Verification Key", CborHex: "5820" + strings.Repeat("cd", 32)}))
-	s.put(ports.Ref{Name: "mypool", Kind: ports.OpCert, Num: 1}, pool.MarshalEnvelope(pool.Envelope{Type: "NodeOperationalCertificate", CborHex: "8400"}))
+	s.put(ports.NamedRef{Name: "mypool", Kind: ports.KesSKey, Num: 1}, kes)
+	s.put(ports.NamedRef{Name: "mypool", Kind: ports.KesVKey, Num: 1}, pool.MarshalEnvelope(pool.Envelope{Type: "KesVerificationKey_ed25519_kes_2^6", Description: "KES Verification Key", CborHex: "5820" + strings.Repeat("cd", 32)}))
+	s.put(ports.NamedRef{Name: "mypool", Kind: ports.OpCert, Num: 1}, pool.MarshalEnvelope(pool.Envelope{Type: "NodeOperationalCertificate", CborHex: "8400"}))
 	return s, k
 }

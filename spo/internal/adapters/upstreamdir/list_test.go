@@ -14,7 +14,7 @@ import (
 //
 // spec: SPO-Pfiles-IN-001, SPO-Pfiles-IN-003, SPO-Pfiles-OUT-001, SPO-Pfiles-OUT-002, SPO-Pfiles-OUT-004, SPO-Pfiles-OUT-005, SPO-Pfiles-OUT-010, SPO-Pfiles-OUT-013, SPO-Pfiles-OUT-014, SPO-Pfiles-OUT-016, SPO-Pfiles-OUT-022, SPO-Pfiles-OUT-031, SPO-Pfiles-OUT-032, SPO-Pfiles-OUT-033, SPO-Pfiles-OUT-034, SPO-Pfiles-OUT-035, SPO-Pfiles-OUT-036
 func TestRefOfNamesEveryFamily(t *testing.T) {
-	cases := map[string]ports.Ref{
+	cases := map[string]ports.NamedRef{
 		"w.addr":                    {Name: "w", Kind: ports.AddrFile},
 		"w.vkey":                    {Name: "w", Kind: ports.AddrVKey},
 		"w.payment.skey":            {Name: "w.payment", Kind: ports.AddrSKey},

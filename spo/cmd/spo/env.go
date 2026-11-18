@@ -21,6 +21,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/platform/execx"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 )
 
 // chainCaps are the capabilities that depend on the mode.
@@ -134,7 +135,11 @@ func wireTo(errw io.Writer, store ports.Store, o cli.WireOptions) (*cli.Env, err
 		env.RegistrySigner = vr
 		// The voting key's QR code: the vault builds the PIN-encrypted payload,
 		// the qrcode adapter draws it (spec: SPO-09a-EXT-005).
-		env.VotingQR = native.VotingKeyQR{Vault: vault}
+		var namedVault ports.NamedVault // the voting key is found by its owner's name
+		if store != nil {
+			namedVault = labels.Named(store)
+		}
+		env.VotingQR = native.VotingKeyQR{Vault: namedVault}
 		env.QRCodes = qrcode.Renderer{}
 		// One directory of the signers connected now: the vault (with the message,
 		// registration and attestation capabilities) and the attached device. Which

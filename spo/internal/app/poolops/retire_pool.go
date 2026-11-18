@@ -31,7 +31,7 @@ var ErrRetirementWindow = errors.New("the retirement epoch of the certificate is
 // an epoch (upstream 07a_genStakepoolRetireCert). The epoch is clamped into
 // the window current+1 .. current+eMax, and the result says so.
 type GenerateRetirementCertificate struct {
-	Store  ports.Store
+	Store  ports.NamedStore
 	Params ports.ProtocolParametersReader
 	Tip    ports.TipReader
 	Certs  ports.PoolCertificateBuilder
@@ -67,7 +67,7 @@ func (uc GenerateRetirementCertificate) Run(ctx context.Context, req RetirementR
 	}
 	var d *pool.Descriptor
 	var nodeEnv []byte
-	if err := uc.Store.View(ctx, func(r ports.Reader) error {
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
 		if d, err = readDescriptor(r, name); err != nil {
 			return err
@@ -78,7 +78,7 @@ func (uc GenerateRetirementCertificate) Run(ctx context.Context, req RetirementR
 		if err = d.CheckName(name); err != nil {
 			return err
 		}
-		nodeEnv, err = get(r, ports.Ref{Name: name, Kind: ports.NodeVKey})
+		nodeEnv, err = get(r, ports.NamedRef{Name: name, Kind: ports.NodeVKey})
 		return err
 	}); err != nil {
 		return RetirementCertificate{}, err
@@ -117,11 +117,11 @@ func (uc GenerateRetirementCertificate) Run(ctx context.Context, req RetirementR
 		return RetirementCertificate{}, err
 	}
 	d.RecordRetirementCert(rfc5322(uc.Clock.Now()), name+".pool.dereg-cert", out.Epoch)
-	if err := uc.Store.Update(ctx, func(w ports.Writer) error {
-		if err := w.Put(ports.Ref{Name: name, Kind: ports.PoolDeregCert}, out.Certificate.Envelope); err != nil {
+	if err := uc.Store.Update(ctx, func(w ports.NamedWriter) error {
+		if err := w.Put(ports.NamedRef{Name: name, Kind: ports.PoolDeregCert}, out.Certificate.Envelope); err != nil {
 			return err
 		}
-		return w.Put(ports.Ref{Name: name, Kind: ports.PoolDescriptor}, d.Render())
+		return w.Put(ports.NamedRef{Name: name, Kind: ports.PoolDescriptor}, d.Render())
 	}); err != nil {
 		return RetirementCertificate{}, err
 	}
@@ -134,7 +134,7 @@ func (uc GenerateRetirementCertificate) Run(ctx context.Context, req RetirementR
 // the cold key is in the vault or on a device is the signer's business; a
 // holder without a signer refuses up front.
 type RetirePool struct {
-	Store     ports.Store
+	Store     ports.NamedStore
 	Addresses ports.AddressInspector
 	Params    ports.ProtocolParametersReader
 	Tip       ports.TipReader
@@ -211,7 +211,7 @@ func (uc RetirePool) Run(ctx context.Context, req RetireRequest) (RetireResult, 
 		pay  payer
 		cold custody.KeyRef
 	)
-	if err := uc.Store.View(ctx, func(r ports.Reader) error {
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
 		if d, err = readDescriptor(r, name); err != nil {
 			return err
@@ -222,14 +222,14 @@ func (uc RetirePool) Run(ctx context.Context, req RetireRequest) (RetireResult, 
 		if d.Text(pool.FieldDeregFile) != name+".pool.dereg-cert" {
 			return fmt.Errorf("%w: deregCertFile is %q", ErrCertificateMismatch, d.Text(pool.FieldDeregFile))
 		}
-		raw, err := get(r, ports.Ref{Name: name, Kind: ports.PoolDeregCert})
+		raw, err := get(r, ports.NamedRef{Name: name, Kind: ports.PoolDeregCert})
 		if err != nil {
 			return fmt.Errorf("%w (not generated, or already submitted)", err)
 		}
 		if cert, err = uc.PoolCerts.DecodePoolCertificate(raw); err != nil {
 			return fmt.Errorf("%s.pool.dereg-cert: %w", name, err)
 		}
-		nodeEnv, err := get(r, ports.Ref{Name: name, Kind: ports.NodeVKey})
+		nodeEnv, err := get(r, ports.NamedRef{Name: name, Kind: ports.NodeVKey})
 		if err != nil {
 			return err
 		}
@@ -319,7 +319,7 @@ func (uc RetirePool) Run(ctx context.Context, req RetireRequest) (RetireResult, 
 	// confirmed: Stage keeps it as a pending record under the transaction's id
 	// before the transaction leaves, and `spo tx settle` or the wait of this
 	// command applies it (hazard H9, SPO-Xconfirm-PR-002).
-	var pref ports.Ref
+	var pref ports.NamedRef
 	stage := func(ctx context.Context, id chain.TxID, validUntil uint64, queued bool) ([]ports.QueuedField, error) {
 		stamp := rfc5322(uc.Clock.Now())
 		if queued {
@@ -331,8 +331,8 @@ func (uc RetirePool) Run(ctx context.Context, req RetireRequest) (RetireResult, 
 		if err != nil {
 			return nil, err
 		}
-		pref = ports.Ref{Name: pend.TxID, Kind: ports.PendingUpdate}
-		if err := uc.Store.Update(ctx, func(w ports.Writer) error { return w.Put(pref, pb) }); err != nil {
+		pref = ports.NamedRef{Name: pend.TxID, Kind: ports.PendingUpdate}
+		if err := uc.Store.Update(ctx, func(w ports.NamedWriter) error { return w.Put(pref, pb) }); err != nil {
 			return nil, fmt.Errorf("keep the retirement record until the transaction is confirmed: %w", err)
 		}
 		if !queued {
@@ -355,14 +355,14 @@ func (uc RetirePool) Run(ctx context.Context, req RetireRequest) (RetireResult, 
 			// The transaction may be in a block: the pending record stays.
 			err = fmt.Errorf("%w\nThe retirement record of pool %s stays pending under transaction %s: spo tx settle applies it once the transaction is confirmed, and drops it when it has expired", err, name, pref.Name)
 		default:
-			_ = uc.Store.Update(ctx, func(w ports.Writer) error { return w.Delete(pref) })
+			_ = uc.Store.Update(ctx, func(w ports.NamedWriter) error { return w.Delete(pref) })
 		}
 		return RetireResult{}, err
 	}
 	// The consumption of the certificate follows the pending record (SPO-07b-OUT-003:
 	// upstream leaves the certificate reusable).
-	if err := uc.Store.Update(ctx, func(w ports.Writer) error {
-		return w.Delete(ports.Ref{Name: name, Kind: ports.PoolDeregCert})
+	if err := uc.Store.Update(ctx, func(w ports.NamedWriter) error {
+		return w.Delete(ports.NamedRef{Name: name, Kind: ports.PoolDeregCert})
 	}); err != nil {
 		return RetireResult{Result: res}, fmt.Errorf("the transaction was sent (%s), but the retirement certificate could not be consumed: %w", res.TxID, err)
 	}

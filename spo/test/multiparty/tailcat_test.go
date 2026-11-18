@@ -53,9 +53,9 @@ type netWorld struct {
 	node   *secret.Buffer // bob's node private key (the client owns a copy)
 }
 
-func readerOf(w *world) ports.Reader {
-	var out ports.Reader
-	_ = w.C.Store.View(ctx, func(r ports.Reader) error { out = r; return nil })
+func readerOf(w *world) ports.NamedReader {
+	var out ports.NamedReader
+	_ = w.C.Store.View(ctx, func(r ports.NamedReader) error { out = r; return nil })
 	return out
 }
 
@@ -143,7 +143,7 @@ func newNetWorldWide(t *testing.T, wide bool) *netWorld {
 	}
 	var got party.Invite
 	bob := w.bobSigner()
-	bob.OnInvite = func(_ ports.Writer, from party.Party, inv party.Invite) error { got = inv; return nil }
+	bob.OnInvite = func(_ ports.NamedWriter, from party.Party, inv party.Invite) error { got = inv; return nil }
 	nw.bob = bob
 	if err := x.bobPump(w, bob.Handle).Run(ctx); err != nil {
 		t.Fatal(err)

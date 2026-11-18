@@ -322,17 +322,49 @@ func TestTouchProbeDistinguishesEnforcedNotEnforcedAndUnknown(t *testing.T) {
 			}
 		})
 	}
-	// With no PIN there is no PIN token to probe with.
+	// The probe also runs when the PIN is not the caller's (the authenticator
+	// verifies the user itself, or the tool prompts): ADR 0011 decision 8 stores
+	// the result with the factor, so an enrolment with no PIN must not leave it
+	// unknown. (Earlier the probe ran only with a PIN.)
 	r := newRig(t, func(c *fakeCfg) { c.PIN = ""; c.Options = []string{"rk", "up", "uv"} })
 	en, err := r.src.Enrol(context.Background(), ports.EnrolRequest{RPID: rp})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cs := r.calls(t); !contains(cs[len(cs)-1].Argv, "-v") || !contains(cs[len(cs)-1].Argv, "-q") {
-		t.Fatalf("a built-in verification device is enrolled with -v -q: %v", cs[len(cs)-1].Argv)
+	cs := r.calls(t)
+	enrol := cs[len(cs)-2]
+	if !contains(enrol.Argv, "-v") || !contains(enrol.Argv, "-q") {
+		t.Fatalf("a built-in verification device is enrolled with -v -q: %v", enrol.Argv)
 	}
-	if en.Touch != ports.TouchProbeNotRun {
-		t.Fatalf("the probe ran without a PIN: %v", en.Touch)
+	if last := cs[len(cs)-1].Argv; !contains(last, "up=false") || !contains(last, "uv=true") {
+		t.Fatalf("the probe did not run with built-in verification: %v", last)
+	}
+	if en.Touch != ports.TouchEnforced {
+		t.Fatalf("the probe result is %v", en.Touch)
+	}
+}
+
+// CheckPIN verifies a PIN without making a credential or asking for a touch.
+//
+// spec: SPO-Xunlock-IF-006
+func TestCheckPINVerifiesWithoutACredential(t *testing.T) {
+	r := newRig(t, nil)
+	good, bad := pin(goodPIN), pin("999999")
+	defer good.Destroy()
+	defer bad.Destroy()
+	if err := r.src.CheckPIN(context.Background(), "", good); err != nil {
+		t.Fatalf("a right PIN: %v", err)
+	}
+	if err := r.src.CheckPIN(context.Background(), "", bad); !errors.Is(err, ports.ErrFactorPIN) {
+		t.Fatalf("a wrong PIN: %v", err)
+	}
+	for _, c := range r.calls(t) {
+		if c.Tool == "fido2-cred" {
+			t.Fatalf("a credential was made: %v", c.Argv)
+		}
+		if c.Tool == "fido2-assert" && (!contains(c.Argv, "up=false") || contains(c.Argv, "-p")) {
+			t.Errorf("the PIN check asked for a touch: %v", c.Argv)
+		}
 	}
 }
 

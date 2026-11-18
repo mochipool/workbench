@@ -109,7 +109,7 @@ func (g *guardRig) file(name string, kind governance.ActionKind, hash *[28]byte)
 		a.Params = []governance.ParamChange{{Name: "max-tx-size", Value: "20000"}}
 	}
 	af, _ := fakeActionFiles{}.BuildActionFile(a)
-	g.store.files[ports.Ref{Name: name, Kind: ports.GovActionFile}] = af.Envelope
+	g.store.files[ports.NamedRef{Name: name, Kind: ports.GovActionFile}] = af.Envelope
 	return name + ".action"
 }
 
@@ -369,7 +369,7 @@ func TestRegisterActionGuardrailsRefusals(t *testing.T) {
 // spec: SPO-25b-PRE-002
 func TestRegisterActionGuardrailsRefusesAHardwarePayerFirst(t *testing.T) {
 	g := newGuardRig(t)
-	g.hardware(ports.Ref{Name: "w.payment", Kind: ports.AddrSKey}, ports.AddrHwsFile)
+	g.hardware(ports.NamedRef{Name: "w.payment", Kind: ports.AddrSKey}, ports.AddrHwsFile)
 	f := g.file("a", governance.ParameterChange, &g.script.Hash)
 	if _, err := g.run(f); !errors.Is(err, ErrHardwarePayer) {
 		t.Fatalf("%v", err)
@@ -439,7 +439,7 @@ func TestRegisterActionRefusesACostModelOfAnotherLength(t *testing.T) {
 		Anchor: governance.Anchor{URL: "https://x.org/a", Hash: [32]byte{1}}, Guardrails: &g.script.Hash,
 		Params: []governance.ParamChange{{Name: "cost-models", Value: `{"PlutusV3":[1,2,3,4]}`}}}
 	af, _ := fakeActionFiles{}.BuildActionFile(a)
-	g.store.files[ports.Ref{Name: "cm", Kind: ports.GovActionFile}] = af.Envelope
+	g.store.files[ports.NamedRef{Name: "cm", Kind: ports.GovActionFile}] = af.Envelope
 	_, err := g.uc().Run(context.Background(), RegisterActionRequest{Payer: "w.payment", Files: []string{"cm.action"}, GuardrailsScript: "g.plutus"})
 	if !errors.Is(err, governance.ErrCostModelLength) || !strings.Contains(err.Error(), "proposal 1") {
 		t.Fatalf("got %v", err)

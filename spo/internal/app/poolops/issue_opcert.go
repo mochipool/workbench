@@ -56,7 +56,7 @@ func (e *CounterMismatchError) Error() string {
 // key (upstream 04d_genNodeOpCert). There is one workflow: whether the cold
 // key is in the vault or on a device is the signer's business (ADR 0008).
 type IssueOperationalCertificate struct {
-	Store   ports.Store
+	Store   ports.NamedStore
 	Signers ports.SignerDirectory
 	Tip     ports.TipReader
 	Genesis ports.GenesisReader
@@ -119,7 +119,7 @@ type issueSnapshot struct {
 // together with the advanced counters.
 func (uc IssueOperationalCertificate) Run(ctx context.Context, poolName string, opts IssueOptions) (OpCertIssued, error) {
 	var snap issueSnapshot
-	if err := uc.Store.View(ctx, func(r ports.Reader) error {
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
 		snap, err = loadIssueSnapshot(r, poolName)
 		return err
@@ -206,7 +206,7 @@ func (uc IssueOperationalCertificate) Run(ctx context.Context, poolName string, 
 	copy(vk[:], snap.coldVKey)
 	next := pool.IssueCounter{Next: counter + 1, ColdVKey: vk}.Envelope()
 
-	err = uc.Store.Update(ctx, func(w ports.Writer) error {
+	err = uc.Store.Update(ctx, func(w ports.NamedWriter) error {
 		// The state may have moved while the signer and the chain were
 		// consulted.
 		now, err := loadIssueSnapshot(w, poolName)
@@ -220,16 +220,16 @@ func (uc IssueOperationalCertificate) Run(ctx context.Context, poolName string, 
 		if err != nil {
 			return err
 		}
-		if err := w.Put(ports.Ref{Name: poolName, Kind: ports.OpCert, Num: snap.number}, cert); err != nil {
+		if err := w.Put(ports.NamedRef{Name: poolName, Kind: ports.OpCert, Num: snap.number}, cert); err != nil {
 			return err
 		}
-		if err := w.Put(ports.Ref{Name: poolName, Kind: ports.NodeCounter}, next); err != nil {
+		if err := w.Put(ports.NamedRef{Name: poolName, Kind: ports.NodeCounter}, next); err != nil {
 			return err
 		}
-		if err := w.Put(ports.Ref{Name: poolName, Kind: ports.KesExpire}, expiry.JSON()); err != nil {
+		if err := w.Put(ports.NamedRef{Name: poolName, Kind: ports.KesExpire}, expiry.JSON()); err != nil {
 			return err
 		}
-		return w.Put(ports.Ref{Name: poolName, Kind: ports.KesCounterNext}, pool.FormatCounter(state.NextNumber()))
+		return w.Put(ports.NamedRef{Name: poolName, Kind: ports.KesCounterNext}, pool.FormatCounter(state.NextNumber()))
 	})
 	if err != nil {
 		return OpCertIssued{}, err
@@ -285,9 +285,9 @@ func (uc IssueOperationalCertificate) checkChain(ctx context.Context, coldVKey [
 	return true, res.Source, single, nil
 }
 
-func loadIssueSnapshot(r ports.Reader, poolName string) (issueSnapshot, error) {
+func loadIssueSnapshot(r ports.NamedReader, poolName string) (issueSnapshot, error) {
 	var s issueSnapshot
-	has := func(k ports.Kind) (bool, error) { return r.Exists(ports.Ref{Name: poolName, Kind: k}) }
+	has := func(k ports.Kind) (bool, error) { return r.Exists(ports.NamedRef{Name: poolName, Kind: k}) }
 
 	skey, err := has(ports.NodeSKey)
 	if err != nil {
@@ -305,7 +305,7 @@ func loadIssueSnapshot(r ports.Reader, poolName string) (issueSnapshot, error) {
 		return s, fmt.Errorf("%w: %v", ErrNoColdVKey, err)
 	}
 
-	vkeyFile, err := r.Get(ports.Ref{Name: poolName, Kind: ports.NodeVKey})
+	vkeyFile, err := r.Get(ports.NamedRef{Name: poolName, Kind: ports.NodeVKey})
 	if errors.Is(err, ports.ErrNotFound) {
 		return s, ErrNoColdVKey
 	}
@@ -320,11 +320,11 @@ func loadIssueSnapshot(r ports.Reader, poolName string) (issueSnapshot, error) {
 		return s, fmt.Errorf("%s.node.vkey: %w", poolName, err)
 	}
 
-	current, err := readCounter(r, ports.Ref{Name: poolName, Kind: ports.KesCounter})
+	current, err := readCounter(r, ports.NamedRef{Name: poolName, Kind: ports.KesCounter})
 	if err != nil {
 		return s, err
 	}
-	next, err := readCounter(r, ports.Ref{Name: poolName, Kind: ports.KesCounterNext})
+	next, err := readCounter(r, ports.NamedRef{Name: poolName, Kind: ports.KesCounterNext})
 	if err != nil {
 		return s, err
 	}
@@ -334,7 +334,7 @@ func loadIssueSnapshot(r ports.Reader, poolName string) (issueSnapshot, error) {
 		return s, err
 	}
 
-	kesFile, err := r.Get(ports.Ref{Name: poolName, Kind: ports.KesVKey, Num: s.number})
+	kesFile, err := r.Get(ports.NamedRef{Name: poolName, Kind: ports.KesVKey, Num: s.number})
 	if errors.Is(err, ports.ErrNotFound) {
 		return s, fmt.Errorf("%w: number %03d", ErrNoKesVKey, s.number)
 	}
@@ -349,7 +349,7 @@ func loadIssueSnapshot(r ports.Reader, poolName string) (issueSnapshot, error) {
 		return s, fmt.Errorf("KES verification key %03d: %w", s.number, err)
 	}
 
-	s.counter, err = r.Get(ports.Ref{Name: poolName, Kind: ports.NodeCounter})
+	s.counter, err = r.Get(ports.NamedRef{Name: poolName, Kind: ports.NodeCounter})
 	if errors.Is(err, ports.ErrNotFound) {
 		s.counter = nil
 		return s, nil
@@ -361,7 +361,7 @@ func loadIssueSnapshot(r ports.Reader, poolName string) (issueSnapshot, error) {
 // (upstream's "do you want to create a new one" prompt, PR-002, as a
 // command). It never overwrites.
 type CreateIssueCounter struct {
-	Store ports.Store
+	Store ports.NamedStore
 }
 
 // ErrIssueCounterExists means the counter file is already there.
@@ -369,14 +369,14 @@ var ErrIssueCounterExists = errors.New("the issue counter already exists")
 
 // Run creates the counter with the given next issue number.
 func (uc CreateIssueCounter) Run(ctx context.Context, poolName string, value uint64) error {
-	return uc.Store.Update(ctx, func(w ports.Writer) error {
-		ref := ports.Ref{Name: poolName, Kind: ports.NodeCounter}
+	return uc.Store.Update(ctx, func(w ports.NamedWriter) error {
+		ref := ports.NamedRef{Name: poolName, Kind: ports.NodeCounter}
 		if exists, err := w.Exists(ref); err != nil {
 			return err
 		} else if exists {
 			return ErrIssueCounterExists
 		}
-		b, err := w.Get(ports.Ref{Name: poolName, Kind: ports.NodeVKey})
+		b, err := w.Get(ports.NamedRef{Name: poolName, Kind: ports.NodeVKey})
 		if errors.Is(err, ports.ErrNotFound) {
 			return ErrNoColdVKey
 		}

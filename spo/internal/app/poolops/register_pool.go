@@ -70,7 +70,7 @@ var (
 // AllowPending is set, which leaves such a slot empty in an OpenIncomplete
 // collection (the seam of multi-party signing, SPO-Xparty-INV-013).
 type RegisterPool struct {
-	Store      ports.Store
+	Store      ports.NamedStore
 	Addresses  ports.AddressInspector
 	Params     ports.ProtocolParametersReader
 	Tip        ports.TipReader
@@ -185,7 +185,7 @@ type regInputs struct {
 	owners      []ownerInfo
 	payer       payer
 	coll        *pool.Collection
-	vkeys       map[string]ports.Ref // slot name to its verification key artefact
+	vkeys       map[string]ports.NamedRef // slot name to its verification key artefact
 	hasMeta     bool
 	hasExt      bool
 }
@@ -220,7 +220,7 @@ func (uc RegisterPool) Run(ctx context.Context, req RegisterRequest) (RegisterRe
 		return RegisterResult{}, fmt.Errorf("payer: %w", err)
 	}
 	var in regInputs
-	if err := uc.Store.View(ctx, func(r ports.Reader) error {
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
 		in, err = uc.read(r, name, pn)
 		return err
@@ -425,8 +425,8 @@ func changeOf(s txbuild.BodySpec) chain.Lovelace {
 // every empty slot that has none yet, in one transaction.
 func (uc RegisterPool) store(ctx context.Context, in regInputs, coll pool.Collection, now time.Time) ([]string, error) {
 	var written []string
-	err := uc.Store.Update(ctx, func(w ports.Writer) error {
-		raw, err := w.Get(ports.Ref{Name: in.name, Kind: ports.PoolDescriptor})
+	err := uc.Store.Update(ctx, func(w ports.NamedWriter) error {
+		raw, err := w.Get(ports.NamedRef{Name: in.name, Kind: ports.PoolDescriptor})
 		if err != nil {
 			return err
 		}
@@ -435,12 +435,12 @@ func (uc RegisterPool) store(ctx context.Context, in regInputs, coll pool.Collec
 			return err
 		}
 		d.SetCollection(coll)
-		if err := w.Put(ports.Ref{Name: in.name, Kind: ports.PoolDescriptor}, d.Render()); err != nil {
+		if err := w.Put(ports.NamedRef{Name: in.name, Kind: ports.PoolDescriptor}, d.Render()); err != nil {
 			return err
 		}
 		written = nil
 		for _, slot := range coll.Missing() {
-			ref := ports.Ref{Name: pool.TransferFileName(in.name, slot, coll.ID), Kind: ports.PoolWitnessFile}
+			ref := ports.NamedRef{Name: pool.TransferFileName(in.name, slot, coll.ID), Kind: ports.PoolWitnessFile}
 			if ok, err := w.Exists(ref); err != nil {
 				return err
 			} else if ok {
@@ -522,12 +522,12 @@ func (uc RegisterPool) finish(ctx context.Context, in regInputs, inp txflow.Inpu
 	ttl := coll.TTL
 	pend := assets.Pending{Kind: assets.PendingPoolRegistration, TxID: coll.Body.ID.String(), ValidUntil: &ttl, Queued: queued,
 		Date: uc.Clock.Now().Format(time.RFC3339Nano), Pool: in.name, Epoch: strconv.FormatUint(tip.Epoch, 10), Stamp: stamp}
-	pref := ports.Ref{Name: pend.TxID, Kind: ports.PendingUpdate}
+	pref := ports.NamedRef{Name: pend.TxID, Kind: ports.PendingUpdate}
 	pb, err := pend.Marshal()
 	if err != nil {
 		return res, err
 	}
-	if err := uc.Store.Update(ctx, func(w ports.Writer) error { return w.Put(pref, pb) }); err != nil {
+	if err := uc.Store.Update(ctx, func(w ports.NamedWriter) error { return w.Put(pref, pb) }); err != nil {
 		return res, fmt.Errorf("keep the registration record until the transaction is confirmed: %w", err)
 	}
 	if queued {
@@ -542,7 +542,7 @@ func (uc RegisterPool) finish(ctx context.Context, in regInputs, inp txflow.Inpu
 		if !queued && errors.Is(err, chain.ErrSubmitOutcomeUnknown) {
 			return res, fmt.Errorf("%w\nThe registration record of pool %s stays pending under transaction %s: spo tx settle applies it once the transaction is confirmed, and drops it when it has expired", err, in.name, pend.TxID)
 		}
-		_ = uc.Store.Update(ctx, func(w ports.Writer) error { return w.Delete(pref) })
+		_ = uc.Store.Update(ctx, func(w ports.NamedWriter) error { return w.Delete(pref) })
 		return res, err
 	}
 	res.Result = out
@@ -550,8 +550,8 @@ func (uc RegisterPool) finish(ctx context.Context, in regInputs, inp txflow.Inpu
 	// What the submission consumed goes in one transaction (SPO-05c-OUT-006: a
 	// crash between the two must not leave a reusable certificate): the witness
 	// collection and the certificate, and the id of what was sent.
-	if err := uc.Store.Update(ctx, func(w ports.Writer) error {
-		raw, err := w.Get(ports.Ref{Name: in.name, Kind: ports.PoolDescriptor})
+	if err := uc.Store.Update(ctx, func(w ports.NamedWriter) error {
+		raw, err := w.Get(ports.NamedRef{Name: in.name, Kind: ports.PoolDescriptor})
 		if err != nil {
 			return err
 		}
@@ -560,15 +560,15 @@ func (uc RegisterPool) finish(ctx context.Context, in regInputs, inp txflow.Inpu
 			return err
 		}
 		d.ClearCollection()
-		if err := w.Put(ports.Ref{Name: in.name, Kind: ports.PoolDescriptor}, d.Render()); err != nil {
+		if err := w.Put(ports.NamedRef{Name: in.name, Kind: ports.PoolDescriptor}, d.Render()); err != nil {
 			return err
 		}
 		// The id of what was submitted, so that a coordinator that asked others to
 		// sign can tell this submission from a discard (SPO-Xparty-INV-035).
-		if err := w.Put(ports.Ref{Name: in.name, Kind: ports.MultisigSubmitted}, []byte(hex.EncodeToString(out.TxID[:]))); err != nil {
+		if err := w.Put(ports.NamedRef{Name: in.name, Kind: ports.MultisigSubmitted}, []byte(hex.EncodeToString(out.TxID[:]))); err != nil {
 			return err
 		}
-		return w.Delete(ports.Ref{Name: in.name, Kind: ports.PoolCert})
+		return w.Delete(ports.NamedRef{Name: in.name, Kind: ports.PoolCert})
 	}); err != nil {
 		return res, fmt.Errorf("the transaction was sent (%s), but the registration could not be recorded as pending in the descriptor: %w", out.TxID, err)
 	}
@@ -586,9 +586,9 @@ func (uc RegisterPool) finish(ctx context.Context, in regInputs, inp txflow.Inpu
 }
 
 func (uc RegisterPool) attach(ctx context.Context, name string) error {
-	return uc.Store.View(ctx, func(r ports.Reader) error {
+	return uc.Store.View(ctx, func(r ports.NamedReader) error {
 		for _, k := range []ports.Kind{ports.PoolMetadata, ports.PoolExtendedMetadata} {
-			b, err := r.Get(ports.Ref{Name: name, Kind: k})
+			b, err := r.Get(ports.NamedRef{Name: name, Kind: k})
 			if errors.Is(err, ports.ErrNotFound) {
 				continue
 			}
@@ -608,8 +608,8 @@ func (uc RegisterPool) attach(ctx context.Context, name string) error {
 }
 
 func (uc RegisterPool) discard(ctx context.Context, name string) error {
-	return uc.Store.Update(ctx, func(w ports.Writer) error {
-		raw, err := w.Get(ports.Ref{Name: name, Kind: ports.PoolDescriptor})
+	return uc.Store.Update(ctx, func(w ports.NamedWriter) error {
+		raw, err := w.Get(ports.NamedRef{Name: name, Kind: ports.PoolDescriptor})
 		if err != nil {
 			return err
 		}
@@ -618,7 +618,7 @@ func (uc RegisterPool) discard(ctx context.Context, name string) error {
 			return err
 		}
 		d.ClearCollection()
-		return w.Put(ports.Ref{Name: name, Kind: ports.PoolDescriptor}, d.Render())
+		return w.Put(ports.NamedRef{Name: name, Kind: ports.PoolDescriptor}, d.Render())
 	})
 }
 
@@ -735,8 +735,8 @@ func (uc RegisterPool) bind(c *pool.Collection, in regInputs) error {
 // read gathers what the registration needs from the store.
 //
 // spec: SPO-05c-IN-001, SPO-05c-IN-003, SPO-05c-PRE-001, SPO-05c-PRE-002, SPO-05c-PRE-005, SPO-05c-PRE-006, SPO-05c-INV-004, SPO-05c-INV-006
-func (uc RegisterPool) read(r ports.Reader, name, pn string) (regInputs, error) {
-	in := regInputs{name: name, vkeys: map[string]ports.Ref{}}
+func (uc RegisterPool) read(r ports.NamedReader, name, pn string) (regInputs, error) {
+	in := regInputs{name: name, vkeys: map[string]ports.NamedRef{}}
 	var err error
 	if in.d, err = readDescriptor(r, name); err != nil {
 		return in, err
@@ -748,7 +748,7 @@ func (uc RegisterPool) read(r ports.Reader, name, pn string) (regInputs, error) 
 	if in.d.Text(pool.FieldRegCertFile) != name+".pool.cert" {
 		return in, fmt.Errorf("%w: regCertFile is %q", ErrCertificateMismatch, in.d.Text(pool.FieldRegCertFile))
 	}
-	nodeRef := ports.Ref{Name: name, Kind: ports.NodeVKey}
+	nodeRef := ports.NamedRef{Name: name, Kind: ports.NodeVKey}
 	nodeEnv, err := get(r, nodeRef)
 	if err != nil {
 		return in, err
@@ -756,7 +756,7 @@ func (uc RegisterPool) read(r ports.Reader, name, pn string) (regInputs, error) 
 	if in.poolID, err = poolIDOf(nodeEnv); err != nil {
 		return in, fmt.Errorf("%s.node.vkey: %w", name, err)
 	}
-	if hws, err := r.Exists(ports.Ref{Name: name, Kind: ports.NodeHwsFile}); err != nil {
+	if hws, err := r.Exists(ports.NamedRef{Name: name, Kind: ports.NodeHwsFile}); err != nil {
 		return in, err
 	} else {
 		in.coldHW = hws
@@ -784,7 +784,7 @@ func (uc RegisterPool) read(r ports.Reader, name, pn string) (regInputs, error) 
 	// The certificate. It is read when the collection is new, and always
 	// present: its absence means "not generated or already submitted"
 	// (SPO-05c-PRE-002).
-	certEnv, err := get(r, ports.Ref{Name: name, Kind: ports.PoolCert})
+	certEnv, err := get(r, ports.NamedRef{Name: name, Kind: ports.PoolCert})
 	if err != nil {
 		return in, fmt.Errorf("%w (not generated, or already submitted)", err)
 	}
@@ -798,7 +798,7 @@ func (uc RegisterPool) read(r ports.Reader, name, pn string) (regInputs, error) 
 	if in.payer, err = readPayer(r, uc.Addresses, uc.NetworkID, pn); err != nil {
 		return in, err
 	}
-	in.vkeys[pn] = ports.Ref{Name: pn, Kind: ports.AddrVKey}
+	in.vkeys[pn] = ports.NamedRef{Name: pn, Kind: ports.AddrVKey}
 
 	owners, _, err := in.d.Owners()
 	if err != nil {
@@ -811,7 +811,7 @@ func (uc RegisterPool) read(r ports.Reader, name, pn string) (regInputs, error) 
 		}
 		seen[o.Name] = true
 		oi := ownerInfo{desc: o}
-		vkRef := ports.Ref{Name: o.Name, Kind: ports.StakingVKey}
+		vkRef := ports.NamedRef{Name: o.Name, Kind: ports.StakingVKey}
 		vk, err := get(r, vkRef)
 		if err != nil {
 			return in, err
@@ -823,7 +823,7 @@ func (uc RegisterPool) read(r ports.Reader, name, pn string) (regInputs, error) 
 			oi.hwDesc = true
 		}
 		in.vkeys[o.Name+".staking"] = vkRef
-		raw, err := get(r, ports.Ref{Name: o.Name, Kind: ports.DelegCert})
+		raw, err := get(r, ports.NamedRef{Name: o.Name, Kind: ports.DelegCert})
 		if err != nil {
 			return in, err
 		}

@@ -19,26 +19,26 @@ import (
 
 	"github.com/mochipool/workbench/spo/internal/adapters/cli"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
-	"github.com/mochipool/workbench/spo/internal/adapters/sqlitestore"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/domain/tokenmeta"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 )
 
 // storeFile reads one artefact of the sealed workspace through the store.
-func storeFile(t *testing.T, dir string, ref ports.Ref) ([]byte, bool) {
+func storeFile(t *testing.T, dir string, ref ports.NamedRef) ([]byte, bool) {
 	t.Helper()
-	st, err := sqlitestore.Open(filepath.Join(dir, cli.WorkspaceFile), secret.Take([]byte(testPass)))
+	st, err := openCold(filepath.Join(dir, cli.WorkspaceFile), secret.Take([]byte(testPass)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
 	var b []byte
 	var found bool
-	err = st.View(context.Background(), func(r ports.Reader) error {
+	err = labels.Named(st).View(context.Background(), func(r ports.NamedReader) error {
 		v, err := r.Get(ref)
 		switch {
 		case err == nil:
@@ -55,15 +55,15 @@ func storeFile(t *testing.T, dir string, ref ports.Ref) ([]byte, bool) {
 }
 
 // storeHas says whether the workspace holds an artefact, secret or not.
-func storeHas(t *testing.T, dir string, ref ports.Ref) bool {
+func storeHas(t *testing.T, dir string, ref ports.NamedRef) bool {
 	t.Helper()
-	st, err := sqlitestore.Open(filepath.Join(dir, cli.WorkspaceFile), secret.Take([]byte(testPass)))
+	st, err := openCold(filepath.Join(dir, cli.WorkspaceFile), secret.Take([]byte(testPass)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
 	var ok bool
-	if err := st.View(context.Background(), func(r ports.Reader) (e error) { ok, e = r.Exists(ref); return }); err != nil {
+	if err := labels.Named(st).View(context.Background(), func(r ports.NamedReader) (e error) { ok, e = r.Exists(ref); return }); err != nil {
 		t.Fatal(err)
 	}
 	return ok
@@ -129,7 +129,7 @@ func TestAssetMetaGenerateAndCheckAgainstARegistry(t *testing.T) {
 		t.Fatalf("no subject:\n%s", out)
 	}
 	subject := m[1]
-	if _, found := storeFile(t, dir, ports.Ref{Name: subject, Kind: ports.TokenRegistration}); found {
+	if _, found := storeFile(t, dir, ports.NamedRef{Name: subject, Kind: ports.TokenRegistration}); found {
 		t.Fatal("the first run stored an entry")
 	}
 
@@ -137,7 +137,7 @@ func TestAssetMetaGenerateAndCheckAgainstARegistry(t *testing.T) {
 	out = step("asset", "meta", "generate", "p.tok", "--set", "metaName=Token", "--set", "metaDescription=A token", "--set", "metaTicker=TOK",
 		"--set", "metaDecimals=3", "--set", "metaUrl=https://example.org/tok", "--out", outFile)
 	mustHave(t, out, "Signed the registry entry", "subject      "+subject, "sequence     1", "Wrote the signed entry to "+outFile)
-	stored, found := storeFile(t, dir, ports.Ref{Name: subject, Kind: ports.TokenRegistration})
+	stored, found := storeFile(t, dir, ports.NamedRef{Name: subject, Kind: ports.TokenRegistration})
 	if !found {
 		t.Fatal("the entry is not in the workspace")
 	}
@@ -327,10 +327,10 @@ func TestPoolImportFromTheChainThenIssueAnOpcert(t *testing.T) {
 	before, _ := os.ReadFile(filepath.Join(dir, cli.WorkspaceFile))
 	out := step(append(imp, "--dry-run")...)
 	mustHave(t, out, "Dry run: nothing was written", "the counter file (next number 18)", "account owner: an owner and the rewards account")
-	if storeHas(t, dir, ports.Ref{Name: "mypool", Kind: ports.PoolDescriptor}) {
+	if storeHas(t, dir, ports.NamedRef{Name: "mypool", Kind: ports.PoolDescriptor}) {
 		t.Fatal("a dry run stored the descriptor")
 	}
-	if storeHas(t, dir, ports.Ref{Name: "mypool", Kind: ports.NodeSKey}) {
+	if storeHas(t, dir, ports.NamedRef{Name: "mypool", Kind: ports.NodeSKey}) {
 		t.Fatal("a dry run stored the cold key")
 	}
 	after, _ := os.ReadFile(filepath.Join(dir, cli.WorkspaceFile))
@@ -341,7 +341,7 @@ func TestPoolImportFromTheChainThenIssueAnOpcert(t *testing.T) {
 	out = step(imp...)
 	mustHave(t, out, "Imported pool "+p.poolID.Bech32()+" as mypool", "counter file holds 18", "Next: spo pool kes generate mypool")
 	notLeaked(t, out, p.coldCBORHex, "SigningKey", "cborHex")
-	for _, ref := range []ports.Ref{{Name: "mypool", Kind: ports.NodeSKey}, {Name: "mypool", Kind: ports.NodeCounter}, {Name: "mypool", Kind: ports.VrfSKey},
+	for _, ref := range []ports.NamedRef{{Name: "mypool", Kind: ports.NodeSKey}, {Name: "mypool", Kind: ports.NodeCounter}, {Name: "mypool", Kind: ports.VrfSKey},
 		{Name: "owner", Kind: ports.StakingSKey}, {Name: "owner", Kind: ports.DelegCert}, {Name: "mypool", Kind: ports.PoolDescriptor}} {
 		if !storeHas(t, dir, ref) {
 			t.Errorf("missing %s", ref)
@@ -384,7 +384,7 @@ func TestPoolImportFromTheChainThenIssueAnOpcert(t *testing.T) {
 	if out, err := withPass(t, off, testPass, "pool", "import", "--yes", "offpool", info, "--cold", p.path("cold"), "--vrf", p.path("vrf")); err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
-	if !storeHas(t, off, ports.Ref{Name: "offpool", Kind: ports.NodeSKey}) {
+	if !storeHas(t, off, ports.NamedRef{Name: "offpool", Kind: ports.NodeSKey}) {
 		t.Error("the offline import stored no cold key")
 	}
 }

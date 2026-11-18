@@ -22,9 +22,9 @@ import (
 func get(t *testing.T, w *world.World, name string, kind ports.Kind) []byte {
 	t.Helper()
 	var out []byte
-	err := w.Store.View(context.Background(), func(r ports.Reader) error {
+	err := w.Store.View(context.Background(), func(r ports.NamedReader) error {
 		var err error
-		out, err = r.Get(ports.Ref{Name: name, Kind: kind})
+		out, err = r.Get(ports.NamedRef{Name: name, Kind: kind})
 		return err
 	})
 	if err != nil {
@@ -35,7 +35,7 @@ func get(t *testing.T, w *world.World, name string, kind ports.Kind) []byte {
 
 func has(w *world.World, name string, kind ports.Kind) bool {
 	ok := false
-	_ = w.Store.View(context.Background(), func(r ports.Reader) error { ok, _ = r.Exists(ports.Ref{Name: name, Kind: kind}); return nil })
+	_ = w.Store.View(context.Background(), func(r ports.NamedReader) error { ok, _ = r.Exists(ports.NamedRef{Name: name, Kind: kind}); return nil })
 	return ok
 }
 

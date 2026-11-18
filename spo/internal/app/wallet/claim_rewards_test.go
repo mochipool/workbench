@@ -231,21 +231,21 @@ func TestClaimRefusals(t *testing.T) {
 		{"the vote delegation is unknown", func(r *claimRig) { r.rewards.r = rewardsOf(5_000_000, chain.Unknown[string]("absent")) }, ErrRewardUnknown, false},
 		{"no rewards", func(r *claimRig) { r.rewards.r = rewardsOf(0, chain.Value("alwaysAbstain")) }, ErrNoRewards, false},
 		{"no reward reader", func(r *claimRig) { r.uc.Rewards = nil }, ErrNoRewardReader, true},
-		{"no stake address file", func(r *claimRig) { delete(r.store.files, ports.Ref{Name: "w", Kind: ports.StakingAddr}) }, ErrNoStakeAddress, true},
-		{"no stake key", func(r *claimRig) { delete(r.store.files, ports.Ref{Name: "w", Kind: ports.StakingSKey}) }, ErrNoStakeKey, true},
-		{"no payer key", func(r *claimRig) { delete(r.store.files, ports.Ref{Name: "p", Kind: ports.AddrSKey}) }, ErrNoSigningKey, true},
+		{"no stake address file", func(r *claimRig) { delete(r.store.files, ports.NamedRef{Name: "w", Kind: ports.StakingAddr}) }, ErrNoStakeAddress, true},
+		{"no stake key", func(r *claimRig) { delete(r.store.files, ports.NamedRef{Name: "w", Kind: ports.StakingSKey}) }, ErrNoStakeKey, true},
+		{"no payer key", func(r *claimRig) { delete(r.store.files, ports.NamedRef{Name: "p", Kind: ports.AddrSKey}) }, ErrNoSigningKey, true},
 		{"a hardware stake key", func(r *claimRig) {
-			delete(r.store.files, ports.Ref{Name: "w", Kind: ports.StakingSKey})
-			r.store.files[ports.Ref{Name: "w", Kind: ports.StakingHwsFile}] = []byte("hw")
+			delete(r.store.files, ports.NamedRef{Name: "w", Kind: ports.StakingSKey})
+			r.store.files[ports.NamedRef{Name: "w", Kind: ports.StakingHwsFile}] = []byte("hw")
 		}, nil, true},
 		{"a hardware payer key", func(r *claimRig) {
-			r.store.files[ports.Ref{Name: "p", Kind: ports.AddrHwsFile}] = []byte("hw")
+			r.store.files[ports.NamedRef{Name: "p", Kind: ports.AddrHwsFile}] = []byte("hw")
 		}, nil, true},
 		{"the stake file holds a payment address", func(r *claimRig) {
-			r.store.files[ports.Ref{Name: "w", Kind: ports.StakingAddr}] = []byte("addr_test_p\n")
+			r.store.files[ports.NamedRef{Name: "w", Kind: ports.StakingAddr}] = []byte("addr_test_p\n")
 		}, ErrNotStakeAddress, true},
 		{"a mainnet stake address", func(r *claimRig) {
-			r.store.files[ports.Ref{Name: "w", Kind: ports.StakingAddr}] = []byte("stake_main_w\n")
+			r.store.files[ports.NamedRef{Name: "w", Kind: ports.StakingAddr}] = []byte("stake_main_w\n")
 		}, ErrNotStakeAddress, true},
 		{"declined", func(r *claimRig) { r.conf.yes = false }, ErrDeclined, false},
 		{"no confirmer", func(r *claimRig) { r.uc.Confirmer = nil }, ErrNoConfirmer, false},

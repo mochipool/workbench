@@ -26,7 +26,7 @@ var ErrBLSHolder = errors.New("a BLS key can only be generated into the local st
 // all is the composition's gate. `enc` is not ported at generation (same
 // decision as 04c): the signing key goes into the sealed store.
 type GenerateBLSKeys struct {
-	Store  ports.Store
+	Store  ports.NamedStore
 	KeyGen ports.BLSKeyGenerator
 }
 
@@ -47,7 +47,7 @@ func (uc GenerateBLSKeys) Run(ctx context.Context, req GenerateBLSKeysRequest) (
 	if req.Place != "" && req.Place != custody.PlaceVault {
 		return BLSKeysGenerated{}, fmt.Errorf("%w (asked for %s)", ErrBLSHolder, req.Place)
 	}
-	if err := uc.Store.View(ctx, func(r ports.Reader) error { return blsPlan(r, req.Pool) }); err != nil {
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error { return blsPlan(r, req.Pool) }); err != nil {
 		return BLSKeysGenerated{}, err
 	}
 	pair, err := uc.KeyGen.GenerateBLS(ctx)
@@ -56,14 +56,14 @@ func (uc GenerateBLSKeys) Run(ctx context.Context, req GenerateBLSKeysRequest) (
 	}
 	defer pair.SKey.Destroy()
 
-	err = uc.Store.Update(ctx, func(w ports.Writer) error {
+	err = uc.Store.Update(ctx, func(w ports.NamedWriter) error {
 		if err := blsPlan(w, req.Pool); err != nil {
 			return err
 		}
-		if err := w.Put(ports.Ref{Name: req.Pool, Kind: ports.BLSVKey}, pair.VKey); err != nil {
+		if err := w.Put(ports.NamedRef{Name: req.Pool, Kind: ports.BLSVKey}, pair.VKey); err != nil {
 			return err
 		}
-		return w.PutSecret(ports.Ref{Name: req.Pool, Kind: ports.BLSSKey}, pair.SKey)
+		return w.PutSecret(ports.NamedRef{Name: req.Pool, Kind: ports.BLSSKey}, pair.SKey)
 	})
 	if err != nil {
 		return BLSKeysGenerated{}, err
@@ -71,6 +71,6 @@ func (uc GenerateBLSKeys) Run(ctx context.Context, req GenerateBLSKeysRequest) (
 	return BLSKeysGenerated{Pool: req.Pool, VKey: pair.VKey}, nil
 }
 
-func blsPlan(r ports.Reader, poolName string) error {
+func blsPlan(r ports.NamedReader, poolName string) error {
 	return refuseExisting(r, ErrBLSKeyExists, poolName, ports.BLSVKey, ports.BLSSKey)
 }

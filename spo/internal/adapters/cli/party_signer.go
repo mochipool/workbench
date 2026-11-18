@@ -19,6 +19,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 )
 
 // safeText quotes a text a peer chose (a label, a purpose, a reason, a
@@ -45,7 +46,7 @@ type storeKey struct {
 
 // loadStoreKeys reads the verification keys of the store's payment, stake and
 // pool cold keys. It needs the store to list its artefacts.
-func loadStoreKeys(ctx context.Context, store ports.Store) (*storeKeyDirectory, error) {
+func loadStoreKeys(ctx context.Context, store ports.NamedStore) (*storeKeyDirectory, error) {
 	lister, ok := store.(ports.SourceLister)
 	if !ok {
 		return nil, errors.New("this workspace's store cannot list its keys, so the signer cannot tell which keys it holds")
@@ -64,7 +65,7 @@ func loadStoreKeys(ctx context.Context, store ports.Store) (*storeKeyDirectory, 
 		ports.NodeVKey:    {custody.RolePoolCold, ports.NodeSKey, ports.NodeHwsFile},
 	}
 	d := &storeKeyDirectory{}
-	err = store.View(ctx, func(r ports.Reader) error {
+	err = store.View(ctx, func(r ports.NamedReader) error {
 		for _, e := range listing.Entries {
 			k, ok := byV[e.Ref.Kind]
 			if !ok {
@@ -85,8 +86,8 @@ func loadStoreKeys(ctx context.Context, store ports.Store) (*storeKeyDirectory, 
 			sk := storeKey{role: k.role, owner: e.Ref.Name, hash: [28]byte(txbuild.HashKey(key32))}
 			// A key is held when a signing key or a hardware signing file is
 			// here; which signer answers is the directory's business.
-			hw, _ := r.Exists(ports.Ref{Name: e.Ref.Name, Kind: k.hwsKey})
-			has, _ := r.Exists(ports.Ref{Name: e.Ref.Name, Kind: k.skey})
+			hw, _ := r.Exists(ports.NamedRef{Name: e.Ref.Name, Kind: k.hwsKey})
+			has, _ := r.Exists(ports.NamedRef{Name: e.Ref.Name, Kind: k.skey})
 			if !hw && !has {
 				continue // a verification key with no signing key here is not held
 			}
@@ -127,7 +128,8 @@ func (d *storeKeyDirectory) Owned() party.OwnedKeys {
 
 // ---- the approval gate ---------------------------------------------------------------------
 
-// passphraseGate asks for the workspace passphrase again before a key signs
+// passphraseGate asks for the workspace passphrase again (or, in a factor session,
+// for a fresh presentation of the authenticator) before a key signs
 // (SPO-Xparty-INV-016, ADR 0005 obligation 6). It asks for every key role, the
 // pool cold, payment and owner stake keys the spec names included. It compares
 // with the passphrase this session was opened with, so a stolen open terminal
@@ -140,7 +142,7 @@ type passphraseGate struct {
 }
 
 func (g passphraseGate) Reauthenticate(ctx context.Context, key custody.KeyRef, bodyHash [32]byte) error {
-	if g.s == nil || g.s.Pass == nil {
+	if g.s == nil || (g.s.Pass == nil && !g.s.factorSession) {
 		return errors.New("there is no workspace passphrase to check against: nothing was signed")
 	}
 	note := ""
@@ -150,12 +152,15 @@ func (g passphraseGate) Reauthenticate(ctx context.Context, key custody.KeyRef, 
 	// The label the operator gave the key (where one exists) and the key hash: a
 	// name alone does not say which key signs.
 	label := ""
-	if idx, ierr := ports.NewStoreKeyIndex(g.s.Store); ierr == nil {
+	{
+		idx := labels.NewIndex(g.s.Anchored)
 		if homes, herr := idx.Homes(ctx, key.Identity); herr == nil {
 			var names []string
 			for _, h := range homes {
 				if h.Role == key.Role {
-					names = append(names, safeText(h.Name))
+					if l, ok, _ := labels.LabelOf(ctx, g.s.Anchored, h.Anchor); ok {
+						names = append(names, safeText(l.Name))
+					}
 				}
 			}
 			if len(names) > 0 {
@@ -165,6 +170,20 @@ func (g passphraseGate) Reauthenticate(ctx context.Context, key custody.KeyRef, 
 	}
 	fmt.Fprintf(g.a.d.Out, "About to sign with the %s key%s, key hash %s, over body %x (%s).\n", key.Role, label, key.Identity, bodyHash[:], note)
 	flushTypedAhead(g.a.term)
+	if g.s.factorSession {
+		// ADR 0011, Amends ADR 0005: the gate is "a fresh presentation of a factor
+		// that the workspace policy accepts". There is no passphrase here; the
+		// authenticator is asked again and its answer checked against the slot.
+		ra, ok := g.s.Sealed.(FactorReauth)
+		if !ok || g.a.d.Factors == nil {
+			return errors.New("this workspace unlocks through FIDO2 factors and there is no factor source to ask again: nothing was signed")
+		}
+		fmt.Fprintf(g.a.d.Err, "Present the authenticator again to sign (%s).\n", note)
+		if err := ra.Reauthenticate(ctx, g.a.reauthOpen()); err != nil {
+			return fmt.Errorf("the authenticator was not presented again, so nothing was signed: %w", err)
+		}
+		return nil
+	}
 	typed, err := g.a.term.ReadSecret(ctx, "Type the workspace passphrase again to sign ("+note+"): ")
 	if errors.Is(err, ErrNoTerminal) {
 		return errors.New("no terminal to ask the passphrase on: an approval needs the passphrase again, and nothing was signed")
@@ -362,10 +381,7 @@ func (r *partyRun) signer(ctx context.Context, snapshot string, d partyDirs) (mu
 	if err != nil {
 		return multisig.Signer{}, "", err
 	}
-	idx, err := ports.NewStoreKeyIndex(r.s.Store)
-	if err != nil {
-		return multisig.Signer{}, "", err
-	}
+	idx := labels.NewIndex(r.s.Anchored)
 	// The role history of an identity, from the stored key records, until the
 	// workspace's role-history record exists (ADR 0010 decision 1).
 	history := func(ctx context.Context, id identity.Ref) (custody.RoleHistory, bool, error) {
@@ -401,13 +417,13 @@ func (r *partyRun) signer(ctx context.Context, snapshot string, d partyDirs) (mu
 		why = "none: this workspace's mode has no provider of its own to ask (light mode has one), and no --own-snapshot was given"
 	}
 	// An invitation carries the coordinator's tailcat address: a sealed record.
-	sg.OnInvite = func(w ports.Writer, from party.Party, inv party.Invite) error {
+	sg.OnInvite = func(w ports.NamedWriter, from party.Party, inv party.Invite) error {
 		buf, err := secret.TryTake([]byte(inv.Address))
 		if err != nil {
 			return err
 		}
 		defer buf.Destroy()
-		return w.PutSecret(ports.Ref{Name: from.Name, Kind: ports.TailcatAddr}, buf)
+		return w.PutSecret(ports.NamedRef{Name: from.Name, Kind: ports.TailcatAddr}, buf)
 	}
 	return sg, why, nil
 }

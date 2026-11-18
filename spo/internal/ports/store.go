@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
+	"strings"
 
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 )
 
@@ -72,6 +75,17 @@ const (
 	PaymentMnemonics Kind = "payment.mnemonics"
 )
 
+// Records of the identity layer (ADR 0010 decision 2), kept by ports/labels. A
+// label holds the only copy of a name; an owner record points at the newest
+// manifest of an owner; a manifest is immutable and keyed by its own identity;
+// a role history is keyed by the key identity it belongs to.
+const (
+	Label         Kind = "label"
+	OwnerRecord   Kind = "owner"
+	OwnerManifest Kind = "owner-manifest"
+	RoleHistory   Kind = "role-history"
+)
+
 type kindInfo struct {
 	secret   bool
 	numbered bool
@@ -90,6 +104,17 @@ var kinds = map[Kind]kindInfo{
 	DelegCert: {}, VoteDelegCert: {}, StakingDeregCert: {}, DRepVKey: {},
 	PartyKeys: {secret: true}, PartyIdentity: {}, PartyRecords: {}, PartyReplay: {},
 	TailcatNodeKey: {secret: true}, TailcatPSK: {secret: true}, TailcatAddr: {secret: true},
+	Label: {}, OwnerRecord: {}, OwnerManifest: {}, RoleHistory: {},
+}
+
+// AllKinds lists the kinds of the catalogue, sorted.
+func AllKinds() []Kind {
+	out := make([]Kind, 0, len(kinds))
+	for k := range kinds {
+		out = append(out, k)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 
 // Known reports whether k is in the catalogue.
@@ -103,15 +128,54 @@ func (k Kind) Secret() bool { return kinds[k].secret }
 // Numbered reports whether artefacts of this kind carry a sequence number.
 func (k Kind) Numbered() bool { return kinds[k].numbered }
 
-// Ref identifies one artefact: the operator's name for its owner (a pool, a
-// wallet), the kind, and a sequence number for numbered kinds.
+// Ref identifies one artefact in the store: the anchor identity of its owner,
+// the kind, and a sequence number for numbered kinds (ADR 0010 decision 2). The
+// store never sees a name: a name is a label that a resolver turns into an
+// anchor before the store is called (NamedRef, package ports/labels).
 type Ref struct {
+	Anchor identity.Ref
+	Kind   Kind
+	Num    int
+}
+
+func (r Ref) String() string {
+	a := r.Anchor.String()
+	if i := strings.IndexByte(a, ':'); i >= 0 && len(a) > i+9 {
+		a = a[:i+9] // the kind and the first four bytes: enough to tell two apart
+	}
+	if r.Kind.Numbered() {
+		return fmt.Sprintf("%s/%s#%d", a, r.Kind, r.Num)
+	}
+	return fmt.Sprintf("%s/%s", a, r.Kind)
+}
+
+// Validate checks a reference before it reaches any adapter.
+func (r Ref) Validate() error {
+	if !r.Kind.Known() {
+		return fmt.Errorf("%w: unknown artefact kind %q", ErrInvalidRef, r.Kind)
+	}
+	if r.Anchor.IsZero() {
+		return fmt.Errorf("%w: no anchor identity", ErrInvalidRef)
+	}
+	if r.Num < 0 || (!r.Kind.Numbered() && r.Num != 0) {
+		return fmt.Errorf("%w: bad sequence number %d for %s", ErrInvalidRef, r.Num, r.Kind)
+	}
+	return nil
+}
+
+// NamedRef is a reference by the operator's name for the owner (a pool, a
+// wallet, a policy), the kind and a number. It exists at the edge of the use
+// cases: NamedStore resolves the name through the labels and calls the store
+// with a Ref. A name that parses as an identity ("key-hash:..." as
+// identity.Ref.String prints it) names the owner that lists the identity as a
+// member, whatever its label (a pool descriptor refers to its owners so).
+type NamedRef struct {
 	Name string
 	Kind Kind
 	Num  int
 }
 
-func (r Ref) String() string {
+func (r NamedRef) String() string {
 	if r.Kind.Numbered() {
 		return fmt.Sprintf("%s/%s#%d", r.Name, r.Kind, r.Num)
 	}
@@ -120,14 +184,27 @@ func (r Ref) String() string {
 
 var nameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*(\.[A-Za-z0-9_-]+)*$`)
 
+// idNameRE matches the text form of an identity as a name: a kind word, a colon
+// and lowercase hexadecimal.
+var idNameRE = regexp.MustCompile(`^[a-z][a-z-]*:[0-9a-f]{40,64}$`)
+
+// IdentityName reports whether the name is the text form of an identity.
+func IdentityName(name string) (identity.Ref, bool) {
+	if !idNameRE.MatchString(name) {
+		return identity.Ref{}, false
+	}
+	id, err := identity.ParseRef(name)
+	return id, err == nil
+}
+
 // Validate checks a reference before it reaches any adapter. A name is a
 // plain label: no path separators, no leading dot, no shell or jq syntax
-// (hazard H7).
-func (r Ref) Validate() error {
+// (hazard H7), or the text form of an identity.
+func (r NamedRef) Validate() error {
 	if !r.Kind.Known() {
 		return fmt.Errorf("%w: unknown artefact kind %q", ErrInvalidRef, r.Kind)
 	}
-	if len(r.Name) > 128 || !nameRE.MatchString(r.Name) {
+	if _, ok := IdentityName(r.Name); !ok && (len(r.Name) > 128 || !nameRE.MatchString(r.Name)) {
 		return fmt.Errorf("%w: name %q must be letters, digits, '-', '_' and single dots", ErrInvalidRef, r.Name)
 	}
 	if r.Num < 0 || (!r.Kind.Numbered() && r.Num != 0) {
@@ -169,6 +246,24 @@ type Store interface {
 	Update(ctx context.Context, fn func(Writer) error) error
 }
 
+// RecordLister is implemented by the Reader and Writer of a store that can list
+// its records by kind inside a transaction (the sealed store and the plain
+// directory store do). The label, owner and membership checks of ports/labels
+// use it; a use case never does.
+type RecordLister interface {
+	// Records lists the references of the records of one kind, including this
+	// transaction's own writes and without the ones it deleted.
+	Records(kind Kind) ([]Ref, error)
+}
+
+// SecretOpener is implemented by the Reader and Writer of a store that can open
+// a secret record inside a transaction, into guarded memory. The label
+// resolver uses it to move the records of a provisional owner (ports/labels);
+// a use case never does.
+type SecretOpener interface {
+	OpenSecret(ref Ref) (*secret.Buffer, error)
+}
+
 // ReadStore is a Store that can only be read. A directory that is only the
 // source of an import is opened as one, so no write method exists to be misused
 // (SPO-Xcustody-INV-001).
@@ -207,3 +302,54 @@ const (
 	TailcatPSK     Kind = "tailcat.psk"
 	TailcatAddr    Kind = "tailcat.addr"
 )
+
+// The name-level view of the store (ADR 0010 decision 4: "a use case resolves a
+// name to an anchor identity through the labels before it calls the store"). The
+// use cases are written against these interfaces; ports/labels implements them
+// over a Store, and a directory in the upstream file layout implements them
+// natively (its files are named). Where a Reader, a Writer or a Store of the
+// anchor level is meant, the interfaces above are used.
+
+// NamedReader reads artefacts by name inside a View or Update.
+type NamedReader interface {
+	// Get returns a non-secret artefact, or ErrNotFound.
+	Get(ref NamedRef) ([]byte, error)
+	// Exists reports whether an artefact is present.
+	Exists(ref NamedRef) (bool, error)
+}
+
+// NamedWriter changes artefacts by name inside an Update.
+type NamedWriter interface {
+	NamedReader
+	Put(ref NamedRef, data []byte) error
+	// PutSecret stores secret material. The buffer stays owned by the caller.
+	PutSecret(ref NamedRef, s *secret.Buffer) error
+	Delete(ref NamedRef) error
+}
+
+// OwnerLabeler is implemented by the NamedReader of the label resolver: it gives
+// the label of the owner that lists an identity. An export reads the names it
+// writes back to an upstream directory through it (ADR 0010 decision 2: "writing
+// an upstream directory writes the label back").
+type OwnerLabeler interface {
+	// LabelOfIdentity returns the label of the owner of the given kind that lists
+	// the identity (written as an identity name), and whether the payment account of
+	// a wallet is kept under `<label>.payment`.
+	LabelOfIdentity(kind identity.OwnerKind, id string) (name string, paymentStem bool, err error)
+}
+
+// NamedStore persists artefacts addressed by name.
+type NamedStore interface {
+	View(ctx context.Context, fn func(NamedReader) error) error
+	Update(ctx context.Context, fn func(NamedWriter) error) error
+}
+
+// NamedReadStore is a NamedStore that can only be read.
+type NamedReadStore interface {
+	View(ctx context.Context, fn func(NamedReader) error) error
+}
+
+// NamedVault releases secret material by name to the code that exports it.
+type NamedVault interface {
+	Open(ctx context.Context, ref NamedRef) (*secret.Buffer, error)
+}

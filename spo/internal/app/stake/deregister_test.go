@@ -98,22 +98,22 @@ func TestDeregisterRefusals(t *testing.T) {
 		{"a certificate for another stake key", func(r *rig, _ *DeregisterStakeAddress) {
 			r.putCert(t, ports.StakingDeregCert, stk.Spec{Kind: stk.CertDeregistration, Deposit: 2_000_000})
 			c, _ := r.certs.BuildCertificate(stk.Spec{Kind: stk.CertDeregistration, Stake: stk.KeyHash{1}, Deposit: 2_000_000})
-			r.store.files[ports.Ref{Name: "w", Kind: ports.StakingDeregCert}] = c.Envelope
+			r.store.files[ports.NamedRef{Name: "w", Kind: ports.StakingDeregCert}] = c.Envelope
 		}, []error{ErrWrongCertificate}},
 		{"the certificate is a registration", func(r *rig, _ *DeregisterStakeAddress) {
 			r.putCert(t, ports.StakingDeregCert, stk.Spec{Kind: stk.CertRegistration, Deposit: 2_000_000})
 		}, []error{ErrWrongCertificate}},
 		{"a certificate the decoder refuses (pre-Conway)", func(r *rig, _ *DeregisterStakeAddress) {
-			r.store.files[ports.Ref{Name: "w", Kind: ports.StakingDeregCert}] = []byte("legacy")
+			r.store.files[ports.NamedRef{Name: "w", Kind: ports.StakingDeregCert}] = []byte("legacy")
 		}, nil},
 		{"no certificate file", func(r *rig, _ *DeregisterStakeAddress) {
-			delete(r.store.files, ports.Ref{Name: "w", Kind: ports.StakingDeregCert})
+			delete(r.store.files, ports.NamedRef{Name: "w", Kind: ports.StakingDeregCert})
 		}, []error{ErrMissingFile}},
 		{"the stake file holds a payment address", func(r *rig, _ *DeregisterStakeAddress) {
-			r.store.files[ports.Ref{Name: "w", Kind: ports.StakingAddr}] = []byte("addr_test_pay\n")
+			r.store.files[ports.NamedRef{Name: "w", Kind: ports.StakingAddr}] = []byte("addr_test_pay\n")
 		}, []error{ErrNotStakeAddress}},
 		{"a hardware stake key", func(r *rig, _ *DeregisterStakeAddress) {
-			r.device(t, ports.Ref{Name: "w", Kind: ports.StakingSKey})
+			r.device(t, ports.NamedRef{Name: "w", Kind: ports.StakingSKey})
 		}, nil},
 		{"declined", func(r *rig, _ *DeregisterStakeAddress) { r.conf.yes = false }, []error{ErrDeclined}},
 	}
@@ -203,7 +203,7 @@ func TestGenerateDeregistrationCertificate(t *testing.T) {
 		if res.Certificate.Kind != stk.CertDeregistration || res.Certificate.Deposit != 2_500_000 || res.Certificate.Stake != stk.KeyHash(r.stakeID) {
 			t.Errorf("%+v", res.Certificate)
 		}
-		if got := r.store.files[ports.Ref{Name: "w", Kind: ports.StakingDeregCert}]; string(got) != string(res.Certificate.Envelope) || r.store.writes != 1 {
+		if got := r.store.files[ports.NamedRef{Name: "w", Kind: ports.StakingDeregCert}]; string(got) != string(res.Certificate.Envelope) || r.store.writes != 1 {
 			t.Errorf("stored %q after %d writes", got, r.store.writes)
 		}
 		if r.l.count("params") != 0 {
@@ -241,10 +241,10 @@ func TestGenerateDeregistrationRefusalsWriteNothing(t *testing.T) {
 		}, []error{stk.ErrUnknown}},
 		{"one source and no acknowledgement", func(_ *rig, uc *GenerateDeregistrationCertificate) { uc.Sources = RequireCorroboration }, []error{ErrSingleSource}},
 		{"no stake address file", func(r *rig, _ *GenerateDeregistrationCertificate) {
-			delete(r.store.files, ports.Ref{Name: "w", Kind: ports.StakingAddr})
+			delete(r.store.files, ports.NamedRef{Name: "w", Kind: ports.StakingAddr})
 		}, []error{ErrMissingFile}},
 		{"a payment address in the file", func(r *rig, _ *GenerateDeregistrationCertificate) {
-			r.store.files[ports.Ref{Name: "w", Kind: ports.StakingAddr}] = []byte("addr_test_pay")
+			r.store.files[ports.NamedRef{Name: "w", Kind: ports.StakingAddr}] = []byte("addr_test_pay")
 		}, []error{ErrNotStakeAddress}},
 		{"no reader", func(_ *rig, uc *GenerateDeregistrationCertificate) { uc.Account = nil }, []error{ErrNoChainReader}},
 	}

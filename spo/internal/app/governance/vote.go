@@ -59,11 +59,11 @@ var voterKinds = []struct {
 // tried in that order and the first that exists wins. It never reads a signing key.
 //
 // spec: SPO-24a-IF-002, SPO-24a-IN-001, SPO-24a-IN-004, SPO-24a-INV-001
-func findVoter(r ports.Reader, arg string) (voterKeys, error) {
+func findVoter(r ports.NamedReader, arg string) (voterKeys, error) {
 	stem := strings.TrimSuffix(strings.TrimSuffix(trimDir(arg), "."), ".vkey")
 	for _, vk := range voterKinds {
 		if base, ok := strings.CutSuffix(stem, vk.suffix); ok && base != "" && !strings.ContainsAny(base, "/\\") {
-			b, err := get(r, ports.Ref{Name: base, Kind: vk.vkey})
+			b, err := get(r, ports.NamedRef{Name: base, Kind: vk.vkey})
 			if err != nil {
 				return voterKeys{}, err
 			}
@@ -75,7 +75,7 @@ func findVoter(r ports.Reader, arg string) (voterKeys, error) {
 		return voterKeys{}, fmt.Errorf("%w: %q", ErrBadWord, arg)
 	}
 	for _, vk := range voterKinds {
-		b, err := r.Get(ports.Ref{Name: stem, Kind: vk.vkey})
+		b, err := r.Get(ports.NamedRef{Name: stem, Kind: vk.vkey})
 		if errors.Is(err, ports.ErrNotFound) {
 			continue
 		}
@@ -137,7 +137,7 @@ type Chooser interface {
 // second get the next free second instead of overwriting each other
 // (SPO-24a-INV-006).
 type GenerateVote struct {
-	Store   ports.Store
+	Store   ports.NamedStore
 	Votes   ports.VoteFileBuilder
 	Actions ports.GovActionReader
 	Params  ports.ProtocolParametersReader
@@ -165,7 +165,7 @@ type GenerateVoteRequest struct {
 
 // VoteWritten is one vote file the run wrote.
 type VoteWritten struct {
-	Ref         ports.Ref
+	Ref         ports.NamedRef
 	Vote        governance.Vote
 	Description string
 }
@@ -207,7 +207,7 @@ func (uc GenerateVote) Run(ctx context.Context, req GenerateVoteRequest) (VotesG
 		return res, fmt.Errorf("%w: a chooser, the action, parameter and epoch readers and a clock are needed", ErrMisconfigured)
 	}
 	var vk voterKeys
-	if err := uc.Store.View(ctx, func(r ports.Reader) error {
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
 		vk, err = findVoter(r, req.Voter)
 		return err
@@ -348,13 +348,13 @@ func (uc GenerateVote) checkActionAnchor(ctx context.Context, a governance.Actio
 }
 
 // write stores the vote file under the first free `<name>_<stamp>` of the local time.
-func (uc GenerateVote) write(ctx context.Context, nm string, role governance.Role, env []byte) (ports.Ref, error) {
+func (uc GenerateVote) write(ctx context.Context, nm string, role governance.Role, env []byte) (ports.NamedRef, error) {
 	kind := ports.VoteFileKind(role)
 	t := uc.Clock.Now()
-	var ref ports.Ref
-	err := uc.Store.Update(ctx, func(w ports.Writer) error {
+	var ref ports.NamedRef
+	err := uc.Store.Update(ctx, func(w ports.NamedWriter) error {
 		for i := 0; i < 600; i++ {
-			ref = ports.Ref{Name: governance.VoteFileName(nm, t.Add(time.Duration(i)*time.Second).Format("060102150405")), Kind: kind}
+			ref = ports.NamedRef{Name: governance.VoteFileName(nm, t.Add(time.Duration(i)*time.Second).Format("060102150405")), Kind: kind}
 			ok, err := w.Exists(ref)
 			if err != nil {
 				return err
@@ -408,14 +408,14 @@ type RegisterVoteRequest struct {
 	Unrestricted bool
 }
 
-func parseVoteFileName(s string) (ports.Ref, error) {
+func parseVoteFileName(s string) (ports.NamedRef, error) {
 	s = trimDir(s)
 	for _, k := range []ports.Kind{ports.VoteDRepFile, ports.VoteCCHotFile, ports.VotePoolFile} {
 		if base, ok := strings.CutSuffix(s, "."+string(k)); ok && base != "" && !strings.ContainsAny(base, "/\\") {
-			return ports.Ref{Name: base, Kind: k}, nil
+			return ports.NamedRef{Name: base, Kind: k}, nil
 		}
 	}
-	return ports.Ref{}, fmt.Errorf("%w: %q is not a .drep.vote, .cc-hot.vote or .pool.vote file", ErrVoteFile, s)
+	return ports.NamedRef{}, fmt.Errorf("%w: %q is not a .drep.vote, .cc-hot.vote or .pool.vote file", ErrVoteFile, s)
 }
 
 // Run registers the votes.
@@ -442,8 +442,8 @@ func (uc RegisterVote) Run(ctx context.Context, req RegisterVoteRequest) (Result
 	var atts []txbuild.VoteAttachment
 	var vk voterKeys
 	var signer txflow.Slot
-	var refs []ports.Ref
-	if err := uc.Store.View(ctx, func(r ports.Reader) error {
+	var refs []ports.NamedRef
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
 		if pay, err = uc.readPayer(r, pn); err != nil {
 			return err
@@ -504,7 +504,7 @@ func (uc RegisterVote) Run(ctx context.Context, req RegisterVoteRequest) (Result
 			}
 			var mismatch string
 			for _, stem := range stems {
-				b, err := r.Get(ports.Ref{Name: stem, Kind: kd.vkey})
+				b, err := r.Get(ports.NamedRef{Name: stem, Kind: kd.vkey})
 				if errors.Is(err, ports.ErrNotFound) {
 					continue
 				}

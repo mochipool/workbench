@@ -65,7 +65,7 @@ var (
 // and never copied elsewhere: the sources stay the caller's to destroy.
 type ImportPoolFromChain struct {
 	PoolInfoAcquirer
-	Store     ports.Store
+	Store     ports.NamedStore
 	VKeys     ports.VKeyEnvelopeDeriver
 	VRF       ports.VrfVKeyDeriver
 	Addresses ports.AddressBuilder
@@ -176,7 +176,7 @@ type PoolImported struct {
 	Pool       string
 	Info       chain.PoolInfo
 	Descriptor []byte
-	Written    []ports.Ref // empty after a dry run
+	Written    []ports.NamedRef // empty after a dry run
 	Accounts   []AccountImported
 	// CounterNext is the number in the counter file (chain counter + 1); valid
 	// when the cold key was imported.
@@ -214,7 +214,7 @@ func metaString(doc map[string]any, k string) string {
 }
 
 type put struct {
-	ref  ports.Ref
+	ref  ports.NamedRef
 	data []byte
 	sec  *ports.Secret
 }
@@ -275,20 +275,20 @@ func (u ImportPoolFromChain) Run(ctx context.Context, req ImportPoolRequest) (Po
 	// Existing artefacts of the pool (SPO-0x-PR-002, SPO-0x-PRE-004).
 	poolKinds := []ports.Kind{ports.PoolDescriptor, ports.NodeSKey, ports.NodeVKey, ports.NodeCounter, ports.VrfSKey, ports.VrfVKey}
 	var nodeVKey []byte
-	if err := u.Store.View(ctx, func(r ports.Reader) error {
+	if err := u.Store.View(ctx, func(r ports.NamedReader) error {
 		for _, k := range poolKinds {
-			ok, err := r.Exists(ports.Ref{Name: name, Kind: k})
+			ok, err := r.Exists(ports.NamedRef{Name: name, Kind: k})
 			if err != nil {
 				return err
 			}
 			if ok && !req.ContinueExisting {
-				return fmt.Errorf("%w: %s", ErrPoolPartExists, ports.Ref{Name: name, Kind: k})
+				return fmt.Errorf("%w: %s", ErrPoolPartExists, ports.NamedRef{Name: name, Kind: k})
 			}
 			if ok && k == ports.PoolDescriptor {
 				return fmt.Errorf("%w: %s", ErrPoolExists, name)
 			}
 		}
-		if b, err := r.Get(ports.Ref{Name: name, Kind: ports.NodeVKey}); err == nil {
+		if b, err := r.Get(ports.NamedRef{Name: name, Kind: ports.NodeVKey}); err == nil {
 			nodeVKey = b
 		}
 		return nil
@@ -353,10 +353,10 @@ func (u ImportPoolFromChain) Run(ctx context.Context, req ImportPoolRequest) (Po
 
 	var plan []put
 	res := PoolImported{Pool: name, Info: info, DryRun: req.DryRun, Sources: sources, SingleSource: singleUsed}
-	taken := map[ports.Ref]bool{}
+	taken := map[ports.NamedRef]bool{}
 	// refuse catches a name used twice in this request; what the store already
 	// holds is checked against the whole plan below (SPO-0x-PRE-006, SPO-0x-PRE-008).
-	refuse := func(r ports.Ref) error {
+	refuse := func(r ports.NamedRef) error {
 		if taken[r] {
 			return fmt.Errorf("%w: %s is used twice", ErrKeyRefused, r)
 		}
@@ -373,8 +373,8 @@ func (u ImportPoolFromChain) Run(ctx context.Context, req ImportPoolRequest) (Po
 		if err := u.keyEnvelope(req.Cold, "cold"); err != nil {
 			return PoolImported{}, err
 		}
-		sk, vk, cnt := ports.Ref{Name: name, Kind: ports.NodeSKey}, ports.Ref{Name: name, Kind: ports.NodeVKey}, ports.Ref{Name: name, Kind: ports.NodeCounter}
-		for _, r := range []ports.Ref{sk, vk, cnt} {
+		sk, vk, cnt := ports.NamedRef{Name: name, Kind: ports.NodeSKey}, ports.NamedRef{Name: name, Kind: ports.NodeVKey}, ports.NamedRef{Name: name, Kind: ports.NodeCounter}
+		for _, r := range []ports.NamedRef{sk, vk, cnt} {
 			if err := refuse(r); err != nil {
 				return PoolImported{}, err
 			}
@@ -422,8 +422,8 @@ func (u ImportPoolFromChain) Run(ctx context.Context, req ImportPoolRequest) (Po
 		if err := u.keyEnvelope(req.VRF, "VRF"); err != nil {
 			return PoolImported{}, err
 		}
-		sk, vk := ports.Ref{Name: name, Kind: ports.VrfSKey}, ports.Ref{Name: name, Kind: ports.VrfVKey}
-		for _, r := range []ports.Ref{sk, vk} {
+		sk, vk := ports.NamedRef{Name: name, Kind: ports.VrfSKey}, ports.NamedRef{Name: name, Kind: ports.VrfVKey}
+		for _, r := range []ports.NamedRef{sk, vk} {
 			if err := refuse(r); err != nil {
 				return PoolImported{}, err
 			}
@@ -448,7 +448,7 @@ func (u ImportPoolFromChain) Run(ctx context.Context, req ImportPoolRequest) (Po
 		if a.Name == "" {
 			continue // a blank name ends the loop
 		}
-		if (ports.Ref{Name: a.Name, Kind: ports.StakingSKey}).Validate() != nil || seen[a.Name] {
+		if (ports.NamedRef{Name: a.Name, Kind: ports.StakingSKey}).Validate() != nil || seen[a.Name] {
 			return PoolImported{}, fmt.Errorf("%w: %q", ErrAccountName, a.Name)
 		}
 		seen[a.Name] = true
@@ -457,14 +457,14 @@ func (u ImportPoolFromChain) Run(ctx context.Context, req ImportPoolRequest) (Po
 		}
 		ai := AccountImported{Name: a.Name}
 		payBase := a.Name + ".payment"
-		pSk, pVk := ports.Ref{Name: payBase, Kind: ports.AddrSKey}, ports.Ref{Name: payBase, Kind: ports.AddrVKey}
+		pSk, pVk := ports.NamedRef{Name: payBase, Kind: ports.AddrSKey}, ports.NamedRef{Name: payBase, Kind: ports.AddrVKey}
 		if u.VKeys == nil {
 			return PoolImported{}, fmt.Errorf("%w: a verification key deriver is needed", ErrImportMisconfigured)
 		}
 		if err := u.keyEnvelope(a.Payment, "payment"); err != nil {
 			return PoolImported{}, err
 		}
-		for _, r := range []ports.Ref{pSk, pVk} {
+		for _, r := range []ports.NamedRef{pSk, pVk} {
 			if err := refuse(r); err != nil {
 				return PoolImported{}, err
 			}
@@ -479,11 +479,11 @@ func (u ImportPoolFromChain) Run(ctx context.Context, req ImportPoolRequest) (Po
 		}
 		plan = append(plan, put{ref: pSk, sec: a.Payment}, put{ref: pVk, data: pEnv})
 		if a.Stake != nil {
-			sSk, sVk := ports.Ref{Name: a.Name, Kind: ports.StakingSKey}, ports.Ref{Name: a.Name, Kind: ports.StakingVKey}
+			sSk, sVk := ports.NamedRef{Name: a.Name, Kind: ports.StakingSKey}, ports.NamedRef{Name: a.Name, Kind: ports.StakingVKey}
 			if err := u.keyEnvelope(a.Stake, "stake"); err != nil {
 				return PoolImported{}, err
 			}
-			for _, r := range []ports.Ref{sSk, sVk} {
+			for _, r := range []ports.NamedRef{sSk, sVk} {
 				if err := refuse(r); err != nil {
 					return PoolImported{}, err
 				}
@@ -509,7 +509,7 @@ func (u ImportPoolFromChain) Run(ctx context.Context, req ImportPoolRequest) (Po
 			if err != nil {
 				return PoolImported{}, err
 			}
-			refs := []ports.Ref{{Name: payBase, Kind: ports.AddrFile}, {Name: a.Name, Kind: ports.StakingAddr}, {Name: a.Name, Kind: ports.StakingCert}}
+			refs := []ports.NamedRef{{Name: payBase, Kind: ports.AddrFile}, {Name: a.Name, Kind: ports.StakingAddr}, {Name: a.Name, Kind: ports.StakingCert}}
 			for _, r := range refs {
 				if err := refuse(r); err != nil {
 					return PoolImported{}, err
@@ -530,7 +530,7 @@ func (u ImportPoolFromChain) Run(ctx context.Context, req ImportPoolRequest) (Po
 			ai.Complete, ai.StakeAddress = true, string(stkAddr)
 			if len(coldRaw) == 32 { // SPO-0x-OUT-012: only when the cold key is there
 				pid, _ := chain.PoolIDOf(coldRaw)
-				dref := ports.Ref{Name: a.Name, Kind: ports.DelegCert}
+				dref := ports.NamedRef{Name: a.Name, Kind: ports.DelegCert}
 				if err := refuse(dref); err != nil {
 					return PoolImported{}, err
 				}
@@ -557,11 +557,11 @@ func (u ImportPoolFromChain) Run(ctx context.Context, req ImportPoolRequest) (Po
 	}
 	res.RewardsMissing = desc.Text(pool.FieldRewards) == ""
 
-	dref := ports.Ref{Name: name, Kind: ports.PoolDescriptor}
+	dref := ports.NamedRef{Name: name, Kind: ports.PoolDescriptor}
 	res.Descriptor = desc.Render()
 	plan = append(plan, put{ref: dref, data: res.Descriptor})
 	if req.DryRun {
-		err := u.Store.View(ctx, func(r ports.Reader) error {
+		err := u.Store.View(ctx, func(r ports.NamedReader) error {
 			for _, p := range plan {
 				ok, err := r.Exists(p.ref)
 				if err != nil {
@@ -582,7 +582,7 @@ func (u ImportPoolFromChain) Run(ctx context.Context, req ImportPoolRequest) (Po
 			return PoolImported{}, err
 		}
 	}
-	err = u.Store.Update(ctx, func(w ports.Writer) error {
+	err = u.Store.Update(ctx, func(w ports.NamedWriter) error {
 		// The same checks inside the transaction: the workspace may have moved.
 		for _, p := range plan {
 			ok, err := w.Exists(p.ref)

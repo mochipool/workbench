@@ -45,7 +45,7 @@ func TestRegisterDRepRegistration(t *testing.T) {
 	if q.Type != "DRepIDRegistration" || len(q.Extra) != 1 || q.Extra[0] != (ports.QueuedField{Key: "drepName", Value: "d"}) {
 		t.Errorf("queue entry %+v", q)
 	}
-	if string(r.store.files[ports.Ref{Name: "d", Kind: ports.DRepRegCert}]) != string(res.Certificate.Envelope) {
+	if string(r.store.files[ports.NamedRef{Name: "d", Kind: ports.DRepRegCert}]) != string(res.Certificate.Envelope) {
 		t.Error("the certificate file is not stored")
 	}
 	// The cert is stored after the queue (a refused run leaves no file).
@@ -115,7 +115,7 @@ func TestRegisterDRepUpdateWouldClearAnchor(t *testing.T) {
 // spec: SPO-21b-INV-006, SPO-21b-INV-015
 func TestRegisterDRepHardwareRefusedUpFront(t *testing.T) {
 	r := newRig(t)
-	r.hardware(ports.Ref{Name: "d", Kind: ports.DRepSKey}, ports.DRepHwsFile)
+	r.hardware(ports.NamedRef{Name: "d", Kind: ports.DRepSKey}, ports.DRepHwsFile)
 	dr := &fakeDReps{src: "koios", l: r.l, r: chain.None[chain.DRepState]()}
 	_, err := r.registerDRep(dr).Run(context.Background(), RegisterDRepRequest{DRep: "d", Payer: "w.payment"})
 	if err == nil {
@@ -177,7 +177,7 @@ func TestRetireDRepRefundIsTheOnChainDeposit(t *testing.T) {
 	if r.queue.got[0].Type != "DRepIDRetirement" {
 		t.Errorf("queue %+v", r.queue.got[0])
 	}
-	if r.store.files[ports.Ref{Name: "d", Kind: ports.DRepRetCert}] == nil {
+	if r.store.files[ports.NamedRef{Name: "d", Kind: ports.DRepRetCert}] == nil {
 		t.Error("the retirement certificate is not stored")
 	}
 }

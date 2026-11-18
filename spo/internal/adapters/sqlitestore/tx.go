@@ -10,19 +10,20 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
 
 	"github.com/fxamacker/cbor/v2"
 
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/platform/seal"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 
 	sqlite "modernc.org/sqlite"
 )
 
 const (
-	tagNamespace = "record-ref"
+	tagNamespace = "record-ref/v2"
 	eventKind    = "audit.event"
 	sqliteBusy   = 5 // primary result code; BUSY_SNAPSHOT (517) and BUSY_RECOVERY (261) carry it in the low byte
 )
@@ -41,22 +42,30 @@ func classOf(k ports.Kind) string {
 	return seal.ClassSensitive
 }
 
-// ownerOf is the owner field of the associated data: the owner name and the
-// sequence number. Names cannot contain '#', so the pair is unambiguous. The
-// number is bound so that two numbered records of one owner cannot swap their
-// lookup tags undetected.
-func ownerOf(r ports.Ref) string { return r.Name + "#" + strconv.Itoa(r.Num) }
+// metaOf is the sealing input of a record of the identity-keyed format: the
+// anchor identity (binary form) and the number are bound into the associated
+// data and held in the owner blob; no name is.
+func metaOf(ws, id []byte, ref ports.Ref, class string, version uint64) seal.RecordMeta {
+	a, _ := ref.Anchor.MarshalBinary()
+	return seal.RecordMeta{WorkspaceID: ws, RecordID: id, Kind: string(ref.Kind), Anchor: a, Num: uint64(ref.Num), Class: class, Version: version, Format: seal.RecordFormat}
+}
 
-// parseOwner is the inverse of ownerOf.
-func parseOwner(o string) (name string, num int, err error) {
-	i := strings.LastIndexByte(o, '#')
-	if i < 0 {
-		return "", 0, fmt.Errorf("%w: malformed owner", ErrCorrupt)
+// refOfOwner is the reference an opened owner blob names.
+func refOfOwner(kind string, anchor []byte, num uint64) (ports.Ref, error) {
+	a, err := identity.UnmarshalRef(anchor)
+	if err != nil {
+		return ports.Ref{}, fmt.Errorf("%w: owner blob: %v", ErrCorrupt, err)
 	}
-	if num, err = strconv.Atoi(o[i+1:]); err != nil {
-		return "", 0, fmt.Errorf("%w: malformed owner", ErrCorrupt)
+	return ports.Ref{Anchor: a, Kind: ports.Kind(kind), Num: int(num)}, nil
+}
+
+// refOf opens the owner blob of a stored record into its reference.
+func (s *Store) refOf(id []byte, kind string, r seal.SealedRecord) (ports.Ref, error) {
+	anchor, num, err := s.keys.OpenOwnerRef(s.ws, id, kind, r)
+	if err != nil {
+		return ports.Ref{Kind: ports.Kind(kind)}, err
 	}
-	return o[:i], num, nil
+	return refOfOwner(kind, anchor, num)
 }
 
 // mapErr turns a lost lock or a unique-tag collision into ErrConflict: any
@@ -82,12 +91,18 @@ func busyOrLocked(err error) bool {
 	return false
 }
 
-func tagFor(keys *seal.Keys, name string, kind string, num int) ([]byte, error) {
-	return keys.Index.Tag(tagNamespace, []byte(name), []byte(kind), []byte(strconv.Itoa(num)))
+// tagFor is the lookup tag of a record: HMAC-SHA256 under the index key over the
+// anchor identity, the kind and the number (ADR 0010, Amends ADR 0003).
+func tagFor(keys *seal.Keys, anchor identity.Ref, kind string, num int) ([]byte, error) {
+	ab, err := anchor.MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+	return keys.Index.Tag(tagNamespace, ab, []byte(kind), []byte(strconv.Itoa(num)))
 }
 
 func (s *Store) tag(r ports.Ref) ([]byte, error) {
-	return tagFor(s.keys, r.Name, string(r.Kind), r.Num)
+	return tagFor(s.keys, r.Anchor, string(r.Kind), r.Num)
 }
 
 type dbq interface {
@@ -115,8 +130,20 @@ type txn struct {
 	ctx      context.Context
 	q        dbq
 	writable bool
+	// resealed: a stored hot record was sealed cold in this transaction (a key gained a cold role)
+	resealed bool
 	ops      map[ports.Ref]*op
 	order    []ports.Ref
+	// cold is the cold-role state of this transaction's writes (cold.go); preset
+	// gives a record the sub-key it is sealed under (an open's rotated salt).
+	cold   *coldWork
+	preset map[ports.Ref]*nextSub
+	// prep is the cold-factor material gathered before this transaction began for
+	// the cold records it creates; probe is set on the first attempt of an Update,
+	// which only counts them (coldNeed) and is rolled back when there are any.
+	prep     *coldPrep
+	probe    bool
+	coldNeed int
 }
 
 // fetch reads the record row for ref, or ports.ErrNotFound.
@@ -175,7 +202,7 @@ func errRecordChanged() error {
 }
 
 func (t *txn) meta(ref ports.Ref, r *recRow) seal.RecordMeta {
-	return seal.RecordMeta{WorkspaceID: t.s.ws, RecordID: r.id, Kind: r.kind, Owner: ownerOf(ref), Class: classOf(ref.Kind), Version: r.version}
+	return metaOf(t.s.ws, r.id, ref, classOf(ref.Kind), r.version)
 }
 
 // corrupt maps a seal failure to ErrCorrupt for ref. Anything else (a memory
@@ -222,9 +249,29 @@ func (t *txn) OpenSecret(ref ports.Ref) (*secret.Buffer, error) {
 	if r.kind != string(ref.Kind) {
 		return nil, &RefError{ref, fmt.Errorf("%w: stored kind %q", ErrCorrupt, r.kind)}
 	}
+	if labels.IsKeySecret(ref.Kind) {
+		cls, err := labels.ClassifyKeyRecord(t, ref)
+		if err != nil {
+			return nil, &RefError{ref, err}
+		}
+		if cls.Cold != seal.IsColdSealed(r.sealed) {
+			return nil, &RefError{ref, ErrColdClassMismatch}
+		}
+		if cls.Cold {
+			return nil, &RefError{ref, errColdRecord}
+		}
+	} else if seal.IsColdSealed(r.sealed) {
+		return nil, &RefError{ref, ErrColdClassMismatch}
+	}
 	b, err := t.s.keys.OpenSecret(t.meta(ref, r), r.sealed)
 	return b, corrupt(ref, err)
 }
+
+// errColdRecord is what a transaction's OpenSecret returns for a cold-role
+// record: Open catches it and opens the record in a write transaction of its own;
+// inside a View or an Update callback it reaches the caller as
+// ErrColdInTransaction.
+var errColdRecord = ErrColdInTransaction
 
 // copySecret copies a guarded buffer into another guarded buffer; the bytes
 // never reach ordinary memory.
@@ -415,7 +462,17 @@ func (t *txn) apply() (*Head, error) {
 	var wrote []*stored
 	var deleted [][]byte
 	now := t.s.now().Unix()
-	for _, ref := range t.order {
+	w := t.cold
+	if w == nil {
+		var err error
+		if w, err = t.coldPrepare(); err != nil {
+			return nil, err
+		}
+		defer w.destroy()
+		t.resealed = w.resealed
+		defer func() { t.coldNeed = w.need }()
+	}
+	for _, ref := range append([]ports.Ref(nil), t.order...) {
 		o := t.ops[ref]
 		tag, err := t.s.tag(ref)
 		if err != nil {
@@ -452,10 +509,10 @@ func (t *txn) apply() (*Head, error) {
 		} else if id, err = seal.NewID(); err != nil {
 			return nil, err
 		}
-		meta := seal.RecordMeta{WorkspaceID: t.s.ws, RecordID: id, Kind: string(ref.Kind), Owner: ownerOf(ref), Class: classOf(ref.Kind), Version: version}
+		meta := metaOf(t.s.ws, id, ref, classOf(ref.Kind), version)
 		var sealed seal.SealedRecord
 		if o.secret != nil {
-			sealed, err = t.s.keys.SealSecret(meta, o.secret)
+			sealed, err = w.seal(ref, meta, o.secret)
 		} else {
 			sealed, err = t.s.keys.SealRecord(meta, o.data)
 		}
@@ -481,7 +538,7 @@ func (t *txn) apply() (*Head, error) {
 			return nil, err
 		}
 		entries = append(entries, touched{ID: id, Version: version, Hash: h})
-		events = append(events, []any{"put", ref.String()})
+		events = append(events, []any{"put", t.auditName(ref, o)})
 	}
 	if len(entries) == 0 {
 		return nil, nil
@@ -500,6 +557,19 @@ func (t *txn) apply() (*Head, error) {
 	return head, nil
 }
 
+// auditName is how an audit event names a record: the kind and the short
+// anchor. A label record also shows its label (group and name) as it was
+// written, so the audit chain tells which name stood for which anchor at the time
+// (a rename is a deleted label and a written one).
+func (t *txn) auditName(ref ports.Ref, o *op) string {
+	if ref.Kind == ports.Label && o != nil && o.data != nil {
+		if l, err := labels.ParseLabel(o.data); err == nil {
+			return fmt.Sprintf("label %s %q -> %s", l.Group, l.Name, l.Anchor)
+		}
+	}
+	return ref.String()
+}
+
 // auditID is the "record id" of an audit event payload: 8 zero bytes then the
 // sequence number, big endian. Events are sealed like records so the same
 // code path (and the same bindings) protect them.
@@ -513,7 +583,9 @@ func auditID(seq uint64) []byte {
 // "audit.event", no owner, class sensitive, record id auditID(seq), version
 // seq.
 func eventMeta(ws []byte, seq uint64) seal.RecordMeta {
-	return seal.RecordMeta{WorkspaceID: ws, RecordID: auditID(seq), Kind: eventKind, Owner: "", Class: seal.ClassSensitive, Version: seq}
+	// The audit rows keep the encoding of format 1: their MAC chain and sealed
+	// events did not change when the record encoding did (ADR 0010 decision 4).
+	return seal.RecordMeta{WorkspaceID: ws, RecordID: auditID(seq), Kind: eventKind, Owner: "", Class: seal.ClassSensitive, Version: seq, Format: seal.LegacyRecordFormat}
 }
 
 var zeroMAC = make([]byte, seal.MACSize)
@@ -935,7 +1007,9 @@ func (s *Store) withWriteTxMode(ctx context.Context, strict bool, body func(q db
 	if err := s.checkWriteSnapshot(ctx, conn); err != nil {
 		return false, err
 	}
+	s.writing.Add(1)
 	head, err := body(conn)
+	s.writing.Add(-1)
 	if err != nil {
 		return false, mapErr(err)
 	}
@@ -990,6 +1064,9 @@ func (s *Store) readBack(ctx context.Context, head *Head, confirm func(context.C
 
 // View implements ports.Store: reads at one consistent snapshot.
 func (s *Store) View(ctx context.Context, fn func(ports.Reader) error) error {
+	if s.legacy {
+		return ErrLegacyFormat
+	}
 	release, err := s.enter(ctx)
 	if err != nil {
 		return err
@@ -1025,27 +1102,74 @@ func (s *Store) Update(ctx context.Context, fn func(ports.Writer) error) error {
 		return err
 	}
 	defer release()
-	_, err = s.withWriteTx(ctx, func(q dbq) (*Head, error) {
-		if err := s.catchUp(ctx, q); err != nil {
-			return nil, err
+	// The cold factor is never asked for while a write transaction is open. The
+	// first attempt runs fn with every new cold record sealed under a throwaway
+	// sub-key and counts them; when there are any it is rolled back, the factor is
+	// presented once for each (no transaction, no lock), and fn runs again with
+	// the material, which the transaction only consumes. A write that needs more
+	// than was gathered fails (ErrColdNotGathered) instead of asking.
+	var prep *coldPrep
+	defer func() { prep.destroy() }()
+	resealed := false
+	var committed bool
+	for {
+		need := 0
+		committed, err = s.withWriteTx(ctx, func(q dbq) (*Head, error) {
+			if err := s.catchUp(ctx, q); err != nil {
+				return nil, err
+			}
+			t := &txn{s: s, ctx: ctx, q: q, writable: true, ops: map[ports.Ref]*op{}, prep: prep, probe: prep == nil}
+			defer t.discard()
+			if err := fn(t); err != nil {
+				return nil, err
+			}
+			h, err := t.apply()
+			resealed = t.resealed
+			need = t.coldNeed
+			if err == nil && t.probe && need > 0 {
+				return nil, errNeedColdFactor
+			}
+			return h, err
+		}, nil)
+		if errors.Is(err, errNeedColdFactor) {
+			if prep, err = s.gatherColdCreate(ctx, need); err != nil {
+				return err
+			}
+			continue
 		}
-		t := &txn{s: s, ctx: ctx, q: q, writable: true, ops: map[ports.Ref]*op{}}
-		defer t.discard()
-		if err := fn(t); err != nil {
-			return nil, err
+		break
+	}
+	if err == nil && committed && resealed {
+		// a key gained a cold role: the hot versions of its records that the write
+		// replaced must not stay in the write-ahead log (as after a rotation)
+		var busy, logFrames, done int
+		if cerr := s.db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &done); cerr != nil || busy != 0 {
+			s.notice("the write-ahead log could not be truncated after a key gained a cold role: the hot versions of its records may stay in the -wal file until it is checkpointed")
 		}
-		return t.apply()
-	}, nil)
+	}
 	return err
 }
 
 // Open implements ports.Vault: it returns the secret in guarded memory.
 func (s *Store) Open(ctx context.Context, ref ports.Ref) (*secret.Buffer, error) {
+	if s.legacy {
+		return nil, ErrLegacyFormat
+	}
 	release, err := s.enter(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer release()
+	b, err := s.openOrdinary(ctx, ref)
+	release()
+	if err != nil && errors.Is(err, errColdRecord) {
+		return s.openCold(ctx, ref)
+	}
+	return b, err
+}
+
+// openOrdinary opens a record that the master key alone opens, in a read
+// transaction. The caller holds the gate.
+func (s *Store) openOrdinary(ctx context.Context, ref ports.Ref) (*secret.Buffer, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err

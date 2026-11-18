@@ -222,7 +222,7 @@ func generateVectors(t *testing.T) []byte {
 	defer pw.Destroy()
 	rng := &scripted{t: t, chunks: [][]byte{in.Salt, in.SlotNonce}}
 	slot, err := sealer{rand: rng}.newPassphraseSlot(in.WorkspaceID, in.SlotID, master, pw,
-		KDFParams{in.KDFMemoryKiB, in.KDFPasses, in.KDFLanes})
+		KDFParams{in.KDFMemoryKiB, in.KDFPasses, in.KDFLanes}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +246,7 @@ func generateVectors(t *testing.T) []byte {
 
 	// Recovery slot. Randomness order: recovery key, nonce.
 	rng = &scripted{t: t, chunks: [][]byte{in.RecoveryKey, in.RecoveryNonce}}
-	rslot, gotKey, err := sealer{rand: rng}.newRecoverySlot(in.WorkspaceID, in.RecoverySlotID, master)
+	rslot, gotKey, err := sealer{rand: rng}.newRecoverySlot(in.WorkspaceID, in.RecoverySlotID, master, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +269,7 @@ func generateVectors(t *testing.T) []byte {
 	if out.RecordAD, err = m.AD(); err != nil {
 		t.Fatal(err)
 	}
-	if out.RecordOwnerAD, err = ownerAD(in.WorkspaceID, in.RecordID, in.Kind); err != nil {
+	if out.RecordOwnerAD, err = ownerAD(LegacyRecordFormat, in.WorkspaceID, in.RecordID, in.Kind); err != nil {
 		t.Fatal(err)
 	}
 	src := secret.Take(append([]byte(nil), in.Plaintext...))
@@ -580,7 +580,7 @@ func TestAEADVectorsAgainstXCrypto(t *testing.T) {
 	owner := h(g.Outputs, "record_owner")
 	if o, err := w.Open(nil, owner[:24], owner[24:], h(g.Outputs, "record_owner_ad")); err != nil {
 		t.Errorf("x/crypto cannot open the committed owner blob: %v", err)
-	} else if got, err := unpadOwner(o); err != nil || got != g.Inputs["owner"].(string) {
+	} else if got, err := unpadOwner(o); err != nil || string(got) != g.Inputs["owner"].(string) {
 		t.Errorf("committed owner blob holds %q: %v", got, err)
 	}
 	// Slot: the wrapped master key opens under the committed slot key, and

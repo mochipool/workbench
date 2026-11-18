@@ -163,10 +163,10 @@ func TestInviteIsBoundToTheEnrolledNodeKeyAndAtomic(t *testing.T) {
 	var stored []string
 	fail := true
 	sg := s.B.Signer()
-	sg.OnInvite = func(w ports.Writer, from party.Party, inv party.Invite) error {
+	sg.OnInvite = func(w ports.NamedWriter, from party.Party, inv party.Invite) error {
 		if fail {
 			// Whatever the hook wrote before failing is rolled back with the rest.
-			_ = w.Put(ports.Ref{Name: "partial", Kind: ports.NodeCounter}, []byte("1"))
+			_ = w.Put(ports.NamedRef{Name: "partial", Kind: ports.NodeCounter}, []byte("1"))
 			return errors.New("the wiring could not store the secret")
 		}
 		stored = append(stored, inv.Address)

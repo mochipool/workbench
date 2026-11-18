@@ -30,7 +30,7 @@ var ErrVrfKeyExists = errors.New("VRF key artefacts already exist for this pool"
 // only, SPO-04a-EXT-003) and exported through Hardware; with no Hardware wired
 // it is refused up front by the generation plan.
 type GenerateColdKeys struct {
-	Store  ports.Store
+	Store  ports.NamedStore
 	KeyGen ports.ColdKeyGenerator
 	// Hardware exports the cold key of a hardware holder; nil keeps the
 	// upfront refusal.
@@ -69,7 +69,7 @@ func (uc GenerateColdKeys) Run(ctx context.Context, req GenerateColdKeysRequest)
 		return ColdKeysGenerated{}, err
 	}
 	// Check before generating, so a refusal creates nothing.
-	if err := uc.Store.View(ctx, func(r ports.Reader) error { return coldPlan(r, req.Pool) }); err != nil {
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error { return coldPlan(r, req.Pool) }); err != nil {
 		return ColdKeysGenerated{}, err
 	}
 	var pair ports.KeyPair
@@ -103,22 +103,22 @@ func (uc GenerateColdKeys) Run(ctx context.Context, req GenerateColdKeysRequest)
 		return ColdKeysGenerated{}, err
 	}
 
-	err = uc.Store.Update(ctx, func(w ports.Writer) error {
+	err = uc.Store.Update(ctx, func(w ports.NamedWriter) error {
 		// Re-check inside the transaction: the state may have moved.
 		if err := coldPlan(w, req.Pool); err != nil {
 			return err
 		}
-		if err := w.Put(ports.Ref{Name: req.Pool, Kind: ports.NodeVKey}, pair.VKey); err != nil {
+		if err := w.Put(ports.NamedRef{Name: req.Pool, Kind: ports.NodeVKey}, pair.VKey); err != nil {
 			return err
 		}
 		if onDevice {
-			if err := w.Put(ports.Ref{Name: req.Pool, Kind: ports.NodeHwsFile}, hwsfile); err != nil {
+			if err := w.Put(ports.NamedRef{Name: req.Pool, Kind: ports.NodeHwsFile}, hwsfile); err != nil {
 				return err
 			}
-		} else if err := w.PutSecret(ports.Ref{Name: req.Pool, Kind: ports.NodeSKey}, pair.SKey); err != nil {
+		} else if err := w.PutSecret(ports.NamedRef{Name: req.Pool, Kind: ports.NodeSKey}, pair.SKey); err != nil {
 			return err
 		}
-		return w.Put(ports.Ref{Name: req.Pool, Kind: ports.NodeCounter}, counter.Envelope())
+		return w.Put(ports.NamedRef{Name: req.Pool, Kind: ports.NodeCounter}, counter.Envelope())
 	})
 	if err != nil {
 		return ColdKeysGenerated{}, err
@@ -128,14 +128,14 @@ func (uc GenerateColdKeys) Run(ctx context.Context, req GenerateColdKeysRequest)
 
 // coldPlan refuses when any of the four artefacts exists, the hardware
 // signing file included (SPO-04a-PRE-001).
-func coldPlan(r ports.Reader, poolName string) error {
+func coldPlan(r ports.NamedReader, poolName string) error {
 	return refuseExisting(r, ErrColdKeyExists, poolName,
 		ports.NodeVKey, ports.NodeSKey, ports.NodeHwsFile, ports.NodeCounter)
 }
 
-func refuseExisting(r ports.Reader, sentinel error, name string, kinds ...ports.Kind) error {
+func refuseExisting(r ports.NamedReader, sentinel error, name string, kinds ...ports.Kind) error {
 	for _, k := range kinds {
-		ref := ports.Ref{Name: name, Kind: k}
+		ref := ports.NamedRef{Name: name, Kind: k}
 		exists, err := r.Exists(ref)
 		if err != nil {
 			return err

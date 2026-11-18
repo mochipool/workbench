@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"io"
 	"strings"
 
@@ -187,7 +188,7 @@ script. ` + hardwareUntested,
 	newCmd.Flags().Uint64Var(&lifetime, "lifetime", 0, "make the policy expire this many slots from now (default: never)")
 	hw.add(newCmd, 0)
 	addChainFlags(newCmd, &flags, false)
-	p.AddCommand(newCmd)
+	p.AddCommand(newCmd, a.renameCommand(identity.OwnerPolicy, "policy"), a.mergeCommand(identity.OwnerPolicy, "policy"))
 	return p
 }
 
@@ -335,9 +336,9 @@ queued is not counted until it has been submitted. The record holds no secret.`,
 			rec := assets.RecordName(ref.Policy, ref.Asset)
 			return a.withEnv(cmd, envSpec{}, func(ctx context.Context, s *session, _ *Env, _ WireOptions) error {
 				var b []byte
-				err := s.Store.View(ctx, func(r ports.Reader) error {
+				err := s.Store.View(ctx, func(r ports.NamedReader) error {
 					var e error
-					b, e = r.Get(ports.Ref{Name: rec, Kind: ports.AssetFile})
+					b, e = r.Get(ports.NamedRef{Name: rec, Kind: ports.AssetFile})
 					return e
 				})
 				if errors.Is(err, ports.ErrNotFound) {

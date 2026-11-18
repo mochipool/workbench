@@ -39,7 +39,7 @@ import (
 // where a factor entry is [kind, id, params] and params is
 //
 //	passphrase: ["argon2id", memory KiB, passes, lanes, salt]
-//	fido2:      [credential id, relying-party id, hmac-secret salt]
+//	fido2:      [credential id, relying-party id, hmac-secret salt, touch probe result]
 //	backend:    [key reference]
 //	recovery:   []
 //
@@ -66,6 +66,7 @@ const (
 const (
 	labelSlotKeyInfo = "spo/slot-key"
 	labelSlotAD      = "spo/slot-ad"
+	labelSlotAD2     = "spo/slot-ad/2"
 	labelColdSubKey  = "cold-subkey"
 
 	maxFactorID     = 64
@@ -90,6 +91,11 @@ type FactorParams struct {
 	CredentialID []byte
 	RPID         string
 	HMACSalt     []byte // KeySize bytes, drawn at enrolment
+	// Touch is the result of the enrolment touch probe (ADR 0011 decision 8,
+	// "Limit"): 0 not run, 1 enforced, 2 not enforced, 3 not confirmed. It is
+	// bound in the slot's associated data, so a file edited to show "touch
+	// enforced" for an authenticator that is not no longer opens.
+	Touch uint8
 
 	// FactorBackend: the Vault or KMS key reference.
 	BackendKeyRef string
@@ -130,7 +136,7 @@ func (f FactorParams) validate() error {
 		return nil
 	}
 	noPass := f.KDF == (KDFParams{}) && len(f.KDFSalt) == 0
-	noFIDO := len(f.CredentialID) == 0 && f.RPID == "" && len(f.HMACSalt) == 0
+	noFIDO := len(f.CredentialID) == 0 && f.RPID == "" && len(f.HMACSalt) == 0 && f.Touch == 0
 	switch f.Kind {
 	case FactorPassphrase:
 		if err := only(noFIDO && f.BackendKeyRef == ""); err != nil {
@@ -149,7 +155,7 @@ func (f FactorParams) validate() error {
 			return err
 		}
 		if len(f.CredentialID) == 0 || len(f.CredentialID) > maxCredentialID ||
-			f.RPID == "" || len(f.RPID) > maxRPID || len(f.HMACSalt) != KeySize {
+			f.RPID == "" || len(f.RPID) > maxRPID || len(f.HMACSalt) != KeySize || f.Touch > 3 {
 			return fmt.Errorf("%w: fido2 factor parameters", ErrFormat)
 		}
 	case FactorBackend:
@@ -171,7 +177,7 @@ func (f FactorParams) entry() []any {
 	case FactorPassphrase:
 		params = []any{AlgKDF, uint64(f.KDF.MemoryKiB), uint64(f.KDF.Passes), uint64(f.KDF.Lanes), f.KDFSalt}
 	case FactorFIDO2:
-		params = []any{f.CredentialID, f.RPID, f.HMACSalt}
+		params = []any{f.CredentialID, f.RPID, f.HMACSalt, uint64(f.Touch)}
 	case FactorBackend:
 		params = []any{f.BackendKeyRef}
 	default:
@@ -196,6 +202,12 @@ type SlotSpec struct {
 	// bytes, or empty in every slot of a strict workspace, which has no recovery
 	// key (domain/unlock enforces which).
 	RecoveryPubKeyHash []byte
+	// Policy is the workspace policy of store format 3, bound in the slot's
+	// associated data under the label "spo/slot-ad/2" (the associated data
+	// above, with the policy after the recovery key hash). Empty keeps the
+	// older encoding, which the committed vectors pin; a store of format 3
+	// always sets it.
+	Policy string
 }
 
 // RecoveryPubKeyHash is the value bound in every slot for a recovery public
@@ -246,6 +258,9 @@ func (s SlotSpec) AD(commit []byte) ([]byte, error) {
 	entries := make([]any, len(s.Factors))
 	for i, f := range s.Factors {
 		entries[i] = f.entry()
+	}
+	if s.Policy != "" {
+		return EncodeCanonical([]any{labelSlotAD2, s.FormatVersion, s.GenesisNonce, s.SlotID, s.Kind, entries, s.RecoveryPubKeyHash, s.Policy, commit})
 	}
 	return EncodeCanonical([]any{labelSlotAD, s.FormatVersion, s.GenesisNonce, s.SlotID, s.Kind, entries, s.RecoveryPubKeyHash, commit})
 }

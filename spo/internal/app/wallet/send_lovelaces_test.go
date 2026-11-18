@@ -41,15 +41,15 @@ func (l *log) count(prefix string) (n int) {
 	return
 }
 
-type memReader map[ports.Ref][]byte
+type memReader map[ports.NamedRef][]byte
 
-func (m memReader) Get(r ports.Ref) ([]byte, error) {
+func (m memReader) Get(r ports.NamedRef) ([]byte, error) {
 	if b, ok := m[r]; ok {
 		return b, nil
 	}
 	return nil, ports.ErrNotFound
 }
-func (m memReader) Exists(r ports.Ref) (bool, error) { _, ok := m[r]; return ok, nil }
+func (m memReader) Exists(r ports.NamedRef) (bool, error) { _, ok := m[r]; return ok, nil }
 
 type memStore struct {
 	files memReader
@@ -65,11 +65,11 @@ func (s *memStore) List(context.Context) (ports.SourceListing, error) {
 	return l, nil
 }
 
-func (s *memStore) View(_ context.Context, fn func(ports.Reader) error) error {
+func (s *memStore) View(_ context.Context, fn func(ports.NamedReader) error) error {
 	s.views++
 	return fn(s.files)
 }
-func (s *memStore) Update(context.Context, func(ports.Writer) error) error {
+func (s *memStore) Update(context.Context, func(ports.NamedWriter) error) error {
 	panic("a payment writes no artefact")
 }
 
@@ -162,7 +162,9 @@ func vkeyEnv(typ string, pub ed25519.PublicKey) []byte {
 }
 
 // fakeDir serves one signer for the keys whose signing key the store holds.
-func fakeDir(st ports.Store, s ports.Signer) ports.SignerDirectory { return porttest.VaultOnly(st, s) }
+func fakeDir(st ports.NamedStore, s ports.Signer) ports.SignerDirectory {
+	return porttest.VaultOnly(st, s)
+}
 
 type fakeChain struct {
 	l       *log
@@ -519,21 +521,21 @@ func TestSourceFiles(t *testing.T) {
 
 	// No address file.
 	r = newRig(t)
-	delete(r.store.files, ports.Ref{Name: "w", Kind: ports.AddrFile})
+	delete(r.store.files, ports.NamedRef{Name: "w", Kind: ports.AddrFile})
 	if _, err := r.run("5"); !errors.Is(err, ErrNoSourceAddress) {
 		t.Errorf("no .addr: %v", err)
 	}
 	// Neither skey nor hwsfile: refused before the destination is looked at
 	// (the destination here would fail too) and before any query.
 	r = newRig(t)
-	delete(r.store.files, ports.Ref{Name: "w", Kind: ports.AddrSKey})
+	delete(r.store.files, ports.NamedRef{Name: "w", Kind: ports.AddrSKey})
 	_, err := r.uc.Run(context.Background(), SendRequest{Source: "w", Destination: "unknown-destination", Amount: "5"})
 	if !errors.Is(err, ErrNoSigningKey) || len(r.l.calls) != 0 {
 		t.Errorf("no key: %v, calls %v", err, r.l.calls)
 	}
 	// The first line of the file is the address.
 	r = newRig(t)
-	r.store.files[ports.Ref{Name: "w", Kind: ports.AddrFile}] = []byte("addr_test_src\nignored second line\n")
+	r.store.files[ports.NamedRef{Name: "w", Kind: ports.AddrFile}] = []byte("addr_test_src\nignored second line\n")
 	if _, err := r.run("5000000"); err != nil {
 		t.Error(err)
 	}
@@ -546,7 +548,7 @@ func TestSourceFiles(t *testing.T) {
 // spec: SPO-Pfiles-INV-002, SPO-Ptx-INV-008, SPO-Xidentity-INV-016
 func TestHardwareFileWinsAndIsPlanned(t *testing.T) {
 	r := newRig(t)
-	r.store.files[ports.Ref{Name: "w", Kind: ports.AddrHwsFile}] = []byte("{}")
+	r.store.files[ports.NamedRef{Name: "w", Kind: ports.AddrHwsFile}] = []byte("{}")
 	_, err := r.run("5000000")
 	var unsupported *custody.UnsupportedError
 	if !errors.As(err, &unsupported) || !strings.Contains(err.Error(), "no hardware signer") {
@@ -599,7 +601,7 @@ func TestDestinationForms(t *testing.T) {
 	ok := func(t *testing.T, dest, wantName, wantAddr string) {
 		t.Helper()
 		r := newRig(t)
-		r.store.files[ports.Ref{Name: "addr_test_shadow", Kind: ports.AddrFile}] = []byte("addr_test_other\n")
+		r.store.files[ports.NamedRef{Name: "addr_test_shadow", Kind: ports.AddrFile}] = []byte("addr_test_other\n")
 		res, err := r.uc.Run(context.Background(), SendRequest{Source: "w", Destination: dest, Amount: "5000000"})
 		if err != nil {
 			t.Fatalf("%q: %v", dest, err)
@@ -642,7 +644,7 @@ func TestDestinationForms(t *testing.T) {
 	// file. The port requires a payment address there too.
 	t.Run("a destination file holding a stake address is refused", func(t *testing.T) {
 		r := newRig(t)
-		r.store.files[ports.Ref{Name: "d", Kind: ports.AddrFile}] = []byte("stake_test_abc\n")
+		r.store.files[ports.NamedRef{Name: "d", Kind: ports.AddrFile}] = []byte("stake_test_abc\n")
 		if _, err := r.run("5000000"); !errors.Is(err, ErrBadDestination) {
 			t.Errorf("%v", err)
 		}
@@ -654,7 +656,7 @@ func TestDestinationForms(t *testing.T) {
 // spec: SPO-01sendLovelaces-IF-008, SPO-Caddr-PRE-001
 func TestNetworkMismatch(t *testing.T) {
 	r := newRig(t)
-	r.store.files[ports.Ref{Name: "d", Kind: ports.AddrFile}] = []byte("addr_main_dst\n")
+	r.store.files[ports.NamedRef{Name: "d", Kind: ports.AddrFile}] = []byte("addr_main_dst\n")
 	if _, err := r.run("5000000"); !errors.Is(err, ErrNetworkMismatch) || r.l.count("utxos") != 0 {
 		t.Errorf("destination: %v", err)
 	}
@@ -665,7 +667,7 @@ func TestNetworkMismatch(t *testing.T) {
 	}
 	// A source that is not spent with a key.
 	r = newRig(t)
-	r.store.files[ports.Ref{Name: "w", Kind: ports.AddrFile}] = []byte("addr_script_x\n")
+	r.store.files[ports.NamedRef{Name: "w", Kind: ports.AddrFile}] = []byte("addr_script_x\n")
 	if _, err := r.run("5000000"); !errors.Is(err, ErrSourceNotKey) {
 		t.Errorf("script source: %v", err)
 	}

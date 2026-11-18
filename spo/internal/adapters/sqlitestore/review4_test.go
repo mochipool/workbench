@@ -176,7 +176,7 @@ func TestR4CommitErrorIsResolvedFromTheFile(t *testing.T) {
 	failBefore := func(context.Context, *sql.Conn) error { return errors.New("injected: commit failed") } // does not commit
 
 	t.Run("update that committed", func(t *testing.T) {
-		s, path, _ := scratch(t)
+		s, path, _ := scratchPresented(t)
 		n0 := auditRowCount(t, path)
 		execCommit = failAfter
 		err := s.Update(ctx, func(w ports.Writer) error { return w.Put(counter, []byte("1")) })
@@ -195,7 +195,7 @@ func TestR4CommitErrorIsResolvedFromTheFile(t *testing.T) {
 		}
 	})
 	t.Run("update that did not commit", func(t *testing.T) {
-		s, path, _ := scratch(t)
+		s, path, _ := scratchPresented(t)
 		n0 := auditRowCount(t, path)
 		execCommit = failBefore
 		err := s.Update(ctx, func(w ports.Writer) error { return w.Put(counter, []byte("1")) })
@@ -209,7 +209,7 @@ func TestR4CommitErrorIsResolvedFromTheFile(t *testing.T) {
 		put(t, s, counter, "2") // and the handle still works
 	})
 	t.Run("rekey that committed", func(t *testing.T) {
-		s, path, rec := scratch(t)
+		s, path, rec := scratchPresented(t)
 		put(t, s, counter, "1")
 		execCommit = failAfter
 		rk, err := s.ChangePassphraseRekey(ctx, passT(t, "np"))
@@ -230,7 +230,7 @@ func TestR4CommitErrorIsResolvedFromTheFile(t *testing.T) {
 		}
 	})
 	t.Run("rekey that did not commit", func(t *testing.T) {
-		s, path, rec := scratch(t)
+		s, path, rec := scratchPresented(t)
 		put(t, s, counter, "1")
 		execCommit = failBefore
 		rk, err := s.ChangePassphraseRekey(ctx, passT(t, "np"))
@@ -322,7 +322,7 @@ func TestR4TriggerLoadedByTheHandleAndHiddenDoesNotFire(t *testing.T) {
 	plantTrigger(t, raw, "t2")
 	get(s, counter)
 	hideTrigger(t, raw)
-	if _, _, err := s.AddRecoverySlot(ctx); err != nil {
+	if _, err := s.AddPassphraseSlot(ctx, passphrase("t2-pass")); err != nil { // was AddRecoverySlot (format 2)
 		t.Fatal(err)
 	}
 	if err := s.Verify(ctx); err != nil {
@@ -373,8 +373,8 @@ func TestR4WriteRefusesAReplacedFile(t *testing.T) {
 
 func TestR4DeletedRecordBehindTheHandleIsRefused(t *testing.T) {
 	s, path, _ := scratch(t)
-	a := ports.Ref{Name: "a", Kind: ports.KesCounter}
-	b := ports.Ref{Name: "b", Kind: ports.KesCounter}
+	a := rf("a", ports.KesCounter)
+	b := rf("b", ports.KesCounter)
 	put(t, s, a, "1")
 	put(t, s, b, "2")
 	raw := rawDB(t, path)
@@ -406,7 +406,7 @@ func TestR4DeletedRecordBehindTheHandleIsRefused(t *testing.T) {
 		t.Errorf("rows: %d, the refused Put must not have created one", n)
 	}
 	// A tag nobody listed is still simply absent.
-	if _, err := get(s, ports.Ref{Name: "never", Kind: ports.KesCounter}); !errors.Is(err, ports.ErrNotFound) {
+	if _, err := get(s, rf("never", ports.KesCounter)); !errors.Is(err, ports.ErrNotFound) {
 		t.Errorf("Get of an unknown record: %v", err)
 	}
 }
@@ -419,7 +419,7 @@ func TestR4TagMapFollowsOtherHandles(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer b.Close()
-	n := ports.Ref{Name: "n", Kind: ports.KesCounter}
+	n := rf("n", ports.KesCounter)
 	if _, err := get(a, n); !errors.Is(err, ports.ErrNotFound) {
 		t.Fatal(err)
 	}
@@ -493,7 +493,7 @@ func TestR4ReopenChecksFileIdentityAndHead(t *testing.T) {
 
 func TestR4CleanupChecksEpochSchemaAndReadsBack(t *testing.T) {
 	t.Run("stale epoch", func(t *testing.T) {
-		a, path, _ := scratch(t)
+		a, path, _ := scratchPresented(t)
 		put(t, a, counter, "1")
 		b, err := Open(path, pwT(t))
 		if err != nil {
@@ -512,7 +512,7 @@ func TestR4CleanupChecksEpochSchemaAndReadsBack(t *testing.T) {
 		}
 	})
 	t.Run("planted schema", func(t *testing.T) {
-		s, path, _ := scratch(t)
+		s, path, _ := scratchPresented(t)
 		rekeyPending(t, s, "np")
 		if _, err := rawDB(t, path).Exec(`CREATE TRIGGER evil AFTER UPDATE ON meta BEGIN SELECT 1; END`); err != nil {
 			t.Fatal(err)
@@ -525,7 +525,7 @@ func TestR4CleanupChecksEpochSchemaAndReadsBack(t *testing.T) {
 		}
 	})
 	t.Run("the flag is read back", func(t *testing.T) {
-		s, path, _ := scratch(t)
+		s, path, _ := scratchPresented(t)
 		rekeyPending(t, s, "np")
 		// A trigger on the write connection (outside sqlite_master) that undoes
 		// the update of the flag.
@@ -548,7 +548,7 @@ func TestR4CleanupChecksEpochSchemaAndReadsBack(t *testing.T) {
 
 // A context that has ended gets its own error, not ErrReentrant's text.
 func TestR4EndedContextIsNotReportedAsReentrancy(t *testing.T) {
-	s, path, _ := scratch(t)
+	s, path, _ := scratchPresented(t)
 	rekeyPending(t, s, "np")
 	c, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -638,7 +638,7 @@ func TestR4ReadOnlyHandleHoldsASharedLock(t *testing.T) {
 	put(t, s, counter, "1")
 	s.Close()
 	before := snapshot(t, filepath.Dir(path))
-	ro, err := open(path, credential{seal.SlotPassphrase, pwT(t)}, true, OpenOptions{})
+	ro, err := open(path, credential{kind: seal.SlotPassphrase, buf: pwT(t)}, true, OpenOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -680,7 +680,7 @@ func TestR4VerifyFileLeavesFilesUnchanged(t *testing.T) {
 func TestR4FailedOpenOfAHotWAL(t *testing.T) {
 	s, path, _ := scratch(t)
 	put(t, s, counter, "1")
-	put(t, s, ports.Ref{Name: "q", Kind: ports.KesCounter}, "x")
+	put(t, s, rf("q", ports.KesCounter), "x")
 	dir := t.TempDir()
 	p2 := filepath.Join(dir, "ws.db")
 	for _, sfx := range []string{"", "-wal", ".head"} {

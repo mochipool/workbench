@@ -95,7 +95,7 @@ anything is written, so a refusal leaves the record as it was.`,
 						return rerr
 					}
 					var have bool
-					if err := s.Store.View(ctx, func(r ports.Reader) (e error) { have, e = r.Exists(rec); return }); err != nil {
+					if err := s.Store.View(ctx, func(r ports.NamedReader) (e error) { have, e = r.Exists(rec); return }); err != nil {
 						return err
 					}
 					if !have {
@@ -154,12 +154,12 @@ func (a *app) printGenerated(res registry.Generated) {
 }
 
 // recordRef is the asset record of the argument.
-func assetRecordRef(arg string) (ports.Ref, error) {
+func assetRecordRef(arg string) (ports.NamedRef, error) {
 	ref, err := assets.ParseRef(arg)
 	if err != nil {
-		return ports.Ref{}, err
+		return ports.NamedRef{}, err
 	}
-	return ports.Ref{Name: assets.RecordName(ref.Policy, ref.Asset), Kind: ports.AssetFile}, nil
+	return ports.NamedRef{Name: assets.RecordName(ref.Policy, ref.Asset), Kind: ports.AssetFile}, nil
 }
 
 func parseMetaSets(sets []string) (map[string]string, error) {
@@ -200,8 +200,8 @@ func metaKeys(kv map[string]string) string {
 // setMetaFields changes the meta fields of the record in one transaction. The
 // values are the operator's own words; the use case validates them when it
 // builds the entry.
-func setMetaFields(ctx context.Context, st ports.Store, rec ports.Ref, kv map[string]string) error {
-	return st.Update(ctx, func(w ports.Writer) error {
+func setMetaFields(ctx context.Context, st ports.NamedStore, rec ports.NamedRef, kv map[string]string) error {
+	return st.Update(ctx, func(w ports.NamedWriter) error {
 		b, err := w.Get(rec)
 		if err != nil {
 			return err

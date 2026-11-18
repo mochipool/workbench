@@ -14,9 +14,9 @@ import (
 // ---- the coordinator's record -----------------------------------------------
 
 var (
-	coordRef  = ports.Ref{Name: "state", Kind: ports.MultisigCoordinator}
-	signerRef = ports.Ref{Name: "state", Kind: ports.MultisigSigner}
-	outboxRef = ports.Ref{Name: "all", Kind: ports.MultisigOutbox}
+	coordRef  = ports.NamedRef{Name: "state", Kind: ports.MultisigCoordinator}
+	signerRef = ports.NamedRef{Name: "state", Kind: ports.MultisigSigner}
+	outboxRef = ports.NamedRef{Name: "all", Kind: ports.MultisigOutbox}
 )
 
 // slotState is what the coordinator knows of the request for one slot.
@@ -48,7 +48,7 @@ type coordState struct {
 	Collections []collState `json:"collections"`
 }
 
-func readJSON(r ports.Reader, ref ports.Ref, v any) error {
+func readJSON(r ports.NamedReader, ref ports.NamedRef, v any) error {
 	b, err := r.Get(ref)
 	if errors.Is(err, ports.ErrNotFound) {
 		return nil
@@ -62,7 +62,7 @@ func readJSON(r ports.Reader, ref ports.Ref, v any) error {
 	return nil
 }
 
-func writeJSON(w ports.Writer, ref ports.Ref, v any) error {
+func writeJSON(w ports.NamedWriter, ref ports.NamedRef, v any) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -70,7 +70,7 @@ func writeJSON(w ports.Writer, ref ports.Ref, v any) error {
 	return w.Put(ref, b)
 }
 
-func readCoord(r ports.Reader) (coordState, error) {
+func readCoord(r ports.NamedReader) (coordState, error) {
 	var s coordState
 	err := readJSON(r, coordRef, &s)
 	for i := range s.Collections {
@@ -168,7 +168,7 @@ func hexCollOf(s string) (c party.CollectionID, err error) {
 	return c, nil
 }
 
-func readOutbox(r ports.Reader) ([]OutItem, error) {
+func readOutbox(r ports.NamedReader) ([]OutItem, error) {
 	var items []OutItem
 	return items, readJSON(r, outboxRef, &items)
 }
@@ -181,7 +181,7 @@ func readOutbox(r ports.Reader) ([]OutItem, error) {
 // refused with ErrIdentityChanged and nothing is queued. There is no exemption
 // by item type: an item typed Rotation sealed by another identity is refused
 // like any other.
-func (n Node) enqueue(w ports.Writer, now time.Time, sealer party.Fingerprint, add ...OutItem) error {
+func (n Node) enqueue(w ports.NamedWriter, now time.Time, sealer party.Fingerprint, add ...OutItem) error {
 	cur, err := n.localFingerprint(w)
 	if err != nil {
 		return err
@@ -201,7 +201,7 @@ func (n Node) enqueue(w ports.Writer, now time.Time, sealer party.Fingerprint, a
 // this transaction, is not compared. Only RotateIdentity calls it, and every
 // item must be a Rotation; the items are marked so that the sweep, which drops
 // what an identity other than the current one sealed, keeps them.
-func (n Node) enqueueRotation(w ports.Writer, now time.Time, old party.Fingerprint, add ...OutItem) error {
+func (n Node) enqueueRotation(w ports.NamedWriter, now time.Time, old party.Fingerprint, add ...OutItem) error {
 	for i := range add {
 		if add[i].Type != string(party.TypeRotation) {
 			return fmt.Errorf("enqueueRotation: an item of type %q is not a rotation announcement", add[i].Type)
@@ -213,11 +213,11 @@ func (n Node) enqueueRotation(w ports.Writer, now time.Time, old party.Fingerpri
 }
 
 // localFingerprint is the fingerprint of the identity this workspace holds now.
-func (n Node) localFingerprint(r ports.Reader) (party.Fingerprint, error) {
+func (n Node) localFingerprint(r ports.NamedReader) (party.Fingerprint, error) {
 	return localFingerprintOf(n.Kit, r)
 }
 
-func localFingerprintOf(kit ports.IdentityKit, r ports.Reader) (party.Fingerprint, error) {
+func localFingerprintOf(kit ports.IdentityKit, r ports.NamedReader) (party.Fingerprint, error) {
 	cur, err := r.Get(localDocRef)
 	if err != nil {
 		return party.Fingerprint{}, err
@@ -231,7 +231,7 @@ func localFingerprintOf(kit ports.IdentityKit, r ports.Reader) (party.Fingerprin
 
 // enqueueItems adds or replaces by message id (a re-sent stored response is the
 // same envelope with Delivered cleared), and drops what expired.
-func enqueueItems(w ports.Writer, now time.Time, add ...OutItem) error {
+func enqueueItems(w ports.NamedWriter, now time.Time, add ...OutItem) error {
 	items, err := readOutbox(w)
 	if err != nil {
 		return err

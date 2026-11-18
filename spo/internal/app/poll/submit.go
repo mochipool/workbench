@@ -110,12 +110,12 @@ func (uc SubmitPollAnswer) Run(ctx context.Context, req SubmitRequest) (SubmitRe
 	var coldHash txbuild.KeyHash
 	var coldKey custody.KeyRef
 	var poolID chain.PoolID
-	if err := uc.Send.Store.View(ctx, func(r ports.Reader) error {
-		hws, err := r.Exists(ports.Ref{Name: stem, Kind: ports.NodeHwsFile})
+	if err := uc.Send.Store.View(ctx, func(r ports.NamedReader) error {
+		hws, err := r.Exists(ports.NamedRef{Name: stem, Kind: ports.NodeHwsFile})
 		if err != nil {
 			return err
 		}
-		skey, err := r.Exists(ports.Ref{Name: stem, Kind: ports.NodeSKey})
+		skey, err := r.Exists(ports.NamedRef{Name: stem, Kind: ports.NodeSKey})
 		if err != nil {
 			return err
 		}
@@ -125,7 +125,7 @@ func (uc SubmitPollAnswer) Run(ctx context.Context, req SubmitRequest) (SubmitRe
 			}
 			return fmt.Errorf("%w: %s.node.skey", ErrNoColdKey, stem)
 		}
-		vk, err := r.Get(ports.Ref{Name: stem, Kind: ports.NodeVKey})
+		vk, err := r.Get(ports.NamedRef{Name: stem, Kind: ports.NodeVKey})
 		if err != nil {
 			return fmt.Errorf("the cold verification key %s.node.vkey: %w", stem, err)
 		}

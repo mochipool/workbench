@@ -16,7 +16,7 @@ func importer(src, dst *memStore, g *fakeGPG) ImportWorkspace {
 	return ImportWorkspace{Source: src, SourceVault: src, Lister: src, Dest: dst, Decryptor: g, Deriver: edDeriver{}, Addresses: addrInspector{}}
 }
 
-func ref(name string, k ports.Kind) ports.Ref { return ports.Ref{Name: name, Kind: k} }
+func ref(name string, k ports.Kind) ports.NamedRef { return ports.NamedRef{Name: name, Kind: k} }
 
 // Everything of a realistic workspace arrives; secrets are written with
 // PutSecret (the memStore, like the real stores, refuses Put for them); the
@@ -100,8 +100,8 @@ func TestImportDecryptsEncryptedKeysWithOnePasswordIncludingBackslash(t *testing
 	}
 }
 
-// Without a password an encrypted key fails its owner; with KeepEncrypted it
-// is kept as an opaque record.
+// Without a password an encrypted key fails its owner; with DeferEncrypted the
+// file is left in the source and the owner is refused (no record is kept).
 //
 // spec: SPO-Pfiles-OUT-003
 func TestImportEncryptedWithoutPassword(t *testing.T) {
@@ -130,18 +130,23 @@ func TestImportEncryptedWithoutPassword(t *testing.T) {
 	if rep.Failed() != 1 {
 		t.Errorf("failed owners: %d", rep.Failed())
 	}
-	// keep-encrypted
+	// defer-encrypted: the file stays in the source, nothing is stored, the owner is refused
 	dst = newMem()
-	rep, err = importer(src, dst, &fakeGPG{}).Run(context.Background(), ImportOptions{Owners: []string{"mypool"}, KeepEncrypted: true})
-	if err != nil || rep.Failed() != 0 {
+	rep, err = importer(src, dst, &fakeGPG{}).Run(context.Background(), ImportOptions{Owners: []string{"mypool"}, DeferEncrypted: true})
+	if err != nil || rep.Failed() != 1 {
 		t.Fatalf("%v %+v", err, rep)
 	}
-	kept := dst.snapshot()[ref("mypool.node", ports.UpstreamEncryptedSKey)]
-	if info, _ := keyfile.Classify([]byte(kept)); info.Form != keyfile.FormEncrypted {
-		t.Error("the kept record is not the encrypted envelope")
+	left := false
+	for _, o := range rep.Owners {
+		for _, a := range o.Artefacts {
+			left = left || (a.Ref == ref("mypool", ports.NodeSKey) && a.Reason == ReasonDeferred)
+		}
 	}
-	if _, ok := dst.snapshot()[ref("mypool", ports.NodeSKey)]; ok {
-		t.Error("a signing key record was made from an undecrypted key")
+	if !left {
+		t.Error("the encrypted file is not listed as left in the source")
+	}
+	if len(dst.snapshot()) != 0 {
+		t.Errorf("a deferred import stored %v", dst.snapshot())
 	}
 }
 
@@ -377,7 +382,7 @@ func TestImportWithoutDeriverSaysSo(t *testing.T) {
 }
 
 func TestStemsRoundTrip(t *testing.T) {
-	for _, r := range []ports.Ref{
+	for _, r := range []ports.NamedRef{
 		{Name: "p", Kind: ports.NodeSKey}, {Name: "p", Kind: ports.KesSKey, Num: 3}, {Name: "w.payment", Kind: ports.AddrSKey},
 		{Name: "w", Kind: ports.StakingSKey}, {Name: "d", Kind: ports.DRepSKey}, {Name: "p", Kind: ports.VrfSKey},
 	} {

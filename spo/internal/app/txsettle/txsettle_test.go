@@ -91,8 +91,8 @@ func (r *rig) pend(idByte byte, validUntil *uint64) domassets.Pending {
 	if err != nil {
 		r.t.Fatal(err)
 	}
-	if err := r.store.Update(bg, func(w ports.Writer) error {
-		return w.Put(ports.Ref{Name: p.TxID, Kind: ports.PendingUpdate}, b)
+	if err := r.store.Update(bg, func(w ports.NamedWriter) error {
+		return w.Put(ports.NamedRef{Name: p.TxID, Kind: ports.PendingUpdate}, b)
 	}); err != nil {
 		r.t.Fatal(err)
 	}
@@ -255,8 +255,8 @@ func TestUnknownKindWithoutAnApplierIsAnError(t *testing.T) {
 	r := newRig(t)
 	p := domassets.Pending{Kind: domassets.PendingPoolRegistration, TxID: chain.TxID{9}.String(), Pool: "mypool", Epoch: "7", Stamp: "x"}
 	b, _ := p.Marshal()
-	if err := r.store.Update(bg, func(w ports.Writer) error {
-		return w.Put(ports.Ref{Name: p.TxID, Kind: ports.PendingUpdate}, b)
+	if err := r.store.Update(bg, func(w ports.NamedWriter) error {
+		return w.Put(ports.NamedRef{Name: p.TxID, Kind: ports.PendingUpdate}, b)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -278,8 +278,8 @@ func TestOneBadPendingUpdateDoesNotBlockTheRest(t *testing.T) {
 	r := newRig(t)
 	bad := domassets.Pending{Kind: domassets.PendingPoolRegistration, TxID: chain.TxID{1}.String(), Pool: "mypool", Epoch: "7", Stamp: "x"}
 	b, _ := bad.Marshal()
-	if err := r.store.Update(bg, func(w ports.Writer) error {
-		return w.Put(ports.Ref{Name: bad.TxID, Kind: ports.PendingUpdate}, b)
+	if err := r.store.Update(bg, func(w ports.NamedWriter) error {
+		return w.Put(ports.NamedRef{Name: bad.TxID, Kind: ports.PendingUpdate}, b)
 	}); err != nil {
 		t.Fatal(err)
 	}

@@ -160,7 +160,7 @@ func TestMintBodiesMatchCardanoCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	signer := native.VaultSigner{Vault: store}
+	signer := native.VaultSigner{Vault: store.Anchor()}
 	pol := []policyKit{e.newPolicy(t, keys.dir, "p0", 0), e.newPolicy(t, keys.dir, "p1", 90_000_000), e.newPolicy(t, keys.dir, "p2", 0)}
 	p := func(n string) string { return filepath.Join(keys.dir, n) }
 	h1 := mustTxID(t, "6b028c5a3457dae4b2f0985af724de07ed05f4721bb20f2389fa87e89792e08c")

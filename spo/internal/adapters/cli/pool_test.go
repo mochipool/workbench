@@ -13,6 +13,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 )
 
 type poolParams struct{}
@@ -34,6 +35,12 @@ type poolFix struct {
 func newPoolFix(t *testing.T) *poolFix {
 	t.Helper()
 	f := &poolFix{sendFixture: newSendFixture(t), absent: map[Cap]string{}}
+	// The pool fixtures make their own wallet `w` (wallet new w --stake). A wallet is
+	// one owner under one label (ADR 0010), so the key-only address `w` of the send
+	// fixture, a different wallet that happens to share the stem, is removed.
+	for _, n := range []string{"w.addr", "w.skey", "w.vkey"} {
+		os.Remove(filepath.Join(f.dir, n))
+	}
 	f.deps.Wire = func(st ports.Store, o WireOptions) (*Env, error) {
 		f.wired++
 		led := native.Ledger{}
@@ -293,7 +300,7 @@ func TestPoolSummaryShowsThePoolAndNoKeyMaterial(t *testing.T) {
 	id[0] = 0xcd
 	sum := ports.TxSummary{Kind: "pool registration", Stage: "submit", Account: "p", Pool: "pool1abc", Pledge: 100_000_000, Deposit: 500_000_000, Fee: 190_000, TTL: 999,
 		Source: "w.payment", TxID: id, Route: "queue", Unchecked: []string{"the registration type comes from the descriptor"}}
-	printPoolSummary(context.Background(), &buf, st, native.Ledger{}, sum)
+	printPoolSummary(context.Background(), &buf, labels.Named(st), native.Ledger{}, sum)
 	out := buf.String()
 	mustContain(t, out, "first registration", "pool id      pool1abc", "pledge       100.000000 ADA", "cost         300.000000 ADA", "margin       0.03", "reward acct  w",
 		"owner        w (local)", "owner        second (external)", "relay        DNS relay.example.org:3001", "metadata     https://example.org/p.json", "deposit      500.000000 ADA",
@@ -305,10 +312,10 @@ func TestPoolSummaryShowsThePoolAndNoKeyMaterial(t *testing.T) {
 	}
 	// The re-registration and the retirement are named as such.
 	buf.Reset()
-	printPoolSummary(context.Background(), &buf, st, nil, ports.TxSummary{Kind: "pool re-registration", Account: "p", Pool: "pool1abc", Stage: "body"})
+	printPoolSummary(context.Background(), &buf, labels.Named(st), nil, ports.TxSummary{Kind: "pool re-registration", Account: "p", Pool: "pool1abc", Stage: "body"})
 	mustContain(t, buf.String(), "re-registration", "before the witnesses are collected")
 	buf.Reset()
-	printPoolSummary(context.Background(), &buf, st, nil, ports.TxSummary{Kind: "pool retirement", Account: "p", Pool: "pool1abc", Stage: "submit", Source: "w.payment"})
+	printPoolSummary(context.Background(), &buf, labels.Named(st), nil, ports.TxSummary{Kind: "pool retirement", Account: "p", Pool: "pool1abc", Stage: "submit", Source: "w.payment"})
 	mustContain(t, buf.String(), "retirement certificate only", "deposit moves", "p.node")
 	if strings.Contains(buf.String(), "pledge") {
 		t.Error("a retirement shows a pledge")
@@ -327,7 +334,7 @@ func TestRegisterReportsTheSlotsItWaitsFor(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := newApp(f.deps)
-	s := &session{Store: st}
+	s := &session{Store: labels.Named(st), Anchored: st}
 	res := poolops.RegisterResult{CollectionID: 77, Type: pool.PoolRegistration, Missing: []string{"second.staking"}, TransferFiles: []string{"p_second_77"}}
 
 	f.out.Reset()

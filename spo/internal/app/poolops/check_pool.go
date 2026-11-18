@@ -37,7 +37,7 @@ const (
 // read model: it returns a structured state instead of an exit code that
 // differs per mode (SPO-05e-MODE-001, SPO-05e-MODE-002).
 type CheckPoolOnChain struct {
-	Store ports.Store
+	Store ports.NamedStore
 	// Pools is the provider; nil in offline mode, which refuses
 	// (SPO-05e-PRE-001).
 	Pools ports.PoolStateReader
@@ -74,7 +74,7 @@ func (uc CheckPoolOnChain) Run(ctx context.Context, ref string) (PoolCheck, erro
 		return PoolCheck{}, fmt.Errorf("%w: checking a pool needs a node or Koios (offline mode cannot)", ErrNoChainReader)
 	}
 	var id chain.PoolID
-	if err := uc.Store.View(ctx, func(r ports.Reader) error {
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
 		id, err = resolvePool(r, ref)
 		return err
@@ -106,7 +106,7 @@ func (uc CheckPoolOnChain) Run(ctx context.Context, ref string) (PoolCheck, erro
 }
 
 // resolvePool follows the order of SPO-05e-IN-001, first match wins.
-func resolvePool(r ports.Reader, ref string) (chain.PoolID, error) {
+func resolvePool(r ports.NamedReader, ref string) (chain.PoolID, error) {
 	lower := strings.ToLower(ref)
 	if w, err := stake.ParsePoolWord(lower); err == nil && w.IsID {
 		return w.Pool, nil
@@ -121,7 +121,7 @@ func resolvePool(r ports.Reader, ref string) (chain.PoolID, error) {
 		return chain.PoolID{}, fmt.Errorf("%w: %q", ErrPoolUnresolved, ref)
 	}
 	text := func(k ports.Kind) (string, bool, error) {
-		b, err := r.Get(ports.Ref{Name: name, Kind: k})
+		b, err := r.Get(ports.NamedRef{Name: name, Kind: k})
 		if errors.Is(err, ports.ErrNotFound) {
 			return "", false, nil
 		}
@@ -146,7 +146,7 @@ func resolvePool(r ports.Reader, ref string) (chain.PoolID, error) {
 		}
 		return w.Pool, nil
 	}
-	if b, err := r.Get(ports.Ref{Name: name, Kind: ports.PoolDescriptor}); err == nil {
+	if b, err := r.Get(ports.NamedRef{Name: name, Kind: ports.PoolDescriptor}); err == nil {
 		d, err := pool.ParseDescriptor(b)
 		if err != nil {
 			return chain.PoolID{}, err

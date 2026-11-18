@@ -33,7 +33,7 @@ var (
 // (upstream leaves the ids and a half-updated descriptor behind,
 // SPO-05a-OUT-001).
 type GeneratePoolCertificate struct {
-	Store  ports.Store
+	Store  ports.NamedStore
 	Params ports.ProtocolParametersReader
 	Certs  ports.PoolCertificateBuilder
 	Hasher ports.PoolMetadataHasher
@@ -103,7 +103,7 @@ func (uc GeneratePoolCertificate) Run(ctx context.Context, req GenerateRequest) 
 		haveAdditional, itn        bool
 	)
 	reg := pool.Registration{}
-	err = uc.Store.View(ctx, func(r ports.Reader) error {
+	err = uc.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
 		if d, err = readDescriptor(r, name); err != nil {
 			return err
@@ -115,13 +115,13 @@ func (uc GeneratePoolCertificate) Run(ctx context.Context, req GenerateRequest) 
 			return err
 		}
 		rewards := d.Text(pool.FieldRewards)
-		if coldEnv, err = get(r, ports.Ref{Name: name, Kind: ports.NodeVKey}); err != nil {
+		if coldEnv, err = get(r, ports.NamedRef{Name: name, Kind: ports.NodeVKey}); err != nil {
 			return err
 		}
-		if vrfEnv, err = get(r, ports.Ref{Name: name, Kind: ports.VrfVKey}); err != nil {
+		if vrfEnv, err = get(r, ports.NamedRef{Name: name, Kind: ports.VrfVKey}); err != nil {
 			return err
 		}
-		if rewardEnv, err = get(r, ports.Ref{Name: rewards, Kind: ports.StakingVKey}); err != nil {
+		if rewardEnv, err = get(r, ports.NamedRef{Name: rewards, Kind: ports.StakingVKey}); err != nil {
 			return err
 		}
 		if reg, err = d.Check(minCost, uc.Choices); err != nil {
@@ -133,7 +133,7 @@ func (uc GeneratePoolCertificate) Run(ctx context.Context, req GenerateRequest) 
 				return fmt.Errorf("%w: %s", ErrDuplicateOwner, o.Name)
 			}
 			seen[o.Name] = true
-			env, err := get(r, ports.Ref{Name: o.Name, Kind: ports.StakingVKey})
+			env, err := get(r, ports.NamedRef{Name: o.Name, Kind: ports.StakingVKey})
 			if err != nil {
 				return err
 			}
@@ -143,14 +143,14 @@ func (uc GeneratePoolCertificate) Run(ctx context.Context, req GenerateRequest) 
 			}
 			ownerKeys = append(ownerKeys, stake.KeyHash(h))
 		}
-		s, e1 := r.Exists(ports.Ref{Name: name, Kind: ports.PoolItnSKey})
-		v, e2 := r.Exists(ports.Ref{Name: name, Kind: ports.PoolItnVKey})
+		s, e1 := r.Exists(ports.NamedRef{Name: name, Kind: ports.PoolItnSKey})
+		v, e2 := r.Exists(ports.NamedRef{Name: name, Kind: ports.PoolItnVKey})
 		if e1 != nil || e2 != nil {
 			return errors.Join(e1, e2)
 		}
 		itn = s && v
 		if reg.ExtendedURL != "" {
-			a, err := r.Get(ports.Ref{Name: name, Kind: ports.PoolAdditionalMetadata})
+			a, err := r.Get(ports.NamedRef{Name: name, Kind: ports.PoolAdditionalMetadata})
 			switch {
 			case err == nil:
 				additional, haveAdditional = a, true
@@ -183,8 +183,8 @@ func (uc GeneratePoolCertificate) Run(ctx context.Context, req GenerateRequest) 
 	if reg.ExtendedURL != "" {
 		if !haveAdditional {
 			// The only artefact written: the operator edits it and runs again.
-			if err := uc.Store.Update(ctx, func(w ports.Writer) error {
-				return w.Put(ports.Ref{Name: name, Kind: ports.PoolAdditionalMetadata}, pool.AdditionalMetadataTemplate(idHex))
+			if err := uc.Store.Update(ctx, func(w ports.NamedWriter) error {
+				return w.Put(ports.NamedRef{Name: name, Kind: ports.PoolAdditionalMetadata}, pool.AdditionalMetadataTemplate(idHex))
 			}); err != nil {
 				return GeneratedPool{}, err
 			}
@@ -225,7 +225,7 @@ func (uc GeneratePoolCertificate) Run(ctx context.Context, req GenerateRequest) 
 	d.NormalizeOwners(reg.Owners)
 	d.RecordGeneration(idHex, idBech, hex.EncodeToString(hash[:]), rfc5322(uc.Clock.Now()), name+".pool.cert", req.ProtectionKey)
 
-	if err := uc.Store.Update(ctx, func(w ports.Writer) error {
+	if err := uc.Store.Update(ctx, func(w ports.NamedWriter) error {
 		puts := []struct {
 			k ports.Kind
 			b []byte
@@ -243,7 +243,7 @@ func (uc GeneratePoolCertificate) Run(ctx context.Context, req GenerateRequest) 
 			}{ports.PoolExtendedMetadata, extended})
 		}
 		for _, p := range puts {
-			if err := w.Put(ports.Ref{Name: name, Kind: p.k}, p.b); err != nil {
+			if err := w.Put(ports.NamedRef{Name: name, Kind: p.k}, p.b); err != nil {
 				return err
 			}
 		}

@@ -38,7 +38,7 @@ var (
 // id computed from the script. The four artefacts are written together or not at all (SPO-10-INV-005
 // upstream leaves a half-written policy that blocks the name).
 type GeneratePolicy struct {
-	Store    ports.Store
+	Store    ports.NamedStore
 	KeyGen   ports.PaymentKeyGenerator
 	Policies ports.PolicyIDCalculator
 	// Tip is read only for a policy with a lifetime.
@@ -72,7 +72,7 @@ type PolicyGenerated struct {
 // PolicyName checks a policy name: a plain label with no directory part (a
 // store name, hazard H7; upstream allowed `assets/mypolicy`).
 func PolicyName(s string) (string, error) {
-	ref := ports.Ref{Name: s, Kind: ports.PolicyVKey}
+	ref := ports.NamedRef{Name: s, Kind: ports.PolicyVKey}
 	if err := ref.Validate(); err != nil {
 		return "", fmt.Errorf("%w: %q", ErrBadPolicyName, s)
 	}
@@ -112,9 +112,9 @@ func (uc GeneratePolicy) Run(ctx context.Context, req GeneratePolicyRequest) (Po
 		}
 		expiry = tip.Slot + req.Lifetime
 	}
-	check := func(r ports.Reader) error {
+	check := func(r ports.NamedReader) error {
 		for _, k := range []ports.Kind{ports.PolicyVKey, ports.PolicySKey, ports.PolicyHwsFile, ports.PolicyScript, ports.PolicyID} {
-			ref := ports.Ref{Name: name, Kind: k}
+			ref := ports.NamedRef{Name: name, Kind: k}
 			ok, err := r.Exists(ref)
 			if err != nil {
 				return err
@@ -161,27 +161,27 @@ func (uc GeneratePolicy) Run(ctx context.Context, req GeneratePolicyRequest) (Po
 	}
 	idHex := hex.EncodeToString(id[:])
 	askDevice := onDevice && uc.PolicyIDer != nil
-	err = uc.Store.Update(ctx, func(w ports.Writer) error {
+	err = uc.Store.Update(ctx, func(w ports.NamedWriter) error {
 		if err := check(w); err != nil {
 			return err
 		}
-		if err := w.Put(ports.Ref{Name: name, Kind: ports.PolicyVKey}, pair.VKey); err != nil {
+		if err := w.Put(ports.NamedRef{Name: name, Kind: ports.PolicyVKey}, pair.VKey); err != nil {
 			return err
 		}
 		if onDevice {
-			if err := w.Put(ports.Ref{Name: name, Kind: ports.PolicyHwsFile}, hwsfile); err != nil {
+			if err := w.Put(ports.NamedRef{Name: name, Kind: ports.PolicyHwsFile}, hwsfile); err != nil {
 				return err
 			}
-		} else if err := w.PutSecret(ports.Ref{Name: name, Kind: ports.PolicySKey}, pair.SKey); err != nil {
+		} else if err := w.PutSecret(ports.NamedRef{Name: name, Kind: ports.PolicySKey}, pair.SKey); err != nil {
 			return err
 		}
-		if err := w.Put(ports.Ref{Name: name, Kind: ports.PolicyScript}, script); err != nil {
+		if err := w.Put(ports.NamedRef{Name: name, Kind: ports.PolicyScript}, script); err != nil {
 			return err
 		}
 		if askDevice {
 			return nil // the id file follows the device's answer
 		}
-		return w.Put(ports.Ref{Name: name, Kind: ports.PolicyID}, []byte(idHex+"\n"))
+		return w.Put(ports.NamedRef{Name: name, Kind: ports.PolicyID}, []byte(idHex+"\n"))
 	})
 	if err != nil {
 		return PolicyGenerated{}, err
@@ -192,9 +192,9 @@ func (uc GeneratePolicy) Run(ctx context.Context, req GeneratePolicyRequest) (Po
 		// disagreement or a failure takes the artefacts away again, so no
 		// half-written policy blocks the name.
 		undo := func() {
-			_ = uc.Store.Update(ctx, func(w ports.Writer) error {
+			_ = uc.Store.Update(ctx, func(w ports.NamedWriter) error {
 				for _, k := range []ports.Kind{ports.PolicyVKey, ports.PolicyHwsFile, ports.PolicyScript} {
-					_ = w.Delete(ports.Ref{Name: name, Kind: k})
+					_ = w.Delete(ports.NamedRef{Name: name, Kind: k})
 				}
 				return nil
 			})
@@ -218,8 +218,8 @@ func (uc GeneratePolicy) Run(ctx context.Context, req GeneratePolicyRequest) (Po
 			undo()
 			return PolicyGenerated{}, fmt.Errorf("the device answered policy id %s, the script's is %s: nothing was stored", devID, idHex)
 		}
-		if err := uc.Store.Update(ctx, func(w ports.Writer) error {
-			return w.Put(ports.Ref{Name: name, Kind: ports.PolicyID}, []byte(devID+"\n"))
+		if err := uc.Store.Update(ctx, func(w ports.NamedWriter) error {
+			return w.Put(ports.NamedRef{Name: name, Kind: ports.PolicyID}, []byte(devID+"\n"))
 		}); err != nil {
 			return PolicyGenerated{}, err
 		}

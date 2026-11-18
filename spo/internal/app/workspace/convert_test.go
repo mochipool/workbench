@@ -11,15 +11,19 @@ import (
 )
 
 // keptFixture is a sealed store that holds a payment key only in upstream's
-// encrypted form (an import with --keep-encrypted), with its verification key.
+// encrypted form (a record of an older import), with its verification key.
 func keptFixture(t *testing.T) (*memStore, keyPair, ConvertKey) {
 	t.Helper()
 	src, keys := workspaceFixture(t)
 	src.put(ref("w.payment", ports.AddrSKey), encryptedOf(t, keys["pay"], "Str0ng-Passw0rd!-And-Long"))
+	// the record an older import made (no new import creates one)
 	mid := newMem()
-	if rep, err := importer(src, mid, &fakeGPG{}).Run(context.Background(), ImportOptions{Owners: []string{"w"}, KeepEncrypted: true}); err != nil || rep.Failed() != 0 {
-		t.Fatalf("%v %+v", err, rep)
+	for r, b := range src.snapshot() {
+		if OwnerOf(r) == "w" && r != ref("w.payment", ports.AddrSKey) {
+			mid.put(r, []byte(b))
+		}
 	}
+	mid.put(ref("w.payment", ports.UpstreamEncryptedSKey), encryptedOf(t, keys["pay"], "Str0ng-Passw0rd!-And-Long"))
 	if _, ok := mid.files[ref("w.payment", ports.UpstreamEncryptedSKey)]; !ok {
 		t.Fatalf("the key was not kept encrypted: %v", mid.snapshot())
 	}
@@ -111,7 +115,7 @@ func (h hookDeriver) DeriveVerificationKey(ctx context.Context, k *ports.Secret)
 func TestConvertKeyRefusesAndChangesNothing(t *testing.T) {
 	ctx := context.Background()
 	rec := ref("w.payment", ports.UpstreamEncryptedSKey)
-	unchanged := func(t *testing.T, mid *memStore, before map[ports.Ref]string) {
+	unchanged := func(t *testing.T, mid *memStore, before map[ports.NamedRef]string) {
 		t.Helper()
 		after := mid.snapshot()
 		if len(after) != len(before) {

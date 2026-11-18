@@ -11,6 +11,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 )
 
 // StoreFiles reads the hardware signing file of a key from the workspace
@@ -38,10 +39,7 @@ func (f StoreFiles) HardwareSigningFile(ctx context.Context, key custody.KeyRef)
 	if _, ok := hwsKinds[key.Role]; !ok {
 		return nil, fmt.Errorf("a %s key has no hardware signing file", key.Role)
 	}
-	idx, err := ports.NewStoreKeyIndex(f.Store)
-	if err != nil {
-		return nil, err
-	}
+	idx := labels.NewIndex(f.Store)
 	homes, err := idx.Homes(ctx, key.Identity)
 	if err != nil {
 		return nil, err

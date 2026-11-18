@@ -9,10 +9,10 @@ import (
 
 // EnqueueForTest and EnqueueRotationForTest let the external tests call the
 // two ways an item enters the outbox.
-func (n Node) EnqueueForTest(w ports.Writer, now time.Time, sealer party.Fingerprint, add ...OutItem) error {
+func (n Node) EnqueueForTest(w ports.NamedWriter, now time.Time, sealer party.Fingerprint, add ...OutItem) error {
 	return n.enqueue(w, now, sealer, add...)
 }
 
-func (n Node) EnqueueRotationForTest(w ports.Writer, now time.Time, old party.Fingerprint, add ...OutItem) error {
+func (n Node) EnqueueRotationForTest(w ports.NamedWriter, now time.Time, old party.Fingerprint, add ...OutItem) error {
 	return n.enqueueRotation(w, now, old, add...)
 }

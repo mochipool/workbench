@@ -138,7 +138,7 @@ func opcertDeps(out *bytes.Buffer, cfgs map[string]WorkspaceConfig, w *wired) De
 	return Deps{
 		Out: out, Err: out,
 		Config:       memConfig(cfgs),
-		OpenUpstream: func(dir string) (ports.Store, error) { return plainstore.OpenTestnet(dir) },
+		OpenUpstream: plainstore.Upstream,
 		Wire:         w.wire,
 		Genesis: func(n string) (string, string, bool) {
 			if n == "preview" {

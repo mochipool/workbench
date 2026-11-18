@@ -69,10 +69,10 @@ func TestRefusesAnEnvelopeThatIsNotPasswordEncrypted(t *testing.T) {
 		"a data body of 2 bytes":     {append(append([]byte(nil), good[:15]...), 0xd2, 2, 1, 0), false},
 		"gpg 2.4.9 real output":      {realGPG, true},
 	} {
-		err := d.Update(ctx, func(w ports.Writer) error {
+		err := d.Update(ctx, func(w ports.NamedWriter) error {
 			b := secret.Take(encryptedKey(tc.msg))
 			defer b.Destroy()
-			return w.PutSecret(ports.Ref{Name: "w", Kind: ports.AddrSKey}, b)
+			return w.PutSecret(ports.NamedRef{Name: "w", Kind: ports.AddrSKey}, b)
 		})
 		if tc.ok != (err == nil) {
 			t.Errorf("%s: %v", name, err)
@@ -98,17 +98,17 @@ func TestRefusesEverySecretThatIsNotAnEncryptedKey(t *testing.T) {
 	plain := []byte(`{"type":"PaymentSigningKeyShelley_ed25519","description":"","cborHex":"5820` + strings.Repeat("ab", 32) + `"}`)
 	enc := encryptedKey(symMessage(9, 3, 0xff, 18))
 	for name, tc := range map[string]struct {
-		ref  ports.Ref
+		ref  ports.NamedRef
 		data []byte
 	}{
-		"plain key":         {ports.Ref{Name: "w", Kind: ports.AddrSKey}, plain},
-		"plain cold key":    {ports.Ref{Name: "p", Kind: ports.NodeSKey}, plain},
-		"garbage as a key":  {ports.Ref{Name: "w", Kind: ports.AddrSKey}, []byte("nope")},
-		"mnemonic":          {ports.Ref{Name: "w", Kind: ports.PaymentMnemonics}, []byte("abandon abandon")},
-		"encrypted in a QR": {ports.Ref{Name: "v", Kind: ports.CatalystQRCode}, enc},
-		"party keys":        {ports.Ref{Name: "local", Kind: ports.PartyKeys}, []byte("x")},
+		"plain key":         {ports.NamedRef{Name: "w", Kind: ports.AddrSKey}, plain},
+		"plain cold key":    {ports.NamedRef{Name: "p", Kind: ports.NodeSKey}, plain},
+		"garbage as a key":  {ports.NamedRef{Name: "w", Kind: ports.AddrSKey}, []byte("nope")},
+		"mnemonic":          {ports.NamedRef{Name: "w", Kind: ports.PaymentMnemonics}, []byte("abandon abandon")},
+		"encrypted in a QR": {ports.NamedRef{Name: "v", Kind: ports.CatalystQRCode}, enc},
+		"party keys":        {ports.NamedRef{Name: "local", Kind: ports.PartyKeys}, []byte("x")},
 	} {
-		err := d.Update(ctx, func(w ports.Writer) error {
+		err := d.Update(ctx, func(w ports.NamedWriter) error {
 			b := secret.Take(append([]byte(nil), tc.data...))
 			defer b.Destroy()
 			return w.PutSecret(tc.ref, b)
@@ -118,20 +118,20 @@ func TestRefusesEverySecretThatIsNotAnEncryptedKey(t *testing.T) {
 		}
 	}
 	// A secret kind through Put is refused too.
-	if err := d.Update(ctx, func(w ports.Writer) error { return w.Put(ports.Ref{Name: "w", Kind: ports.AddrSKey}, plain) }); !errors.Is(err, ports.ErrSecretKind) {
+	if err := d.Update(ctx, func(w ports.NamedWriter) error { return w.Put(ports.NamedRef{Name: "w", Kind: ports.AddrSKey}, plain) }); !errors.Is(err, ports.ErrSecretKind) {
 		t.Errorf("Put of a key: %v", err)
 	}
 	if ents, _ := os.ReadDir(dir); len(ents) != 0 {
 		t.Fatalf("something was written: %v", ents)
 	}
 	// The encrypted form, and a non-secret file, are written, locked.
-	err = d.Update(ctx, func(w ports.Writer) error {
+	err = d.Update(ctx, func(w ports.NamedWriter) error {
 		b := secret.Take(append([]byte(nil), enc...))
 		defer b.Destroy()
-		if err := w.PutSecret(ports.Ref{Name: "w", Kind: ports.AddrSKey}, b); err != nil {
+		if err := w.PutSecret(ports.NamedRef{Name: "w", Kind: ports.AddrSKey}, b); err != nil {
 			return err
 		}
-		return w.Put(ports.Ref{Name: "w", Kind: ports.AddrVKey}, []byte("{}"))
+		return w.Put(ports.NamedRef{Name: "w", Kind: ports.AddrVKey}, []byte("{}"))
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -151,13 +151,13 @@ func TestRefusesEverySecretThatIsNotAnEncryptedKey(t *testing.T) {
 func TestAFailedUpdateWritesNothing(t *testing.T) {
 	dir := t.TempDir()
 	d, _ := Open(dir)
-	err := d.Update(ctx, func(w ports.Writer) error {
-		if err := w.Put(ports.Ref{Name: "w", Kind: ports.AddrVKey}, []byte("{}")); err != nil {
+	err := d.Update(ctx, func(w ports.NamedWriter) error {
+		if err := w.Put(ports.NamedRef{Name: "w", Kind: ports.AddrVKey}, []byte("{}")); err != nil {
 			return err
 		}
 		b := secret.Take([]byte("clear"))
 		defer b.Destroy()
-		return w.PutSecret(ports.Ref{Name: "w", Kind: ports.AddrSKey}, b)
+		return w.PutSecret(ports.NamedRef{Name: "w", Kind: ports.AddrSKey}, b)
 	})
 	if err == nil {
 		t.Fatal("no error")

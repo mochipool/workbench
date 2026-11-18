@@ -4,6 +4,7 @@ package main
 
 import (
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
@@ -17,10 +18,16 @@ func init() {
 	openPlain, plainAudit = plainOpener, plainAuditor
 }
 
-func plainOpener(dir string) (ports.Store, error) { return plainstore.Open(dir) }
+func plainOpener(dir string) (ports.Store, error) {
+	st, err := plainstore.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	return st.Anchor(), nil
+}
 
-func plainAuditor(dir string, store ports.Store) ports.Store {
-	if plainstore.IsPlain(store) {
+func plainAuditor(dir string, store ports.NamedStore) ports.NamedStore {
+	if as, ok := labels.AnchorOf(store); ok && plainstore.IsPlain(as) {
 		return plainstore.AuditStore(dir)
 	}
 	return store

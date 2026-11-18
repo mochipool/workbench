@@ -130,7 +130,7 @@ func TestEnqueueHasNoRotationExemption(t *testing.T) {
 	}
 	node := s.B.Signer().Node
 	for _, typ := range []string{string(party.TypeRotation), string(party.TypeSigningResponse)} {
-		err := node.Store.Update(ctx, func(w ports.Writer) error {
+		err := node.Store.Update(ctx, func(w ports.NamedWriter) error {
 			return node.EnqueueForTest(w, s.clock.Now(), stranger, item(typ))
 		})
 		if !errors.Is(err, multisig.ErrIdentityChanged) {
@@ -147,7 +147,7 @@ func TestEnqueueHasNoRotationExemption(t *testing.T) {
 	cur := s.B.Identity.Fingerprint
 	marked := item(string(party.TypeRotation))
 	marked.Rotation = true
-	if err := node.Store.Update(ctx, func(w ports.Writer) error {
+	if err := node.Store.Update(ctx, func(w ports.NamedWriter) error {
 		return node.EnqueueForTest(w, s.clock.Now(), cur, marked)
 	}); err != nil {
 		t.Fatal(err)
@@ -156,7 +156,7 @@ func TestEnqueueHasNoRotationExemption(t *testing.T) {
 		t.Errorf("%+v", got)
 	}
 	// The rotation's own queueing takes only Rotation items, and marks them.
-	if err := node.Store.Update(ctx, func(w ports.Writer) error {
+	if err := node.Store.Update(ctx, func(w ports.NamedWriter) error {
 		return node.EnqueueRotationForTest(w, s.clock.Now(), stranger, item(string(party.TypeSigningResponse)))
 	}); err == nil {
 		t.Error("enqueueRotation took an item that is not a rotation announcement")

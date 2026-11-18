@@ -250,7 +250,7 @@ func (hwIndex) Homes(_ context.Context, id identity.Ref) ([]ports.KeyHome, error
 	var out []ports.KeyHome
 	for _, role := range custody.Roles() {
 		if _, ok := hwNames.Load(custody.KeyRef{Role: role, Identity: id}); ok {
-			out = append(out, ports.KeyHome{Role: role, Identity: id, Name: "hw", HasHardware: true})
+			out = append(out, ports.KeyHome{Role: role, Identity: id, HasHardware: true})
 		}
 	}
 	return out, nil
@@ -340,4 +340,9 @@ func vaultWithSeed(t *testing.T, file string, envType string, seed []byte) *plai
 		t.Fatal(err)
 	}
 	return st
+}
+
+// RoleHistory implements ports.KeyIndex: the test index records none.
+func (hwIndex) RoleHistory(context.Context, identity.Ref) (custody.RoleHistory, bool, error) {
+	return custody.RoleHistory{}, false, nil
 }

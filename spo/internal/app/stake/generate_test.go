@@ -42,7 +42,7 @@ func TestGenerateDelegationCertificate(t *testing.T) {
 		if c.Kind != stk.CertPoolDelegation || c.Pool != tc.want || c.Stake != r.stakeID || c.Deposit != 0 {
 			t.Errorf("%s: %+v", tc.word, c.Spec)
 		}
-		if got := r.store.files[ports.Ref{Name: "w", Kind: ports.DelegCert}]; string(got) != string(c.Envelope) {
+		if got := r.store.files[ports.NamedRef{Name: "w", Kind: ports.DelegCert}]; string(got) != string(c.Envelope) {
 			t.Errorf("stored %q", got)
 		}
 	}
@@ -69,7 +69,7 @@ func TestGenerateDelegationRefusalsWriteNothing(t *testing.T) {
 		}
 	}
 	r := newRig(t)
-	r.store.files[ports.Ref{Name: "w", Kind: ports.StakingVKey}] = []byte("not an envelope")
+	r.store.files[ports.NamedRef{Name: "w", Kind: ports.StakingVKey}] = []byte("not an envelope")
 	if _, err := (GenerateDelegationCertificate{Store: r.store, Certs: r.certs}).Run(bg, DelegationRequest{Pool: hex56(1), Delegator: "w"}); err == nil {
 		t.Error("a bad vkey was accepted")
 	}
@@ -94,7 +94,7 @@ func TestGenerateVoteDelegationCertificate(t *testing.T) {
 	cipScript, _ := chain.Bech32Encode("drep", append([]byte{0x23}, h[:]...))
 	localHash := chain.DRepID{}
 	_ = localHash
-	local, _ := vkeyHash(r.store.files[ports.Ref{Name: "d", Kind: ports.DRepVKey}])
+	local, _ := vkeyHash(r.store.files[ports.NamedRef{Name: "d", Kind: ports.DRepVKey}])
 	for _, tc := range []struct {
 		word string
 		want stk.DRep
@@ -116,12 +116,12 @@ func TestGenerateVoteDelegationCertificate(t *testing.T) {
 		if res.Certificate.DRep != tc.want || res.Certificate.Stake != r.stakeID || res.Certificate.Kind != stk.CertVoteDelegation {
 			t.Errorf("%s: %+v", tc.word, res.Certificate.Spec)
 		}
-		if got := r.store.files[ports.Ref{Name: "w", Kind: ports.VoteDelegCert}]; string(got) != string(res.Certificate.Envelope) {
+		if got := r.store.files[ports.NamedRef{Name: "w", Kind: ports.VoteDelegCert}]; string(got) != string(res.Certificate.Envelope) {
 			t.Errorf("stored %q", got)
 		}
 	}
 	// A stored DRep named like a keyword wins (form 5 before forms 6 and 7).
-	r.store.files[ports.Ref{Name: "always-abstain", Kind: ports.DRepVKey}] = r.store.files[ports.Ref{Name: "d", Kind: ports.DRepVKey}]
+	r.store.files[ports.NamedRef{Name: "always-abstain", Kind: ports.DRepVKey}] = r.store.files[ports.NamedRef{Name: "d", Kind: ports.DRepVKey}]
 	res, err := uc.Run(bg, VoteDelegationRequest{Target: "always-abstain", Delegator: "w"})
 	if err != nil || res.Certificate.DRep.Kind != stk.DRepKey {
 		t.Errorf("%+v %v", res.Certificate.DRep, err)

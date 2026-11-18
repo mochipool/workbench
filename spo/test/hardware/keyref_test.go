@@ -68,15 +68,15 @@ func TestAWrongAccountHardwareAnswerIsRefused(t *testing.T) {
 	}
 	// the file stored for hw's payment key is the file of another account
 	var otherFile []byte
-	if err := w.Store.View(ctx, func(r ports.Reader) error {
+	if err := w.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
-		otherFile, err = r.Get(ports.Ref{Name: "other.payment", Kind: ports.AddrHwsFile})
+		otherFile, err = r.Get(ports.NamedRef{Name: "other.payment", Kind: ports.AddrHwsFile})
 		return err
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.Store.Update(ctx, func(wr ports.Writer) error {
-		return wr.Put(ports.Ref{Name: "hw.payment", Kind: ports.AddrHwsFile}, otherFile)
+	if err := w.Store.Update(ctx, func(wr ports.NamedWriter) error {
+		return wr.Put(ports.NamedRef{Name: "hw.payment", Kind: ports.AddrHwsFile}, otherFile)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -96,22 +96,22 @@ func TestAWrongAccountHardwareAnswerIsRefused(t *testing.T) {
 // fakeParties resolves a party name to a fingerprint; it implements only ByName.
 type fakeParties map[string]party.Fingerprint
 
-func (f fakeParties) ByName(_ ports.Reader, name string) (party.Party, error) {
+func (f fakeParties) ByName(_ ports.NamedReader, name string) (party.Party, error) {
 	if fp, ok := f[name]; ok {
 		return party.Party{Name: name, Fingerprint: fp}, nil
 	}
 	return party.Party{}, ports.ErrNotFound
 }
-func (fakeParties) ByFingerprint(ports.Reader, party.Fingerprint) (party.Party, error) {
+func (fakeParties) ByFingerprint(ports.NamedReader, party.Fingerprint) (party.Party, error) {
 	return party.Party{}, ports.ErrNotFound
 }
-func (fakeParties) List(ports.Reader) ([]party.Party, error) { return nil, nil }
-func (fakeParties) Put(ports.Writer, party.Party) error      { return nil }
-func (fakeParties) SetScope(ports.Writer, string, party.Scope) (party.Party, error) {
+func (fakeParties) List(ports.NamedReader) ([]party.Party, error) { return nil, nil }
+func (fakeParties) Put(ports.NamedWriter, party.Party) error      { return nil }
+func (fakeParties) SetScope(ports.NamedWriter, string, party.Scope) (party.Party, error) {
 	return party.Party{}, nil
 }
-func (fakeParties) Revoke(ports.Writer, string) (party.Party, error) { return party.Party{}, nil }
-func (fakeParties) Rotate(ports.Writer, party.Fingerprint, party.Party, party.Party) error {
+func (fakeParties) Revoke(ports.NamedWriter, string) (party.Party, error) { return party.Party{}, nil }
+func (fakeParties) Rotate(ports.NamedWriter, party.Fingerprint, party.Party, party.Party) error {
 	return nil
 }
 
@@ -159,7 +159,9 @@ func TestOneRegistrationRunsThroughTheSamePlanningForVaultDeviceAndRemote(t *tes
 	vaultAcc := account(t, w, "va", custody.PlaceVault, 0)
 	remAcc := account(t, w, "rem", custody.PlaceVault, 0)
 	// the remote owner's signing key is with the co-signer: only the verification key is here
-	if err := w.Store.Update(ctx, func(wr ports.Writer) error { return wr.Delete(ports.Ref{Name: "rem", Kind: ports.StakingSKey}) }); err != nil {
+	if err := w.Store.Update(ctx, func(wr ports.NamedWriter) error {
+		return wr.Delete(ports.NamedRef{Name: "rem", Kind: ports.StakingSKey})
+	}); err != nil {
 		t.Fatal(err)
 	}
 	cold, err := (poolops.GenerateColdKeys{Store: w.Store, KeyGen: native.SoftwareKeys{}, Hardware: w.Exporter()}).
@@ -177,7 +179,9 @@ func TestOneRegistrationRunsThroughTheSamePlanningForVaultDeviceAndRemote(t *tes
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := w.Store.Update(ctx, func(wr ports.Writer) error { return wr.Put(ports.Ref{Name: name, Kind: ports.DelegCert}, dc.Envelope) }); err != nil {
+		if err := w.Store.Update(ctx, func(wr ports.NamedWriter) error {
+			return wr.Put(ports.NamedRef{Name: name, Kind: ports.DelegCert}, dc.Envelope)
+		}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -210,9 +214,9 @@ func TestOneRegistrationRunsThroughTheSamePlanningForVaultDeviceAndRemote(t *tes
 		t.Errorf("the device witnessed %d times in a run that defers its slots: %v", n, w.HW.Calls())
 	}
 	var raw []byte
-	if err := w.Store.View(ctx, func(r ports.Reader) error {
+	if err := w.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
-		raw, err = r.Get(ports.Ref{Name: "mypool", Kind: ports.PoolDescriptor})
+		raw, err = r.Get(ports.NamedRef{Name: "mypool", Kind: ports.PoolDescriptor})
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -260,8 +264,8 @@ func TestAPayerWithBothFilesIsSignedOnTheDevice(t *testing.T) {
 	account(t, w, "dst", custody.PlaceVault, 0)
 	// a signing key stored beside the hardware file (it need not be the key: the
 	// directory goes by the files stored for the verification key)
-	if err := w.Store.Update(ctx, func(wr ports.Writer) error {
-		return wr.PutSecret(ports.Ref{Name: "hw.payment", Kind: ports.AddrSKey}, secret.Take([]byte("{}")))
+	if err := w.Store.Update(ctx, func(wr ports.NamedWriter) error {
+		return wr.PutSecret(ports.NamedRef{Name: "hw.payment", Kind: ports.AddrSKey}, secret.Take([]byte("{}")))
 	}); err != nil {
 		t.Fatal(err)
 	}

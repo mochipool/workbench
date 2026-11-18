@@ -72,10 +72,10 @@ func (e env) signerKey(t *testing.T, path string, extra ...string) (skey []byte,
 	return skey, env.CborHex[4:]
 }
 
-func putSecret(t *testing.T, st ports.Store, name string, kind ports.Kind, b []byte) {
+func putSecret(t *testing.T, st ports.NamedStore, name string, kind ports.Kind, b []byte) {
 	t.Helper()
-	err := st.Update(context.Background(), func(w ports.Writer) error {
-		return w.PutSecret(ports.Ref{Name: name, Kind: kind}, secret.Take(append([]byte(nil), b...)))
+	err := st.Update(context.Background(), func(w ports.NamedWriter) error {
+		return w.PutSecret(ports.NamedRef{Name: name, Kind: kind}, secret.Take(append([]byte(nil), b...)))
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -141,7 +141,7 @@ func TestCip8SignMatchesCardanoSigner(t *testing.T) {
 		json.Unmarshal(env, &x)
 		return x.CborHex[4:]
 	}
-	var sg ports.Signer = native.VaultSignatures{VaultSigner: native.VaultSigner{Vault: st}}
+	var sg ports.Signer = native.VaultSignatures{VaultSigner: native.VaultSigner{Vault: st.Anchor()}}
 	ms := sg.(ports.MessageSigner)
 
 	type kc struct {
@@ -285,7 +285,7 @@ func TestCip36MatchesCardanoSigner(t *testing.T) {
 		pair.SKey.Destroy()
 		votes = append(votes, bech)
 	}
-	var sg ports.Signer = native.VaultSignatures{VaultSigner: native.VaultSigner{Vault: st}}
+	var sg ports.Signer = native.VaultSignatures{VaultSigner: native.VaultSigner{Vault: st.Anchor()}}
 	c36 := sg.(ports.Cip36Signer)
 
 	for _, set := range []struct {
@@ -411,7 +411,7 @@ func TestCip88MatchesCardanoSigner(t *testing.T) {
 	}()
 	calS, calV := e.signerKey(t, "calidus")
 	_ = calS
-	var sg ports.Signer = native.VaultSignatures{VaultSigner: native.VaultSigner{Vault: st}}
+	var sg ports.Signer = native.VaultSignatures{VaultSigner: native.VaultSigner{Vault: st.Anchor()}}
 	c88 := sg.(ports.Cip88Signer)
 
 	for _, set := range []struct {

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/domain/keyfile"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
@@ -86,7 +87,7 @@ func TestExportEncryptsEverySigningKey(t *testing.T) {
 	if err != nil || rep.Failed() != 0 {
 		t.Fatalf("%v %+v", err, rep)
 	}
-	for _, r := range []ports.Ref{ref("w.payment", ports.AddrSKey), ref("w", ports.StakingSKey), ref("mypool", ports.NodeSKey)} {
+	for _, r := range []ports.NamedRef{ref("w.payment", ports.AddrSKey), ref("w", ports.StakingSKey), ref("mypool", ports.NodeSKey)} {
 		got := dst.snapshot()[r]
 		info, cerr := keyfile.Classify([]byte(got))
 		if cerr != nil || info.Form != keyfile.FormEncrypted {
@@ -138,10 +139,14 @@ func TestExportNeverWritesAKeptEncryptedKey(t *testing.T) {
 	src, keys := workspaceFixture(t)
 	enc := encryptedOf(t, keys["cold"], "Str0ng-Passw0rd!-And-Long")
 	src.put(ref("mypool", ports.NodeSKey), enc)
+	// a record an older import made: no new import creates one
 	mid := newMem()
-	if rep, err := importer(src, mid, &fakeGPG{}).Run(context.Background(), ImportOptions{Owners: []string{"mypool"}, KeepEncrypted: true}); err != nil || rep.Failed() != 0 {
-		t.Fatalf("%v %+v", err, rep)
+	for r, b := range src.snapshot() {
+		if OwnerOf(r) == "mypool" && r.Kind != ports.NodeSKey {
+			mid.put(r, []byte(b))
+		}
 	}
+	mid.put(ref("mypool.node", ports.UpstreamEncryptedSKey), enc)
 	out := newMem()
 	rep, err := exporter(mid, out, &fakeGPG{}, &auditLog{}).Run(context.Background(), ExportOptions{Owners: []string{"mypool"}, Password: sec("Str0ng-Passw0rd!-And-Long")})
 	if err != nil || rep.Failed() != 0 {
@@ -230,4 +235,56 @@ type brokenDecryptor struct{}
 
 func (brokenDecryptor) Decrypt(context.Context, []byte, *ports.Secret) (*ports.Secret, error) {
 	return sec("5820deadbeef"), nil
+}
+
+// labeledStore gives the readers of a store the label lookup of the label
+// resolver, with a fixed table.
+type labeledStore struct {
+	*memStore
+	labels map[string]string // identity name -> label
+}
+
+type labeledReader struct {
+	ports.NamedReader
+	labels map[string]string
+}
+
+func (r labeledReader) LabelOfIdentity(_ identity.OwnerKind, id string) (string, bool, error) {
+	if n, ok := r.labels[id]; ok {
+		return n, true, nil
+	}
+	return "", false, ports.ErrNotFound
+}
+
+func (s labeledStore) View(ctx context.Context, fn func(ports.NamedReader) error) error {
+	return s.memStore.View(ctx, func(r ports.NamedReader) error { return fn(labeledReader{r, s.labels}) })
+}
+
+// A descriptor of the workspace refers to its owners, its reward account and the
+// payer of an open registration by key hash; the export writes the labels back, so
+// the upstream scripts read names: `<label>.payment` for the payment account of a
+// wallet that has one. A reference whose owner has no label is left as it is.
+//
+// spec: SPO-Xidentity-INV-026
+func TestExportWritesTheLabelsBackIntoADescriptor(t *testing.T) {
+	src := newMem()
+	stake := "key-hash:" + strings.Repeat("ab", 28)
+	pay := "key-hash:" + strings.Repeat("cd", 28)
+	ghost := "key-hash:" + strings.Repeat("ef", 28)
+	src.put(ref("p", ports.PoolDescriptor), []byte(`{"poolName":"p","poolOwner":[{"ownerName":"`+stake+`","ownerWitness":"local"},{"ownerName":"`+ghost+`","ownerWitness":"external"}],"poolRewards":"`+stake+`","regWitness":{"id":1,"regPayName":"`+pay+`","txBody":{"type":"x","description":"","cborHex":"a0"},"witnesses":{"p.node":{"witness":{}}}}}`))
+	ls := labeledStore{src, map[string]string{stake: "alice", pay: "alice"}}
+	dst := newMem()
+	ex := ExportWorkspace{Source: ls, SourceVault: src, Lister: src, Dest: dst, Encryptor: &fakeGPG{}, Decryptor: &fakeGPG{}, Auditor: &auditLog{}}
+	if _, err := ex.Run(context.Background(), ExportOptions{Password: sec("Str0ng-Passw0rd!-And-Long")}); err != nil {
+		t.Fatal(err)
+	}
+	got := string(dst.files[ref("p", ports.PoolDescriptor)])
+	for _, want := range []string{`"ownerName":"alice"`, `"poolRewards": "alice"`, `"regPayName":"alice.payment"`, ghost} {
+		if !strings.Contains(strings.ReplaceAll(got, ` `, ``), strings.ReplaceAll(want, ` `, ``)) {
+			t.Errorf("the exported descriptor lacks %s:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, stake) || strings.Contains(got, pay) {
+		t.Errorf("an identity was exported where a label exists:\n%s", got)
+	}
 }

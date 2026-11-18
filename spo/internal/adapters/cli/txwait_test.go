@@ -311,7 +311,9 @@ func TestNotWaitedNoticeNamesThePendingRecordAndTheCommand(t *testing.T) {
 	put := func(id chain.TxID) {
 		p := domassets.Pending{Kind: domassets.PendingPoolRegistration, TxID: id.String(), Pool: "mypool", Epoch: "7", Stamp: "x"}
 		b, _ := p.Marshal()
-		if err := st.Update(context.Background(), func(w ports.Writer) error { return w.Put(ports.Ref{Name: p.TxID, Kind: ports.PendingUpdate}, b) }); err != nil {
+		if err := st.Update(context.Background(), func(w ports.NamedWriter) error {
+			return w.Put(ports.NamedRef{Name: p.TxID, Kind: ports.PendingUpdate}, b)
+		}); err != nil {
 			t.Fatal(err)
 		}
 	}

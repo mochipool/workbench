@@ -39,7 +39,7 @@ func TestAuthorizeCommitteeHotKey(t *testing.T) {
 	if r.l.count("witness committee-cold m") != 1 || r.l.count("witness committee-hot") != 0 || r.l.count("assemble witnesses=2") != 1 {
 		t.Errorf("witnesses: %v", r.l.calls)
 	}
-	if r.store.files[ports.Ref{Name: "h", Kind: ports.CCHotCert}] == nil {
+	if r.store.files[ports.NamedRef{Name: "h", Kind: ports.CCHotCert}] == nil {
 		t.Error("the certificate is not stored under the hot key's name")
 	}
 	if res.Submitted != true {
@@ -101,7 +101,7 @@ func TestCommitteeTransactionsRefuseOffline(t *testing.T) {
 // spec: SPO-23c-INV-006, SPO-23e-INV-003
 func TestAuthorizeCommitteeHardwareRefused(t *testing.T) {
 	r := newRig(t)
-	r.hardware(ports.Ref{Name: "m", Kind: ports.CCColdSKey}, ports.CCColdHwsFile)
+	r.hardware(ports.NamedRef{Name: "m", Kind: ports.CCColdSKey}, ports.CCColdHwsFile)
 	c := &fakeCommittee{l: r.l, cold: chain.None[governance.CommitteeMember]()}
 	if _, err := r.authorize(c).Run(context.Background(), AuthorizeRequest{Cold: "m", Hot: "h", Payer: "w.payment"}); err == nil {
 		t.Fatal("hardware must be refused")
@@ -117,7 +117,7 @@ func TestAuthorizeCommitteeHardwareRefused(t *testing.T) {
 // spec: SPO-23c-IN-001
 func TestAuthorizeHashFileMismatch(t *testing.T) {
 	r := newRig(t)
-	r.store.files[ports.Ref{Name: "m", Kind: ports.CCColdHash}] = []byte(strings.Repeat("00", 28) + "\n")
+	r.store.files[ports.NamedRef{Name: "m", Kind: ports.CCColdHash}] = []byte(strings.Repeat("00", 28) + "\n")
 	c := &fakeCommittee{l: r.l, cold: chain.None[governance.CommitteeMember]()}
 	if _, err := r.authorize(c).Run(context.Background(), AuthorizeRequest{Cold: "m", Hot: "h", Payer: "w.payment"}); !errors.Is(err, ErrHashFileMismatch) {
 		t.Fatalf("got %v", err)
@@ -143,7 +143,7 @@ func TestResignCommitteeColdKey(t *testing.T) {
 	if res.Certificate.Kind != stake.CertCommitteeResign || res.Certificate.Anchor.URL != "https://x.org/r.json" || res.Certificate.Anchor.Hash != governance.HashDocument([]byte(`{}`)) {
 		t.Fatalf("certificate %+v", res.Certificate)
 	}
-	if r.store.files[ports.Ref{Name: "m", Kind: ports.CCColdRetCert}] == nil {
+	if r.store.files[ports.NamedRef{Name: "m", Kind: ports.CCColdRetCert}] == nil {
 		t.Error("certificate not stored under the cold key's name")
 	}
 	if len(res.Decisions) != 1 || !strings.Contains(res.Decisions[0], "not verified") {

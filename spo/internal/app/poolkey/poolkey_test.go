@@ -57,7 +57,7 @@ func (r rig) keyUC() GenerateCalidusKey {
 }
 
 func (r rig) regUC() GenerateCalidusRegistration {
-	return GenerateCalidusRegistration{Store: r.store, Signers: native.NewSignatureSigners(r.store), Clock: r.clock}
+	return GenerateCalidusRegistration{Store: r.store, Signers: native.NewSignatureSigners(r.store.Anchor()), Clock: r.clock}
 }
 
 func (r rig) files(t *testing.T) []string {
@@ -82,9 +82,9 @@ func (r rig) mode(t *testing.T, name string) os.FileMode {
 	return fi.Mode().Perm()
 }
 
-func (r rig) put(t *testing.T, ref ports.Ref, b []byte) {
+func (r rig) put(t *testing.T, ref ports.NamedRef, b []byte) {
 	t.Helper()
-	err := r.store.Update(context.Background(), func(w ports.Writer) error {
+	err := r.store.Update(context.Background(), func(w ports.NamedWriter) error {
 		if ref.Kind.Secret() {
 			return w.PutSecret(ref, secret.Take(append([]byte(nil), b...)))
 		}
@@ -102,9 +102,9 @@ func (r rig) coldKey(t *testing.T, pool string) {
 		t.Fatal(err)
 	}
 	defer pair.SKey.Destroy()
-	r.put(t, ports.Ref{Name: pool, Kind: ports.NodeVKey}, pair.VKey)
-	if err := r.store.Update(context.Background(), func(w ports.Writer) error {
-		return w.PutSecret(ports.Ref{Name: pool, Kind: ports.NodeSKey}, pair.SKey)
+	r.put(t, ports.NamedRef{Name: pool, Kind: ports.NodeVKey}, pair.VKey)
+	if err := r.store.Update(context.Background(), func(w ports.NamedWriter) error {
+		return w.PutSecret(ports.NamedRef{Name: pool, Kind: ports.NodeSKey}, pair.SKey)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func TestGenerateCalidusKeyRefusals(t *testing.T) {
 		t.Errorf("second run: %v", err)
 	}
 	// An orphan hardware file is enough.
-	r.put(t, ports.Ref{Name: "h", Kind: ports.CalidusHwsFile}, []byte("{}"))
+	r.put(t, ports.NamedRef{Name: "h", Kind: ports.CalidusHwsFile}, []byte("{}"))
 	if _, err := r.keyUC().Run(context.Background(), GenerateCalidusKeyRequest{Name: "h"}); !errors.Is(err, ErrExists) {
 		t.Errorf("hwsfile: %v", err)
 	}
@@ -307,7 +307,7 @@ func TestGenerateCalidusRegistrationRefusals(t *testing.T) {
 		t.Errorf("no cold key: %v", err)
 	}
 	// A cold signing key with no verification key and no id file: no pool id.
-	r.put(t, ports.Ref{Name: "q", Kind: ports.NodeSKey}, []byte(`{"type":"StakePoolSigningKey_ed25519","description":"","cborHex":"5820`+strings.Repeat("11", 32)+`"}`))
+	r.put(t, ports.NamedRef{Name: "q", Kind: ports.NodeSKey}, []byte(`{"type":"StakePoolSigningKey_ed25519","description":"","cborHex":"5820`+strings.Repeat("11", 32)+`"}`))
 	if _, err := r.regUC().Run(ctx, CalidusRegistrationRequest{Calidus: "cal", Pool: "q"}); !errors.Is(err, ErrNoPoolID) {
 		t.Errorf("no pool id: %v", err)
 	}
@@ -316,7 +316,7 @@ func TestGenerateCalidusRegistrationRefusals(t *testing.T) {
 	r.coldKey(t, "p")
 	other := chain.PoolID{1, 2, 3}
 	bech, _ := chain.Bech32Encode("pool", other[:])
-	r.put(t, ports.Ref{Name: "p", Kind: ports.PoolIDBechFile}, []byte(bech+"\n"))
+	r.put(t, ports.NamedRef{Name: "p", Kind: ports.PoolIDBechFile}, []byte(bech+"\n"))
 	n := len(r.files(t))
 	if _, err := r.regUC().Run(ctx, CalidusRegistrationRequest{Calidus: "cal", Pool: "p"}); err == nil || !strings.Contains(err.Error(), "not the pool's key") {
 		t.Errorf("a stale pool id file: %v", err)
@@ -363,7 +363,7 @@ func TestRegistrationHardwareColdKeyRefusedUpFront(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.coldKey(t, "p")
-	r.put(t, ports.Ref{Name: "p", Kind: ports.NodeHwsFile}, []byte("{}"))
+	r.put(t, ports.NamedRef{Name: "p", Kind: ports.NodeHwsFile}, []byte("{}"))
 	// The hardware file wins beside a key file (SPO-15-INV-002) and, with no device
 	// signer, is refused by the plan. (The old "remote holder" case is gone: a
 	// holder can no longer be named in a request.)
@@ -402,7 +402,7 @@ func TestQueryCalidusClassifiesSubjects(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.coldKey(t, "pl")
-	r.put(t, ports.Ref{Name: "ph", Kind: ports.PoolIDFile}, []byte(strings.Repeat("ab", 28)+"\n"))
+	r.put(t, ports.NamedRef{Name: "ph", Kind: ports.PoolIDFile}, []byte(strings.Repeat("ab", 28)+"\n"))
 	pub := "63c5d69570349e4233a0575811464f0e8a3fd329abe76e9bdc3d3f1b95982179"
 	nodeV, _ := os.ReadFile(filepath.Join(r.dir, "pl.node.vkey"))
 	nodePub, _ := cose.VKeyFromEnvelope(nodeV)
@@ -411,7 +411,7 @@ func TestQueryCalidusClassifiesSubjects(t *testing.T) {
 	poolBech, _ := chain.Bech32Encode("pool", make([]byte, 28))
 	hexPool, _ := chain.Bech32Encode("pool", []byte(strings.Repeat("\xab", 28)))
 	// A stored name that is also valid hex wins as a file, as upstream's order has it.
-	r.put(t, ports.Ref{Name: strings.Repeat("c", 64), Kind: ports.CalidusID}, []byte(phraseID+"\n"))
+	r.put(t, ports.NamedRef{Name: strings.Repeat("c", 64), Kind: ports.CalidusID}, []byte(phraseID+"\n"))
 
 	for _, c := range []struct {
 		subject string
@@ -437,7 +437,7 @@ func TestQueryCalidusClassifiesSubjects(t *testing.T) {
 		}
 	}
 	// A vkey-only name uses the key's public key.
-	r.put(t, ports.Ref{Name: "vonly", Kind: ports.CalidusVKey}, []byte(`{"type":"x","description":"","cborHex":"5820`+pub+`"}`))
+	r.put(t, ports.NamedRef{Name: "vonly", Kind: ports.CalidusVKey}, []byte(`{"type":"x","description":"","cborHex":"5820`+pub+`"}`))
 	rd := &recReader{}
 	if _, err := (QueryCalidus{Store: r.store, Reader: rd}).Run(ctx, "vonly"); err != nil || rd.got[0].PubKeyHex != pub {
 		t.Errorf("vkey subject: %v %+v", err, rd.got)

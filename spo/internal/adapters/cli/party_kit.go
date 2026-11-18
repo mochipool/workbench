@@ -19,7 +19,7 @@ type PartyKit struct {
 	Registry ports.PartyRegistry
 	// SetScope changes the scope recorded for a party inside the Update the
 	// caller runs (partystore.Registry.SetScope).
-	SetScope func(w ports.Writer, name string, scope party.Scope) (party.Party, error)
+	SetScope func(w ports.NamedWriter, name string, scope party.Scope) (party.Party, error)
 	Replay   ports.ReplayLog
 	// Addresses is the ledger's address inspector, always: a signer's
 	// classification of inputs and outputs by credential depends on it. It is

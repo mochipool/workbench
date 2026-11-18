@@ -10,20 +10,21 @@ import (
 	"github.com/mochipool/workbench/spo/internal/adapters/sqlitestore"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 )
 
 type memStore struct {
-	m       map[ports.Ref][]byte
+	m       map[ports.NamedRef][]byte
 	failPut error
 	updates int
 }
 
 type memTx struct {
 	s     *memStore
-	stage map[ports.Ref][]byte
+	stage map[ports.NamedRef][]byte
 }
 
-func (t *memTx) Get(r ports.Ref) ([]byte, error) {
+func (t *memTx) Get(r ports.NamedRef) ([]byte, error) {
 	if b, ok := t.stage[r]; ok {
 		return b, nil
 	}
@@ -32,23 +33,23 @@ func (t *memTx) Get(r ports.Ref) ([]byte, error) {
 	}
 	return nil, ports.ErrNotFound
 }
-func (t *memTx) Exists(r ports.Ref) (bool, error) { _, err := t.Get(r); return err == nil, nil }
-func (t *memTx) Put(r ports.Ref, d []byte) error {
+func (t *memTx) Exists(r ports.NamedRef) (bool, error) { _, err := t.Get(r); return err == nil, nil }
+func (t *memTx) Put(r ports.NamedRef, d []byte) error {
 	if t.s.failPut != nil {
 		return t.s.failPut
 	}
 	t.stage[r] = append([]byte(nil), d...)
 	return nil
 }
-func (t *memTx) PutSecret(ports.Ref, *secret.Buffer) error { return ports.ErrSecretKind }
-func (t *memTx) Delete(ports.Ref) error                    { return nil }
+func (t *memTx) PutSecret(ports.NamedRef, *secret.Buffer) error { return ports.ErrSecretKind }
+func (t *memTx) Delete(ports.NamedRef) error                    { return nil }
 
-func (s *memStore) View(_ context.Context, fn func(ports.Reader) error) error {
-	return fn(&memTx{s: s, stage: map[ports.Ref][]byte{}})
+func (s *memStore) View(_ context.Context, fn func(ports.NamedReader) error) error {
+	return fn(&memTx{s: s, stage: map[ports.NamedRef][]byte{}})
 }
-func (s *memStore) Update(_ context.Context, fn func(ports.Writer) error) error {
+func (s *memStore) Update(_ context.Context, fn func(ports.NamedWriter) error) error {
 	s.updates++
-	t := &memTx{s: s, stage: map[ports.Ref][]byte{}}
+	t := &memTx{s: s, stage: map[ports.NamedRef][]byte{}}
 	if err := fn(t); err != nil {
 		return err
 	}
@@ -58,7 +59,7 @@ func (s *memStore) Update(_ context.Context, fn func(ports.Writer) error) error 
 	return nil
 }
 
-func newMem() *memStore { return &memStore{m: map[ports.Ref][]byte{}} }
+func newMem() *memStore { return &memStore{m: map[ports.NamedRef][]byte{}} }
 
 var ctx = context.Background()
 
@@ -158,7 +159,7 @@ func TestInSealedStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	seq0, _ := s.Head()
-	if err := (&Auditor{Store: s, Reason: "test"}).Record(ctx, ports.AuditEvent{Operation: "export-workspace", Owners: []string{"w"}}); err != nil {
+	if err := (&Auditor{Store: labels.Named(s), Reason: "test"}).Record(ctx, ports.AuditEvent{Operation: "export-workspace", Owners: []string{"w"}}); err != nil {
 		t.Fatal(err)
 	}
 	if seq1, _ := s.Head(); seq1 != seq0+1 {
@@ -173,7 +174,7 @@ func TestInSealedStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if evs, err := Events(ctx, s); err != nil || len(evs) != 1 || evs[0].Reason != "test" {
+	if evs, err := Events(ctx, labels.Named(s)); err != nil || len(evs) != 1 || evs[0].Reason != "test" {
 		t.Fatalf("%v %v", evs, err)
 	}
 }

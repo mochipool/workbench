@@ -200,8 +200,8 @@ func (a *app) poolMetadataCommand() *cobra.Command {
 				if extended {
 					kind = ports.PoolExtendedMetadata
 				}
-				return s.Store.View(ctx, func(r ports.Reader) error {
-					b, err := r.Get(ports.Ref{Name: name, Kind: kind})
+				return s.Store.View(ctx, func(r ports.NamedReader) error {
+					b, err := r.Get(ports.NamedRef{Name: name, Kind: kind})
 					if errors.Is(err, ports.ErrNotFound) {
 						return fmt.Errorf("pool %s has no %s: run `spo pool cert generate %s`", name, kind, name)
 					}
@@ -309,7 +309,7 @@ func (a *app) reportRegister(ctx context.Context, s *session, env *Env, wo WireO
 	if len(res.Missing) > 0 {
 		var slots []slotInfo
 		if d, err := readDescriptorOf(ctx, s.Store, name); err == nil {
-			_ = s.Store.View(ctx, func(r ports.Reader) error {
+			_ = s.Store.View(ctx, func(r ports.NamedReader) error {
 				coll, _ := d.Collection(env.TxIDs.TransactionID)
 				pn, _ := payerWord(args[1])
 				for _, sl := range poolSlots(r, d, name, pn, false, coll, labelerOf(env)) {
@@ -476,7 +476,7 @@ a witness is replaced only with --overwrite.`,
 					fmt.Fprintln(w)
 				}
 				var slots []slotInfo
-				_ = s.Store.View(ctx, func(r ports.Reader) error {
+				_ = s.Store.View(ctx, func(r ports.NamedReader) error {
 					slots = poolSlots(r, d, name, coll.PayName, false, coll, labelerOf(env))
 					return nil
 				})

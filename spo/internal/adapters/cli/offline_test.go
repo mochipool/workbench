@@ -100,7 +100,9 @@ func newOgFixture(t *testing.T, mode string) *ogFixture {
 		t.Fatal(err)
 	}
 	put := func(name string, kind ports.Kind, content string) {
-		if err := st.Update(context.Background(), func(w ports.Writer) error { return w.Put(ports.Ref{Name: name, Kind: kind}, []byte(content+"\n")) }); err != nil {
+		if err := st.Update(context.Background(), func(w ports.NamedWriter) error {
+			return w.Put(ports.NamedRef{Name: name, Kind: kind}, []byte(content+"\n"))
+		}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -108,7 +110,7 @@ func newOgFixture(t *testing.T, mode string) *ogFixture {
 	put("w", ports.StakingAddr, ogStake)
 	cfgs := map[string]WorkspaceConfig{f.dir: {Network: "preview", Mode: mode}}
 	f.deps = Deps{Out: &f.out, Err: &f.out, Version: "test", Config: memConfig(cfgs),
-		OpenUpstream: func(dir string) (ports.Store, error) { return plainstore.OpenTestnet(dir) },
+		OpenUpstream: plainstore.Upstream,
 		Wire: func(_ ports.Store, o WireOptions) (*Env, error) {
 			led := native.Ledger{}
 			env := &Env{Mode: o.Mode, NetworkID: ports.NetworkTestnet, Clock: cliClock{}, AddressInspector: led, TxIDs: led,

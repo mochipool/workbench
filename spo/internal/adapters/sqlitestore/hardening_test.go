@@ -24,8 +24,29 @@ import (
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
-// scratch makes a workspace with Init and opens it with its passphrase.
+// scratch makes a workspace with Init and opens it with its passphrase. The
+// handle holds NO recovery proof and no recovery secret: it is a handle that the
+// master key alone could have made. A test that rekeys presents the recovery key
+// itself (presentStd, or rekeyTo, which does it from heldRecovery).
 func scratch(t *testing.T) (s *Store, path string, recoveryText string) {
+	t.Helper()
+	s, path, recoveryText = scratchUnpresented(t)
+	heldRecovery.Store(s, recoveryText)
+	return s, path, recoveryText
+}
+
+// scratchPresented is scratch with the recovery key presented on the handle, for
+// a test that rekeys or rotates it once (a rekey consumes the presentation).
+func scratchPresented(t *testing.T) (s *Store, path string, recoveryText string) {
+	t.Helper()
+	s, path, recoveryText = scratch(t)
+	presentStd(t, s, recoveryText)
+	return s, path, recoveryText
+}
+
+// scratchUnpresented is scratch without the presentation: a handle that only
+// the passphrase opened.
+func scratchUnpresented(t *testing.T) (s *Store, path string, recoveryText string) {
 	t.Helper()
 	path = filepath.Join(t.TempDir(), "ws.db")
 	p1, p2 := pw(), pw()
@@ -114,8 +135,16 @@ func TestInitFromScratch(t *testing.T) {
 
 // ---- H1: rekey ----
 
+// heldRecovery remembers, per handle, the recovery key an operator would hold
+// (the one printed at creation or by the last rekey), so a test helper can
+// present it before the next rekey.
+var heldRecovery sync.Map
+
 func rekeyTo(t *testing.T, s *Store, p string) string {
 	t.Helper()
+	if cur, ok := heldRecovery.Load(s); ok {
+		presentStd(t, s, cur.(string))
+	}
 	rk, err := s.ChangePassphraseRekey(ctx, passphrase(p))
 	if err != nil {
 		t.Fatal(err)
@@ -123,6 +152,7 @@ func rekeyTo(t *testing.T, s *Store, p string) string {
 	var text string
 	rk.Use(func(b []byte) error { text = string(b); return nil })
 	rk.Destroy()
+	heldRecovery.Store(s, text)
 	// What the CLI does once the key has been shown.
 	if err := s.Cleanup(ctx); err != nil {
 		t.Fatal(err)
@@ -138,9 +168,9 @@ func TestRekeyRevokesOldSlotsEvenIfPutBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var slotRow [9]any
-	if err := s.db.QueryRow(`SELECT id,kind,kdf_memory_kib,kdf_passes,kdf_lanes,salt,key_commit,nonce,wrapped_key FROM keyslots WHERE id=?`, oldID).
-		Scan(&slotRow[0], &slotRow[1], &slotRow[2], &slotRow[3], &slotRow[4], &slotRow[5], &slotRow[6], &slotRow[7], &slotRow[8]); err != nil {
+	var slotRow [11]any
+	if err := s.db.QueryRow(`SELECT id,kind,kdf_memory_kib,kdf_passes,kdf_lanes,salt,key_commit,nonce,wrapped_key,bound,rec_hash FROM keyslots WHERE id=?`, oldID).
+		Scan(&slotRow[0], &slotRow[1], &slotRow[2], &slotRow[3], &slotRow[4], &slotRow[5], &slotRow[6], &slotRow[7], &slotRow[8], &slotRow[9], &slotRow[10]); err != nil {
 		t.Fatal(err)
 	}
 	oldWrapped := slotRow[8].([]byte)
@@ -192,7 +222,7 @@ func TestRekeyRevokesOldSlotsEvenIfPutBack(t *testing.T) {
 			t.Fatal(err)
 		}
 		sr := seal.SealedRecord{Nonce: nonce, WrappedKey: wrapped, Owner: owner, Ciphertext: ct}
-		m := seal.RecordMeta{WorkspaceID: s.ws, RecordID: id, Kind: "kes.counter", Owner: ownerOf(counter), Class: seal.ClassSensitive, Version: uint64(v)}
+		m := metaOf(s.ws, id, counter, seal.ClassSensitive, uint64(v))
 		if _, err := oldKeys.OpenRecord(m, sr); !errors.Is(err, seal.ErrAuth) {
 			t.Errorf("the old master key opened a record sealed after the rekey: %v", err)
 		}
@@ -226,12 +256,15 @@ func TestRekeyRevokesOldSlotsEvenIfPutBack(t *testing.T) {
 	// unwraps to the OLD master key, which no longer protects anything, and
 	// the store refuses it.
 	db := rawDB(t, path)
-	if _, err := db.Exec(`INSERT INTO keyslots (id,kind,kdf_memory_kib,kdf_passes,kdf_lanes,salt,key_commit,nonce,wrapped_key) VALUES (?,?,?,?,?,?,?,?,?)`, slotRow[:]...); err != nil {
+	if _, err := db.Exec(`INSERT INTO keyslots (id,kind,kdf_memory_kib,kdf_passes,kdf_lanes,salt,key_commit,nonce,wrapped_key,bound,rec_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?)`, slotRow[:]...); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
 	_, err = Open(path, passphrase("old-pass"))
-	if !errors.Is(err, ErrKeyEpoch) || errors.Is(err, ErrWrongCredential) {
+	// Format 3: the old slot binds another recovery public key hash than the
+	// current slots, so the policy check refuses the table before any key is
+	// derived (this test expected ErrKeyEpoch in format 2).
+	if !errors.Is(err, ErrPolicyViolated) || errors.Is(err, ErrWrongCredential) {
 		t.Errorf("re-inserted old slot: %v", err)
 	}
 	// With the slot AND the old meta row put back, the old credential unlocks
@@ -246,19 +279,11 @@ func TestRekeyRevokesOldSlotsEvenIfPutBack(t *testing.T) {
 	if _, err = Open(path, passphrase("old-pass")); !errors.Is(err, ErrVerify) {
 		t.Errorf("old slot with old meta: %v, want a verification error", err)
 	}
-	h, err := OpenWithOptions(path, passphrase("old-pass"), OpenOptions{SkipVerify: true})
-	if err != nil {
+	// The policy check is not part of the verification SkipVerify skips: the old
+	// slot's table is refused even then (format 2 opened and failed at first use).
+	if _, err := OpenWithOptions(path, passphrase("old-pass"), OpenOptions{SkipVerify: true}); !errors.Is(err, ErrPolicyViolated) {
 		t.Fatalf("old slot with old meta, verification skipped: %v", err)
 	}
-	// With verification skipped the handle builds its record map at first use,
-	// and that is a verification, which fails here.
-	if _, err := get(h, counter); !errors.Is(err, ErrVerify) {
-		t.Errorf("the old master key read a record sealed after the rekey: %v", err)
-	}
-	if h.Verify(ctx) == nil {
-		t.Error("Verify passed with the old slot and the old meta row back")
-	}
-	h.Close()
 	// Back to the new state for the rest of the test.
 	db = rawDB(t, path)
 	db.Exec(`DELETE FROM keyslots WHERE id = ?`, slotRow[0])
@@ -285,10 +310,12 @@ func TestRekeyResultHasOnePassphraseAndOneRecoverySlot(t *testing.T) {
 	if _, err := s.AddPassphraseSlot(ctx, passphrase("second")); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.AddRecoverySlot(ctx); err != nil {
-		t.Fatal(err)
+	// (Format 3 binds one recovery key in every slot, so a second recovery slot is
+	// refused; this test used one to get four slots, now it gets three.)
+	if _, _, err := s.AddRecoverySlot(ctx); !errors.Is(err, ErrUseRekey) {
+		t.Fatalf("a second recovery slot: %v", err)
 	}
-	if infos, _ := s.Slots(ctx); len(infos) != 4 {
+	if infos, _ := s.Slots(ctx); len(infos) != 3 {
 		t.Fatalf("%d slots", len(infos))
 	}
 	rekeyTo(t, s, "only")
@@ -334,7 +361,7 @@ func TestRekeyNeedsExactlyOnePassphrase(t *testing.T) {
 func TestRekeyIsAtomic(t *testing.T) {
 	s, path, _ := scratch(t)
 	put(t, s, counter, "x")
-	put(t, s, ports.Ref{Name: "p", Kind: ports.KesVKey}, "v")
+	put(t, s, rf("p", ports.KesVKey), "v")
 	np := passphrase("new")
 	defer np.Destroy()
 	live := liveBuffers()
@@ -403,9 +430,8 @@ func TestRekeyTwiceAndWithSecretsAndNumberedRecords(t *testing.T) {
 	s, path, _ := scratch(t)
 	var refs []ports.Ref
 	for i := 0; i < 4; i++ {
-		r := ports.Ref{Name: "pool-a", Kind: ports.KesSKey, Num: i}
-		putSecret(t, s, r, strings.Repeat("k", 10+i))
-		put(t, s, ports.Ref{Name: "pool-a", Kind: ports.KesVKey, Num: i}, "v")
+		r := rf("pool-a", ports.KesSKey, i)
+		putSecret(t, s, r, strings.Repeat("k", 10+i)) // writes the verification key and role history too
 		refs = append(refs, r)
 	}
 	rekeyTo(t, s, "second")
@@ -419,8 +445,8 @@ func TestRekeyTwiceAndWithSecretsAndNumberedRecords(t *testing.T) {
 			t.Errorf("secret %d has %d bytes", i, k.Len())
 		}
 		k.Destroy()
-		if b, err := get(s, ports.Ref{Name: "pool-a", Kind: ports.KesVKey, Num: i}); err != nil || string(b) != "v" {
-			t.Errorf("vkey %d: %q %v", i, b, err)
+		if _, err := get(s, rf("pool-a", ports.KesVKey, i)); err != nil {
+			t.Errorf("vkey %d: %v", i, err)
 		}
 	}
 	if err := s.Verify(ctx); err != nil {
@@ -453,8 +479,9 @@ func TestSlotInvariantIsEnforcedInsideTheTransaction(t *testing.T) {
 	if infos, _ := s.Slots(ctx); len(infos) != 1 {
 		t.Errorf("the refused operation changed the slots: %d", len(infos))
 	}
-	// Adding the missing kind restores the invariant.
-	if _, _, err := s.AddRecoverySlot(ctx); err != nil {
+	// A recovery key is bound in every slot of a format 3 workspace, so the
+	// missing recovery slot is not added back: a rekey makes a new one.
+	if _, _, err := s.AddRecoverySlot(ctx); !errors.Is(err, ErrUseRekey) {
 		t.Errorf("AddRecoverySlot: %v", err)
 	}
 }
@@ -602,7 +629,7 @@ func TestHeadFile(t *testing.T) {
 // M1(a): the lookup tag and the kind are in the hash the audit covers.
 func TestVerifyCoversTagAndKind(t *testing.T) {
 	s, _, _ := scratch(t)
-	a, b := ports.Ref{Name: "p", Kind: ports.KesVKey, Num: 0}, ports.Ref{Name: "p", Kind: ports.KesVKey, Num: 1}
+	a, b := rf("p", ports.KesVKey, 0), rf("p", ports.KesVKey, 1)
 	put(t, s, a, "va")
 	put(t, s, b, "vb")
 	ta, _ := s.tag(a)
@@ -624,7 +651,7 @@ func TestSecretCiphertextLengthHidesThePayloadSize(t *testing.T) {
 		s.db.QueryRow(`SELECT length(ciphertext) FROM records WHERE kind = ? AND version >= 1 AND lookup_tag = ?`, string(ref.Kind), mustTag(t, s, ref)).Scan(&n)
 		return n
 	}
-	r12, r24 := ports.Ref{Name: "w", Kind: ports.AddrSKey}, ports.Ref{Name: "w2", Kind: ports.AddrSKey}
+	r12, r24 := rf("w", ports.AddrSKey), rf("w2", ports.AddrSKey)
 	putSecret(t, s, r12, strings.Repeat("abandon ", 12))
 	putSecret(t, s, r24, strings.Repeat("abandon ", 24))
 	if a, b := size(r12), size(r24); a != b || a != 256+16 {
@@ -670,11 +697,11 @@ func TestEveryBufferIsReleased(t *testing.T) {
 		k.Destroy()
 		put(t, s, counter, "x")
 		// Failure paths: missing, wrong kind, a failing callback, a delete.
-		s.Open(ctx, ports.Ref{Name: "nope", Kind: ports.KesSKey})
+		s.Open(ctx, rf("nope", ports.KesSKey))
 		s.Open(ctx, counter)
 		sec := secret.Take([]byte("s"))
 		s.Update(ctx, func(w ports.Writer) error {
-			w.PutSecret(skey0, sec)
+			putKeyW(w, skey0, sec)
 			return errors.New("abort")
 		})
 		sec.Destroy()
@@ -749,7 +776,7 @@ func TestManyOpenSecretsEndInAnErrorNotAPanic(t *testing.T) {
 	if _, err := get(s, counter); !errors.Is(err, ports.ErrNotFound) {
 		t.Errorf("store after the limit: %v", err)
 	}
-	if err := s.Update(ctx, func(w ports.Writer) error { return w.PutSecret(skey0, secret.Take([]byte("again"))) }); err != nil {
+	if err := s.Update(ctx, func(w ports.Writer) error { return putKeyW(w, skey0, secret.Take([]byte("again"))) }); err != nil {
 		t.Errorf("update after the limit: %v", err)
 	}
 }
@@ -858,7 +885,7 @@ func TestOpenSecretInsideAnUpdate(t *testing.T) {
 		})
 		b.Destroy()
 		// And it sees this update's own writes.
-		w.PutSecret(skey0, secret.Take([]byte("staged")))
+		putKeyW(w, skey0, secret.Take([]byte("staged")))
 		b, err = o.OpenSecret(skey0)
 		if err != nil {
 			return err
@@ -923,7 +950,11 @@ func TestUnlockWorkIsCapped(t *testing.T) {
 	maxUnlockWork = 300
 	defer func() { maxUnlockWork = old }()
 	p := fresh(t)
-	s := openAt(t, p)
+	s, err := Open(p, pw()) // not the recovery key: no slot is added on a recovery handle
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
 	if _, err := s.AddPassphraseSlot(ctx, passphrase("x1")); err != nil {
 		t.Fatal(err)
 	}
@@ -946,7 +977,7 @@ func TestUnlockWorkIsCapped(t *testing.T) {
 	}
 	// Whichever slot holds the real passphrase, at most one derivation runs
 	// before the cap, so at least one of the three is reported as skipped.
-	_, err := Open(p, passphrase("matches none of them"))
+	_, err = Open(p, passphrase("matches none of them"))
 	if !errors.Is(err, ErrWrongCredential) || strings.Count(err.Error(), "most key-derivation work") != 2 {
 		t.Errorf("capped unlock: %v", err)
 	}
@@ -1145,7 +1176,7 @@ func TestSlotOperationsAreAudited(t *testing.T) {
 	if _, err := s.AddPassphraseSlot(ctx, passphrase("two")); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.AddRecoverySlot(ctx); err != nil {
+	if _, err := s.AddPassphraseSlot(ctx, passphrase("two-b")); err != nil { // was AddRecoverySlot (format 2)
 		t.Fatal(err)
 	}
 	rekeyTo(t, s, "three")
@@ -1180,7 +1211,7 @@ func TestSlotOperationsAreAudited(t *testing.T) {
 func TestErrorsDoNotContainOperatorNames(t *testing.T) {
 	s, _, _ := scratch(t)
 	const name = "MARKERPOOLNAME"
-	ref := ports.Ref{Name: name, Kind: ports.KesVKey}
+	ref := rf(name, ports.KesVKey)
 	put(t, s, ref, "v")
 	exec(t, s, `UPDATE records SET ciphertext = CAST(substr(ciphertext,1,1) || CASE WHEN substr(ciphertext,2,1) = x'00' THEN x'01' ELSE x'00' END || substr(ciphertext,3) AS BLOB)`)
 	_, err := get(s, ref)
@@ -1200,9 +1231,9 @@ func TestErrorsDoNotContainOperatorNames(t *testing.T) {
 		t.Errorf("the ref is not carried in a *RefError: %v", err)
 	}
 	// Secrets, sealing failures and PutSecret errors too.
-	sref := ports.Ref{Name: name, Kind: ports.KesSKey}
+	sref := rf(name, ports.KesSKey)
 	empty := secret.Take(nil)
-	err = s.Update(ctx, func(w ports.Writer) error { return w.PutSecret(sref, empty) })
+	err = s.Update(ctx, func(w ports.Writer) error { return putKeyW(w, sref, empty) })
 	if err == nil || strings.Contains(err.Error(), name) {
 		t.Errorf("PutSecret error: %v", err)
 	}
@@ -1216,7 +1247,7 @@ func TestErrorsDoNotContainOperatorNames(t *testing.T) {
 func TestRecordMovedToAnotherWorkspaceFails(t *testing.T) {
 	a, _, _ := scratch(t)
 	b, _, _ := scratch(t)
-	ref := ports.Ref{Name: "p", Kind: ports.KesVKey}
+	ref := rf("p", ports.KesVKey)
 	put(t, a, ref, "secret-ish")
 	put(t, b, ref, "placeholder")
 	// Same reference, so b has a row under its own tag for this ref. Replace

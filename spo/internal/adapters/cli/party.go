@@ -21,6 +21,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 )
 
 // partyRun is what a party command runs in: the open sealed workspace, its
@@ -41,8 +42,8 @@ func (r *partyRun) kit() *PartyKit { return r.env.Party }
 
 // vault is the store as the vault that releases the keys. A sealed workspace
 // is both.
-func (r *partyRun) vault() (ports.Vault, error) {
-	v, ok := r.s.Store.(ports.Vault)
+func (r *partyRun) vault() (ports.NamedVault, error) {
+	v, ok := r.s.Store.(ports.NamedVault)
 	if !ok {
 		return nil, errors.New("this workspace's store cannot release keys to a signer")
 	}
@@ -67,10 +68,9 @@ func (r *partyRun) coordinator() (multisig.Coordinator, error) {
 		return multisig.Coordinator{}, err
 	}
 	c := multisig.Coordinator{Node: r.node(), TxIDs: r.env.TxIDs, NetworkMagic: magic}
-	if idx, err := ports.NewStoreKeyIndex(r.s.Store); err == nil {
-		c.History = func(ctx context.Context, id identity.Ref) (custody.RoleHistory, bool, error) {
-			return ports.RoleHistoryOf(ctx, idx, id)
-		}
+	idx := labels.NewIndex(r.s.Anchored)
+	c.History = func(ctx context.Context, id identity.Ref) (custody.RoleHistory, bool, error) {
+		return ports.RoleHistoryOf(ctx, idx, id)
 	}
 	return c, nil
 }
@@ -143,9 +143,9 @@ It cannot be changed: a new label is a new identity.`,
 				req := parties.InitRequest{Label: label}
 				// Refuse before anything is made when an identity exists.
 				var have bool
-				if err := r.s.Store.View(ctx, func(rd ports.Reader) error {
+				if err := r.s.Store.View(ctx, func(rd ports.NamedReader) error {
 					var err error
-					have, err = rd.Exists(ports.Ref{Name: "local", Kind: ports.PartyIdentity})
+					have, err = rd.Exists(ports.NamedRef{Name: "local", Kind: ports.PartyIdentity})
 					return err
 				}); err != nil {
 					return err
@@ -183,7 +183,7 @@ It cannot be changed: a new label is a new identity.`,
 // nodeKey returns the public half of this workspace's tailcat node key,
 // making and storing the key first when make is set and there is none.
 func (r *partyRun) nodeKey(ctx context.Context, make bool) (party.NodeKey, error) {
-	ref := ports.Ref{Name: "local", Kind: ports.TailcatNodeKey}
+	ref := ports.NamedRef{Name: "local", Kind: ports.TailcatNodeKey}
 	v, err := r.vault()
 	if err != nil {
 		return party.NodeKey{}, err
@@ -193,7 +193,7 @@ func (r *partyRun) nodeKey(ctx context.Context, make bool) (party.NodeKey, error
 		return party.NodeKey{}, errors.New("this build has no tailcat transport")
 	}
 	var have bool
-	if err := r.s.Store.View(ctx, func(rd ports.Reader) error {
+	if err := r.s.Store.View(ctx, func(rd ports.NamedReader) error {
 		var err error
 		have, err = rd.Exists(ref)
 		return err
@@ -209,7 +209,7 @@ func (r *partyRun) nodeKey(ctx context.Context, make bool) (party.NodeKey, error
 			return party.NodeKey{}, err
 		}
 		defer k.Destroy()
-		if err := r.s.Store.Update(ctx, func(w ports.Writer) error { return w.PutSecret(ref, k) }); err != nil {
+		if err := r.s.Store.Update(ctx, func(w ports.NamedWriter) error { return w.PutSecret(ref, k) }); err != nil {
 			return party.NodeKey{}, err
 		}
 	}
@@ -534,7 +534,7 @@ our listener refuses it.`,
 				}
 				k := r.kit()
 				p, err := parties.Revoke{Store: r.s.Store, Registry: k.Registry, Clock: r.env.Clock,
-					Hooks: []func(ports.Writer, party.Party) error{c.OnRevoke, func(_ ports.Writer, p party.Party) error { revokeLive(p); return nil }}}.Run(ctx, args[0])
+					Hooks: []func(ports.NamedWriter, party.Party) error{c.OnRevoke, func(_ ports.NamedWriter, p party.Party) error { revokeLive(p); return nil }}}.Run(ctx, args[0])
 				if err != nil {
 					if errors.Is(err, ports.ErrNotFound) {
 						return fmt.Errorf("no party named %q: see spo party list", args[0])
@@ -595,7 +595,7 @@ that permits. To stop a party entirely use: spo party revoke.`,
 					}
 				}
 				var out party.Party
-				err = r.s.Store.Update(ctx, func(wr ports.Writer) error {
+				err = r.s.Store.Update(ctx, func(wr ports.NamedWriter) error {
 					var err error
 					if out, err = k.SetScope(wr, args[0], next); err != nil {
 						return err
@@ -632,7 +632,7 @@ func scopeWidens(old, next party.Scope) bool {
 
 func (r *partyRun) byName(ctx context.Context, name string) (party.Party, error) {
 	var p party.Party
-	err := r.s.Store.View(ctx, func(rd ports.Reader) error {
+	err := r.s.Store.View(ctx, func(rd ports.NamedReader) error {
 		var err error
 		p, err = r.kit().Registry.ByName(rd, name)
 		return err
@@ -661,7 +661,7 @@ the events above.`,
 			return a.party(cmd, nil, nil, func(ctx context.Context, r *partyRun) error {
 				var es []parties.Event
 				var total uint64
-				err := r.s.Store.View(ctx, func(rd ports.Reader) error {
+				err := r.s.Store.View(ctx, func(rd ports.NamedReader) error {
 					var err error
 					if noise {
 						es, total, err = multisig.Noise(rd)

@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/domain/keyfile"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -24,19 +26,19 @@ import (
 // operator's password and sealed like any other key. The password is tried
 // as typed and as upstream's prompt would have stored it (keyfile.UpstreamRead).
 // With no password, an owner holding an encrypted key fails with
-// ErrPasswordRequired, unless KeepEncrypted is set: then the key is stored
-// still gpg-wrapped as an opaque UpstreamEncryptedSKey record that no signer
-// reads, and a later import or export can open it. Decrypt-and-seal is the
-// recommended path: a kept key is protected only by its password and cannot
-// sign.
+// ErrPasswordRequired. With DeferEncrypted the encrypted key file is not
+// imported at all (ADR 0011 decision 2): it stays in the source, the report
+// says so, and its owner is not counted as imported. No UpstreamEncryptedSKey
+// record is created any more; one an older workspace holds is read by
+// ConvertKey only.
 type ImportWorkspace struct {
 	// Source, SourceVault and Lister read the upstream directory
 	// (upstreamdir.Source implements all three).
-	Source      ports.ReadStore
-	SourceVault ports.Vault
+	Source      ports.NamedReadStore
+	SourceVault ports.NamedVault
 	Lister      ports.SourceLister
 	// Dest is the sealed store.
-	Dest ports.Store
+	Dest ports.NamedStore
 	// Decryptor opens upstream-encrypted keys (the gpg adapter). May be nil
 	// when the directory has none.
 	Decryptor ports.KeyDecryptor
@@ -47,6 +49,73 @@ type ImportWorkspace struct {
 	// Open opens a source directory by path for a selective import
 	// (Import). Run does not use it.
 	Open func(dir string) (Source, error)
+	// History and Homes read the destination's role histories and the owners
+	// that list a key identity. When set, a VRF or KES verification key whose
+	// Ed25519 identity has any role history, or is a member of an owner in a
+	// role other than KES or VRF, is refused: a cold key relabelled as a hot
+	// one (the check the node export makes, applied at import by stem).
+	// HotDeriver derives the KES leaf from a KES signing key, so the relabel
+	// check looks at the key the signing key really holds and not only at the
+	// root the verification key file declares. May be nil (the check then covers
+	// the declared key only).
+	HotDeriver ports.HotVKeyDeriver
+	History    func(ctx context.Context, id identity.Ref) (custody.RoleHistory, bool, error)
+	Homes      func(ctx context.Context, id identity.Ref) ([]ports.KeyHome, error)
+}
+
+// ErrRelabelledHotKey means a verification key imported as a VRF or KES key is
+// the public key of a key the workspace knows in another role.
+var ErrRelabelledHotKey = errors.New("the public key of this hot key is also a recorded key of the workspace in another role")
+
+// checkHotRelabel refuses the verification key envelope b of a VRF or KES key
+// when its Ed25519 identity has a role history or a non-hot home.
+func (u ImportWorkspace) checkHotRelabel(ctx context.Context, b []byte) error {
+	env, err := pool.ParseEnvelope(b)
+	if err != nil {
+		return nil // malformed content is refused elsewhere
+	}
+	pub, err := identity.PublicKeyOfCborHex(env.CborHex)
+	if err != nil {
+		return nil
+	}
+	return u.checkRelabelPub(ctx, pub, false)
+}
+
+// checkRelabelPub refuses a 32-byte public key that the workspace already knows
+// as another role's key. For a hot key (VRF, KES) any role history, or a home
+// other than KES or VRF, refuses it; for a Calidus or Catalyst voting key only a
+// cold role (a role history with a cold role, or a cold home) does.
+func (u ImportWorkspace) checkRelabelPub(ctx context.Context, pub []byte, coldOnly bool) error {
+	if u.History == nil && u.Homes == nil {
+		return nil
+	}
+	eid, err := identity.KeyHashOf(pub)
+	if err != nil {
+		return nil
+	}
+	if u.History != nil {
+		h, ok, herr := u.History(ctx, eid)
+		switch {
+		case herr != nil:
+			return fmt.Errorf("%w: %v", ports.ErrUnreadableRecords, herr)
+		case ok && !coldOnly && len(h.Roles()) > 0:
+			return fmt.Errorf("%w: the workspace records it with roles", ErrRelabelledHotKey)
+		case ok && coldOnly && h.HasColdRole():
+			return fmt.Errorf("%w: the workspace records it as a cold key", ErrRelabelledHotKey)
+		}
+	}
+	if u.Homes != nil {
+		hs, herr := u.Homes(ctx, eid)
+		if herr != nil {
+			return fmt.Errorf("%w: %v", ports.ErrUnreadableRecords, herr)
+		}
+		for _, h := range hs {
+			if coldOnly && h.Role.IsCold() || !coldOnly && h.Role != custody.RoleKES && h.Role != custody.RoleVRF {
+				return fmt.Errorf("%w: it is a member of an owner as a %s key", ErrRelabelledHotKey, h.Role)
+			}
+		}
+	}
+	return nil
 }
 
 // ImportOptions selects and shapes an import.
@@ -56,17 +125,18 @@ type ImportOptions struct {
 	Owners []string
 	// Password opens upstream-encrypted keys. The caller owns and destroys it.
 	Password *ports.Secret
-	// KeepEncrypted imports an encrypted key as it is when there is no
-	// Password.
-	KeepEncrypted bool
+	// DeferEncrypted leaves every upstream-encrypted key file in the source: it
+	// is listed in the report as left there, and its owner is not imported. No
+	// password is asked for.
+	DeferEncrypted bool
 	// Overwrite replaces artefacts the destination already holds. Without it
 	// an owner with any artefact already in the destination is not imported.
 	Overwrite bool
 }
 
 type planned struct {
-	src  ports.Ref
-	dst  ports.Ref
+	src  ports.NamedRef
+	dst  ports.NamedRef
 	data []byte
 	sec  *ports.Secret
 }
@@ -94,8 +164,8 @@ func (u ImportWorkspace) Run(ctx context.Context, opts ImportOptions) (*Report, 
 // release.
 type prepared struct {
 	owner   string
-	refs    []ports.Ref
-	results map[ports.Ref]*ArtefactReport
+	refs    []ports.NamedRef
+	results map[ports.NamedRef]*ArtefactReport
 	plan    []planned
 	final   string
 	rewrite []Rewrite
@@ -140,8 +210,8 @@ func (p *prepared) why() string {
 	return "an artefact failed"
 }
 
-func sortedRefs(m map[ports.Ref]*ArtefactReport) []ports.Ref {
-	var rs []ports.Ref
+func sortedRefs(m map[ports.NamedRef]*ArtefactReport) []ports.NamedRef {
+	var rs []ports.NamedRef
 	for r := range m {
 		rs = append(rs, r)
 	}
@@ -151,19 +221,19 @@ func sortedRefs(m map[ports.Ref]*ArtefactReport) []ports.Ref {
 
 // prepareOwner is the plan phase of one owner: it reads, decrypts, checks and
 // decides, and writes nothing (SPO-Xmulti-INV-003).
-func (u ImportWorkspace) prepareOwner(ctx context.Context, src srcDir, owner string, refs []ports.Ref, opts ImportOptions, pw *passwordSet, rep *Report, xf *ownerXform, dry bool) *prepared {
+func (u ImportWorkspace) prepareOwner(ctx context.Context, src srcDir, owner string, refs []ports.NamedRef, opts ImportOptions, pw *passwordSet, rep *Report, xf *ownerXform, dry bool) *prepared {
 	sort.Slice(refs, func(i, j int) bool { return refs[i].String() < refs[j].String() })
-	results := map[ports.Ref]*ArtefactReport{}
+	results := map[ports.NamedRef]*ArtefactReport{}
 	for _, r := range refs {
 		results[r] = &ArtefactReport{Ref: r, Status: StatusDone}
 	}
 	failed := false
-	fail := func(r ports.Ref, why string) {
+	fail := func(r ports.NamedRef, why string) {
 		results[r].Status, results[r].Reason = StatusFailed, why
 		failed = true
 	}
 
-	data := ownerData{open: map[ports.Ref][]byte{}, skey: map[ports.Ref]*ports.Secret{}}
+	data := ownerData{open: map[ports.NamedRef][]byte{}, skey: map[ports.NamedRef]*ports.Secret{}}
 	var plan []planned
 	var toDestroy []*ports.Secret
 	cleanup := func() {
@@ -203,19 +273,22 @@ func (u ImportWorkspace) prepareOwner(ctx context.Context, src srcDir, owner str
 			case cerr != nil:
 				fail(r, "not a signing key envelope")
 			case info.Form == keyfile.FormPlain:
+				var kerr error
+				_ = buf.Use(func(b []byte) error { kerr = ports.CheckEnvelopeKind(r.Kind, b); return nil })
+				if kerr != nil {
+					fail(r, "the key's envelope type does not match its file kind: it would be sealed under the wrong class")
+					break
+				}
 				data.skey[r] = buf
 				plan = append(plan, planned{src: r, dst: r, sec: buf})
 			case info.Form == keyfile.FormEncrypted:
-				dec, note, derr := u.openEncrypted(ctx, r, buf, opts, pw)
-				if derr != "" {
-					fail(r, derr)
+				if opts.DeferEncrypted {
+					fail(r, ReasonDeferred)
 					break
 				}
-				if note != "" {
-					results[r].Note = note + "; its pair with the verification key is not checked"
-					stem, _ := KeyStem(r)
-					dst := ports.Ref{Name: stem, Kind: ports.UpstreamEncryptedSKey}
-					plan = append(plan, planned{src: r, dst: dst, sec: buf})
+				dec, derr := u.openEncrypted(ctx, r, buf, pw)
+				if derr != "" {
+					fail(r, derr)
 					break
 				}
 				toDestroy = append(toDestroy, dec)
@@ -247,6 +320,34 @@ func (u ImportWorkspace) prepareOwner(ctx context.Context, src srcDir, owner str
 		for r, n := range notes {
 			if results[r].Note == "" {
 				results[r].Note = n
+			}
+		}
+	}
+
+	if !failed {
+		for _, p := range plan {
+			if p.sec == nil && (p.dst.Kind == ports.VrfVKey || p.dst.Kind == ports.KesVKey) {
+				if err := u.checkHotRelabel(ctx, p.data); err != nil {
+					fail(p.src, err.Error())
+				}
+			}
+			// a Calidus or Catalyst voting key that is a known cold key
+			if p.sec == nil && (p.dst.Kind == ports.CalidusVKey || p.dst.Kind == ports.VotingVKey) {
+				if env, perr := pool.ParseEnvelope(p.data); perr == nil {
+					if pub, kerr := identity.PublicKeyOfCborHex(env.CborHex); kerr == nil {
+						if err := u.checkRelabelPub(ctx, pub, true); err != nil {
+							fail(p.src, err.Error())
+						}
+					}
+				}
+			}
+			// a KES signing key: the leaf it holds, not the root a file declares
+			if p.sec != nil && p.dst.Kind == ports.KesSKey && u.HotDeriver != nil {
+				if leaf, lerr := u.HotDeriver.DeriveKESLeaf(ctx, p.sec); lerr == nil {
+					if err := u.checkRelabelPub(ctx, leaf, false); err != nil {
+						fail(p.src, err.Error())
+					}
+				}
 			}
 		}
 	}
@@ -332,17 +433,17 @@ func (u ImportWorkspace) prepareOwner(ctx context.Context, src srcDir, owner str
 // coldKeyNotes says, for an incoming cold verification key or issue counter
 // that replaces artefacts of a workspace pool holding a different cold key,
 // that it does. Notes only: the key pair and counter checks decide refusals.
-func coldKeyNotes(ws *wsSnapshot, final string, plan []planned, verb string) map[ports.Ref]string {
-	out := map[ports.Ref]string{}
-	cold := func(get func(ports.Ref) ([]byte, bool), name string) []byte {
-		if b, ok := get(ports.Ref{Name: name, Kind: ports.NodeVKey}); ok {
+func coldKeyNotes(ws *wsSnapshot, final string, plan []planned, verb string) map[ports.NamedRef]string {
+	out := map[ports.NamedRef]string{}
+	cold := func(get func(ports.NamedRef) ([]byte, bool), name string) []byte {
+		if b, ok := get(ports.NamedRef{Name: name, Kind: ports.NodeVKey}); ok {
 			if env, err := pool.ParseEnvelope(b); err == nil {
 				if k, err := env.Key32(); err == nil {
 					return k
 				}
 			}
 		}
-		if b, ok := get(ports.Ref{Name: name, Kind: ports.NodeCounter}); ok {
+		if b, ok := get(ports.NamedRef{Name: name, Kind: ports.NodeCounter}); ok {
 			if c, err := pool.ParseIssueCounter(b); err == nil {
 				return c.ColdVKey[:]
 			}
@@ -353,13 +454,13 @@ func coldKeyNotes(ws *wsSnapshot, final string, plan []planned, verb string) map
 	if existing == nil {
 		return out
 	}
-	inc := map[ports.Ref][]byte{}
+	inc := map[ports.NamedRef][]byte{}
 	for _, p := range plan {
 		if p.sec == nil {
 			inc[p.dst] = p.data
 		}
 	}
-	incoming := cold(func(r ports.Ref) ([]byte, bool) { b, ok := inc[r]; return b, ok }, final)
+	incoming := cold(func(r ports.NamedRef) ([]byte, bool) { b, ok := inc[r]; return b, ok }, final)
 	if incoming == nil || bytes.Equal(incoming, existing) {
 		return out
 	}
@@ -431,11 +532,11 @@ func commitReason(err error) string {
 	if errors.Is(err, errConflict) {
 		return "the destination already holds artefacts of this owner (use Overwrite)"
 	}
-	return "the destination could not be written"
+	return "the destination could not be written: " + err.Error()
 }
 
 func (u ImportWorkspace) commit(ctx context.Context, plan []planned, overwrite bool) error {
-	return u.Dest.Update(ctx, func(w ports.Writer) error {
+	return u.Dest.Update(ctx, func(w ports.NamedWriter) error {
 		if !overwrite {
 			for _, p := range plan {
 				ok, err := w.Exists(p.dst)
@@ -465,7 +566,7 @@ func (u ImportWorkspace) commit(ctx context.Context, plan []planned, overwrite b
 // conflicts reports whether the destination holds any artefact of the plan.
 func (u ImportWorkspace) conflicts(ctx context.Context, plan []planned) (bool, error) {
 	found := false
-	err := u.Dest.View(ctx, func(r ports.Reader) error {
+	err := u.Dest.View(ctx, func(r ports.NamedReader) error {
 		for _, p := range plan {
 			ok, err := r.Exists(p.dst)
 			if err != nil {
@@ -480,9 +581,9 @@ func (u ImportWorkspace) conflicts(ctx context.Context, plan []planned) (bool, e
 	return found, err
 }
 
-func (u ImportWorkspace) read(ctx context.Context, src srcDir, r ports.Ref) ([]byte, error) {
+func (u ImportWorkspace) read(ctx context.Context, src srcDir, r ports.NamedRef) ([]byte, error) {
 	var b []byte
-	err := src.store.View(ctx, func(rd ports.Reader) error {
+	err := src.store.View(ctx, func(rd ports.NamedReader) error {
 		var e error
 		b, e = rd.Get(r)
 		return e
@@ -490,42 +591,42 @@ func (u ImportWorkspace) read(ctx context.Context, src srcDir, r ports.Ref) ([]b
 	return b, err
 }
 
-// openEncrypted decrypts an upstream-encrypted key. When no password is
-// given and KeepEncrypted is set it returns a note instead and keeps the
-// opaque form. A non-empty string is a failure reason.
+// ReasonDeferred is the reason shown for an upstream-encrypted key file that an
+// import with DeferEncrypted left in the source.
+const ReasonDeferred = "left in the source: encrypted by upstream, not imported (--defer-encrypted); its owner is not imported"
+
+// openEncrypted decrypts an upstream-encrypted key. A non-empty string is a
+// failure reason.
 //
 // spec: SPO-Ckey-PRE-006, SPO-Ckey-PRE-010, SPO-Ckey-PRE-007, SPO-Ckey-PR-002
-func (u ImportWorkspace) openEncrypted(ctx context.Context, r ports.Ref, buf *ports.Secret, opts ImportOptions, pw *passwordSet) (dec *ports.Secret, note, failure string) {
+func (u ImportWorkspace) openEncrypted(ctx context.Context, r ports.NamedRef, buf *ports.Secret, pw *passwordSet) (dec *ports.Secret, failure string) {
 	var enc keyfile.Encrypted
 	var perr error
 	_ = buf.Use(func(b []byte) error { enc, perr = keyfile.ParseEncrypted(b); return nil })
 	if perr != nil {
-		return nil, "", "the encrypted key file is damaged"
+		return nil, "the encrypted key file is damaged"
 	}
 	if pw == nil {
-		if opts.KeepEncrypted {
-			return nil, "kept in upstream's encrypted form (upstream-encrypted record)", ""
-		}
-		return nil, "", ErrPasswordRequired.Error()
+		return nil, ErrPasswordRequired.Error()
 	}
 	if u.Decryptor == nil {
-		return nil, "", "no decryptor wired"
+		return nil, "no decryptor wired"
 	}
 	cbor, err := pw.open(ctx, u.Decryptor, enc.EncrHex)
 	switch {
 	case errors.Is(err, ports.ErrWrongPassphrase):
-		return nil, "", "the password does not open this key"
+		return nil, "the password does not open this key"
 	case errors.Is(err, ports.ErrMalformedCiphertext):
-		return nil, "", "the encrypted key is not a valid gpg message"
+		return nil, "the encrypted key is not a valid gpg message"
 	case err != nil:
-		return nil, "", "the key could not be decrypted"
+		return nil, "the key could not be decrypted"
 	}
 	defer cbor.Destroy()
 	plain, err := plainFromDecrypted(enc, cbor, "    ")
 	if err != nil {
-		return nil, "", "the decrypted key is not usable"
+		return nil, "the decrypted key is not usable"
 	}
-	return plain, "", ""
+	return plain, ""
 }
 
 // validateOpen applies the cheap structural checks to non-secret artefacts

@@ -37,7 +37,7 @@ const (
 )
 
 type resArtefact struct {
-	ref  ports.Ref
+	ref  ports.NamedRef
 	side sideFlag
 	data []byte        // content of a non-secret artefact; the incoming one when it replaces
 	sec  *ports.Secret // the incoming secret, when it is one
@@ -142,7 +142,7 @@ type coherence struct {
 	ws      *wsSnapshot
 	o       *wsOwner
 	final   string
-	res     map[ports.Ref]*resArtefact
+	res     map[ports.NamedRef]*resArtefact
 	destroy []*ports.Secret
 	reasons []string
 }
@@ -153,7 +153,7 @@ func (c *coherence) release() {
 	}
 }
 
-func (c *coherence) bad(r ports.Ref, why string) {
+func (c *coherence) bad(r ports.NamedRef, why string) {
 	c.reasons = append(c.reasons, fmt.Sprintf("%s (%s)", r.String(), why))
 }
 
@@ -168,8 +168,8 @@ func (c *coherence) derive(sec *ports.Secret) []byte {
 	return raw
 }
 
-func (c *coherence) openExisting(r ports.Ref) *ports.Secret {
-	v, ok := c.u.Dest.(ports.Vault)
+func (c *coherence) openExisting(r ports.NamedRef) *ports.Secret {
+	v, ok := c.u.Dest.(ports.NamedVault)
 	if !ok || !c.o.refs[r] {
 		return nil
 	}
@@ -181,7 +181,7 @@ func (c *coherence) openExisting(r ports.Ref) *ports.Secret {
 	return buf
 }
 
-func (c *coherence) sameSecret(r ports.Ref, inc *ports.Secret) bool {
+func (c *coherence) sameSecret(r ports.NamedRef, inc *ports.Secret) bool {
 	ex := c.openExisting(r)
 	if ex == nil || inc == nil {
 		return false
@@ -280,10 +280,10 @@ func (u ImportWorkspace) checkCoherence(ctx context.Context, ws *wsSnapshot, fin
 	if o == nil {
 		return "", ""
 	}
-	c := &coherence{u: u, ctx: ctx, ws: ws, o: o, final: final, res: map[ports.Ref]*resArtefact{}}
+	c := &coherence{u: u, ctx: ctx, ws: ws, o: o, final: final, res: map[ports.NamedRef]*resArtefact{}}
 	defer c.release()
 
-	var dsts []ports.Ref
+	var dsts []ports.NamedRef
 	for _, p := range plan {
 		dsts = append(dsts, p.dst)
 	}
@@ -317,7 +317,7 @@ func (u ImportWorkspace) checkCoherence(ctx context.Context, ws *wsSnapshot, fin
 		}
 	}
 
-	refs := make([]ports.Ref, 0, len(c.res))
+	refs := make([]ports.NamedRef, 0, len(c.res))
 	for r := range c.res {
 		refs = append(refs, r)
 	}
@@ -377,7 +377,7 @@ func (u ImportWorkspace) checkCoherence(ctx context.Context, ws *wsSnapshot, fin
 	// (both from the workspace, or both from the import), are the same key on both
 	// sides, or a base address of the result ties them.
 	baseAddrTies := func(addrName string, pay, st *slotView) bool {
-		a := c.res[ports.Ref{Name: addrName, Kind: ports.AddrFile}]
+		a := c.res[ports.NamedRef{Name: addrName, Kind: ports.AddrFile}]
 		if a == nil || a.data == nil || pay.id == nil || st.id == nil || u.Addresses == nil {
 			return false
 		}
@@ -456,7 +456,7 @@ func (u ImportWorkspace) checkCoherence(ctx context.Context, ws *wsSnapshot, fin
 		}
 	}
 
-	open := ownerData{open: map[ports.Ref][]byte{}, skey: map[ports.Ref]*ports.Secret{}}
+	open := ownerData{open: map[ports.NamedRef][]byte{}, skey: map[ports.NamedRef]*ports.Secret{}}
 	for _, r := range refs {
 		if a := c.res[r]; a.data != nil {
 			open.open[r] = a.data
@@ -556,8 +556,8 @@ func (u ImportWorkspace) checkCoherence(ctx context.Context, ws *wsSnapshot, fin
 	}
 
 	// KES counters agree with each other and with the numbered keys.
-	kfail := map[ports.Ref]string{}
-	knotes := map[ports.Ref]string{}
+	kfail := map[ports.NamedRef]string{}
+	knotes := map[ports.NamedRef]string{}
 	checkKesCounters(open, kfail, knotes)
 	for r, why := range kfail {
 		c.bad(r, why)
@@ -623,7 +623,7 @@ func (u ImportWorkspace) checkCoherence(ctx context.Context, ws *wsSnapshot, fin
 // counter, operational certificate, pool certificate or pool id for a cold
 // key, a certificate or address for the stake or payment key. Empty when
 // nothing does.
-func (c *coherence) identityAnchor(views map[slotKey]*slotView, keys []slotKey, refs []ports.Ref, final string,
+func (c *coherence) identityAnchor(views map[slotKey]*slotView, keys []slotKey, refs []ports.NamedRef, final string,
 	inspect func(*resArtefact) (ports.AddressInfo, bool), hashIs func(*txbuild.KeyHash, []byte) bool) string {
 	for _, k := range keys {
 		if v := views[k]; v.id != nil && v.side == bothSides {
@@ -660,7 +660,7 @@ func (c *coherence) identityAnchor(views map[slotKey]*slotView, keys []slotKey, 
 		return nil
 	}
 	// does artefact a (of one side) name a key of the other side?
-	names := func(r ports.Ref, a *resArtefact, other bool) string {
+	names := func(r ports.NamedRef, a *resArtefact, other bool) string {
 		cold, stake := coldOf(other), keyOf(slotKey{final, ports.StakingVKey, 0}, other)
 		if a.data == nil {
 			return ""

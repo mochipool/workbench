@@ -23,9 +23,9 @@ func TestPoolWitnessSignInfoAndClear(t *testing.T) {
 	out := r.must(t, []string{"y"}, "pool", "register", "p", "quartz-owner.payment", "--allow-pending")
 	name := regexp.MustCompile(`wrote\s+(p_second_\d+)\.witness`).FindStringSubmatch(out)[1]
 	var raw []byte
-	if err := storeOf(t, r.dir).View(context.Background(), func(rd ports.Reader) error {
+	if err := storeOf(t, r.dir).View(context.Background(), func(rd ports.NamedReader) error {
 		var err error
-		raw, err = rd.Get(ports.Ref{Name: name, Kind: ports.PoolWitnessFile})
+		raw, err = rd.Get(ports.NamedRef{Name: name, Kind: ports.PoolWitnessFile})
 		return err
 	}); err != nil {
 		t.Fatal(err)

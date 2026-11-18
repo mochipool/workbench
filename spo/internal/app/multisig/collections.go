@@ -36,19 +36,19 @@ type loaded struct {
 	desc *pool.Descriptor
 }
 
-func (n Node) collectionRef(ref CollectionRef) (ports.Ref, error) {
+func (n Node) collectionRef(ref CollectionRef) (ports.NamedRef, error) {
 	switch ref.Kind {
 	case KindPool:
-		return ports.Ref{Name: ref.Name, Kind: ports.PoolDescriptor}, nil
+		return ports.NamedRef{Name: ref.Name, Kind: ports.PoolDescriptor}, nil
 	case KindStandalone:
-		return ports.Ref{Name: ref.Name, Kind: ports.MultisigCollection}, nil
+		return ports.NamedRef{Name: ref.Name, Kind: ports.MultisigCollection}, nil
 	}
-	return ports.Ref{}, fmt.Errorf("collection kind %q", ref.Kind)
+	return ports.NamedRef{}, fmt.Errorf("collection kind %q", ref.Kind)
 }
 
 // loadCollection reads the collection under ref. The body hash is recomputed
 // from the stored body, not trusted (the descriptor parser does it).
-func (n Node) loadCollection(r ports.Reader, txids ports.TxIDCalculator, ref CollectionRef) (loaded, error) {
+func (n Node) loadCollection(r ports.NamedReader, txids ports.TxIDCalculator, ref CollectionRef) (loaded, error) {
 	sref, err := n.collectionRef(ref)
 	if err != nil {
 		return loaded{}, err
@@ -75,7 +75,7 @@ func (n Node) loadCollection(r ports.Reader, txids ports.TxIDCalculator, ref Col
 }
 
 // saveCollection writes the collection back where it came from.
-func (n Node) saveCollection(w ports.Writer, l loaded) error {
+func (n Node) saveCollection(w ports.NamedWriter, l loaded) error {
 	sref, err := n.collectionRef(l.ref)
 	if err != nil {
 		return err

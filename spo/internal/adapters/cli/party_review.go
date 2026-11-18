@@ -398,7 +398,7 @@ func (r *partyRun) allRequestIDs(ctx context.Context, sg multisig.Signer) ([]par
 
 func (r *partyRun) securityEvents(ctx context.Context) ([]parties.Event, error) {
 	var evs []parties.Event
-	err := r.s.Store.View(ctx, func(rd ports.Reader) error {
+	err := r.s.Store.View(ctx, func(rd ports.NamedReader) error {
 		var err error
 		evs, err = multisig.Events(rd)
 		return err
@@ -721,7 +721,7 @@ a coordinator probe this machine. Declining needs no review: it signs nothing.`,
 					return reviewErr(err, args[0])
 				}
 				if reason != "" {
-					_ = r.s.Store.Update(ctx, func(w ports.Writer) error {
+					_ = r.s.Store.Update(ctx, func(w ports.NamedWriter) error {
 						return parties.AppendEvent(w, parties.Event{At: r.env.Clock.Now(), Kind: "request-decline-note", Peer: h.Sender.String(),
 							Detail: reason})
 					})

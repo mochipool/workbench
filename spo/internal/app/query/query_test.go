@@ -84,13 +84,13 @@ func asset(pol string, name string, q uint64) chain.AssetAmount {
 	return a
 }
 
-func store(t *testing.T) ports.Store {
+func store(t *testing.T) ports.NamedStore {
 	st, err := plainstore.OpenTestnet(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	put := func(name string, kind ports.Kind, content string) {
-		if err := st.Update(bg, func(w ports.Writer) error { return w.Put(ports.Ref{Name: name, Kind: kind}, []byte(content)) }); err != nil {
+		if err := st.Update(bg, func(w ports.NamedWriter) error { return w.Put(ports.NamedRef{Name: name, Kind: kind}, []byte(content)) }); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -477,7 +477,9 @@ func TestOpCertFromTheStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	put := func(kind ports.Kind, num int, content []byte) {
-		if err := st.Update(bg, func(w ports.Writer) error { return w.Put(ports.Ref{Name: "mypool", Kind: kind, Num: num}, content) }); err != nil {
+		if err := st.Update(bg, func(w ports.NamedWriter) error {
+			return w.Put(ports.NamedRef{Name: "mypool", Kind: kind, Num: num}, content)
+		}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -511,10 +513,10 @@ func TestQueryOpCertCounter(t *testing.T) {
 	for i := range id {
 		id[i] = byte(i)
 	}
-	st := func() ports.Store {
+	st := func() ports.NamedStore {
 		s, _ := plainstore.OpenTestnet(t.TempDir())
-		_ = s.Update(bg, func(w ports.Writer) error {
-			return w.Put(ports.Ref{Name: "mypool", Kind: ports.PoolIDBechFile}, []byte(id.Bech32()+"\n"))
+		_ = s.Update(bg, func(w ports.NamedWriter) error {
+			return w.Put(ports.NamedRef{Name: "mypool", Kind: ports.PoolIDBechFile}, []byte(id.Bech32()+"\n"))
 		})
 		return s
 	}()

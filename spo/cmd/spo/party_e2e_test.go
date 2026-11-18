@@ -133,28 +133,30 @@ func newPartyWorld(t *testing.T, tailcat bool) *partyWorld {
 	// not (its public key and delegation certificate stay there).
 	src, dst := storeOf(t, w.r.dir), storeOf(t, w.bob)
 	ctx := context.Background()
-	skey, err := src.Open(ctx, ports.Ref{Name: "second", Kind: ports.StakingSKey})
+	skey, err := src.Open(ctx, ports.NamedRef{Name: "second", Kind: ports.StakingSKey})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var vkey []byte
-	if err := src.View(ctx, func(r ports.Reader) error {
+	if err := src.View(ctx, func(r ports.NamedReader) error {
 		var e error
-		vkey, e = r.Get(ports.Ref{Name: "second", Kind: ports.StakingVKey})
+		vkey, e = r.Get(ports.NamedRef{Name: "second", Kind: ports.StakingVKey})
 		return e
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := dst.Update(ctx, func(wr ports.Writer) error {
-		if err := wr.Put(ports.Ref{Name: "second", Kind: ports.StakingVKey}, vkey); err != nil {
+	if err := dst.Update(ctx, func(wr ports.NamedWriter) error {
+		if err := wr.Put(ports.NamedRef{Name: "second", Kind: ports.StakingVKey}, vkey); err != nil {
 			return err
 		}
-		return wr.PutSecret(ports.Ref{Name: "second", Kind: ports.StakingSKey}, skey)
+		return wr.PutSecret(ports.NamedRef{Name: "second", Kind: ports.StakingSKey}, skey)
 	}); err != nil {
 		t.Fatal(err)
 	}
 	skey.Destroy()
-	if err := src.Update(ctx, func(wr ports.Writer) error { return wr.Delete(ports.Ref{Name: "second", Kind: ports.StakingSKey}) }); err != nil {
+	if err := src.Update(ctx, func(wr ports.NamedWriter) error {
+		return wr.Delete(ports.NamedRef{Name: "second", Kind: ports.StakingSKey})
+	}); err != nil {
 		t.Fatal(err)
 	}
 	src.Close()
@@ -162,7 +164,7 @@ func newPartyWorld(t *testing.T, tailcat bool) *partyWorld {
 	// The second owner's signatures come from the party that coordinator calls bob.
 	w.r.certAndDescriptor(t, "quartz-owner", "second:bob")
 	h, _ := blake2b.New(28, nil)
-	h.Write(vkeyOf(t, w.r.dir, ports.Ref{Name: "p", Kind: ports.NodeVKey}))
+	h.Write(vkeyOf(t, w.r.dir, ports.NamedRef{Name: "p", Kind: ports.NodeVKey}))
 	w.poolHex = hex.EncodeToString(h.Sum(nil))
 	w.other = strings.Repeat("0f", 28)
 
@@ -292,7 +294,7 @@ func TestFileTransportTwoOwnerRegistrationEndToEnd(t *testing.T) {
 	if err != nil || !strings.Contains(out, "Signed.") {
 		t.Fatalf("approve: %v\n%s", err, out)
 	}
-	notLeaked(t, out, testPass, secretHex(t, w.bob, ports.Ref{Name: "second", Kind: ports.StakingSKey}))
+	notLeaked(t, out, testPass, secretHex(t, w.bob, ports.NamedRef{Name: "second", Kind: ports.StakingSKey}))
 	out = mustParty(t, w.bob, nil, nil, "party", "outbox", "export", exportDir)
 	mustHave(t, out, "1 envelope(s) of 1 waiting written")
 	resp, _ := filepath.Glob(filepath.Join(exportDir, "SigningResponse-*-*.spo"))

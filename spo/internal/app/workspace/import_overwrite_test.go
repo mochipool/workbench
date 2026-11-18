@@ -16,15 +16,15 @@ func overwriteRename(t *testing.T, tr *memTree, dst *memStore, from, to string) 
 	})
 }
 
-func snapshotOf(s *memStore) map[ports.Ref]string {
-	out := map[ports.Ref]string{}
+func snapshotOf(s *memStore) map[ports.NamedRef]string {
+	out := map[ports.NamedRef]string{}
 	for r, b := range s.files {
 		out[r] = string(b)
 	}
 	return out
 }
 
-func sameFiles(a, b map[ports.Ref]string) bool {
+func sameFiles(a, b map[ports.NamedRef]string) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -38,8 +38,8 @@ func sameFiles(a, b map[ports.Ref]string) bool {
 
 func putPayment(s *memStore, name string, seed byte) keyPair {
 	pk := payment(seed)
-	s.put(ports.Ref{Name: name + ".payment", Kind: ports.AddrSKey}, pk.skey)
-	s.put(ports.Ref{Name: name + ".payment", Kind: ports.AddrVKey}, pk.vkey)
+	s.put(ports.NamedRef{Name: name + ".payment", Kind: ports.AddrSKey}, pk.skey)
+	s.put(ports.NamedRef{Name: name + ".payment", Kind: ports.AddrVKey}, pk.vkey)
 	return pk
 }
 
@@ -105,7 +105,7 @@ func TestXmultiOverwriteRenameOntoPaymentOnlyWalletIsRefused(t *testing.T) {
 		dst := newMem()
 		pk := putPayment(dst, "b", 3)
 		if addr == "enterprise" {
-			dst.put(ports.Ref{Name: "b.payment", Kind: ports.AddrFile}, addrOf(pk.vkey))
+			dst.put(ports.NamedRef{Name: "b.payment", Kind: ports.AddrFile}, addrOf(pk.vkey))
 		}
 		before := snapshotOf(dst)
 		rep, _ := overwriteRename(t, tr, dst, "a", "b")
@@ -129,12 +129,12 @@ func TestXmultiOverwriteKeepsPaymentKeysTiedByABaseAddress(t *testing.T) {
 	dst := newMem()
 	pk := putPayment(dst, "b", 3)
 	ph, sh := keyHashOf(pk.vkey), keyHashOf(stake.vkey)
-	dst.put(ports.Ref{Name: "b.payment", Kind: ports.AddrFile}, []byte("addr_"+hex.EncodeToString(ph[:])+"_"+hex.EncodeToString(sh[:])))
+	dst.put(ports.NamedRef{Name: "b.payment", Kind: ports.AddrFile}, []byte("addr_"+hex.EncodeToString(ph[:])+"_"+hex.EncodeToString(sh[:])))
 	rep, err := overwriteRename(t, tr, dst, "a", "b")
 	if o := ownerOf(rep, "a"); err != nil || !o.Written {
 		t.Fatalf("%v %+v", err, o)
 	}
-	if _, ok := dst.files[ports.Ref{Name: "b.payment", Kind: ports.AddrSKey}]; !ok {
+	if _, ok := dst.files[ports.NamedRef{Name: "b.payment", Kind: ports.AddrSKey}]; !ok {
 		t.Error("the payment key was deleted")
 	}
 }
@@ -149,8 +149,8 @@ func TestXmultiOverwriteOntoOwnerWithKeptEncryptedKeyIsRefused(t *testing.T) {
 	dst := newMem()
 	putWallet(dst, "b", 2)
 	pk := payment(3)
-	dst.put(ports.Ref{Name: "b.payment", Kind: ports.UpstreamEncryptedSKey}, encryptedOf(t, pk, "Correct-Horse-9"))
-	dst.put(ports.Ref{Name: "b.payment", Kind: ports.AddrVKey}, pk.vkey)
+	dst.put(ports.NamedRef{Name: "b.payment", Kind: ports.UpstreamEncryptedSKey}, encryptedOf(t, pk, "Correct-Horse-9"))
+	dst.put(ports.NamedRef{Name: "b.payment", Kind: ports.AddrVKey}, pk.vkey)
 	before := snapshotOf(dst)
 	rep, _ := overwriteRename(t, tr, dst, "a", "b")
 	if o := ownerOf(rep, "a"); o.Written || !strings.Contains(o.Reason, "encrypted") {
@@ -180,12 +180,12 @@ func TestXmultiOverwriteOfTheSameOwnerAndTheNextKesKeySucceed(t *testing.T) {
 	putPool(dst, "p", 80, "")
 	putPool(tr.dir("/d"), "p", 80, "")
 	src := tr.dir("/d")
-	delete(src.files, ports.Ref{Name: "p", Kind: ports.KesSKey, Num: 1})
-	delete(src.files, ports.Ref{Name: "p", Kind: ports.KesVKey, Num: 1})
-	delete(src.files, ports.Ref{Name: "p", Kind: ports.OpCert, Num: 1})
-	src.put(ports.Ref{Name: "p", Kind: ports.KesSKey, Num: 2}, []byte(`{"type":"KesSigningKey_ed25519_kes_2^6","description":"KES Signing Key","cborHex":"5860`+strings.Repeat("ee", 96)+`"}`))
-	src.put(ports.Ref{Name: "p", Kind: ports.KesVKey, Num: 2}, []byte(`{"type":"KesVerificationKey_ed25519_kes_2^6","description":"KES Verification Key","cborHex":"5820`+strings.Repeat("ef", 32)+`"}`))
-	src.put(ports.Ref{Name: "p", Kind: ports.OpCert, Num: 2}, opcertOf(rawOf(cold(80).vkey), bytes.Repeat([]byte{0xef}, 32)))
+	delete(src.files, ports.NamedRef{Name: "p", Kind: ports.KesSKey, Num: 1})
+	delete(src.files, ports.NamedRef{Name: "p", Kind: ports.KesVKey, Num: 1})
+	delete(src.files, ports.NamedRef{Name: "p", Kind: ports.OpCert, Num: 1})
+	src.put(ports.NamedRef{Name: "p", Kind: ports.KesSKey, Num: 2}, []byte(`{"type":"KesSigningKey_ed25519_kes_2^6","description":"KES Signing Key","cborHex":"5860`+strings.Repeat("ee", 96)+`"}`))
+	src.put(ports.NamedRef{Name: "p", Kind: ports.KesVKey, Num: 2}, []byte(`{"type":"KesVerificationKey_ed25519_kes_2^6","description":"KES Verification Key","cborHex":"5820`+strings.Repeat("ef", 32)+`"}`))
+	src.put(ports.NamedRef{Name: "p", Kind: ports.OpCert, Num: 2}, opcertOf(rawOf(cold(80).vkey), bytes.Repeat([]byte{0xef}, 32)))
 	src.put(ref("p", ports.KesCounter), []byte("2\n"))
 	src.put(ref("p", ports.KesCounterNext), []byte("2\n"))
 	rep, err = multi(t, tr, dst).Import(ctx(), ImportRequest{Dirs: []string{"/d"}, All: true, ImportOptions: ImportOptions{Overwrite: true}})
@@ -193,7 +193,7 @@ func TestXmultiOverwriteOfTheSameOwnerAndTheNextKesKeySucceed(t *testing.T) {
 		t.Fatalf("next KES key: %v %+v", err, o)
 	}
 	for _, n := range []int{1, 2} {
-		if _, ok := dst.files[ports.Ref{Name: "p", Kind: ports.KesVKey, Num: n}]; !ok {
+		if _, ok := dst.files[ports.NamedRef{Name: "p", Kind: ports.KesVKey, Num: n}]; !ok {
 			t.Errorf("KES key %d is not in the workspace", n)
 		}
 	}
@@ -203,9 +203,9 @@ func TestXmultiOverwriteOfTheSameOwnerAndTheNextKesKeySucceed(t *testing.T) {
 	tr, dst = newTree(), newMem()
 	putPool(dst, "p", 80, "")
 	putPool(tr.dir("/d"), "p", 81, "")
-	delete(tr.dir("/d").files, ports.Ref{Name: "p", Kind: ports.KesSKey, Num: 1})
-	delete(tr.dir("/d").files, ports.Ref{Name: "p", Kind: ports.KesVKey, Num: 1})
-	delete(tr.dir("/d").files, ports.Ref{Name: "p", Kind: ports.OpCert, Num: 1})
+	delete(tr.dir("/d").files, ports.NamedRef{Name: "p", Kind: ports.KesSKey, Num: 1})
+	delete(tr.dir("/d").files, ports.NamedRef{Name: "p", Kind: ports.KesVKey, Num: 1})
+	delete(tr.dir("/d").files, ports.NamedRef{Name: "p", Kind: ports.OpCert, Num: 1})
 	before := snapshotOf(dst)
 	rep, _ = multi(t, tr, dst).Import(ctx(), ImportRequest{Dirs: []string{"/d"}, All: true, ImportOptions: ImportOptions{Overwrite: true}})
 	if o := ownerOf(rep, "p"); o.Written || !strings.Contains(o.Reason, "node.opcert#1") {

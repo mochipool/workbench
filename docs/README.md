@@ -36,6 +36,7 @@ Hardware wallets:
 Operator workflows:
 
 * [Rotate KES keys](./how-to/rotate-kes-keys.md)
+* [Unlock slots, the unlock policy, rotation and node export](./how-to/slots-policy-and-rotation.md)
 * [Claim rewards air-gapped](./how-to/claim-rewards-air-gapped.md)
 * [Update pool parameters](./how-to/update-pool-parameters.md)
 * [Import pools and wallets kept in separate folders](./how-to/import-multi-folder-layout.md)

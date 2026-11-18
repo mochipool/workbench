@@ -83,7 +83,7 @@ func (fakeAddrs) BuildStakeAddress(n uint8, s txbuild.KeyHash) (chain.StakeAddre
 	return chain.StakeAddress(fmt.Sprintf("stake_fake_%d_%x", n, s[:2])), nil
 }
 
-func newGenDir(t *testing.T) (ports.Store, string) {
+func newGenDir(t *testing.T) (ports.NamedStore, string) {
 	t.Helper()
 	dir := t.TempDir()
 	st, err := plainstore.OpenTestnet(dir)

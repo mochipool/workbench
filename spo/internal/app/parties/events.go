@@ -46,7 +46,7 @@ const (
 	MaxNoiseEvents    = 128
 )
 
-var eventsRef = ports.Ref{Name: "log", Kind: ports.MultisigEvents}
+var eventsRef = ports.NamedRef{Name: "log", Kind: ports.MultisigEvents}
 
 type eventLog struct {
 	Security   []Event `json:"security"`
@@ -54,7 +54,7 @@ type eventLog struct {
 	NoiseTotal uint64  `json:"noiseTotal"`
 }
 
-func readLog(r ports.Reader) (eventLog, error) {
+func readLog(r ports.NamedReader) (eventLog, error) {
 	var l eventLog
 	b, err := r.Get(eventsRef)
 	if errors.Is(err, ports.ErrNotFound) {
@@ -76,19 +76,19 @@ func readLog(r ports.Reader) (eventLog, error) {
 }
 
 // Events reads the security log, oldest first.
-func Events(r ports.Reader) ([]Event, error) {
+func Events(r ports.NamedReader) ([]Event, error) {
 	l, err := readLog(r)
 	return l.Security, err
 }
 
 // Noise reads the ring of unauthenticated refusals, oldest first, and how many
 // there have been in all.
-func Noise(r ports.Reader) (ring []Event, total uint64, err error) {
+func Noise(r ports.NamedReader) (ring []Event, total uint64, err error) {
 	l, err := readLog(r)
 	return l.Noise, l.NoiseTotal, err
 }
 
-func writeLog(w ports.Writer, l eventLog) error {
+func writeLog(w ports.NamedWriter, l eventLog) error {
 	b, err := json.Marshal(l)
 	if err != nil {
 		return err
@@ -98,7 +98,7 @@ func writeLog(w ports.Writer, l eventLog) error {
 
 // AppendEvent adds a security event inside the caller's transaction, so the
 // event commits with the change it records.
-func AppendEvent(w ports.Writer, e Event) error {
+func AppendEvent(w ports.NamedWriter, e Event) error {
 	l, err := readLog(w)
 	if err != nil {
 		return err
@@ -127,7 +127,7 @@ const OtherRefusals = "further refusals for other reasons"
 // reason as an earlier entry raises that entry's Count and LastSeen instead of
 // adding one. A hostile but enrolled party that sends refused envelopes in a
 // loop cannot push the operator's own history out of the log.
-func AppendRefusal(w ports.Writer, e Event) error {
+func AppendRefusal(w ports.NamedWriter, e Event) error {
 	l, err := readLog(w)
 	if err != nil {
 		return err
@@ -170,7 +170,7 @@ func AppendRefusal(w ports.Writer, e Event) error {
 
 // AppendNoise records an unauthenticated refusal: in the ring, oldest first
 // out, and in the counter. It never touches the security events.
-func AppendNoise(w ports.Writer, e Event) error {
+func AppendNoise(w ports.NamedWriter, e Event) error {
 	l, err := readLog(w)
 	if err != nil {
 		return err

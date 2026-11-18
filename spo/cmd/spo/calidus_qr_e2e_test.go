@@ -36,7 +36,7 @@ func TestCalidusSignThroughCommands(t *testing.T) {
 	if !ed25519.Verify(pk, []byte("hello pool"), sg) || ed25519.Verify(pk, []byte("hello pool."), sg) {
 		t.Error("the signature is not a plain Ed25519 signature over the text")
 	}
-	notLeaked(t, all.String(), secretHex(t, dir, ports.Ref{Name: "c", Kind: ports.CalidusSKey}), "abandon abandon", "SigningKey")
+	notLeaked(t, all.String(), secretHex(t, dir, ports.NamedRef{Name: "c", Kind: ports.CalidusSKey}), "abandon abandon", "SigningKey")
 
 	for _, tc := range []struct {
 		args []string
@@ -81,5 +81,5 @@ func TestCatalystQRCodeThroughCommands(t *testing.T) {
 	if ents, _ := os.ReadDir(wd); len(ents) != 0 {
 		t.Errorf("a file was written: %v", ents)
 	}
-	notLeaked(t, all.String(), secretHex(t, dir, ports.Ref{Name: "v", Kind: ports.VotingSKey}), "SigningKey")
+	notLeaked(t, all.String(), secretHex(t, dir, ports.NamedRef{Name: "v", Kind: ports.VotingSKey}), "SigningKey")
 }

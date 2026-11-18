@@ -13,7 +13,7 @@ import (
 
 // The read-only source has no method that writes: its whole method set is
 // listed here, and a new one fails the test and must be argued for. The type is
-// also not a ports.Store (no Update), so a use case that writes cannot be handed
+// also not a ports.NamedStore (no Update), so a use case that writes cannot be handed
 // one.
 //
 // spec: SPO-Xcustody-INV-001, SPO-Xcustody-IN-001
@@ -28,8 +28,8 @@ func TestSourceHasNoWriteMethod(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("methods %v, want %v", got, want)
 	}
-	if _, isStore := any(&Source{}).(ports.Store); isStore {
-		t.Error("Source implements ports.Store")
+	if _, isStore := any(&Source{}).(ports.NamedStore); isStore {
+		t.Error("Source implements ports.NamedStore")
 	}
 	// The reader a View hands out has Get and Exists only.
 	rt := reflect.TypeOf(reader{})
@@ -38,7 +38,7 @@ func TestSourceHasNoWriteMethod(t *testing.T) {
 			t.Errorf("reader has the method %s", n)
 		}
 	}
-	if _, ok := any(reader{}).(ports.Writer); ok {
+	if _, ok := any(reader{}).(ports.NamedWriter); ok {
 		t.Error("the reader of a View is a Writer")
 	}
 }
@@ -74,15 +74,15 @@ func TestReadingASourceChangesNothing(t *testing.T) {
 	if _, err := s.Subdirs(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if buf, err := s.Open(ctx, ports.Ref{Name: "p", Kind: ports.NodeSKey}); err != nil {
+	if buf, err := s.Open(ctx, ports.NamedRef{Name: "p", Kind: ports.NodeSKey}); err != nil {
 		t.Fatal(err)
 	} else {
 		buf.Destroy()
 	}
-	_ = s.View(ctx, func(r ports.Reader) error {
-		_, _ = r.Get(ports.Ref{Name: "p", Kind: ports.NodeVKey})
-		_, _ = r.Get(ports.Ref{Name: "p", Kind: ports.NodeSKey}) // refused: a secret kind
-		_, _ = r.Exists(ports.Ref{Name: "q", Kind: ports.NodeVKey})
+	_ = s.View(ctx, func(r ports.NamedReader) error {
+		_, _ = r.Get(ports.NamedRef{Name: "p", Kind: ports.NodeVKey})
+		_, _ = r.Get(ports.NamedRef{Name: "p", Kind: ports.NodeSKey}) // refused: a secret kind
+		_, _ = r.Exists(ports.NamedRef{Name: "q", Kind: ports.NodeVKey})
 		return nil
 	})
 	if !reflect.DeepEqual(before, snap()) {

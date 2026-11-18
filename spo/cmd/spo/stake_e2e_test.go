@@ -284,8 +284,8 @@ func exec2(t *testing.T, dir string, lines []string, args ...string) (string, er
 func secretsOfWallet(t *testing.T, dir, name string) []string {
 	t.Helper()
 	return []string{
-		secretHex(t, dir, ports.Ref{Name: name + ".payment", Kind: ports.AddrSKey}),
-		secretHex(t, dir, ports.Ref{Name: name, Kind: ports.StakingSKey}),
+		secretHex(t, dir, ports.NamedRef{Name: name + ".payment", Kind: ports.AddrSKey}),
+		secretHex(t, dir, ports.NamedRef{Name: name, Kind: ports.StakingSKey}),
 	}
 }
 

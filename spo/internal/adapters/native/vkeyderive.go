@@ -147,7 +147,29 @@ func (VKeyDeriver) derive(env *secret.Buffer) (pub []byte, form vkeyForm, err er
 
 // DeriveVerificationKey implements ports.VerificationKeyDeriver: the raw
 // 32-byte verification key.
-func (d VKeyDeriver) DeriveVerificationKey(_ context.Context, skeyEnvelope *secret.Buffer) ([]byte, error) {
+//
+// A KES signing key (the Sum6 root key) and a VRF signing key (the public half)
+// are derived by HotKeyDeriver, in the exact forms of pool.ValidateHot: an
+// import by stem therefore refuses a file that has the envelope type of such a
+// key and other material, and one whose key does not pair with its stored
+// verification key.
+func (d VKeyDeriver) DeriveVerificationKey(ctx context.Context, skeyEnvelope *secret.Buffer) ([]byte, error) {
+	var typ string
+	_ = skeyEnvelope.Use(func(b []byte) error {
+		var e struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(b, &e) == nil {
+			typ = e.Type
+		}
+		return nil
+	})
+	switch typ {
+	case "KesSigningKey_ed25519_kes_2^6":
+		return HotKeyDeriver{}.DeriveKES(ctx, skeyEnvelope)
+	case "VrfSigningKey_PraosVRF":
+		return HotKeyDeriver{}.DeriveVRF(ctx, skeyEnvelope)
+	}
 	pub, _, err := d.derive(skeyEnvelope)
 	return pub, err
 }

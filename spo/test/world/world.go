@@ -123,7 +123,7 @@ func (w *World) Fund(addr chain.Address, lovelace chain.Lovelace) {
 // Signers is the directory: vault keys to the vault signer, hardware keys to
 // the hardware signer when one is set up.
 func (w *World) Signers() ports.SignerDirectory {
-	d := native.Signers{Vault: w.Store}
+	d := native.Signers{Vault: w.Store.Anchor()}
 	if w.HW != nil {
 		d.Hardware = w.HW.Lazy
 	}
@@ -227,7 +227,7 @@ func (w *World) UseHardware(vendor, app string) *HW {
 		t.Fatal(err)
 	}
 	cfg := hwcli.Config{
-		Toolchain: stubToolchain{bin}, Runner: execx.OS{}, Files: hwcli.StoreFiles{Store: w.Store},
+		Toolchain: stubToolchain{bin}, Runner: execx.OS{}, Files: hwcli.StoreFiles{Store: w.Store.Anchor()},
 		TxID: w.Ledger.TransactionID, PolicyID: w.Ledger.PolicyID, Network: hwcli.Network{Magic: 2},
 		Timeout: 3 * time.Second, Poll: 20 * time.Millisecond, Attempt: 2 * time.Second, TempRoot: tmp,
 		Env: []string{"FAKEHW_CONFIG=" + h.cfgPath},

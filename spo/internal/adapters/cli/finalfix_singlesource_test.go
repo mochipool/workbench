@@ -110,7 +110,7 @@ func TestStakeDeregisterOneRecordPerReadAndAFailedRecordStopsIt(t *testing.T) {
 	}
 
 	g := newStakeFix(t)
-	g.deps.WorkspaceAuditor = func(string, ports.Store, string) ports.WorkspaceAuditor { return failingAuditor{} }
+	g.deps.WorkspaceAuditor = func(string, ports.NamedStore, string) ports.WorkspaceAuditor { return failingAuditor{} }
 	g.newWallet(t)
 	g.rewards = &fakeRewards{name: "only", r: registered(0)}
 	err := g.run(t, &scriptTerm{t: t}, "stake", "deregister", "s", "s.payment", "--yes", "--single-source")

@@ -46,7 +46,7 @@ var (
 // only after the signer approves what it shows (SPO-05d-INV-008,
 // SPO-05d-SEC-002).
 type SignWitnessFile struct {
-	Store    ports.Store
+	Store    ports.NamedStore
 	Tip      ports.TipReader
 	Clock    ports.Clock
 	Viewer   ports.TxViewer
@@ -125,10 +125,10 @@ func (uc SignWitnessFile) Run(ctx context.Context, req SignRequest) (SignResult,
 	}
 	res := SignResult{Tip: tip.Slot, NameMismatch: tf.SigningName != keyName}
 
-	vkeyRef := ports.Ref{Name: owner, Kind: ports.StakingVKey}
+	vkeyRef := ports.NamedRef{Name: owner, Kind: ports.StakingVKey}
 	var vkey []byte
 	var key custody.KeyRef
-	if err := uc.Store.View(ctx, func(r ports.Reader) error {
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
 		if vkey, err = r.Get(vkeyRef); err != nil {
 			return fmt.Errorf("%s: %w", vkeyRef, err)
@@ -221,7 +221,7 @@ func sameJSON(a, b []byte) bool {
 
 // WitnessInfo reports the collection of a pool (upstream 05d `info`).
 type WitnessInfo struct {
-	Store ports.Store
+	Store ports.NamedStore
 	Tip   ports.TipReader
 	TxIDs ports.TxIDCalculator
 }
@@ -264,7 +264,7 @@ func (uc WitnessInfo) Run(ctx context.Context, poolArg string) (InfoResult, erro
 		return InfoResult{}, err
 	}
 	var d *pool.Descriptor
-	if err := uc.Store.View(ctx, func(r ports.Reader) error {
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
 		d, err = readDescriptor(r, name)
 		return err
@@ -301,7 +301,7 @@ func (uc WitnessInfo) Run(ctx context.Context, poolArg string) (InfoResult, erro
 
 // ClearWitnesses discards the collection of a pool (upstream 05d `clear`).
 type ClearWitnesses struct {
-	Store ports.Store
+	Store ports.NamedStore
 	TxIDs ports.TxIDCalculator
 }
 
@@ -334,7 +334,7 @@ func (uc ClearWitnesses) Run(ctx context.Context, req ClearRequest) (ClearResult
 		return ClearResult{}, err
 	}
 	var res ClearResult
-	err = uc.Store.Update(ctx, func(w ports.Writer) error {
+	err = uc.Store.Update(ctx, func(w ports.NamedWriter) error {
 		d, err := readDescriptor(w, name)
 		if err != nil {
 			return err
@@ -352,7 +352,7 @@ func (uc ClearWitnesses) Run(ctx context.Context, req ClearRequest) (ClearResult
 		}
 		d.ClearCollection()
 		res.Cleared = true
-		return w.Put(ports.Ref{Name: name, Kind: ports.PoolDescriptor}, d.Render())
+		return w.Put(ports.NamedRef{Name: name, Kind: ports.PoolDescriptor}, d.Render())
 	})
 	return res, err
 }

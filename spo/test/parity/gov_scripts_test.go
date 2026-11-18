@@ -72,20 +72,20 @@ const publicPhrase = "abandon abandon abandon abandon abandon abandon abandon ab
 
 type keyScript struct {
 	name, script, prefix string
-	run                  func(st ports.Store, req governance.GenerateKeysRequest) error
+	run                  func(st ports.NamedStore, req governance.GenerateKeysRequest) error
 }
 
 func keyScripts() []keyScript {
 	return []keyScript{
-		{"DRep", "21a_genDRepKeys.sh", "x", func(st ports.Store, req governance.GenerateKeysRequest) error {
+		{"DRep", "21a_genDRepKeys.sh", "x", func(st ports.NamedStore, req governance.GenerateKeysRequest) error {
 			_, err := governance.GenerateDRepKeys{Store: st, Keys: govKeys(), Deriver: govKeys(), Mnemonics: govKeys()}.Run(context.Background(), req)
 			return err
 		}},
-		{"committee cold", "23a_genComColdKeys.sh", "x", func(st ports.Store, req governance.GenerateKeysRequest) error {
+		{"committee cold", "23a_genComColdKeys.sh", "x", func(st ports.NamedStore, req governance.GenerateKeysRequest) error {
 			_, err := governance.GenerateCommitteeColdKeys{Store: st, Keys: govKeys(), Deriver: govKeys(), Mnemonics: govKeys()}.Run(context.Background(), req)
 			return err
 		}},
-		{"committee hot", "23b_genComHotKeys.sh", "x", func(st ports.Store, req governance.GenerateKeysRequest) error {
+		{"committee hot", "23b_genComHotKeys.sh", "x", func(st ports.NamedStore, req governance.GenerateKeysRequest) error {
 			_, err := governance.GenerateCommitteeHotKeys{Store: st, Keys: govKeys(), Deriver: govKeys(), Mnemonics: govKeys()}.Run(context.Background(), req)
 			return err
 		}},

@@ -58,7 +58,7 @@ func (r rig) keyUC() GenerateVotingKey {
 }
 
 func (r rig) regUC() GenerateRegistration {
-	return GenerateRegistration{Store: r.store, Signers: native.NewSignatureSigners(r.store), Clock: r.clock,
+	return GenerateRegistration{Store: r.store, Signers: native.NewSignatureSigners(r.store.Anchor()), Clock: r.clock,
 		Tip: fixedTip{424242}, NetworkID: ports.NetworkTestnet}
 }
 
@@ -84,9 +84,9 @@ func (r rig) mode(t *testing.T, name string) os.FileMode {
 	return fi.Mode().Perm()
 }
 
-func (r rig) put(t *testing.T, ref ports.Ref, b []byte) {
+func (r rig) put(t *testing.T, ref ports.NamedRef, b []byte) {
 	t.Helper()
-	err := r.store.Update(context.Background(), func(w ports.Writer) error {
+	err := r.store.Update(context.Background(), func(w ports.NamedWriter) error {
 		if ref.Kind.Secret() {
 			return w.PutSecret(ref, secret.Take(append([]byte(nil), b...)))
 		}
@@ -106,9 +106,9 @@ func (r rig) stakeAccount(t *testing.T, name string) (stakePub [32]byte) {
 		t.Fatal(err)
 	}
 	defer pair.SKey.Destroy()
-	r.put(t, ports.Ref{Name: name, Kind: ports.StakingVKey}, pair.VKey)
-	if err := r.store.Update(context.Background(), func(w ports.Writer) error {
-		return w.PutSecret(ports.Ref{Name: name, Kind: ports.StakingSKey}, pair.SKey)
+	r.put(t, ports.NamedRef{Name: name, Kind: ports.StakingVKey}, pair.VKey)
+	if err := r.store.Update(context.Background(), func(w ports.NamedWriter) error {
+		return w.PutSecret(ports.NamedRef{Name: name, Kind: ports.StakingSKey}, pair.SKey)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestGenerateVotingKeyRefusals(t *testing.T) {
 	if _, err := r.keyUC().Run(context.Background(), GenerateVotingKeyRequest{Name: "v"}); !errors.Is(err, ErrExists) {
 		t.Errorf("again: %v", err)
 	}
-	r.put(t, ports.Ref{Name: "h", Kind: ports.VotingHwsFile}, []byte("{}"))
+	r.put(t, ports.NamedRef{Name: "h", Kind: ports.VotingHwsFile}, []byte("{}"))
 	if _, err := r.keyUC().Run(context.Background(), GenerateVotingKeyRequest{Name: "h"}); !errors.Is(err, ErrExists) {
 		t.Errorf("hwsfile: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestGenerateRegistration(t *testing.T) {
 		t.Fatal(err)
 	}
 	stakePub := r.stakeAccount(t, "w")
-	r.put(t, ports.Ref{Name: "pay", Kind: ports.AddrFile}, []byte(enterprise("addr_test", 0x60)+"\n"))
+	r.put(t, ports.NamedRef{Name: "pay", Kind: ports.AddrFile}, []byte(enterprise("addr_test", 0x60)+"\n"))
 	hexKey := strings.Repeat("ab", 32)
 
 	deleg, _ := ParseDelegation("v1 3|" + hexKey + " 1")
@@ -301,12 +301,12 @@ func TestResolveVotingKey(t *testing.T) {
 	r := newRig(t)
 	pubA, pubB := strings.Repeat("aa", 32), strings.Repeat("bb", 32)
 	bechA, _ := chain.Bech32Encode("cvote_vk", mustHex(t, pubA))
-	r.put(t, ports.Ref{Name: "both", Kind: ports.VotingPKey}, []byte(bechA+"\n"))
-	r.put(t, ports.Ref{Name: "both", Kind: ports.VotingVKey}, []byte(`{"type":"x","description":"","cborHex":"5820`+pubB+`"}`))
-	r.put(t, ports.Ref{Name: "vonly", Kind: ports.VotingVKey}, []byte(`{"type":"x","description":"","cborHex":"5820`+pubB+`"}`))
+	r.put(t, ports.NamedRef{Name: "both", Kind: ports.VotingPKey}, []byte(bechA+"\n"))
+	r.put(t, ports.NamedRef{Name: "both", Kind: ports.VotingVKey}, []byte(`{"type":"x","description":"","cborHex":"5820`+pubB+`"}`))
+	r.put(t, ports.NamedRef{Name: "vonly", Kind: ports.VotingVKey}, []byte(`{"type":"x","description":"","cborHex":"5820`+pubB+`"}`))
 	check := func(ref, wantPub, wantSrc string) {
 		t.Helper()
-		_ = r.store.View(context.Background(), func(rd ports.Reader) error {
+		_ = r.store.View(context.Background(), func(rd ports.NamedReader) error {
 			k, err := resolveVotingKey(rd, DelegationWord{Ref: ref, Weight: 1})
 			if err != nil {
 				t.Errorf("%s: %v", ref, err)
@@ -324,7 +324,7 @@ func TestResolveVotingKey(t *testing.T) {
 	check(pubA+pubB, pubA, "hex")
 	check(pubB, pubB, "hex")
 	check(bechA, pubA, "bech32")
-	_ = r.store.View(context.Background(), func(rd ports.Reader) error {
+	_ = r.store.View(context.Background(), func(rd ports.NamedReader) error {
 		for _, bad := range []string{"nothing", strings.Repeat("g", 64), "cvote_vk1qqqqqq"} {
 			if _, err := resolveVotingKey(rd, DelegationWord{Ref: bad}); !errors.Is(err, ErrBadVotingKey) {
 				t.Errorf("%q: %v", bad, err)
@@ -381,7 +381,7 @@ func TestGenerateRegistrationRefusals(t *testing.T) {
 		t.Errorf("no nonce: %v", err)
 	}
 	// A hardware stake file beside a software key wins and is refused up front.
-	r.put(t, ports.Ref{Name: "w", Kind: ports.StakingHwsFile}, []byte("{}"))
+	r.put(t, ports.NamedRef{Name: "w", Kind: ports.StakingHwsFile}, []byte("{}"))
 	n++
 	var ue *custody.UnsupportedError
 	if _, err := r.regUC().Run(ctx, RegistrationRequest{Delegation: deleg, Stake: "w", Rewards: addr}); !errors.As(err, &ue) {

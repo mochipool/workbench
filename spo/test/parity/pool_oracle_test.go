@@ -253,7 +253,7 @@ func TestPoolTransactionsMatchCardanoCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	signer := native.VaultSigner{Vault: store}
+	signer := native.VaultSigner{Vault: store.Anchor()}
 	// The vault reads the payment key as <name>.skey and the cold key as <pool>.node.skey.
 	payAddr := chain.Address(strings.TrimSpace(e.cli(t, lits("address", "build", "--testnet-magic", "2", "--payment-verification-key-file", k.p("pay.vkey"))...)))
 	cold := rawKey(t, k.p("pp.node.vkey"))

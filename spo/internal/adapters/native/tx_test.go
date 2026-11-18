@@ -216,7 +216,7 @@ func someBody(t *testing.T) txbuild.TxBody {
 	return b
 }
 
-func keyRef(t *testing.T, st ports.Store, role custody.Role, owner string) custody.KeyRef {
+func keyRef(t *testing.T, st ports.NamedStore, role custody.Role, owner string) custody.KeyRef {
 	t.Helper()
 	return porttest.Key(t, st, role, owner)
 }
@@ -231,7 +231,12 @@ func TestVaultSignerWitnesses(t *testing.T) {
 		seed[i] = byte(7 * i)
 	}
 	normal := `{"type":"PaymentSigningKeyShelley_ed25519","description":"Payment Signing Key","cborHex":"5820` + hex.EncodeToString(seed) + `"}`
-	stake := `{"type":"StakeSigningKeyShelley_ed25519","description":"Stake Signing Key","cborHex":"5820` + hex.EncodeToString(seed) + `"}`
+	// the stake key is a key of its own: a key is a member of one owner only (ADR 0010)
+	seed2 := make([]byte, 32)
+	for i := range seed2 {
+		seed2[i] = byte(11*i + 3)
+	}
+	stake := `{"type":"StakeSigningKeyShelley_ed25519","description":"Stake Signing Key","cborHex":"5820` + hex.EncodeToString(seed2) + `"}`
 	xprv := bip32.FromBip39Entropy(make([]byte, 32), nil)
 	ext, err := bursa.GetPaymentExtendedSKey(xprv)
 	if err != nil {
@@ -239,10 +244,11 @@ func TestVaultSignerWitnesses(t *testing.T) {
 	}
 	extJSON, _ := json.Marshal(ext)
 	pub := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
+	pub2 := ed25519.NewKeyFromSeed(seed2).Public().(ed25519.PublicKey)
 
 	vault := vaultDir(t, map[string]string{"n.skey": normal, "e.skey": string(extJSON), "s.staking.skey": stake,
-		"n.vkey": vkeyFile(pub), "e.vkey": vkeyFile(xprv.PublicKey()), "s.staking.vkey": vkeyFile(pub)})
-	signer := VaultSigner{Vault: vault}
+		"n.vkey": vkeyFile(pub), "e.vkey": vkeyFile(xprv.PublicKey()), "s.staking.vkey": vkeyFile(pub2)})
+	signer := VaultSigner{Vault: vault.Anchor()}
 	body := someBody(t)
 	for _, tc := range []struct {
 		name  string
@@ -253,7 +259,7 @@ func TestVaultSignerWitnesses(t *testing.T) {
 	}{
 		{"normal payment key", keyRef(t, vault, custody.RolePayment, "n"), pub, txbuild.HashKey(pub), true},
 		{"extended payment key", keyRef(t, vault, custody.RolePayment, "e"), xprv.PublicKey(), txbuild.HashKey(xprv.PublicKey()), true},
-		{"stake key of a wallet", keyRef(t, vault, custody.RoleStake, "s"), pub, txbuild.HashKey(pub), true},
+		{"stake key of a wallet", keyRef(t, vault, custody.RoleStake, "s"), pub2, txbuild.HashKey(pub2), true},
 	} {
 		w, err := signer.Witness(context.Background(), tc.key, body)
 		if err != nil {
@@ -295,7 +301,7 @@ func TestVaultSignerRefusals(t *testing.T) {
 		"nokey.vkey": vkeyFile(make([]byte, 32)),
 	}
 	vault := vaultDir(t, files)
-	signer := VaultSigner{Vault: vault}
+	signer := VaultSigner{Vault: vault.Anchor()}
 	body := someBody(t)
 	for name, want := range map[string]string{"nokey": "holds no signing key", "stakey": "unsupported signing key type", "enc": "gpg-encrypted",
 		"short": "not a", "badext": "does not match", "kes": "unsupported signing key type", "notjson": "not a text envelope"} {
@@ -371,7 +377,7 @@ func TestVaultSignerSignsTheIdOfTheBodyItIsHanded(t *testing.T) {
 	vault := vaultDir(t, map[string]string{
 		"n.skey": `{"type":"PaymentSigningKeyShelley_ed25519","description":"","cborHex":"5820` + hex.EncodeToString(seed) + `"}`,
 		"n.vkey": vkeyFile(pub)})
-	signer := VaultSigner{Vault: vault}
+	signer := VaultSigner{Vault: vault.Anchor()}
 	key := keyRef(t, vault, custody.RolePayment, "n")
 	body := someBody(t)
 	forged := body
@@ -395,7 +401,7 @@ func TestVaultSignerSignsTheIdOfTheBodyItIsHanded(t *testing.T) {
 	other := vaultDir(t, map[string]string{
 		"n.skey": `{"type":"PaymentSigningKeyShelley_ed25519","description":"","cborHex":"5820` + hex.EncodeToString(seed) + `"}`,
 		"n.vkey": vkeyFile(make([]byte, 32))})
-	if _, err := (VaultSigner{Vault: other}).Witness(context.Background(), keyRef(t, other, custody.RolePayment, "n"), body); err == nil ||
+	if _, err := (VaultSigner{Vault: other.Anchor()}).Witness(context.Background(), keyRef(t, other, custody.RolePayment, "n"), body); err == nil ||
 		!strings.Contains(err.Error(), "another key") {
 		t.Errorf("a vault key that is not the demanded key: %v", err)
 	}

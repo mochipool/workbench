@@ -134,6 +134,20 @@ func VerifyOpCert(oc OpCert, ask *OpCertAsk, want identity.Ref) error {
 	return nil
 }
 
+// VerifyOpCertOwnKey is VerifyOpCert for a certificate whose cold key is taken
+// from the certificate itself (the caller compares that key with the pool's
+// own), with a sanity bound on the start period.
+func VerifyOpCertOwnKey(oc OpCert, maxPeriod uint64) error {
+	if oc.KesPeriod > maxPeriod {
+		return ErrOpCertField
+	}
+	want, err := identity.KeyHashOf(oc.ColdVKey[:])
+	if err != nil {
+		return err
+	}
+	return VerifyOpCert(oc, nil, want)
+}
+
 // VerifyCip36 is the verifier of OpSignCip36: the registration metadata is
 // well formed, its witness verifies, and the stake key it names hashes to the
 // demanded identity.

@@ -40,7 +40,7 @@ var ErrOptionNotUsed = errors.New("option does not apply to this key source")
 // types). The mnemonic of a derived wallet is stored as a secret and never
 // returned.
 type GenerateWalletAccount struct {
-	Store     ports.Store
+	Store     ports.NamedStore
 	Payment   ports.PaymentKeyGenerator // WalletKeysRandom
 	Stake     ports.StakeKeyGenerator   // WalletKeysRandom
 	Mnemonics ports.MnemonicGenerator   // WalletKeysMnemonic without given words
@@ -143,17 +143,17 @@ func (uc GenerateWalletAccount) Run(ctx context.Context, req GenerateWalletReque
 	}
 
 	payName := name + ".payment"
-	check := func(r ports.Reader) error {
+	check := func(r ports.NamedReader) error {
 		if err := refuseRefs(r, ErrAccountExists,
-			ports.Ref{Name: payName, Kind: ports.AddrVKey}, ports.Ref{Name: payName, Kind: ports.AddrSKey},
-			ports.Ref{Name: payName, Kind: ports.AddrHwsFile}, ports.Ref{Name: payName, Kind: ports.AddrFile},
-			ports.Ref{Name: name, Kind: ports.StakingVKey}, ports.Ref{Name: name, Kind: ports.StakingSKey},
-			ports.Ref{Name: name, Kind: ports.StakingHwsFile}, ports.Ref{Name: name, Kind: ports.StakingAddr},
-			ports.Ref{Name: name, Kind: ports.StakingCert}); err != nil {
+			ports.NamedRef{Name: payName, Kind: ports.AddrVKey}, ports.NamedRef{Name: payName, Kind: ports.AddrSKey},
+			ports.NamedRef{Name: payName, Kind: ports.AddrHwsFile}, ports.NamedRef{Name: payName, Kind: ports.AddrFile},
+			ports.NamedRef{Name: name, Kind: ports.StakingVKey}, ports.NamedRef{Name: name, Kind: ports.StakingSKey},
+			ports.NamedRef{Name: name, Kind: ports.StakingHwsFile}, ports.NamedRef{Name: name, Kind: ports.StakingAddr},
+			ports.NamedRef{Name: name, Kind: ports.StakingCert}); err != nil {
 			return err
 		}
 		if req.Source == WalletKeysMnemonic {
-			return refuseRefs(r, ErrMnemonicsExist, ports.Ref{Name: name, Kind: ports.PaymentMnemonics})
+			return refuseRefs(r, ErrMnemonicsExist, ports.NamedRef{Name: name, Kind: ports.PaymentMnemonics})
 		}
 		return nil
 	}
@@ -228,43 +228,43 @@ func (uc GenerateWalletAccount) Run(ctx context.Context, req GenerateWalletReque
 		defer file.Destroy()
 	}
 
-	err = uc.Store.Update(ctx, func(w ports.Writer) error {
+	err = uc.Store.Update(ctx, func(w ports.NamedWriter) error {
 		if err := check(w); err != nil {
 			return err
 		}
 		if file != nil {
-			if err := w.PutSecret(ports.Ref{Name: name, Kind: ports.PaymentMnemonics}, file); err != nil {
+			if err := w.PutSecret(ports.NamedRef{Name: name, Kind: ports.PaymentMnemonics}, file); err != nil {
 				return err
 			}
 		}
-		if err := w.Put(ports.Ref{Name: payName, Kind: ports.AddrVKey}, pay.VKey); err != nil {
+		if err := w.Put(ports.NamedRef{Name: payName, Kind: ports.AddrVKey}, pay.VKey); err != nil {
 			return err
 		}
 		if payHW {
 			// spec: SPO-03a-EXT-002, SPO-03a-OUT-001, SPO-Pfiles-OUT-004
-			if err := w.Put(ports.Ref{Name: payName, Kind: ports.AddrHwsFile}, payHws); err != nil {
+			if err := w.Put(ports.NamedRef{Name: payName, Kind: ports.AddrHwsFile}, payHws); err != nil {
 				return err
 			}
-		} else if err := w.PutSecret(ports.Ref{Name: payName, Kind: ports.AddrSKey}, pay.SKey); err != nil {
+		} else if err := w.PutSecret(ports.NamedRef{Name: payName, Kind: ports.AddrSKey}, pay.SKey); err != nil {
 			return err
 		}
-		if err := w.Put(ports.Ref{Name: name, Kind: ports.StakingVKey}, stake.VKey); err != nil {
+		if err := w.Put(ports.NamedRef{Name: name, Kind: ports.StakingVKey}, stake.VKey); err != nil {
 			return err
 		}
 		if stakeHW {
-			if err := w.Put(ports.Ref{Name: name, Kind: ports.StakingHwsFile}, stakeHws); err != nil {
+			if err := w.Put(ports.NamedRef{Name: name, Kind: ports.StakingHwsFile}, stakeHws); err != nil {
 				return err
 			}
-		} else if err := w.PutSecret(ports.Ref{Name: name, Kind: ports.StakingSKey}, stake.SKey); err != nil {
+		} else if err := w.PutSecret(ports.NamedRef{Name: name, Kind: ports.StakingSKey}, stake.SKey); err != nil {
 			return err
 		}
 		// The base address file has no trailing newline, the stake address
 		// file has one: that is what cardano-cli 11.2.3.0's `address build`
 		// and `stake-address build` write (SPO-Pfiles-OUT-001 correction).
-		if err := w.Put(ports.Ref{Name: payName, Kind: ports.AddrFile}, []byte(base)); err != nil {
+		if err := w.Put(ports.NamedRef{Name: payName, Kind: ports.AddrFile}, []byte(base)); err != nil {
 			return err
 		}
-		return w.Put(ports.Ref{Name: name, Kind: ports.StakingAddr}, []byte(reward+"\n"))
+		return w.Put(ports.NamedRef{Name: name, Kind: ports.StakingAddr}, []byte(reward+"\n"))
 	})
 	if err != nil {
 		return res, err

@@ -24,7 +24,7 @@ var ErrNoCollection = errors.New("the pool has no witness collection")
 // local signer take. The slot records that the witness arrived without an
 // authenticated party (SPO-Xparty-IF-007).
 type ImportWitness struct {
-	Store ports.Store
+	Store ports.NamedStore
 	Tip   ports.TipReader
 	TxIDs ports.TxIDCalculator
 }
@@ -65,7 +65,7 @@ func (uc ImportWitness) Run(ctx context.Context, req ImportRequest) (ImportResul
 		return ImportResult{}, fmt.Errorf("current slot: %w", err)
 	}
 	var out ImportResult
-	err = uc.Store.Update(ctx, func(w ports.Writer) error {
+	err = uc.Store.Update(ctx, func(w ports.NamedWriter) error {
 		d, err := readDescriptor(w, name)
 		if err != nil {
 			return err
@@ -98,11 +98,11 @@ func (uc ImportWitness) Run(ctx context.Context, req ImportRequest) (ImportResul
 			return err
 		}
 		d.SetCollection(next)
-		if err := w.Put(ports.Ref{Name: name, Kind: ports.PoolDescriptor}, d.Render()); err != nil {
+		if err := w.Put(ports.NamedRef{Name: name, Kind: ports.PoolDescriptor}, d.Render()); err != nil {
 			return err
 		}
 		// The request file goes once the witness is stored (SPO-05d-INV-004).
-		ref := ports.Ref{Name: tf.Name(), Kind: ports.PoolWitnessFile}
+		ref := ports.NamedRef{Name: tf.Name(), Kind: ports.PoolWitnessFile}
 		if ok, err := w.Exists(ref); err != nil {
 			return err
 		} else if ok {
@@ -120,16 +120,16 @@ func (uc ImportWitness) Run(ctx context.Context, req ImportRequest) (ImportResul
 // key hash from the verification key in the store, so a collection made by
 // the upstream script (which stores none) can verify. A hash that is stored
 // and differs from the store's is an error.
-func bindFromStore(r ports.Reader, poolN string, c *pool.Collection) error {
+func bindFromStore(r ports.NamedReader, poolN string, c *pool.Collection) error {
 	for i, s := range c.Slots {
-		var ref ports.Ref
+		var ref ports.NamedRef
 		switch {
 		case s.Name == poolN+".node":
-			ref = ports.Ref{Name: poolN, Kind: ports.NodeVKey}
+			ref = ports.NamedRef{Name: poolN, Kind: ports.NodeVKey}
 		case len(s.Name) > len(".staking") && s.Name[len(s.Name)-len(".staking"):] == ".staking":
-			ref = ports.Ref{Name: s.Name[:len(s.Name)-len(".staking")], Kind: ports.StakingVKey}
+			ref = ports.NamedRef{Name: s.Name[:len(s.Name)-len(".staking")], Kind: ports.StakingVKey}
 		default:
-			ref = ports.Ref{Name: s.Name, Kind: ports.AddrVKey}
+			ref = ports.NamedRef{Name: s.Name, Kind: ports.AddrVKey}
 		}
 		env, err := r.Get(ref)
 		if err != nil {

@@ -48,10 +48,10 @@ recovery key ──HKDF────▶ slot key ─┼─unwrap──▶ master 
 
 Each record write draws a fresh 32-byte data key and a random 24-byte nonce, seals the payload with XChaCha20-Poly1305, and wraps the data key under the record-wrapping key.
 
-The associated data of both operations is the canonical CBOR encoding of `[format version, workspace id, record id, kind, owner, class, record version, payload format]`, where the owner is the name and number of the artefact. A ciphertext moved to another record, kind, owner, class, version or workspace fails to open (this closes SPO-Ckey-SEC-004). The class is not stored: it follows from the kind.
+The associated data of both operations is the canonical CBOR encoding of `[format version, genesis nonce, record id, kind, anchor identity, number, class, record version, payload format]` (store format 2, [ADR 0010](./0010-object-identity.md)): the anchor identity (its binary form) and the number replace the owner name of format 1, and the genesis nonce is the workspace id. A ciphertext moved to another record, kind, anchor, number, class, version or workspace fails to open (this closes SPO-Ckey-SEC-004). The class is not stored: it follows from the kind.
 
-* Record ids are random. A record is found through a lookup tag: an HMAC under the index key over the name, kind and number.
-* The owner name is stored sealed beside the record, padded to a fixed 160 bytes, so that a rekey can recompute lookup tags.
+* Record ids are random. A record is found through a lookup tag: an HMAC under the index key over the anchor identity, the kind and the number (namespace `record-ref/v2`).
+* The anchor identity, the kind and the number are stored sealed beside the record (the owner blob, padded to a fixed 160 bytes), so that a rekey can recompute lookup tags. No name is stored in a record: a name is held only by a `label` record. A store of format 1 (owner names) is refused by the opener and converted by `spo workspace migrate` (ADR 0010 decision 4; [how-to](../../how-to/migrate-a-workspace.md)).
 * **Secret** payloads are framed as a 4-byte length, the payload, and zero padding up to the next power of two of at least 256 bytes, so the stored size does not reveal a key type or a mnemonic's word count. They are decrypted directly into guarded memory.
 * **Sensitive** payloads are stored unpadded and opened into ordinary memory.
 

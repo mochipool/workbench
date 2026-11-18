@@ -123,6 +123,28 @@ func (SoftwareKeys) DeriveCommitteeCold(_ context.Context, m *secret.Buffer, acc
 	return deriveGov(m, account, index, bursa.GetCommitteeColdKey, bursa.GetCommitteeColdVKey, bursa.GetCommitteeColdSKey, signerCCColdVDesc, signerCCColdSDesc)
 }
 
+// DeriveColdMnemonicVKey implements ports.ColdMnemonicVKeyDeriver: the committee
+// cold verification key of the words in a stored mnemonic file, by
+// DeriveCommitteeCold (the derivation the generator uses) on account 0, index 0.
+func (k SoftwareKeys) DeriveColdMnemonicVKey(ctx context.Context, file *secret.Buffer) ([]byte, error) {
+	raw, account, index, err := ports.SplitMnemonicFile(file)
+	if err != nil {
+		return nil, err
+	}
+	defer raw.Destroy()
+	words, err := ports.NormalizeMnemonic(raw)
+	if err != nil {
+		return nil, err
+	}
+	defer words.Destroy()
+	pair, err := k.DeriveCommitteeCold(ctx, words, account, index)
+	if err != nil {
+		return nil, err
+	}
+	pair.SKey.Destroy()
+	return pair.VKey, nil
+}
+
 // DeriveCommitteeHot implements ports.GovernanceDeriver: role 5.
 //
 // spec: SPO-23b-INV-002, SPO-23b-EXT-003
@@ -135,4 +157,5 @@ var (
 	_ ports.CommitteeColdKeyGenerator = SoftwareKeys{}
 	_ ports.CommitteeHotKeyGenerator  = SoftwareKeys{}
 	_ ports.GovernanceDeriver         = SoftwareKeys{}
+	_ ports.ColdMnemonicVKeyDeriver   = SoftwareKeys{}
 )

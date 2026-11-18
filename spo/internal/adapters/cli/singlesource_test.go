@@ -25,7 +25,7 @@ func (r *recAuditor) Record(_ context.Context, e ports.AuditEvent) error {
 }
 
 func (r *recAuditor) deps(d Deps) Deps {
-	d.WorkspaceAuditor = func(string, ports.Store, string) ports.WorkspaceAuditor { return r }
+	d.WorkspaceAuditor = func(string, ports.NamedStore, string) ports.WorkspaceAuditor { return r }
 	return d
 }
 

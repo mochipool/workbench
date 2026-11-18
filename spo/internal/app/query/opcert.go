@@ -126,7 +126,7 @@ type OpCertVerdict struct {
 // CheckOpCert checks an operational certificate against the chain (upstream
 // 04e_checkNodeOpCert with two arguments).
 type CheckOpCert struct {
-	Store ports.Store
+	Store ports.NamedStore
 	// Tip, Genesis and Counters are nil in offline mode, which refuses
 	// (SPO-04e-PRE-001).
 	Tip      ports.TipReader
@@ -270,18 +270,18 @@ func (uc CheckOpCert) certificate(ctx context.Context, req OpCertCheck) (pool.Op
 	name := strings.TrimPrefix(req.Pool, "./")
 	var raw []byte
 	var num int
-	err := uc.Store.View(ctx, func(r ports.Reader) error {
+	err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 		first, last := 0, 0
 		if req.Number != nil {
 			first, last = *req.Number, *req.Number
 		} else {
 			// The newest: the highest number below the next KES counter.
 			// Probe downwards; the store has no listing.
-			n, err := readInt(r, ports.Ref{Name: name, Kind: ports.KesCounterNext})
+			n, err := readInt(r, ports.NamedRef{Name: name, Kind: ports.KesCounterNext})
 			if err != nil {
 				return err
 			}
-			c, err := readInt(r, ports.Ref{Name: name, Kind: ports.KesCounter})
+			c, err := readInt(r, ports.NamedRef{Name: name, Kind: ports.KesCounter})
 			if err != nil {
 				return err
 			}
@@ -289,7 +289,7 @@ func (uc CheckOpCert) certificate(ctx context.Context, req OpCertCheck) (pool.Op
 			first = 0
 		}
 		for i := last; i >= first; i-- {
-			b, err := r.Get(ports.Ref{Name: name, Kind: ports.OpCert, Num: i})
+			b, err := r.Get(ports.NamedRef{Name: name, Kind: ports.OpCert, Num: i})
 			if errors.Is(err, ports.ErrNotFound) {
 				continue
 			}
@@ -309,7 +309,7 @@ func (uc CheckOpCert) certificate(ctx context.Context, req OpCertCheck) (pool.Op
 }
 
 // readInt reads a KES counter file; a missing one is 0.
-func readInt(r ports.Reader, ref ports.Ref) (int, error) {
+func readInt(r ports.NamedReader, ref ports.NamedRef) (int, error) {
 	b, err := r.Get(ref)
 	if errors.Is(err, ports.ErrNotFound) {
 		return 0, nil
@@ -324,7 +324,7 @@ func readInt(r ports.Reader, ref ports.Ref) (int, error) {
 // counter of a pool, and what the next certificate needs (upstream
 // 04e_checkNodeOpCert with one argument).
 type QueryOpCertCounter struct {
-	Store    ports.Store
+	Store    ports.NamedStore
 	Counters ports.OpCertCounterReader
 	// Pools adds the pool's name and ticker; optional.
 	Pools ports.PoolStateReader
@@ -414,8 +414,8 @@ func (uc QueryOpCertCounter) resolve(ctx context.Context, ref string) (chain.Poo
 		return chain.PoolID{}, fmt.Errorf("%w: %q", ErrPoolUnresolved, ref)
 	}
 	var id chain.PoolID
-	err := uc.Store.View(ctx, func(r ports.Reader) error {
-		b, err := r.Get(ports.Ref{Name: name, Kind: ports.PoolIDBechFile})
+	err := uc.Store.View(ctx, func(r ports.NamedReader) error {
+		b, err := r.Get(ports.NamedRef{Name: name, Kind: ports.PoolIDBechFile})
 		if errors.Is(err, ports.ErrNotFound) || errors.Is(err, ports.ErrInvalidRef) {
 			return fmt.Errorf("%w: %q", ErrPoolUnresolved, ref)
 		}

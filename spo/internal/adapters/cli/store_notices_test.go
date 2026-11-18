@@ -28,7 +28,10 @@ type scriptedStore struct {
 	calls      []string
 	keyFile    *os.File // the file the recovery key is written to; read when Cleanup runs
 	keyAtClean string
+	problems   []string // what ColdProblems reports
 }
+
+func (s *scriptedStore) ColdProblems(context.Context) ([]string, error) { return s.problems, nil }
 
 func (s *scriptedStore) Notices() []string { return append([]string(nil), s.notices...) }
 
@@ -52,6 +55,13 @@ func (s *scriptedStore) ChangePassphraseRekey(context.Context, *secret.Buffer) (
 
 func (s *scriptedStore) RekeyKeepPassphrase(context.Context, *secret.Buffer) (*secret.Buffer, error) {
 	return s.rekey()
+}
+
+func (s *scriptedStore) PresentRecovery(context.Context, FactorOpen) error { return nil }
+
+func (s *scriptedStore) ChangePassphraseKeepRecovery(context.Context, *secret.Buffer, *secret.Buffer) error {
+	_, err := s.rekey()
+	return err
 }
 
 func (s *scriptedStore) Cleanup(context.Context) error {
@@ -83,6 +93,7 @@ func storeRun(t *testing.T, st *scriptedStore, args ...string) (stdout, stderr s
 	var out, errw bytes.Buffer
 	pfd := tokenFile(t, "a passphrase long enough\n")
 	nfd := tokenFile(t, "a different passphrase\n")
+	rinfd := tokenFile(t, "ABCD-EFGH-IJKL-MNOP\n")
 	rf, rfd := tokenFileKeep(t)
 	st.keyFile = rf
 	root := NewRoot(Deps{
@@ -98,6 +109,8 @@ func storeRun(t *testing.T, st *scriptedStore, args ...string) (stdout, stderr s
 		switch a {
 		case "@NEWFD":
 			all[i] = nfd
+		case "@RINFD":
+			all[i] = rinfd
 		case "@RKFD":
 			all[i] = rfd
 		}
@@ -130,8 +143,7 @@ func drainPipe(r *os.File) string {
 
 func TestRekeyCommandsPrintNoticesAndCleanUpAfterTheKey(t *testing.T) {
 	for name, args := range map[string][]string{
-		"passphrase change": {"store", "passphrase", "change", "--new-passphrase-fd", "@NEWFD", "--recovery-key-fd", "@RKFD"},
-		"recovery-key new":  {"store", "recovery-key", "new", "--recovery-key-fd", "@RKFD"},
+		"recovery-key new": {"store", "recovery-key", "new", "--recovery-key-in-fd", "@RINFD", "--recovery-key-fd", "@RKFD"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			st := &scriptedStore{notices: []string{"opened with a notice"}, rekeyAdds: "the rekey is committed but the head file could not be written", cleanupErr: errors.New("busy")}
@@ -216,7 +228,7 @@ func TestCloseNoticesAndErrorsAreSurfaced(t *testing.T) {
 	}
 	// A more specific error is not replaced by it.
 	st = &scriptedStore{closeErr: errors.New("disk on fire"), rekeyErr: errors.New("the rekey failed specifically")}
-	_, _, err = storeRun(t, st, "store", "recovery-key", "new", "--recovery-key-fd", "@RKFD")
+	_, _, err = storeRun(t, st, "store", "recovery-key", "new", "--recovery-key-in-fd", "@RINFD", "--recovery-key-fd", "@RKFD")
 	if err == nil || !strings.Contains(err.Error(), "the rekey failed specifically") || strings.Contains(err.Error(), "disk on fire") {
 		t.Errorf("the specific error was replaced: %v", err)
 	}
@@ -270,8 +282,7 @@ func TestStoreVerifyWordingAndDeep(t *testing.T) {
 
 func TestUnknownRekeyOutcomeShowsTheKeyWithGuidance(t *testing.T) {
 	for name, args := range map[string][]string{
-		"passphrase change": {"store", "passphrase", "change", "--new-passphrase-fd", "@NEWFD", "--recovery-key-fd", "@RKFD"},
-		"recovery-key new":  {"store", "recovery-key", "new", "--recovery-key-fd", "@RKFD"},
+		"recovery-key new": {"store", "recovery-key", "new", "--recovery-key-in-fd", "@RINFD", "--recovery-key-fd", "@RKFD"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			st := &scriptedStore{keyErr: ErrOutcomeUnknown}
@@ -355,5 +366,16 @@ func TestUnconfirmedKeyInUnknownOutcomeIsNotCalledValid(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "valid key of the workspace") || !strings.Contains(err.Error(), "valid only if the change took effect") {
 		t.Errorf("wording: %v", err)
+	}
+}
+
+// `store slots` names the cold records the workspace key shows to be out of step.
+//
+// spec: SPO-Xcustody-INV-023
+func TestStoreSlotsNamesColdRecordsOutOfStep(t *testing.T) {
+	st := &scriptedStore{problems: []string{"node.skey/pool-a: sealed under a cold passphrase, but the policy is hardware"}}
+	out, _, err := storeRun(t, st, "store", "slots")
+	if err != nil || !strings.Contains(out, "1 cold-role record(s) are out of step") || !strings.Contains(out, "node.skey/pool-a: sealed under a cold passphrase") {
+		t.Fatalf("%v\n%s", err, out)
 	}
 }

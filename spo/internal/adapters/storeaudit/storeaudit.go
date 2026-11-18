@@ -2,7 +2,7 @@
 // unprotect, import) in the store itself (ports.WorkspaceAuditor).
 //
 // An event is appended to one record, ports.WorkspaceAuditLog, through
-// ports.Store.Update. In the sealed store that write is a row of the
+// ports.NamedStore.Update. In the sealed store that write is a row of the
 // MAC-chained audit log, so the event cannot be removed or reordered without
 // breaking verification. The record keeps the newest MaxEvents events; older
 // ones are evicted, and the chain keeps proof that each write happened.
@@ -34,7 +34,7 @@ const MaxEvents = 4096
 const MaxReasonBytes = 1024
 
 // Ref is the reference of the log record.
-var Ref = ports.Ref{Name: "workspace", Kind: ports.WorkspaceAuditLog}
+var Ref = ports.NamedRef{Name: "workspace", Kind: ports.WorkspaceAuditLog}
 
 // ErrReasonTooLong means the reason is longer than MaxReasonBytes.
 var ErrReasonTooLong = errors.New("the audit reason is too long")
@@ -58,6 +58,9 @@ type Event struct {
 	Read         string `json:"read,omitempty"`
 	Source       string `json:"source,omitempty"`
 	SingleSource bool   `json:"single_source,omitempty"`
+
+	// Detail is AuditEvent.Detail.
+	Detail []string `json:"detail,omitempty"`
 }
 
 type logFile struct {
@@ -67,7 +70,7 @@ type logFile struct {
 
 // Auditor implements ports.WorkspaceAuditor over a store.
 type Auditor struct {
-	Store ports.Store
+	Store ports.NamedStore
 	// Reason is the operator's stated reason, recorded with every event this
 	// auditor writes. It is not secret and must not hold any.
 	Reason string
@@ -91,8 +94,9 @@ func (a *Auditor) Record(ctx context.Context, e ports.AuditEvent) error {
 		Time: now().UTC().Truncate(time.Second), Operation: e.Operation, Owners: append([]string(nil), e.Owners...),
 		PlaintextKeys: e.PlaintextKeys, ProtectedKeys: e.ProtectedKeys, Protected: e.Protected, Acknowledged: e.Acknowledged,
 		Reason: a.Reason, Command: e.Command, Read: e.Read, Source: e.Source, SingleSource: e.SingleSource,
+		Detail: append([]string(nil), e.Detail...),
 	}
-	err := a.Store.Update(ctx, func(w ports.Writer) error {
+	err := a.Store.Update(ctx, func(w ports.NamedWriter) error {
 		var lf logFile
 		switch data, err := w.Get(Ref); {
 		case errors.Is(err, ports.ErrNotFound):
@@ -121,9 +125,9 @@ func (a *Auditor) Record(ctx context.Context, e ports.AuditEvent) error {
 }
 
 // Events reads the log, oldest first, for reports and tests.
-func Events(ctx context.Context, s ports.Store) ([]Event, error) {
+func Events(ctx context.Context, s ports.NamedStore) ([]Event, error) {
 	var lf logFile
-	err := s.View(ctx, func(r ports.Reader) error {
+	err := s.View(ctx, func(r ports.NamedReader) error {
 		data, err := r.Get(Ref)
 		if errors.Is(err, ports.ErrNotFound) {
 			return nil

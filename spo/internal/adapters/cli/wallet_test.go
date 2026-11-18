@@ -151,7 +151,7 @@ func newSendFixture(t *testing.T) *sendFixture {
 	cfgs := map[string]WorkspaceConfig{f.dir: {Network: "preview", Mode: ModeOffline}}
 	f.deps = Deps{
 		Out: &f.out, Err: &f.out, Config: memConfig(cfgs),
-		OpenUpstream: func(dir string) (ports.Store, error) { return plainstore.OpenTestnet(dir) },
+		OpenUpstream: plainstore.Upstream,
 		Wire: func(st ports.Store, o WireOptions) (*Env, error) {
 			led := native.Ledger{}
 			env := &Env{Mode: o.Mode, NetworkID: ports.NetworkTestnet, Clock: cliClock{},

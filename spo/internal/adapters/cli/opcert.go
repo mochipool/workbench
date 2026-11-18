@@ -277,7 +277,9 @@ hex). Exit status is non-zero when the chain's answer is not known.`,
 // kind, named by provider.
 var providerTokenKind = ports.ProviderToken
 
-func tokenRef(provider string) ports.Ref { return ports.Ref{Name: provider, Kind: providerTokenKind} }
+func tokenRef(provider string) ports.NamedRef {
+	return ports.NamedRef{Name: provider, Kind: providerTokenKind}
+}
 
 // loadToken returns the stored API token of a provider, or nil when none is
 // stored. The caller destroys it.
@@ -285,12 +287,12 @@ func (a *app) loadToken(cmd *cobra.Command, s *session, provider string) (*secre
 	if !providerTokenKind.Known() {
 		return nil, nil
 	}
-	vault, ok := s.Store.(ports.Vault)
+	vault, ok := s.Store.(ports.NamedVault)
 	if !ok {
 		return nil, nil
 	}
 	var has bool
-	if err := s.Store.View(cmd.Context(), func(r ports.Reader) error {
+	if err := s.Store.View(cmd.Context(), func(r ports.NamedReader) error {
 		var err error
 		has, err = r.Exists(tokenRef(provider))
 		return err

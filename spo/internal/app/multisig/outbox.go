@@ -12,7 +12,7 @@ import (
 // Outbox is the store-backed queue of sealed envelopes. A transport loop
 // calls Flush; nothing here is held in a connection (SPO-Xparty-SEC-003).
 type Outbox struct {
-	Store ports.Store
+	Store ports.NamedStore
 	Clock ports.Clock
 	// Offline refuses a network transport (SPO-Xparty-MODE-001).
 	Offline bool
@@ -44,7 +44,7 @@ func (o Outbox) sweep(ctx context.Context) error {
 	if o.Parties == nil || o.Kit == nil {
 		return ErrOutboxNotWired
 	}
-	bad := func(r ports.Reader, it OutItem) (string, error) {
+	bad := func(r ports.NamedReader, it OutItem) (string, error) {
 		to, err := fpOfHex(it.To)
 		if err != nil {
 			return "", err
@@ -69,7 +69,7 @@ func (o Outbox) sweep(ctx context.Context) error {
 		return "", nil
 	}
 	var found bool
-	if err := o.Store.View(ctx, func(r ports.Reader) error {
+	if err := o.Store.View(ctx, func(r ports.NamedReader) error {
 		items, err := readOutbox(r)
 		for _, it := range items {
 			if it.Delivered {
@@ -85,7 +85,7 @@ func (o Outbox) sweep(ctx context.Context) error {
 	}); err != nil || !found {
 		return err
 	}
-	return o.Store.Update(ctx, func(w ports.Writer) error {
+	return o.Store.Update(ctx, func(w ports.NamedWriter) error {
 		items, err := readOutbox(w)
 		if err != nil {
 			return err
@@ -119,7 +119,7 @@ func (o Outbox) Pending(ctx context.Context) ([]OutItem, error) {
 		return nil, err
 	}
 	var out []OutItem
-	err := o.Store.View(ctx, func(r ports.Reader) error {
+	err := o.Store.View(ctx, func(r ports.NamedReader) error {
 		items, err := readOutbox(r)
 		for _, it := range items {
 			if !it.Delivered && it.Expires >= o.Clock.Now().Unix() {
@@ -180,7 +180,7 @@ func (o Outbox) Flush(ctx context.Context, tr ports.Transport) (int, error) {
 		}
 	}
 	if len(done) > 0 {
-		err := o.Store.Update(ctx, func(w ports.Writer) error {
+		err := o.Store.Update(ctx, func(w ports.NamedWriter) error {
 			all, err := readOutbox(w)
 			if err != nil {
 				return err
@@ -205,7 +205,7 @@ func (o Outbox) Flush(ctx context.Context, tr ports.Transport) (int, error) {
 // made. Nothing else is re-sent: a response, a refusal or a CollectionClosed
 // was delivered when it was written.
 func (o Outbox) Rearm(ctx context.Context) error {
-	return o.Store.Update(ctx, func(w ports.Writer) error {
+	return o.Store.Update(ctx, func(w ports.NamedWriter) error {
 		return rearm(w, nil)
 	})
 }
@@ -218,7 +218,7 @@ func (o Outbox) Rearm(ctx context.Context) error {
 // dropped by the next listing. It returns how many were rearmed.
 func (o Outbox) RearmRotations(ctx context.Context) (int, error) {
 	n := 0
-	err := o.Store.Update(ctx, func(w ports.Writer) error {
+	err := o.Store.Update(ctx, func(w ports.NamedWriter) error {
 		items, err := readOutbox(w)
 		if err != nil {
 			return err
@@ -239,7 +239,7 @@ func (o Outbox) RearmRotations(ctx context.Context) (int, error) {
 
 // rearm clears Sent on the undelivered SigningRequests, of one recipient when
 // to is not nil, inside the caller's transaction.
-func rearm(w ports.Writer, to *party.Fingerprint) error {
+func rearm(w ports.NamedWriter, to *party.Fingerprint) error {
 	all, err := readOutbox(w)
 	if err != nil {
 		return err
@@ -254,7 +254,7 @@ func rearm(w ports.Writer, to *party.Fingerprint) error {
 
 // settleRequest marks the envelope with that message id done: the answer it
 // asks for has arrived.
-func settleRequest(w ports.Writer, id string) error {
+func settleRequest(w ports.NamedWriter, id string) error {
 	all, err := readOutbox(w)
 	if err != nil {
 		return err
@@ -268,7 +268,7 @@ func settleRequest(w ports.Writer, id string) error {
 }
 
 // settleCollection marks every envelope of a collection done: it was closed.
-func settleCollection(w ports.Writer, collection string) error {
+func settleCollection(w ports.NamedWriter, collection string) error {
 	all, err := readOutbox(w)
 	if err != nil {
 		return err
@@ -358,7 +358,7 @@ func (p Pump) receiveOne(ctx context.Context) (bool, error) {
 
 // dropTo removes the undelivered envelopes addressed to a party, inside the
 // caller's transaction (revocation).
-func dropTo(w ports.Writer, to party.Fingerprint) (int, error) {
+func dropTo(w ports.NamedWriter, to party.Fingerprint) (int, error) {
 	items, err := readOutbox(w)
 	if err != nil {
 		return 0, err

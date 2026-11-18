@@ -248,9 +248,9 @@ func (f *fixture) refusal(h multisig.Handled, reason party.RefusalReason, body [
 func (f *fixture) signerRecord() []byte {
 	f.t.Helper()
 	var raw []byte
-	if err := f.B.Store.View(ctx, func(r ports.Reader) error {
+	if err := f.B.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
-		raw, err = r.Get(ports.Ref{Name: "state", Kind: ports.MultisigSigner})
+		raw, err = r.Get(ports.NamedRef{Name: "state", Kind: ports.MultisigSigner})
 		return err
 	}); err != nil {
 		f.t.Fatal(err)

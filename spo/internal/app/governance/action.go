@@ -57,7 +57,7 @@ func stakeCredential(a string) (governance.Credential, uint8, error) {
 // from the constitution: the script is a witness of the transaction that
 // proposes it (RegisterAction).
 type GenerateAction struct {
-	Store   ports.Store
+	Store   ports.NamedStore
 	Actions ports.ActionFileBuilder
 	Params  ports.ProtocolParametersReader
 	Epoch   ports.EpochReader
@@ -113,7 +113,7 @@ type lovelace = chain.Lovelace
 
 // ActionGenerated is the result.
 type ActionGenerated struct {
-	Ref    ports.Ref
+	Ref    ports.NamedRef
 	Action governance.Action
 	// Decisions records what shaped the file: a replaced hash, an unverified anchor.
 	Decisions []string
@@ -161,8 +161,8 @@ func (uc GenerateAction) Run(ctx context.Context, req GenerateActionRequest) (Ac
 		if _, err := name(nm); err != nil {
 			return res, fmt.Errorf("deposit-return account: %w", err)
 		}
-		if err := uc.Store.View(ctx, func(r ports.Reader) error {
-			b, err := get(r, ports.Ref{Name: nm, Kind: ports.StakingAddr})
+		if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
+			b, err := get(r, ports.NamedRef{Name: nm, Kind: ports.StakingAddr})
 			addr = firstLine(b)
 			return err
 		}); err != nil {
@@ -249,9 +249,9 @@ func (uc GenerateAction) Run(ctx context.Context, req GenerateActionRequest) (Ac
 	}
 	// The file name: the first free second (SPO-25a-OUT-006 overwrites within one second).
 	t := uc.Clock.Now()
-	err = uc.Store.Update(ctx, func(w ports.Writer) error {
+	err = uc.Store.Update(ctx, func(w ports.NamedWriter) error {
 		for i := 0; i < 600; i++ {
-			ref := ports.Ref{Name: prefix + "_" + t.Add(time.Duration(i)*time.Second).Format("060102150405"), Kind: ports.GovActionFile}
+			ref := ports.NamedRef{Name: prefix + "_" + t.Add(time.Duration(i)*time.Second).Format("060102150405"), Kind: ports.GovActionFile}
 			ok, err := w.Exists(ref)
 			if err != nil {
 				return err
@@ -501,7 +501,7 @@ func (uc RegisterAction) Run(ctx context.Context, req RegisterActionRequest) (Ac
 	}
 	var pay payer
 	var props []txbuild.ProposalAttachment
-	if err := uc.Store.View(ctx, func(r ports.Reader) error {
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
 		if pay, err = uc.readPayer(r, pn); err != nil {
 			return err
@@ -516,7 +516,7 @@ func (uc RegisterAction) Run(ctx context.Context, req RegisterActionRequest) (Ac
 				return fmt.Errorf("%w: %s is given twice", ErrActionFile, f)
 			}
 			seen[nm] = true
-			raw, err := get(r, ports.Ref{Name: nm, Kind: ports.GovActionFile})
+			raw, err := get(r, ports.NamedRef{Name: nm, Kind: ports.GovActionFile})
 			if err != nil {
 				return err
 			}

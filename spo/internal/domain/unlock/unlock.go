@@ -33,6 +33,27 @@ const (
 // Valid reports whether p is one of the three policies.
 func (p Policy) Valid() bool { return p == Standard || p == Hardware || p == Strict }
 
+// Rank orders the policies by what they guarantee: standard < hardware <
+// strict. An unknown policy ranks below every valid one.
+func (p Policy) Rank() int {
+	switch p {
+	case Standard:
+		return 1
+	case Hardware:
+		return 2
+	case Strict:
+		return 3
+	}
+	return 0
+}
+
+// Weakens reports whether moving a workspace from one policy to another lowers
+// what it guarantees: hardware to standard, strict to hardware or standard. A
+// move to the same policy, or to a stronger one, does not weaken. (Hardware to
+// strict drops the recovery path; it is not weaker, and the store still asks for
+// the current recovery credential, because the recovery path changes.)
+func Weakens(from, to Policy) bool { return to.Rank() < from.Rank() }
+
 // FactorKind is the kind of a factor.
 type FactorKind string
 
@@ -68,6 +89,13 @@ type Slot struct {
 	Factors []Factor
 	// RecoveryPubKeyHash is the hash of the recovery public key the slot binds.
 	RecoveryPubKeyHash []byte
+	// Legacy marks a passphrase or recovery slot sealed before store format 3.
+	// It binds no recovery public key hash and no policy, because rewrapping it
+	// needs its credential (a migration has none). It is exempt from the two
+	// hash rules and is allowed only under Standard, where the passphrase or
+	// recovery key alone opens a slot anyway; any other policy refuses such a
+	// slot by RulePassphraseOnly or RuleRecoveryOnly.
+	Legacy bool
 }
 
 // Table is a slot table with its policy.
@@ -97,6 +125,7 @@ const (
 	RuleMultipleRecovery  Rule = "multiple-recovery"            // more than one distinct recovery factor
 	RuleKeyHashMissing    Rule = "recovery-key-hash-missing"    // a slot of a policy with a recovery path binds no hash
 	RuleKeyHashPresent    Rule = "strict-key-hash"              // a slot of a strict table binds a recovery key hash
+	RuleDailySlot         Rule = "daily-slot"                   // hardware or strict with only a recovery composite: no slot opens it day to day
 )
 
 // Violation is one refused rule, with the slot it concerns (nil for the table).
@@ -318,6 +347,15 @@ func Check(t Table) error {
 				}
 			}
 		}
+		daily := false
+		for i := range t.Slots {
+			if shapeOK[i] && !(t.Slots[i].Kind == SlotComposite && t.Slots[i].has(Recovery)) {
+				daily = true
+			}
+		}
+		if !daily {
+			add(RuleDailySlot, nil, "the table has no slot that opens the workspace without the recovery path: the last such slot cannot be removed")
+		}
 		if t.Policy == Hardware {
 			recComposite := false
 			for i := range t.Slots {
@@ -358,6 +396,12 @@ func Check(t Table) error {
 	// has no recovery key and binds none (the value is absent everywhere).
 	for i := range t.Slots {
 		s := &t.Slots[i]
+		if s.Legacy {
+			if len(s.RecoveryPubKeyHash) != 0 || (s.Kind != SlotPassphrase && s.Kind != SlotRecovery) {
+				add(RuleShape, s, "only a passphrase or recovery slot is legacy, and it binds no recovery public key hash")
+			}
+			continue
+		}
 		switch {
 		case t.Policy == Strict && len(s.RecoveryPubKeyHash) != 0:
 			add(RuleKeyHashPresent, s, "strict has no recovery public key; the bound hash must be absent")
@@ -367,9 +411,17 @@ func Check(t Table) error {
 	}
 
 	// Every slot binds the same recovery public key hash.
-	for i := 1; i < len(t.Slots); i++ {
-		if !bytes.Equal(t.Slots[i].RecoveryPubKeyHash, t.Slots[0].RecoveryPubKeyHash) {
-			add(RuleRecoveryKeyHash, &t.Slots[i], "binds another recovery public key hash than slot %x", t.Slots[0].ID)
+	var first *Slot
+	for i := range t.Slots {
+		if t.Slots[i].Legacy {
+			continue
+		}
+		if first == nil {
+			first = &t.Slots[i]
+			continue
+		}
+		if !bytes.Equal(t.Slots[i].RecoveryPubKeyHash, first.RecoveryPubKeyHash) {
+			add(RuleRecoveryKeyHash, &t.Slots[i], "binds another recovery public key hash than slot %x", first.ID)
 		}
 	}
 	return finish()

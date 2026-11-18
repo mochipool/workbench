@@ -41,9 +41,12 @@ func Open(dir string) (*Source, error) {
 // Dir is the absolute path of the directory.
 func (s *Source) Dir() string { return s.dir }
 
-func (s *Source) path(r ports.Ref) (string, error) {
+func (s *Source) path(r ports.NamedRef) (string, error) {
 	if err := r.Validate(); err != nil {
 		return "", err
+	}
+	if _, isID := ports.IdentityName(r.Name); isID {
+		return "", fmt.Errorf("%w: a directory has file names, not identities", ports.ErrInvalidRef)
 	}
 	name, ok := layout[r.Kind]
 	if !ok {
@@ -54,7 +57,7 @@ func (s *Source) path(r ports.Ref) (string, error) {
 
 type reader struct{ s *Source }
 
-func (t reader) Get(r ports.Ref) ([]byte, error) {
+func (t reader) Get(r ports.NamedRef) ([]byte, error) {
 	if r.Kind.Secret() {
 		return nil, ports.ErrSecretKind
 	}
@@ -69,7 +72,7 @@ func (t reader) Get(r ports.Ref) ([]byte, error) {
 	return b, err
 }
 
-func (t reader) Exists(r ports.Ref) (bool, error) {
+func (t reader) Exists(r ports.NamedRef) (bool, error) {
 	p, err := t.s.path(r)
 	if err != nil {
 		return false, err
@@ -81,16 +84,16 @@ func (t reader) Exists(r ports.Ref) (bool, error) {
 	return err == nil, err
 }
 
-// View implements ports.ReadStore.
-func (s *Source) View(_ context.Context, fn func(ports.Reader) error) error {
+// View implements ports.NamedReadStore.
+func (s *Source) View(_ context.Context, fn func(ports.NamedReader) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return fn(reader{s})
 }
 
-// Open implements ports.Vault: it reads a key or other secret file into
+// Open implements ports.NamedVault: it reads a key or other secret file into
 // guarded memory, for an import to seal it.
-func (s *Source) Open(_ context.Context, r ports.Ref) (*secret.Buffer, error) {
+func (s *Source) Open(_ context.Context, r ports.NamedRef) (*secret.Buffer, error) {
 	if !r.Kind.Secret() {
 		return nil, fmt.Errorf("%w: %s is not a secret kind", ports.ErrInvalidRef, r.Kind)
 	}
@@ -110,6 +113,6 @@ func (s *Source) Open(_ context.Context, r ports.Ref) (*secret.Buffer, error) {
 }
 
 var (
-	_ ports.ReadStore = (*Source)(nil)
-	_ ports.Vault     = (*Source)(nil)
+	_ ports.NamedReadStore = (*Source)(nil)
+	_ ports.NamedVault     = (*Source)(nil)
 )

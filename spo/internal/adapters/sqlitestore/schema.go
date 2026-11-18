@@ -80,5 +80,31 @@ CREATE TABLE audit (
   mac      BLOB    NOT NULL,
   prev_mac BLOB    NOT NULL
 ) STRICT;
+`, // 2: store format 3 (ADR 0011). The key slot table gains the kinds
+	// fido2-hmac and composite, the columns bound, rec_hash and factors, and
+	// the meta row gains the policy. SQLite cannot change a CHECK in place, so
+	// the table is rebuilt; the migration of a file runs this and the data step
+	// of Migrate3 in one transaction.
+	`
+CREATE TABLE keyslots_new (
+  id             BLOB PRIMARY KEY,
+  kind           TEXT NOT NULL CHECK (kind IN ('passphrase', 'recovery', 'fido2-hmac', 'composite')),
+  kdf_memory_kib INTEGER,
+  kdf_passes     INTEGER,
+  kdf_lanes      INTEGER,
+  salt           BLOB,
+  key_commit     BLOB NOT NULL,
+  nonce          BLOB NOT NULL,
+  wrapped_key    BLOB NOT NULL,
+  bound          INTEGER NOT NULL DEFAULT 0 CHECK (bound IN (0, 1)),
+  rec_hash       BLOB,
+  factors        BLOB
+) STRICT;
+INSERT INTO keyslots_new (id, kind, kdf_memory_kib, kdf_passes, kdf_lanes, salt, key_commit, nonce, wrapped_key)
+  SELECT id, kind, kdf_memory_kib, kdf_passes, kdf_lanes, salt, key_commit, nonce, wrapped_key FROM keyslots;
+DROP TABLE keyslots;
+ALTER TABLE keyslots_new RENAME TO keyslots;
+ALTER TABLE meta ADD COLUMN policy TEXT NOT NULL DEFAULT 'standard' CHECK (policy IN ('standard', 'hardware', 'strict'));
+ALTER TABLE meta ADD COLUMN recovery_pub BLOB;
 `,
 }

@@ -199,7 +199,7 @@ func TestSendAssetsRefusals(t *testing.T) {
 	}
 	// a hardware-held paying key is refused before anything is built
 	r5 := newRig(t)
-	r5.store.files[ports.Ref{Name: "w", Kind: ports.AddrHwsFile}] = nil
+	r5.store.files[ports.NamedRef{Name: "w", Kind: ports.AddrHwsFile}] = nil
 	if _, err := r5.sendAssets(t, r5.assetsUC(), rigPolicy+".t 1", nil); err == nil || r5.l.count("build") != 0 {
 		t.Errorf("hardware: %v %v", err, r5.l.calls)
 	}
@@ -210,8 +210,8 @@ func TestSendAssetsRefusals(t *testing.T) {
 // spec: SPO-01sendAssets-IF-014, SPO-01sendAssets-INV-001
 func TestSendAssetsByAssetFile(t *testing.T) {
 	r := newRig(t)
-	r.store.files[ports.Ref{Name: "mypol.t", Kind: ports.AssetFile}] = []byte(`{"policyID": "` + rigPolicy + `", "name": "t", "hexname": ""}`)
-	r.store.files[ports.Ref{Name: "mypol.hex-74", Kind: ports.AssetFile}] = []byte(`{"policyID": "` + rigPolicy + `", "name": "74", "hexname": "74"}`)
+	r.store.files[ports.NamedRef{Name: "mypol.t", Kind: ports.AssetFile}] = []byte(`{"policyID": "` + rigPolicy + `", "name": "t", "hexname": ""}`)
+	r.store.files[ports.NamedRef{Name: "mypol.hex-74", Kind: ports.AssetFile}] = []byte(`{"policyID": "` + rigPolicy + `", "name": "74", "hexname": "74"}`)
 	for _, word := range []string{"mypol.t 2", "mypol.t.asset 2", "mypol.{74} 2"} {
 		r.queue.got = nil
 		if res, err := r.sendAssets(t, r.assetsUC(), word, nil); err != nil || res.Sent[0].Quantity != 2 {
@@ -221,7 +221,7 @@ func TestSendAssetsByAssetFile(t *testing.T) {
 	if _, err := r.sendAssets(t, r.assetsUC(), "nofile 2", nil); !errors.Is(err, assets.ErrBadSelection) {
 		t.Errorf("a missing asset file: %v", err)
 	}
-	r.store.files[ports.Ref{Name: "bad", Kind: ports.AssetFile}] = []byte(`{"policyID": "zz"}`)
+	r.store.files[ports.NamedRef{Name: "bad", Kind: ports.AssetFile}] = []byte(`{"policyID": "zz"}`)
 	if _, err := r.sendAssets(t, r.assetsUC(), "bad 2", nil); !errors.Is(err, assets.ErrBadSelection) {
 		t.Errorf("a damaged asset file: %v", err)
 	}

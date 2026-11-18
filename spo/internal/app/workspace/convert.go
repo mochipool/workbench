@@ -23,7 +23,7 @@ var (
 )
 
 // ConvertKey turns a key kept in upstream's password-encrypted form (an
-// UpstreamEncryptedSKey record, made by an import with --keep-encrypted) into
+// UpstreamEncryptedSKey record, made by an import before --keep-encrypted was removed) into
 // an ordinary sealed signing key that can sign.
 //
 // It decrypts with the operator's upstream password, checks the key against the
@@ -32,8 +32,8 @@ var (
 // The decrypted key lives only in guarded memory and is never written in clear
 // anywhere (SPO-Xcustody-INV-001, SPO-Xcustody-PR-001).
 type ConvertKey struct {
-	Store     ports.Store
-	Vault     ports.Vault
+	Store     ports.NamedStore
+	Vault     ports.NamedVault
 	Decryptor ports.KeyDecryptor
 	Deriver   ports.VerificationKeyDeriver
 }
@@ -43,96 +43,96 @@ type ConvertKey struct {
 // reference of the sealed key.
 //
 // spec: SPO-Xcustody-PR-001, SPO-Ckey-PRE-005, SPO-Ckey-PRE-006, SPO-Ckey-EXT-002
-func (u ConvertKey) Run(ctx context.Context, name string, password *ports.Secret) (ports.Ref, error) {
+func (u ConvertKey) Run(ctx context.Context, name string, password *ports.Secret) (ports.NamedRef, error) {
 	stem := strings.TrimSuffix(name, ".skey")
-	rec := ports.Ref{Name: stem, Kind: ports.UpstreamEncryptedSKey}
+	rec := ports.NamedRef{Name: stem, Kind: ports.UpstreamEncryptedSKey}
 	if rec.Validate() != nil {
-		return ports.Ref{}, ErrNoKeptKey
+		return ports.NamedRef{}, ErrNoKeptKey
 	}
 	dst, ok := SKeyRefFromStem(stem)
 	if !ok {
-		return ports.Ref{}, ErrNoKeptKey
+		return ports.NamedRef{}, ErrNoKeptKey
 	}
 	if u.Decryptor == nil {
-		return ports.Ref{}, errors.New("no decryptor wired")
+		return ports.NamedRef{}, errors.New("no decryptor wired")
 	}
 	if u.Deriver == nil {
-		return ports.Ref{}, ErrConvertUnverified
+		return ports.NamedRef{}, ErrConvertUnverified
 	}
 	role := ports.SigningKeyKinds()[dst.Kind]
 	if role.VKey == "" {
-		return ports.Ref{}, ErrConvertNoVKey
+		return ports.NamedRef{}, ErrConvertNoVKey
 	}
 	var vdata []byte
 	var taken bool
-	if err := u.Store.View(ctx, func(r ports.Reader) error {
+	if err := u.Store.View(ctx, func(r ports.NamedReader) error {
 		var e error
 		if taken, e = r.Exists(dst); e != nil || taken {
 			return e
 		}
-		vdata, e = r.Get(ports.Ref{Name: dst.Name, Kind: role.VKey, Num: dst.Num})
+		vdata, e = r.Get(ports.NamedRef{Name: dst.Name, Kind: role.VKey, Num: dst.Num})
 		if errors.Is(e, ports.ErrNotFound) {
 			vdata, e = nil, nil
 		}
 		return e
 	}); err != nil {
-		return ports.Ref{}, err
+		return ports.NamedRef{}, err
 	}
 	if taken {
-		return ports.Ref{}, ErrConvertDestination
+		return ports.NamedRef{}, ErrConvertDestination
 	}
 	pws, err := newPasswordSet(password)
 	if err != nil {
-		return ports.Ref{}, err
+		return ports.NamedRef{}, err
 	}
 	defer pws.destroy()
 	buf, err := u.Vault.Open(ctx, rec)
 	if errors.Is(err, ports.ErrNotFound) {
-		return ports.Ref{}, ErrNoKeptKey
+		return ports.NamedRef{}, ErrNoKeptKey
 	}
 	if err != nil {
-		return ports.Ref{}, err
+		return ports.NamedRef{}, err
 	}
 	defer buf.Destroy()
 	info, cerr := classifyBuf(buf)
 	if cerr != nil || info.Form != keyfile.FormEncrypted {
-		return ports.Ref{}, ErrNotAKeyFile
+		return ports.NamedRef{}, ErrNotAKeyFile
 	}
 	var enc keyfile.Encrypted
 	var perr error
 	_ = buf.Use(func(b []byte) error { enc, perr = keyfile.ParseEncrypted(b); return nil })
 	if perr != nil {
-		return ports.Ref{}, perr
+		return ports.NamedRef{}, perr
 	}
 	cbor, err := pws.open(ctx, u.Decryptor, enc.EncrHex)
 	if err != nil {
-		return ports.Ref{}, err
+		return ports.NamedRef{}, err
 	}
 	defer cbor.Destroy()
 	plain, err := plainFromDecrypted(enc, cbor, "    ")
 	if err != nil {
-		return ports.Ref{}, fmt.Errorf("the decrypted key is not usable: %w", err)
+		return ports.NamedRef{}, fmt.Errorf("the decrypted key is not usable: %w", err)
 	}
 	defer plain.Destroy()
 	if len(vdata) == 0 {
-		return ports.Ref{}, ErrConvertNoVKey
+		return ports.NamedRef{}, ErrConvertNoVKey
 	}
 	raw, err := u.Deriver.DeriveVerificationKey(ctx, plain)
 	if errors.Is(err, ports.ErrKeyTypeUnsupported) {
-		return ports.Ref{}, ErrConvertType
+		return ports.NamedRef{}, ErrConvertType
 	}
 	if err != nil {
-		return ports.Ref{}, ErrConvertUnverified
+		return ports.NamedRef{}, ErrConvertUnverified
 	}
 	env, perr := pool.ParseEnvelope(vdata)
 	stored, kerr := env.Key32()
 	if perr != nil || kerr != nil {
-		return ports.Ref{}, ErrConvertUnverified
+		return ports.NamedRef{}, ErrConvertUnverified
 	}
 	if !bytes.Equal(raw, stored) {
-		return ports.Ref{}, ErrConvertMismatch
+		return ports.NamedRef{}, ErrConvertMismatch
 	}
-	err = u.Store.Update(ctx, func(w ports.Writer) error {
+	err = u.Store.Update(ctx, func(w ports.NamedWriter) error {
 		// The checks above ran in a View, before the password was tried and the
 		// key decrypted: the workspace may have changed since. Look again in
 		// this transaction, at what the decision rested on.
@@ -146,7 +146,7 @@ func (u ConvertKey) Run(ctx context.Context, name string, password *ports.Secret
 		} else if !kept {
 			return fmt.Errorf("%w: the kept key is gone", ports.ErrConflict)
 		}
-		if now, e := w.Get(ports.Ref{Name: dst.Name, Kind: role.VKey, Num: dst.Num}); e != nil || !bytes.Equal(now, vdata) {
+		if now, e := w.Get(ports.NamedRef{Name: dst.Name, Kind: role.VKey, Num: dst.Num}); e != nil || !bytes.Equal(now, vdata) {
 			return fmt.Errorf("%w: the verification key the check used has changed", ports.ErrConflict)
 		}
 		if err := w.PutSecret(dst, plain); err != nil {
@@ -155,7 +155,7 @@ func (u ConvertKey) Run(ctx context.Context, name string, password *ports.Secret
 		return w.Delete(rec)
 	})
 	if err != nil {
-		return ports.Ref{}, err
+		return ports.NamedRef{}, err
 	}
 	return dst, nil
 }

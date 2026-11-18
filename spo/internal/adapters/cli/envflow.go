@@ -281,7 +281,7 @@ func (a *app) withEnv(cmd *cobra.Command, spec envSpec, fn func(ctx context.Cont
 			}
 		}
 	}
-	env, err := a.d.Wire(s.Store, o)
+	env, err := a.d.Wire(s.Anchored, o)
 	if err != nil {
 		return err
 	}

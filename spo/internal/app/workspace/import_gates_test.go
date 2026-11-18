@@ -19,7 +19,7 @@ func noteOf(o OwnerReport) string {
 	return strings.Join(s, "; ")
 }
 
-func unchanged(t *testing.T, what string, before map[ports.Ref]string, dst *memStore) {
+func unchanged(t *testing.T, what string, before map[ports.NamedRef]string, dst *memStore) {
 	t.Helper()
 	if !sameFiles(before, snapshotOf(dst)) {
 		t.Errorf("%s: the workspace changed", what)
@@ -48,7 +48,7 @@ func TestXmultiGateADisjointMergeIsRefused(t *testing.T) {
 		if o := ownerOf(rep, "p"); o.Written || stored(dst, "p", ports.PoolDescriptor) != "" {
 			t.Errorf("overwrite=%v: p: %+v", ow, o)
 		}
-		if _, ok := dst.files[ports.Ref{Name: "x.payment", Kind: ports.AddrVKey}]; ok {
+		if _, ok := dst.files[ports.NamedRef{Name: "x.payment", Kind: ports.AddrVKey}]; ok {
 			t.Errorf("overwrite=%v: the payment key was merged into the stake wallet", ow)
 		}
 		_ = before
@@ -72,12 +72,12 @@ func TestXmultiGateARoleKeyHalvesMustBePairs(t *testing.T) {
 		for _, matching := range []bool{false, true} {
 			tr, dst := newTree(), newMem()
 			putWallet(dst, "x", 11)
-			dst.put(ports.Ref{Name: "x", Kind: role.VKey}, a.vkey)
+			dst.put(ports.NamedRef{Name: "x", Kind: role.VKey}, a.vkey)
 			src := b
 			if matching {
 				src = a
 			}
-			tr.dir("/d").put(ports.Ref{Name: "x", Kind: sk}, src.skey)
+			tr.dir("/d").put(ports.NamedRef{Name: "x", Kind: sk}, src.skey)
 			before := snapshotOf(dst)
 			rep, err := multi(t, tr, dst).Import(ctx(), ImportRequest{Dirs: []string{"/d"}, All: true})
 			if err != nil {
@@ -129,9 +129,9 @@ func TestXmultiGateAKesOnlyOverPoolOfAnotherColdKey(t *testing.T) {
 func kesSource(t *testing.T, tr *memTree, cold byte, opcertKes byte) {
 	t.Helper()
 	d := tr.dir("/d")
-	d.put(ports.Ref{Name: "p", Kind: ports.KesSKey, Num: 2}, []byte(`{"type":"KesSigningKey_ed25519_kes_2^6","description":"KES Signing Key","cborHex":"5860`+strings.Repeat("ee", 96)+`"}`))
-	d.put(ports.Ref{Name: "p", Kind: ports.KesVKey, Num: 2}, []byte(`{"type":"KesVerificationKey_ed25519_kes_2^6","description":"KES Verification Key","cborHex":"5820`+strings.Repeat("ef", 32)+`"}`))
-	d.put(ports.Ref{Name: "p", Kind: ports.OpCert, Num: 2}, opcertOf(rawOf(cold32(cold)), bytes.Repeat([]byte{opcertKes}, 32)))
+	d.put(ports.NamedRef{Name: "p", Kind: ports.KesSKey, Num: 2}, []byte(`{"type":"KesSigningKey_ed25519_kes_2^6","description":"KES Signing Key","cborHex":"5860`+strings.Repeat("ee", 96)+`"}`))
+	d.put(ports.NamedRef{Name: "p", Kind: ports.KesVKey, Num: 2}, []byte(`{"type":"KesVerificationKey_ed25519_kes_2^6","description":"KES Verification Key","cborHex":"5820`+strings.Repeat("ef", 32)+`"}`))
+	d.put(ports.NamedRef{Name: "p", Kind: ports.OpCert, Num: 2}, opcertOf(rawOf(cold32(cold)), bytes.Repeat([]byte{opcertKes}, 32)))
 }
 
 func cold32(seed byte) []byte { return cold(seed).vkey }
@@ -181,7 +181,7 @@ func TestXmultiGateAAdditiveCoherentMerge(t *testing.T) {
 	for _, k := range []ports.Kind{ports.KesCounter, ports.KesCounterNext} {
 		delete(dst.files, ref("p", k))
 	}
-	for _, r := range []ports.Ref{{Name: "p", Kind: ports.KesSKey, Num: 1}, {Name: "p", Kind: ports.KesVKey, Num: 1}, {Name: "p", Kind: ports.OpCert, Num: 1}} {
+	for _, r := range []ports.NamedRef{{Name: "p", Kind: ports.KesSKey, Num: 1}, {Name: "p", Kind: ports.KesVKey, Num: 1}, {Name: "p", Kind: ports.OpCert, Num: 1}} {
 		delete(dst.files, r)
 	}
 	putPool(tr.dir("/d"), "p", 80, "")
@@ -196,7 +196,7 @@ func TestXmultiGateAAdditiveCoherentMerge(t *testing.T) {
 	if n := noteOf(o); !strings.Contains(n, "merged into the existing workspace owner") || !strings.Contains(n, "p/node.opcert#1") || !strings.Contains(n, "p/kes.vkey#1") {
 		t.Errorf("note %q", n)
 	}
-	if _, ok := dst.files[ports.Ref{Name: "p", Kind: ports.OpCert, Num: 1}]; !ok {
+	if _, ok := dst.files[ports.NamedRef{Name: "p", Kind: ports.OpCert, Num: 1}]; !ok {
 		t.Error("the opcert is not in the workspace")
 	}
 }
@@ -282,7 +282,7 @@ func TestXmultiWitnessFilesOfARenamedOwnerRefuseThePool(t *testing.T) {
 		tr := newTree()
 		putWallet(tr.dir("/d"), "a", 1)
 		putPool(tr.dir("/d"), "p", 80, descJSON("p", "a", "a"))
-		tr.dir("/d").put(ports.Ref{Name: "p_a_abc123", Kind: ports.PoolWitnessFile}, []byte(`{"id":"abc123"}`))
+		tr.dir("/d").put(ports.NamedRef{Name: "p_a_abc123", Kind: ports.PoolWitnessFile}, []byte(`{"id":"abc123"}`))
 		return tr, newMem()
 	}
 	tr, dst := build()
@@ -300,7 +300,7 @@ func TestXmultiWitnessFilesOfARenamedOwnerRefuseThePool(t *testing.T) {
 	}
 	// the pool itself renamed: the slot of its own cold key names the old pool name
 	tr, dst = build()
-	tr.dir("/d").put(ports.Ref{Name: "p_p.node_abc123", Kind: ports.PoolWitnessFile}, []byte(`{"id":"abc123"}`))
+	tr.dir("/d").put(ports.NamedRef{Name: "p_p.node_abc123", Kind: ports.PoolWitnessFile}, []byte(`{"id":"abc123"}`))
 	rep, _ = multi(t, tr, dst).Import(ctx(), ImportRequest{Dirs: []string{"/d"}, All: true, Renames: []Rename{{From: Selector{Name: "p"}, To: "q"}}})
 	if o := ownerOf(rep, "p"); o.Written || !strings.Contains(o.Reason, "witness file") {
 		t.Errorf("renamed pool: %+v", o)
@@ -311,7 +311,7 @@ func TestXmultiWitnessFilesOfARenamedOwnerRefuseThePool(t *testing.T) {
 // path logic had made a mistake: the pool p of /d is planned with the final
 // descriptor `final`, and the extra owners with the artefacts in `extra`
 // (stored under their name). It returns the refusal Gate B set, "" for none.
-func bindHarness(t *testing.T, tr *memTree, dst *memStore, final string, note string, extra map[string]map[ports.Ref][]byte) string {
+func bindHarness(t *testing.T, tr *memTree, dst *memStore, final string, note string, extra map[string]map[ports.NamedRef][]byte) string {
 	t.Helper()
 	u := ImportWorkspace{Dest: dst, Deriver: edDeriver{}, Addresses: addrInspector{}, Open: tr.Open}
 	req := ImportRequest{Dirs: []string{"/d"}, All: true}
@@ -335,10 +335,10 @@ func bindHarness(t *testing.T, tr *memTree, dst *memStore, final string, note st
 		if f.name == "a" { // a renamed owner: stored as w
 			f.final = "w"
 		}
-		p := &prepared{done: true, final: f.final, results: map[ports.Ref]*ArtefactReport{}}
+		p := &prepared{done: true, final: f.final, results: map[ports.NamedRef]*ArtefactReport{}}
 		switch f.name {
 		case "p":
-			d := ports.Ref{Name: "p", Kind: ports.PoolDescriptor}
+			d := ports.NamedRef{Name: "p", Kind: ports.PoolDescriptor}
 			p.plan = []planned{{src: d, dst: d, data: []byte(final)}}
 			p.results[d] = &ArtefactReport{Ref: d, Note: note}
 		default:
@@ -375,34 +375,34 @@ func TestXmultiGateBChecksTheEndStateByKeys(t *testing.T) {
 		setup func(tr *memTree, dst *memStore)
 		final string
 		note  string
-		extra map[string]map[ports.Ref][]byte
+		extra map[string]map[ports.NamedRef][]byte
 		want  string // "" = accepted
 	}{
 		{"wallet stored with the source's keys",
 			func(tr *memTree, dst *memStore) { putWallet(tr.dir("/d"), "w", 1) },
 			descJSON("p", "w", "w"), "",
-			map[string]map[ports.Ref][]byte{"w": {ref("w", ports.StakingVKey): pair(1, "StakeSigningKeyShelley_ed25519", "StakeVerificationKeyShelley_ed25519", "Stake").vkey}}, ""},
+			map[string]map[ports.NamedRef][]byte{"w": {ref("w", ports.StakingVKey): pair(1, "StakeSigningKeyShelley_ed25519", "StakeVerificationKeyShelley_ed25519", "Stake").vkey}}, ""},
 		{"wallet stored with other stake keys than the source owner",
 			func(tr *memTree, dst *memStore) { putWallet(tr.dir("/d"), "w", 1) },
 			descJSON("p", "w", "w"), "",
-			map[string]map[ports.Ref][]byte{"w": {ref("w", ports.StakingVKey): other.vkey}}, "differs from the one of the source owner"},
+			map[string]map[ports.NamedRef][]byte{"w": {ref("w", ports.StakingVKey): other.vkey}}, "differs from the one of the source owner"},
 		{"wallet with the same stake keys and other payment keys",
 			func(tr *memTree, dst *memStore) {
 				putWallet(tr.dir("/d"), "w", 1)
 				putPayment(tr.dir("/d"), "w", 3)
 			},
 			descJSON("p", "w", "w"), "",
-			map[string]map[ports.Ref][]byte{"w": {
+			map[string]map[ports.NamedRef][]byte{"w": {
 				ref("w", ports.StakingVKey):               pair(1, "StakeSigningKeyShelley_ed25519", "StakeVerificationKeyShelley_ed25519", "Stake").vkey,
 				{Name: "w.payment", Kind: ports.AddrVKey}: otherPay.vkey}}, "payment verification key of the wallet differs"},
 		{"owner is a pool",
 			func(tr *memTree, dst *memStore) { putPool(tr.dir("/d"), "x", 81, "") },
 			descJSON("p", "x", "x"), "",
-			map[string]map[ports.Ref][]byte{"x": {ref("x", ports.NodeVKey): cold(81).vkey}}, "not a wallet"},
+			map[string]map[ports.NamedRef][]byte{"x": {ref("x", ports.NodeVKey): cold(81).vkey}}, "not a wallet"},
 		{"owner without a stake key",
 			func(tr *memTree, dst *memStore) { putPayment(tr.dir("/d"), "x", 1) },
 			descJSON("p", "x", "x"), "",
-			map[string]map[ports.Ref][]byte{"x": {{Name: "x.payment", Kind: ports.AddrVKey}: payment(1).vkey}}, "no stake verification key"},
+			map[string]map[ports.NamedRef][]byte{"x": {{Name: "x.payment", Kind: ports.AddrVKey}: payment(1).vkey}}, "no stake verification key"},
 		{"no such owner",
 			func(tr *memTree, dst *memStore) {},
 			descJSON("p", "ghost", "ghost"), "", nil, "no owner of that name will exist"},
@@ -415,7 +415,7 @@ func TestXmultiGateBChecksTheEndStateByKeys(t *testing.T) {
 		{"workspace-only wallet replaced by the plan",
 			func(tr *memTree, dst *memStore) { putWallet(tr.dir("/d"), "a", 2); putWallet(dst, "w", 40) },
 			descJSON("p", "w", "w"), "poolOwner[0].ownerName is bound to the existing workspace wallet \"w\"; poolRewards is bound to the existing workspace wallet \"w\"",
-			map[string]map[ports.Ref][]byte{"a": {ref("a", ports.StakingVKey): other.vkey}}, "would not be the one the workspace holds now"},
+			map[string]map[ports.NamedRef][]byte{"a": {ref("a", ports.StakingVKey): other.vkey}}, "would not be the one the workspace holds now"},
 		{"owner named by another spelling",
 			func(tr *memTree, dst *memStore) { putWallet(tr.dir("/d"), "w", 1); putWallet(dst, "W", 40) },
 			descJSON("p", "W", "W"), "poolOwner[0].ownerName is bound to the existing workspace wallet \"W\"; poolRewards is bound to the existing workspace wallet \"W\"", nil, "differs only by case"},
@@ -449,7 +449,7 @@ func TestXmultiGateAIsOneFunctionOverTheResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	pk := payment(5)
-	plan := []planned{{dst: ports.Ref{Name: "x.payment", Kind: ports.AddrVKey}, data: pk.vkey}}
+	plan := []planned{{dst: ports.NamedRef{Name: "x.payment", Kind: ports.AddrVKey}, data: pk.vkey}}
 	if why, _ := u.checkCoherence(ctx(), ws, "x", plan); !strings.Contains(why, "not provably one owner") {
 		t.Errorf("disjoint: %q", why)
 	}
@@ -457,7 +457,7 @@ func TestXmultiGateAIsOneFunctionOverTheResult(t *testing.T) {
 	// stake key is one owner
 	sh := keyHashOf(rawOfPair(t, dst, "x"))
 	ph := keyHashOf(pk.vkey)
-	plan = append(plan, planned{dst: ports.Ref{Name: "x.payment", Kind: ports.AddrFile}, data: []byte("addr_" + hex.EncodeToString(ph[:]) + "_" + hex.EncodeToString(sh[:]))})
+	plan = append(plan, planned{dst: ports.NamedRef{Name: "x.payment", Kind: ports.AddrFile}, data: []byte("addr_" + hex.EncodeToString(ph[:]) + "_" + hex.EncodeToString(sh[:]))})
 	if why, note := u.checkCoherence(ctx(), ws, "x", plan); why != "" || !strings.Contains(note, "added") {
 		t.Errorf("tied: %q %q", why, note)
 	}
@@ -465,4 +465,21 @@ func TestXmultiGateAIsOneFunctionOverTheResult(t *testing.T) {
 
 func rawOfPair(t *testing.T, s *memStore, name string) []byte {
 	return s.files[ref(name, ports.StakingVKey)]
+}
+
+// A pool cold key presented as a payment key is refused at import: stored under
+// a hot kind it would be sealed hot (ADR 0011 decision 6).
+//
+// spec: SPO-Xcustody-PRE-026
+func TestImportRefusesAColdEnvelopeUnderAHotKind(t *testing.T) {
+	tr, dst := newTree(), newMem()
+	cold := pair(30, "StakePoolSigningKey_ed25519", "StakePoolVerificationKey_ed25519", "Cold")
+	tr.dir("/d").put(ports.NamedRef{Name: "w.payment", Kind: ports.AddrSKey}, cold.skey)
+	rep, err := multi(t, tr, dst).Import(ctx(), ImportRequest{Dirs: []string{"/d"}, All: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Failed() != 1 || len(dst.snapshot()) != 0 {
+		t.Errorf("a cold envelope under a hot kind was imported: %+v %v", rep, dst.snapshot())
+	}
 }

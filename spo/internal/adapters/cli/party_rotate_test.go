@@ -117,8 +117,8 @@ func TestRotateCommandReplacesTheIdentityAndQueuesTheAnnouncement(t *testing.T) 
 func TestRotateWithoutTheOldKeyIsRefusedAndSaysEnrollAnew(t *testing.T) {
 	s := newPscene(t)
 	f := s.bob
-	if err := f.st.Update(context.Background(), func(w ports.Writer) error {
-		return w.Delete(ports.Ref{Name: "local", Kind: ports.PartyKeys})
+	if err := f.st.Update(context.Background(), func(w ports.NamedWriter) error {
+		return w.Delete(ports.NamedRef{Name: "local", Kind: ports.PartyKeys})
 	}); err != nil {
 		t.Fatal(err)
 	}

@@ -19,6 +19,7 @@ const (
 	MemberDRep    = "drep"    // DRep
 	MemberHot     = "hot"     // committee member
 	MemberScript  = "script"  // policy
+	MemberKey     = "key"     // policy: the verification key whose hash the script names
 )
 
 type roleSpec struct {
@@ -39,7 +40,10 @@ var roleSpecs = map[OwnerKind]map[string]roleSpec{
 	},
 	OwnerDRep:      {MemberDRep: {kind: KindKeyHash, anchor: true}},
 	OwnerCommittee: {MemberCold: {kind: KindKeyHash, anchor: true}, MemberHot: {kind: KindKeyHash}},
-	OwnerPolicy:    {MemberScript: {kind: KindScriptHash, anchor: true}},
+	OwnerPolicy: {
+		MemberScript: {kind: KindScriptHash, anchor: true},
+		MemberKey:    {kind: KindKeyHash},
+	},
 }
 
 // Member is one identity listed in a manifest, under a role and, where the
@@ -110,11 +114,11 @@ func (m Manifest) check() error {
 			return fmt.Errorf("%w: role %s %d is listed twice", ErrManifest, mem.Role, mem.Num)
 		}
 		byKey[k] = true
-		if byID[mem.Identity] {
-			return fmt.Errorf("%w: %s is listed twice", ErrManifest, mem.Identity)
-		}
 		byID[mem.Identity] = true
-		if mem.Identity == m.anchor {
+		// One key may be a member under more than one role of one owner (a wallet
+		// whose payment and stake keys are the same key); the anchor role is the
+		// payment role when the anchor holds it.
+		if mem.Identity == m.anchor && (anchorRole == "" || !specs[anchorRole].anchor || (m.owner == OwnerWallet && mem.Role == MemberPayment)) {
 			anchorRole = mem.Role
 		}
 		hasPayment = hasPayment || mem.Role == MemberPayment
@@ -188,9 +192,6 @@ func (m Manifest) Has(id Ref) bool {
 func (m Manifest) Add(mem Member) (Manifest, error) {
 	if _, ok := m.Lookup(mem.Role, mem.Num); ok {
 		return Manifest{}, fmt.Errorf("%w: %s %d is already listed", ErrManifestAppend, mem.Role, mem.Num)
-	}
-	if m.Has(mem.Identity) {
-		return Manifest{}, fmt.Errorf("%w: %s is already listed", ErrManifestAppend, mem.Identity)
 	}
 	id, err := m.ID()
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 	"github.com/mochipool/workbench/spo/test/plainstore"
 )
 
@@ -16,9 +17,9 @@ import (
 func usePlainLayout(t *testing.T) {
 	t.Helper()
 	oldOpen, oldAudit := openPlain, plainAudit
-	openPlain = func(dir string) (ports.Store, error) { return plainstore.OpenTestnet(dir) }
-	plainAudit = func(dir string, store ports.Store) ports.Store {
-		if plainstore.IsPlain(store) {
+	openPlain = plainstore.Upstream
+	plainAudit = func(dir string, store ports.NamedStore) ports.NamedStore {
+		if as, ok := labels.AnchorOf(store); ok && plainstore.IsPlain(as) {
 			return plainstore.AuditStore(dir)
 		}
 		return store

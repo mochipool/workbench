@@ -75,15 +75,15 @@ func TestInitAndExport(t *testing.T) {
 		t.Fatalf("export = %v", err)
 	}
 	// The secret is read only through the vault and is not in the document.
-	if err := a.store.View(ctx, func(r ports.Reader) error {
-		if _, err := r.Get(ports.Ref{Name: "local", Kind: ports.PartyKeys}); !errors.Is(err, ports.ErrSecretKind) {
+	if err := a.store.View(ctx, func(r ports.NamedReader) error {
+		if _, err := r.Get(ports.NamedRef{Name: "local", Kind: ports.PartyKeys}); !errors.Is(err, ports.ErrSecretKind) {
 			t.Errorf("the keys are readable as a plain record: %v", err)
 		}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	keys, err := a.store.Open(ctx, ports.Ref{Name: "local", Kind: ports.PartyKeys})
+	keys, err := a.store.Open(ctx, ports.NamedRef{Name: "local", Kind: ports.PartyKeys})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +187,7 @@ func TestEnroll(t *testing.T) {
 		t.Errorf("list %+v", got)
 	}
 	var evs []parties.Event
-	a.store.View(ctx, func(r ports.Reader) error { evs, _ = parties.Events(r); return nil })
+	a.store.View(ctx, func(r ports.NamedReader) error { evs, _ = parties.Events(r); return nil })
 	if len(evs) != 1 || evs[0].Kind != "party-enrolled" || evs[0].Peer != rb.Fingerprint.String() {
 		t.Errorf("events %+v", evs)
 	}
@@ -230,7 +230,7 @@ func TestRevoke(t *testing.T) {
 	// A hook that fails rolls everything back: the party stays active.
 	boom := errors.New("boom")
 	failing := uc
-	failing.Hooks = []func(ports.Writer, party.Party) error{func(ports.Writer, party.Party) error { return boom }}
+	failing.Hooks = []func(ports.NamedWriter, party.Party) error{func(ports.NamedWriter, party.Party) error { return boom }}
 	if _, err := failing.Run(ctx, "beta"); !errors.Is(err, boom) {
 		t.Fatal(err)
 	}
@@ -238,7 +238,7 @@ func TestRevoke(t *testing.T) {
 		t.Fatal("a failed revocation left the party revoked")
 	}
 	var hooked party.Party
-	uc.Hooks = []func(ports.Writer, party.Party) error{func(_ ports.Writer, p party.Party) error { hooked = p; return nil }}
+	uc.Hooks = []func(ports.NamedWriter, party.Party) error{func(_ ports.NamedWriter, p party.Party) error { hooked = p; return nil }}
 	p, err := uc.Run(ctx, "beta")
 	if err != nil || p.State != party.StateRevoked || hooked.Name != "beta" {
 		t.Fatalf("revoke = %+v, %v", p, err)
@@ -250,15 +250,15 @@ func TestRevoke(t *testing.T) {
 		t.Errorf("revoke unknown: %v", err)
 	}
 	var evs []parties.Event
-	a.store.View(ctx, func(r ports.Reader) error { evs, _ = parties.Events(r); return nil })
+	a.store.View(ctx, func(r ports.NamedReader) error { evs, _ = parties.Events(r); return nil })
 	if len(evs) != 2 || evs[1].Kind != "party-revoked" {
 		t.Errorf("events %+v", evs)
 	}
 }
 
-func readerOf(w *ws) ports.Reader {
-	var out ports.Reader
-	w.store.View(ctx, func(r ports.Reader) error { out = r; return nil })
+func readerOf(w *ws) ports.NamedReader {
+	var out ports.NamedReader
+	w.store.View(ctx, func(r ports.NamedReader) error { out = r; return nil })
 	return out
 }
 
@@ -277,13 +277,13 @@ func TestEventLogsAreSeparate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.store.Update(ctx, func(w ports.Writer) error {
-		return w.Put(ports.Ref{Name: "log", Kind: ports.MultisigEvents}, raw) // also the older, single-list form
+	if err := a.store.Update(ctx, func(w ports.NamedWriter) error {
+		return w.Put(ports.NamedRef{Name: "log", Kind: ports.MultisigEvents}, raw) // also the older, single-list form
 	}); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 3*parties.MaxNoiseEvents; i++ {
-		if err := a.store.Update(ctx, func(w ports.Writer) error {
+		if err := a.store.Update(ctx, func(w ports.NamedWriter) error {
 			return parties.AppendNoise(w, parties.Event{At: a.clk.t, Kind: "envelope-refused", Slot: i})
 		}); err != nil {
 			t.Fatal(err)
@@ -291,7 +291,7 @@ func TestEventLogsAreSeparate(t *testing.T) {
 	}
 	var evs, ring []parties.Event
 	var total uint64
-	a.store.View(ctx, func(r ports.Reader) error {
+	a.store.View(ctx, func(r ports.NamedReader) error {
 		evs, _ = parties.Events(r)
 		ring, total, _ = parties.Noise(r)
 		return nil
@@ -303,12 +303,12 @@ func TestEventLogsAreSeparate(t *testing.T) {
 		t.Fatalf("noise ring %d, last %d, total %d", len(ring), ring[len(ring)-1].Slot, total)
 	}
 	// A security event evicts the oldest security event, and only that.
-	if err := a.store.Update(ctx, func(w ports.Writer) error {
+	if err := a.store.Update(ctx, func(w ports.NamedWriter) error {
 		return parties.AppendEvent(w, parties.Event{At: a.clk.t, Kind: "security", Slot: -1})
 	}); err != nil {
 		t.Fatal(err)
 	}
-	a.store.View(ctx, func(r ports.Reader) error { evs, _ = parties.Events(r); ring, _, _ = parties.Noise(r); return nil })
+	a.store.View(ctx, func(r ports.NamedReader) error { evs, _ = parties.Events(r); ring, _, _ = parties.Noise(r); return nil })
 	if len(evs) != parties.MaxSecurityEvents || evs[0].Slot != 1 || evs[len(evs)-1].Slot != -1 || len(ring) != parties.MaxNoiseEvents {
 		t.Fatalf("eviction: %d events, first %d, last %d, ring %d", len(evs), evs[0].Slot, evs[len(evs)-1].Slot, len(ring))
 	}
@@ -323,7 +323,7 @@ func TestRefusalsAreCoalescedPerSender(t *testing.T) {
 	w := newWS(t)
 	at := w.clk.t
 	log := func(peer, reason string) {
-		if err := w.store.Update(ctx, func(wr ports.Writer) error {
+		if err := w.store.Update(ctx, func(wr ports.NamedWriter) error {
 			return parties.AppendRefusal(wr, parties.Event{At: at, Kind: "message-refused", Peer: peer, Reason: reason})
 		}); err != nil {
 			t.Fatal(err)
@@ -332,7 +332,7 @@ func TestRefusalsAreCoalescedPerSender(t *testing.T) {
 	}
 	var es []parties.Event
 	read := func() {
-		if err := w.store.View(ctx, func(r ports.Reader) error { var err error; es, err = parties.Events(r); return err }); err != nil {
+		if err := w.store.View(ctx, func(r ports.NamedReader) error { var err error; es, err = parties.Events(r); return err }); err != nil {
 			t.Fatal(err)
 		}
 	}

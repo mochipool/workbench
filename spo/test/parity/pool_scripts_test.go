@@ -382,7 +382,7 @@ func (r poolRun) goRegister(t *testing.T, slot, epoch uint64, at time.Time, opts
 	t.Helper()
 	store, file, led, tip, clock := r.e.poolKit(t, r.port, slot, epoch, at)
 	uc := poolops.RegisterPool{Store: store, Addresses: led, Params: file, Tip: tip, Utxos: file,
-		Pipeline:  txflow.Pipeline{Signers: native.Signers{Vault: store}, Min: led, Fees: led, Bodies: led, Assembler: led, Queue: file, Confirmer: yes{}, Approval: txflow.ApprovalSkip},
+		Pipeline:  txflow.Pipeline{Signers: native.Signers{Vault: store.Anchor()}, Min: led, Fees: led, Bodies: led, Assembler: led, Queue: file, Confirmer: yes{}, Approval: txflow.ApprovalSkip},
 		PoolCerts: led, StakeCerts: led, TxIDs: led, Hasher: led, Clock: clock, Attach: file, NetworkID: ports.NetworkTestnet}
 	for _, o := range opts {
 		o(&uc)
@@ -749,7 +749,7 @@ func TestPoolRetirementMatchesUpstream(t *testing.T) {
 		upFee, upTTL, _ := queuedTTL(t, up)
 		store, file, led, _, clock := e.poolKit(t, port, 0, 0, time.Now())
 		uc := poolops.RetirePool{Store: store, Addresses: led, Params: file, Tip: epochTip{upTTL - 100000, cur}, Utxos: file,
-			Pipeline:  txflow.Pipeline{Signers: native.Signers{Vault: store}, Min: led, Fees: led, Bodies: led, Assembler: led, Queue: file, Confirmer: yes{}},
+			Pipeline:  txflow.Pipeline{Signers: native.Signers{Vault: store.Anchor()}, Min: led, Fees: led, Bodies: led, Assembler: led, Queue: file, Confirmer: yes{}},
 			PoolCerts: led, Clock: clock, NetworkID: ports.NetworkTestnet}
 		res, err := uc.Run(bg, poolops.RetireRequest{Pool: "mypool", Payer: "w.payment"})
 		if err != nil {

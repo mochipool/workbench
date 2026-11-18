@@ -12,14 +12,11 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 )
 
-// This file is the transitional bridge between key identities (ADR 0010) and
-// the name-keyed store of today. A key reference carries an identity; the
-// store still keys records by the operator's name for the owner. KeyIndex finds
-// the stored records of an identity, and the functions below apply the one
-// constructor each role's identity has. A later change replaces the name key
-// of the store with {anchor, kind, number} and a label index; the use cases
-// and signers written against KeyRef and KeyIndex do not change, only the
-// implementation of KeyIndex and of app/keyring.Resolve.
+// This file holds what a key identity needs of the store (ADR 0010): the kinds
+// of each role's key records, the identity constructor of each role, and
+// KeyIndex, the index from an identity to the records that hold the key. The
+// implementation lives in ports/labels: it finds the owner whose manifest lists
+// the identity and answers with the owner's anchor.
 
 // KeyKinds are the store kinds of one role's key records.
 type KeyKinds struct{ VKey, SKey, Hws Kind }
@@ -68,14 +65,16 @@ func IdentityOfVKey(role custody.Role, envelope []byte) (identity.Ref, error) {
 	return identity.KeyHashOf(vk)
 }
 
-// KeyHome is where the store holds the records of one key (transitional: the
-// store is name-keyed). It says nothing about who answers for the key.
+// KeyHome is where the store holds the records of one key: the anchor of the
+// owner and the number of the key. It says nothing about who answers for the
+// key.
 type KeyHome struct {
 	Role     custody.Role
 	Identity identity.Ref
-	// Name is the store name of the key's owner. It is the store key and a
-	// display label; it is not part of any key reference.
-	Name string
+	// Anchor is the anchor identity of the owner whose manifest lists the key.
+	Anchor identity.Ref
+	// Num is the number of a numbered key (a KES key).
+	Num int
 	// HasSecret reports a signing key in the vault; HasHardware a hardware
 	// signing file (a verification key exported from a device).
 	HasSecret, HasHardware bool
@@ -106,20 +105,36 @@ func hwsPubKey(file []byte) ([]byte, bool) {
 	return raw[2 : 2+32], true
 }
 
+// HwsPubKey returns the 32-byte public key of a hardware signing file.
+func HwsPubKey(file []byte) ([]byte, bool) { return hwsPubKey(file) }
+
 // SecretRef is the store reference of the home's signing key.
-func (h KeyHome) SecretRef() Ref { k, _ := KeyKindsOf(h.Role); return Ref{Name: h.Name, Kind: k.SKey} }
+func (h KeyHome) SecretRef() Ref {
+	k, _ := KeyKindsOf(h.Role)
+	return Ref{Anchor: h.Anchor, Kind: k.SKey, Num: h.Num}
+}
 
 // HardwareRef is the store reference of the home's hardware signing file.
-func (h KeyHome) HardwareRef() Ref { k, _ := KeyKindsOf(h.Role); return Ref{Name: h.Name, Kind: k.Hws} }
+func (h KeyHome) HardwareRef() Ref {
+	k, _ := KeyKindsOf(h.Role)
+	return Ref{Anchor: h.Anchor, Kind: k.Hws, Num: h.Num}
+}
 
 // VKeyRef is the store reference of the home's verification key.
-func (h KeyHome) VKeyRef() Ref { k, _ := KeyKindsOf(h.Role); return Ref{Name: h.Name, Kind: k.VKey} }
+func (h KeyHome) VKeyRef() Ref {
+	k, _ := KeyKindsOf(h.Role)
+	return Ref{Anchor: h.Anchor, Kind: k.VKey, Num: h.Num}
+}
 
-// KeyIndex finds the stored records of a key identity.
+// KeyIndex finds the stored records of a key identity and its role history.
 type KeyIndex interface {
 	// Homes lists every stored record set whose verification key has the
-	// identity, in any role (the same key may be stored under two roles).
+	// identity: the owner that lists it, in its role there. An identity belongs to
+	// one owner, so at most one home is returned.
 	Homes(ctx context.Context, id identity.Ref) ([]KeyHome, error)
+	// RoleHistory returns the stored role history of a key identity (ADR 0010
+	// decision 1); false when none is stored.
+	RoleHistory(ctx context.Context, id identity.Ref) (custody.RoleHistory, bool, error)
 }
 
 // HomeFor returns the home of the identity under a role.
@@ -152,160 +167,21 @@ func HardwareHome(homes []KeyHome, role custody.Role) (KeyHome, bool) {
 	return KeyHome{}, false
 }
 
-// RoleHistoryOf is the role history of an identity computed from the stored
-// key records: which roles the same verification key is stored under. It is
-// the transitional form of the workspace's role-history record (ADR 0010
-// decision 1); the store worker replaces it by a read of that record. The
-// history is empty (and the error nil) for an identity the store does not hold.
-//
-// It fails closed: when the index cannot read every verification key record
-// (an unreadable record might be this identity), it returns
-// ErrUnreadableRecords and a caller that applies the cold-key rule refuses.
+// RoleHistoryOf is the role history of an identity: the stored record of kind
+// role-history, written whenever a key is created, imported or used in a role. The
+// history is empty (and ok false, the error nil) for an identity the workspace
+// has no record of. A record that cannot be read is an error, never an empty
+// history: a caller that applies the cold-key rule refuses.
 func RoleHistoryOf(ctx context.Context, idx KeyIndex, id identity.Ref) (custody.RoleHistory, bool, error) {
-	homes, err := idx.Homes(ctx, id)
-	if err != nil {
-		return custody.RoleHistory{}, false, err
-	}
-	if ci, ok := idx.(interface {
-		Unreadable(context.Context) (int, error)
-	}); ok {
-		if n, err := ci.Unreadable(ctx); err != nil {
-			return custody.RoleHistory{}, false, err
-		} else if n > 0 {
-			return custody.RoleHistory{}, false, fmt.Errorf("%w: %d verification key record(s)", ErrUnreadableRecords, n)
-		}
-	}
-	var h custody.RoleHistory
-	ok := false
-	for _, home := range homes {
-		if !ok {
-			if h, err = custody.NewRoleHistory(id, home.Role); err != nil {
-				return custody.RoleHistory{}, false, err
-			}
-			ok = true
-			continue
-		}
-		if h, err = h.With(home.Role); err != nil {
-			return custody.RoleHistory{}, false, err
-		}
-	}
-	return h, ok, nil
+	return idx.RoleHistory(ctx, id)
 }
 
-// StoreKeyIndex is a KeyIndex over a name-keyed store that can list its
-// artefacts (the sealed store can).
-type StoreKeyIndex struct{ Store Store }
-
-// NewStoreKeyIndex returns the index of a store, or an error when the store
-// cannot list its artefacts.
-func NewStoreKeyIndex(s Store) (StoreKeyIndex, error) {
-	if _, ok := s.(SourceLister); !ok {
-		return StoreKeyIndex{}, errors.New("this workspace's store cannot list its keys, so the keys it holds cannot be found by identity")
-	}
-	return StoreKeyIndex{Store: s}, nil
-}
-
-// Homes implements KeyIndex.
-func (x StoreKeyIndex) Homes(ctx context.Context, id identity.Ref) ([]KeyHome, error) {
-	if x.Store == nil {
-		return nil, nil
-	}
-	lister, ok := x.Store.(SourceLister)
-	if !ok {
-		return nil, errors.New("this workspace's store cannot list its keys")
-	}
-	listing, err := lister.List(ctx)
-	if err != nil {
-		return nil, err
-	}
-	byV := map[Kind]custody.Role{}
-	for role, k := range roleKinds {
-		byV[k.VKey] = role
-	}
-	var out []KeyHome
-	err = x.Store.View(ctx, func(r Reader) error {
-		for _, e := range listing.Entries {
-			role, ok := byV[e.Ref.Kind]
-			if !ok {
-				continue
-			}
-			raw, err := r.Get(e.Ref)
-			if err != nil {
-				continue
-			}
-			got, err := IdentityOfVKey(role, raw)
-			if err != nil || got != id {
-				continue
-			}
-			kk := roleKinds[role]
-			h := KeyHome{Role: role, Identity: id, Name: e.Ref.Name}
-			h.HasSecret, _ = r.Exists(Ref{Name: e.Ref.Name, Kind: kk.SKey})
-			if kk.Hws != "" {
-				h.HasHardware, _ = r.Exists(Ref{Name: e.Ref.Name, Kind: kk.Hws})
-				if h.HasHardware {
-					if b, err := r.Get(Ref{Name: e.Ref.Name, Kind: kk.Hws}); err == nil {
-						if pub, ok := hwsPubKey(b); ok && role != custody.RoleVRF {
-							if got, err := IdentityOfVKey(role, []byte(`{"type":"x","description":"","cborHex":"5820`+hex.EncodeToString(pub)+`"}`)); err == nil && got != id {
-								h.HasHardware, h.WrongHardwareFile = false, true
-							}
-						}
-					}
-				}
-			}
-			out = append(out, h)
-		}
-		return nil
-	})
-	return out, err
-}
-
-// ErrUnreadableRecords means a verification key record of the store could not
-// be read or parsed, so the roles of an identity cannot be known for certain.
-var ErrUnreadableRecords = errors.New("a verification key record cannot be read, so the roles recorded for a key are not certain")
-
-// Unreadable counts the verification key records that cannot be read or parsed.
-func (x StoreKeyIndex) Unreadable(ctx context.Context) (int, error) {
-	if x.Store == nil {
-		return 0, nil
-	}
-	lister, ok := x.Store.(SourceLister)
-	if !ok {
-		return 0, errors.New("this workspace's store cannot list its keys")
-	}
-	listing, err := lister.List(ctx)
-	if err != nil {
-		return 0, err
-	}
-	byV := map[Kind]custody.Role{}
-	for role, k := range roleKinds {
-		byV[k.VKey] = role
-	}
-	n := 0
-	err = x.Store.View(ctx, func(r Reader) error {
-		for _, e := range listing.Entries {
-			role, ok := byV[e.Ref.Kind]
-			if !ok {
-				continue
-			}
-			raw, err := r.Get(e.Ref)
-			if err != nil {
-				n++
-				continue
-			}
-			if _, err := IdentityOfVKey(role, raw); err != nil {
-				n++
-			}
-		}
-		return nil
-	})
-	return n, err
-}
-
-var _ KeyIndex = StoreKeyIndex{}
+// ErrUnreadableRecords means a record needed to know the roles of an identity
+// cannot be read, so they are not certain.
+var ErrUnreadableRecords = errors.New("a record that holds the roles recorded for a key cannot be read, so the roles recorded for a key are not certain")
 
 // memoIndex remembers the homes of each identity for the length of one plan, so
-// the verification keys of the store are read once per identity, not once per
-// lookup.
+// the records of the store are read once per identity, not once per lookup.
 type memoIndex struct {
 	inner KeyIndex
 	m     map[identity.Ref][]KeyHome
@@ -323,14 +199,9 @@ func (x *memoIndex) Homes(ctx context.Context, id identity.Ref) ([]KeyHome, erro
 	return h, nil
 }
 
-// Unreadable passes through (not memoised: it is only asked by the cold rule).
-func (x *memoIndex) Unreadable(ctx context.Context) (int, error) {
-	if ci, ok := x.inner.(interface {
-		Unreadable(context.Context) (int, error)
-	}); ok {
-		return ci.Unreadable(ctx)
-	}
-	return 0, nil
+// RoleHistory passes through (not memoised: it is only asked by the cold rule).
+func (x *memoIndex) RoleHistory(ctx context.Context, id identity.Ref) (custody.RoleHistory, bool, error) {
+	return x.inner.RoleHistory(ctx, id)
 }
 
 // MemoIndex wraps an index for one plan.

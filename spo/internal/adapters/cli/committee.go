@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -15,7 +16,8 @@ import (
 func (a *app) committeeCommand() *cobra.Command {
 	keys := govGroup("keys", "Committee member keys", a.committeeKeysCommand(true), a.committeeKeysCommand(false))
 	return govGroup("committee", "Constitutional committee member: keys, hot-key authorisation, status, resignation",
-		keys, a.committeeAuthorizeCommand(), a.committeeStatusCommand(), a.committeeResignCommand())
+		keys, a.committeeAuthorizeCommand(), a.committeeStatusCommand(), a.committeeResignCommand(),
+		a.renameCommand(identity.OwnerCommittee, "committee member"), a.mergeCommand(identity.OwnerCommittee, "committee member"))
 }
 
 func committeeStem(s string) string {
@@ -82,8 +84,8 @@ was sent.`,
 				var details []string
 				for _, d := range []struct {
 					label string
-					ref   ports.Ref
-				}{{"cold key hash", ports.Ref{Name: committeeStem(args[0]), Kind: ports.CCColdHash}}, {"hot key hash ", ports.Ref{Name: committeeStem(args[1]), Kind: ports.CCHotHash}}} {
+					ref   ports.NamedRef
+				}{{"cold key hash", ports.NamedRef{Name: committeeStem(args[0]), Kind: ports.CCColdHash}}, {"hot key hash ", ports.NamedRef{Name: committeeStem(args[1]), Kind: ports.CCHotHash}}} {
 					if b := readPublic(ctx, s.Store, d.ref); b != nil {
 						details = append(details, d.label+" "+firstLineText(b))
 					}
@@ -94,7 +96,7 @@ was sent.`,
 					return f.hint(err)
 				}
 				a.govReport(govOutcome{kind: "committee hot key authorisation", account: committeeStem(args[0]), payer: payerStem(args[2]), res: res, details: details,
-					stored: []ports.Ref{{Name: committeeStem(args[1]), Kind: ports.CCHotCert}}}, &f, env, wo)
+					stored: []ports.NamedRef{{Name: committeeStem(args[1]), Kind: ports.CCHotCert}}}, &f, env, wo)
 				return nil
 			})
 		},
@@ -124,7 +126,7 @@ as <cold>.cc-cold-ret.cert after the transaction was sent.`,
 			spec := envSpec{flags: &f.chain, config: true, needs: govTxNeeds(CapCerts, CapCommittee), extras: &f.extra}
 			return a.withEnv(cmd, spec, func(ctx context.Context, s *session, env *Env, wo WireOptions) error {
 				var details, notes []string
-				if b := readPublic(ctx, s.Store, ports.Ref{Name: committeeStem(args[0]), Kind: ports.CCColdHash}); b != nil {
+				if b := readPublic(ctx, s.Store, ports.NamedRef{Name: committeeStem(args[0]), Kind: ports.CCColdHash}); b != nil {
 					details = append(details, "cold key hash "+firstLineText(b))
 				}
 				if f.anchorURL == "" {
@@ -147,7 +149,7 @@ as <cold>.cc-cold-ret.cert after the transaction was sent.`,
 					return f.hint(err)
 				}
 				a.govReport(govOutcome{kind: "committee cold key resignation", account: committeeStem(args[0]), payer: payerStem(args[1]), res: res, details: details, notes: notes,
-					stored: []ports.Ref{{Name: committeeStem(args[0]), Kind: ports.CCColdRetCert}}}, &f, env, wo)
+					stored: []ports.NamedRef{{Name: committeeStem(args[0]), Kind: ports.CCColdRetCert}}}, &f, env, wo)
 				return nil
 			})
 		},

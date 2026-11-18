@@ -31,17 +31,16 @@ type fsSealed struct {
 }
 
 func (f *fsSealed) View(ctx context.Context, fn func(ports.Reader) error) error {
-	return f.st.View(ctx, fn)
+	return f.st.Anchor().View(ctx, fn)
 }
 func (f *fsSealed) Update(ctx context.Context, fn func(ports.Writer) error) error {
-	return f.st.Update(ctx, fn)
+	return f.st.Anchor().Update(ctx, fn)
 }
 func (f *fsSealed) Open(ctx context.Context, r ports.Ref) (*secret.Buffer, error) {
-	return f.st.Open(ctx, r)
+	return f.st.Anchor().Open(ctx, r)
 }
-func (f *fsSealed) List(ctx context.Context) (ports.SourceListing, error) { return f.st.List(ctx) }
-func (f *fsSealed) Close() error                                          { return nil }
-func (f *fsSealed) Notices() []string                                     { return nil }
+func (f *fsSealed) Close() error      { return nil }
+func (f *fsSealed) Notices() []string { return nil }
 
 // auditRec records what the export tells the auditor, and what was already in
 // the destination when it did.
@@ -146,8 +145,8 @@ func newWsFix(t *testing.T) *wsFix {
 		Config:             memConfig(map[string]WorkspaceConfig{f.ws: {Network: "preview", Mode: ModeOffline}}),
 		Sealed:             SealedOps{Open: func(string, *secret.Buffer, OpenOptions) (SealedStore, error) { return f.sealed, nil }},
 		OpenUpstreamSource: func(dir string) (UpstreamSource, error) { return upstreamdir.Open(dir) },
-		OpenExportDir:      func(dir string) (ports.Store, error) { return exportdir.Open(dir) },
-		WorkspaceAuditor: func(_ string, _ ports.Store, reason string) ports.WorkspaceAuditor {
+		OpenExportDir:      func(dir string) (ports.NamedStore, error) { return exportdir.Open(dir) },
+		WorkspaceAuditor: func(_ string, _ ports.NamedStore, reason string) ports.WorkspaceAuditor {
 			f.audit.reason = reason
 			return f.audit
 		},

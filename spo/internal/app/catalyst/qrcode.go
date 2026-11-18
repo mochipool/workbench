@@ -25,7 +25,7 @@ const QRDisplayOperation = "catalyst-qr-display"
 // only the payload, which is as sensitive as the key (SPO-09a-SEC-002), is
 // handed to Renderer.
 type ExportVotingKeyQR struct {
-	Store    ports.Store
+	Store    ports.NamedStore
 	Source   ports.VotingKeyQRSource
 	Renderer ports.QRCodeRenderer
 	Auditor  ports.WorkspaceAuditor
@@ -59,12 +59,12 @@ func (uc ExportVotingKeyQR) Run(ctx context.Context, req QRRequest) (res QRExpor
 		return res, err
 	}
 	var haveKey, haveHws bool
-	if err := uc.Store.View(ctx, func(r ports.Reader) error {
+	if err := uc.Store.View(ctx, func(r ports.NamedReader) error {
 		var err error
-		if haveKey, err = r.Exists(ports.Ref{Name: nm, Kind: ports.VotingSKey}); err != nil {
+		if haveKey, err = r.Exists(ports.NamedRef{Name: nm, Kind: ports.VotingSKey}); err != nil {
 			return err
 		}
-		haveHws, err = r.Exists(ports.Ref{Name: nm, Kind: ports.VotingHwsFile})
+		haveHws, err = r.Exists(ports.NamedRef{Name: nm, Kind: ports.VotingHwsFile})
 		return err
 	}); err != nil {
 		return res, err
@@ -73,7 +73,7 @@ func (uc ExportVotingKeyQR) Run(ctx context.Context, req QRRequest) (res QRExpor
 		if haveHws {
 			return res, ErrHardwareVotingKey
 		}
-		return res, fmt.Errorf("%w: %s", ErrMissingFile, ports.Ref{Name: nm, Kind: ports.VotingSKey})
+		return res, fmt.Errorf("%w: %s", ErrMissingFile, ports.NamedRef{Name: nm, Kind: ports.VotingSKey})
 	}
 	pin, err := domcat.ParsePIN(req.PIN) // SPO-09a-PRE-009
 	if err != nil {

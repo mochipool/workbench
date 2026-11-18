@@ -22,10 +22,10 @@ import (
 	"github.com/mochipool/workbench/spo/internal/adapters/cli"
 	"github.com/mochipool/workbench/spo/internal/adapters/native/n2c"
 	"github.com/mochipool/workbench/spo/internal/adapters/native/n2c/n2ctest"
-	"github.com/mochipool/workbench/spo/internal/adapters/sqlitestore"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 )
 
 // Online mode against an in-process node on a UNIX socket (n2ctest). The node's
@@ -422,17 +422,17 @@ func seedColdKey(t *testing.T, dir string) chain.PoolID {
 		seed[i] = byte(7 * (i + 1))
 	}
 	vk := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
-	st, err := sqlitestore.Open(filepath.Join(dir, cli.WorkspaceFile), secret.Take([]byte(testPass)))
+	st, err := openCold(filepath.Join(dir, cli.WorkspaceFile), secret.Take([]byte(testPass)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	err = st.Update(context.Background(), func(w ports.Writer) error {
-		if err := w.PutSecret(ports.Ref{Name: poolName, Kind: ports.NodeSKey},
+	err = labels.Named(st).Update(context.Background(), func(w ports.NamedWriter) error {
+		if err := w.PutSecret(ports.NamedRef{Name: poolName, Kind: ports.NodeSKey},
 			secret.Take([]byte(`{"type":"StakePoolSigningKey_ed25519","description":"","cborHex":"5820`+hex.EncodeToString(seed)+`"}`))); err != nil {
 			return err
 		}
-		return w.Put(ports.Ref{Name: poolName, Kind: ports.NodeVKey},
+		return w.Put(ports.NamedRef{Name: poolName, Kind: ports.NodeVKey},
 			[]byte(`{"type":"StakePoolVerificationKey_ed25519","description":"","cborHex":"5820`+hex.EncodeToString(vk)+`"}`))
 	})
 	if err != nil {

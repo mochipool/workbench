@@ -155,3 +155,14 @@ The owner accepted this record on 2026-11-17. The entries marked unconfirmed rem
 * Whether a mnemonic-derived software wallet that is later also attached on a hardware device (same key, two connected signers) should prefer the device, the vault or ask. The draft says "the operator's preference".
 * Whether labels are per workspace or global per client. Per workspace is assumed, and `label` records live in the workspace's own records.
 * Migration of a store whose descriptors do not resolve to keys. Recommended: refuse, with an explicit per-pool `--quarantine` that leaves the unresolved pool unusable; needs the owner's decision.
+
+## Amendments
+
+**Proposed amendment, awaiting owner.** The status line above is unchanged. The implementation of decisions 2 and 4 departs from the text in these ways, and the owner is asked to accept or reject them:
+
+* **Provisional owners.** An owner whose anchoring key does not exist yet (a pool descriptor written before the cold key, a VRF key generated first, a wallet's address file) keeps its records under a derived anchor with a label. The anchoring key moves them to the real anchor in one transaction and the keys kept meanwhile join the manifest. A provisional owner has no owner record and cannot be renamed. The text of decision 2 assumes an owner exists only with its anchor.
+* **Named records.** Records keyed by a string a use case or protocol chooses (transaction ids, transfer file names, `state`, provider tokens, Calidus and voting key families) are keyed by the content hash of `[named-record tag, [group, name]]` with a label in the group of their kind. The fixed ownerless anchor and the keying of transactions, envelopes, collections and audit events by their own content identity are not built.
+* **One key, several roles of one owner.** A key may be a member under more than one role of one owner's manifest; it is never a member of two owners.
+* **Policy manifests** list the verification key (`key`) beside the script id, so that a signer finds a policy key by identity.
+* **Label names** are never the text form of an identity.
+

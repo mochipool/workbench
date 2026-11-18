@@ -26,16 +26,16 @@ const (
 // Source is an opened source directory: read only, never followed through
 // links.
 type Source interface {
-	ports.ReadStore
-	ports.Vault
+	ports.NamedReadStore
+	ports.NamedVault
 	ports.SourceLister
 	ports.SourceTree
 }
 
 type srcDir struct {
 	dir    string
-	store  ports.ReadStore
-	vault  ports.Vault
+	store  ports.NamedReadStore
+	vault  ports.NamedVault
 	lister ports.SourceLister
 	tree   ports.SourceTree
 }
@@ -106,7 +106,7 @@ type found struct {
 	kind     OwnerKind
 	name     string
 	dir      string
-	refs     []ports.Ref
+	refs     []ports.NamedRef
 	src      srcDir
 	selected bool
 	final    string
@@ -116,7 +116,7 @@ type found struct {
 
 func (f *found) key() string { return f.dir + "\x00" + f.name }
 
-func kindOfRefs(refs []ports.Ref) OwnerKind {
+func kindOfRefs(refs []ports.NamedRef) OwnerKind {
 	k := KindOther
 	for _, r := range refs {
 		switch r.Kind {
@@ -139,7 +139,7 @@ func kindOfRefs(refs []ports.Ref) OwnerKind {
 // `to`. Every artefact name starts with its owner's name (OwnerOf), the rest
 // (`.payment`, `_<slot>_<id>`, `.<asset>`, the key stem of an encrypted key)
 // is kept.
-func renameRef(r ports.Ref, from, to string) ports.Ref {
+func renameRef(r ports.NamedRef, from, to string) ports.NamedRef {
 	if strings.HasPrefix(r.Name, from) {
 		r.Name = to + strings.TrimPrefix(r.Name, from)
 	}
@@ -175,7 +175,7 @@ func (u ImportWorkspace) discover(ctx context.Context, req ImportRequest, srcs [
 		if files > MaxFiles {
 			return fmt.Errorf("%w: more than %d files", ErrTooMany, MaxFiles)
 		}
-		by := map[string][]ports.Ref{}
+		by := map[string][]ports.NamedRef{}
 		for _, e := range l.Entries {
 			o := OwnerOf(e.Ref)
 			by[o] = append(by[o], e.Ref)
@@ -422,7 +422,7 @@ func (u ImportWorkspace) selectOwners(ctx context.Context, req ImportRequest, sr
 		if renamed[f] {
 			return nil, fmt.Errorf("%w: %q is renamed twice", ErrBadRename, rn.From.String())
 		}
-		if err := (ports.Ref{Name: rn.To, Kind: ports.StakingVKey}).Validate(); err != nil {
+		if err := (ports.NamedRef{Name: rn.To, Kind: ports.StakingVKey}).Validate(); err != nil {
 			return nil, fmt.Errorf("%w: %q is not a valid name: %v", ErrBadRename, rn.To, err)
 		}
 		renamed[f] = true
@@ -729,8 +729,8 @@ func refusedOwner(f *found, why string) OwnerReport {
 	return o
 }
 
-func skipAll(refs []ports.Ref, why string) []ArtefactReport {
-	rs := append([]ports.Ref(nil), refs...)
+func skipAll(refs []ports.NamedRef, why string) []ArtefactReport {
+	rs := append([]ports.NamedRef(nil), refs...)
 	sort.Slice(rs, func(i, j int) bool { return rs[i].String() < rs[j].String() })
 	out := make([]ArtefactReport, 0, len(rs))
 	for _, r := range rs {
@@ -739,7 +739,7 @@ func skipAll(refs []ports.Ref, why string) []ArtefactReport {
 	return out
 }
 
-func hasKind(refs []ports.Ref, k ports.Kind) bool {
+func hasKind(refs []ports.NamedRef, k ports.Kind) bool {
 	for _, r := range refs {
 		if r.Kind == k {
 			return true

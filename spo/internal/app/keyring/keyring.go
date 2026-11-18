@@ -21,12 +21,12 @@ var ErrUnresolved = ports.ErrNoVerificationKey
 
 // Resolve returns the key reference of the role's key stored under the name.
 // It refuses when the name has no verification key for the role.
-func Resolve(r ports.Reader, role custody.Role, name string) (custody.KeyRef, error) {
+func Resolve(r ports.NamedReader, role custody.Role, name string) (custody.KeyRef, error) {
 	kinds, ok := ports.KeyKindsOf(role)
 	if !ok {
 		return custody.KeyRef{}, fmt.Errorf("a %s key has no stored form to resolve", role)
 	}
-	raw, err := r.Get(ports.Ref{Name: name, Kind: kinds.VKey})
+	raw, err := r.Get(ports.NamedRef{Name: name, Kind: kinds.VKey})
 	if errors.Is(err, ports.ErrNotFound) {
 		return custody.KeyRef{}, fmt.Errorf("%w: the %s key of %q (%s)", ErrUnresolved, role, name, kinds.VKey)
 	}
@@ -45,18 +45,18 @@ func Resolve(r ports.Reader, role custody.Role, name string) (custody.KeyRef, er
 // stored under the name (the caller states its own refusal). Which signer
 // answers for the key is decided later by the signer directory; nothing here
 // says whether the key is in the vault or on a device.
-func ResolveHeld(r ports.Reader, role custody.Role, name string) (key custody.KeyRef, held bool, err error) {
+func ResolveHeld(r ports.NamedReader, role custody.Role, name string) (key custody.KeyRef, held bool, err error) {
 	kinds, ok := ports.KeyKindsOf(role)
 	if !ok {
 		return custody.KeyRef{}, false, fmt.Errorf("a %s key has no stored form to resolve", role)
 	}
 	if kinds.Hws != "" {
-		if held, err = r.Exists(ports.Ref{Name: name, Kind: kinds.Hws}); err != nil {
+		if held, err = r.Exists(ports.NamedRef{Name: name, Kind: kinds.Hws}); err != nil {
 			return custody.KeyRef{}, false, err
 		}
 	}
 	if !held {
-		if held, err = r.Exists(ports.Ref{Name: name, Kind: kinds.SKey}); err != nil {
+		if held, err = r.Exists(ports.NamedRef{Name: name, Kind: kinds.SKey}); err != nil {
 			return custody.KeyRef{}, false, err
 		}
 	}
@@ -70,14 +70,14 @@ func ResolveHeld(r ports.Reader, role custody.Role, name string) (key custody.Ke
 // Held is ResolveHeld with the refusal of a use case: when neither a signing
 // key nor a hardware signing file is stored it returns noKey, wrapped with the
 // reference of the missing signing key.
-func Held(r ports.Reader, role custody.Role, name string, noKey error) (custody.KeyRef, error) {
+func Held(r ports.NamedReader, role custody.Role, name string, noKey error) (custody.KeyRef, error) {
 	key, held, err := ResolveHeld(r, role, name)
 	if err != nil {
 		return custody.KeyRef{}, err
 	}
 	if !held {
 		kinds, _ := ports.KeyKindsOf(role)
-		return custody.KeyRef{}, fmt.Errorf("%w: %s", noKey, ports.Ref{Name: name, Kind: kinds.SKey})
+		return custody.KeyRef{}, fmt.Errorf("%w: %s", noKey, ports.NamedRef{Name: name, Kind: kinds.SKey})
 	}
 	return key, nil
 }

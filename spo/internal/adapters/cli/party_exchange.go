@@ -240,8 +240,8 @@ func (o onlyCollection) allow(ctx context.Context, _ party.Fingerprint, env []by
 // on the wire.
 func (r *partyRun) collectionWireID(ctx context.Context, poolName string) (party.CollectionID, error) {
 	var id party.CollectionID
-	err := r.s.Store.View(ctx, func(rd ports.Reader) error {
-		raw, err := rd.Get(ports.Ref{Name: poolName, Kind: ports.PoolDescriptor})
+	err := r.s.Store.View(ctx, func(rd ports.NamedReader) error {
+		raw, err := rd.Get(ports.NamedRef{Name: poolName, Kind: ports.PoolDescriptor})
 		if err != nil {
 			return err
 		}
@@ -407,7 +407,7 @@ func (r *partyRun) sweepNotices(ctx context.Context) {
 // party it is enrolled as.
 func (r *partyRun) recipientLabels(ctx context.Context) (map[string]string, error) {
 	m := map[string]string{}
-	err := r.s.Store.View(ctx, func(rd ports.Reader) error {
+	err := r.s.Store.View(ctx, func(rd ports.NamedReader) error {
 		ps, err := r.kit().Registry.List(rd)
 		for _, p := range ps {
 			m[hex.EncodeToString(p.Fingerprint[:])] = p.Name
@@ -470,7 +470,7 @@ func (r *partyRun) inboxRole(ctx context.Context, as string) (string, error) {
 		return "", fmt.Errorf("--as is coordinator or signer, not %q", as)
 	}
 	var coord, sign bool
-	err := r.s.Store.View(ctx, func(rd ports.Reader) error {
+	err := r.s.Store.View(ctx, func(rd ports.NamedReader) error {
 		ps, err := r.kit().Registry.List(rd)
 		for _, p := range ps {
 			coord = coord || (p.Active() && p.HasRole(party.RoleCoordinator))
@@ -676,7 +676,7 @@ func (r *partyRun) partyLabel(ctx context.Context, fp party.Fingerprint) string 
 	}
 	out := fp.String()
 	if r.kit() != nil && r.kit().Registry != nil {
-		_ = r.s.Store.View(ctx, func(rd ports.Reader) error {
+		_ = r.s.Store.View(ctx, func(rd ports.NamedReader) error {
 			if p, err := r.kit().Registry.ByFingerprint(rd, fp); err == nil && p.Name != "" {
 				out = safeText(p.Name)
 			}

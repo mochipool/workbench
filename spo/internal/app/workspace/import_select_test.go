@@ -3,12 +3,14 @@ package workspace
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
+	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -106,9 +108,9 @@ func putPool(s *memStore, name string, seed byte, descriptor string) {
 	s.put(ref(name, ports.NodeCounter), pool.IssueCounter{Next: 2, ColdVKey: vk}.Envelope())
 	s.put(ref(name, ports.KesCounter), pool.FormatCounter(1))
 	s.put(ref(name, ports.KesCounterNext), pool.FormatCounter(2))
-	s.put(ports.Ref{Name: name, Kind: ports.KesSKey, Num: 1}, []byte(`{"type":"KesSigningKey_ed25519_kes_2^6","description":"KES Signing Key","cborHex":"5860`+strings.Repeat("ab", 96)+`"}`))
-	s.put(ports.Ref{Name: name, Kind: ports.KesVKey, Num: 1}, pool.MarshalEnvelope(pool.Envelope{Type: "KesVerificationKey_ed25519_kes_2^6", Description: "KES Verification Key", CborHex: "5820" + strings.Repeat("cd", 32)}))
-	s.put(ports.Ref{Name: name, Kind: ports.OpCert, Num: 1}, opcertOf(kb, bytes.Repeat([]byte{0xcd}, 32)))
+	s.put(ports.NamedRef{Name: name, Kind: ports.KesSKey, Num: 1}, []byte(`{"type":"KesSigningKey_ed25519_kes_2^6","description":"KES Signing Key","cborHex":"5860`+strings.Repeat("ab", 96)+`"}`))
+	s.put(ports.NamedRef{Name: name, Kind: ports.KesVKey, Num: 1}, pool.MarshalEnvelope(pool.Envelope{Type: "KesVerificationKey_ed25519_kes_2^6", Description: "KES Verification Key", CborHex: "5820" + strings.Repeat("cd", 32)}))
+	s.put(ports.NamedRef{Name: name, Kind: ports.OpCert, Num: 1}, opcertOf(kb, bytes.Repeat([]byte{0xcd}, 32)))
 	if descriptor != "" {
 		s.put(ref(name, ports.PoolDescriptor), []byte(descriptor))
 	}
@@ -445,7 +447,7 @@ func TestXmultiRenames(t *testing.T) {
 		}
 	}
 	// every artefact of the renamed pool, numbered ones and counters included
-	for _, r := range []ports.Ref{ref("newpool", ports.NodeVKey), ref("newpool", ports.NodeSKey), ref("newpool", ports.NodeCounter),
+	for _, r := range []ports.NamedRef{ref("newpool", ports.NodeVKey), ref("newpool", ports.NodeSKey), ref("newpool", ports.NodeCounter),
 		ref("newpool", ports.KesCounter), ref("newpool", ports.KesCounterNext), ref("newpool", ports.PoolCert), ref("newpool", ports.PoolDeregCert),
 		{Name: "newpool", Kind: ports.KesSKey, Num: 1}, {Name: "newpool", Kind: ports.KesVKey, Num: 1}, {Name: "newpool", Kind: ports.OpCert, Num: 1}} {
 		if _, ok := dst.files[r]; !ok {
@@ -693,5 +695,146 @@ func TestXmultiChecksStillRunOnRenamedOwner(t *testing.T) {
 	rep, _ := multi(t, tr, dst).Import(ctx(), ImportRequest{Dirs: []string{"/d"}, Renames: []Rename{{From: Selector{Name: "p"}, To: "q"}}, All: true})
 	if rep.Failed() != 1 || len(dst.files) != 0 {
 		t.Errorf("%+v", rep.Owners)
+	}
+}
+
+// putPayer gives a wallet a payment key pair under a stem (`w.payment` for the
+// payment account of a wallet with a stake key, `e` for a key-only address).
+func putPayer(s *memStore, stem string, seed byte) {
+	kp := pair(seed, "PaymentSigningKeyShelley_ed25519", "PaymentVerificationKeyShelley_ed25519", "Payment")
+	s.put(ref(stem, ports.AddrSKey), kp.skey)
+	s.put(ref(stem, ports.AddrVKey), kp.vkey)
+}
+
+// An open registration whose payer is the payment account of a wallet
+// (`<wallet>.payment`) or an enterprise wallet with no stake key is imported by a
+// selective run: the payer is a payment key identity, not a wallet with a stake
+// key, so the binding is made on the payment verification key (ADR 0010 decision
+// 4; closes the known limit of the first multi-folder import).
+//
+// spec: SPO-Xmulti-INV-007, SPO-Xmulti-PRE-011
+func TestXmultiOpenRegistrationPaidFromAPaymentAccountOrAnEnterpriseWallet(t *testing.T) {
+	for _, tc := range []struct{ name, payer, wallet string }{
+		{"payment account of a wallet", "w.payment", "w"},
+		{"enterprise wallet", "e", "e"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := `"regWitness": {"id": "x", "regPayName": "` + tc.payer + `", "witnesses": {"p.node": {"witness": {}}, "w.staking": {"witness": {}}, "` + tc.payer + `": {"witness": {}}}}`
+			tr, dst := newTree(), newMem()
+			putPool(tr.dir("/d"), "p", 80, descJSON("p", "w", "w", reg))
+			putWallet(tr.dir("/d"), "w", 40)
+			if tc.wallet == "w" {
+				putPayer(tr.dir("/d"), "w.payment", 41)
+			} else {
+				putPayer(tr.dir("/d"), "e", 42)
+			}
+			sel := []Selector{{Kind: KindPool, Name: "p"}, {Kind: KindWallet, Name: "w"}}
+			if tc.wallet == "e" {
+				sel = append(sel, Selector{Kind: KindWallet, Name: "e"})
+			}
+			rep, err := multi(t, tr, dst).Import(ctx(), ImportRequest{Dirs: []string{"/d"}, Only: sel})
+			if err != nil || rep.Failed() != 0 || !ownerOf(rep, "p").Written {
+				t.Fatalf("a selective import of a pool paid from %s: %v %+v\n%s", tc.payer, err, rep.Owners, reasons(ownerOf(rep, "p")))
+			}
+			if !strings.Contains(stored(dst, "p", ports.PoolDescriptor), `"regPayName": "`+tc.payer+`"`) {
+				t.Errorf("the registration was not carried:\n%s", stored(dst, "p", ports.PoolDescriptor))
+			}
+			// a payer wallet that this run does not select and the workspace does not
+			// hold is not found: the pool is refused
+			rep, _ = multi(t, tr, newMem()).Import(ctx(), ImportRequest{Dirs: []string{"/d"}, Only: []Selector{{Kind: KindPool, Name: "p"}, {Kind: KindWallet, Name: "w"}}})
+			if tc.wallet == "e" && ownerOf(rep, "p").Written {
+				t.Errorf("a pool paid from the unselected wallet %q was written", tc.payer)
+			}
+		})
+	}
+}
+
+func reasons(o OwnerReport) string {
+	var out []string
+	for _, a := range o.Artefacts {
+		if a.Status == StatusFailed || (a.Reason != "" && !strings.Contains(a.Reason, "another artefact failed")) {
+			out = append(out, a.Ref.String()+": "+a.Reason+" "+a.Note)
+		}
+	}
+	return o.Reason + "; " + strings.Join(out, "; ")
+}
+
+// The resolver's conditions by identity: the pool id a descriptor records is the
+// hash of the cold key the pool will have; a witness slot's recorded key hash is
+// that of the wallet's stake key; two owner names that resolve to one stake key
+// are refused, showing both.
+//
+// spec: SPO-Xmulti-INV-007, SPO-Xidentity-INV-019
+func TestXmultiResolutionByIdentity(t *testing.T) {
+	cl := cold(80)
+	env, _ := pool.ParseEnvelope(cl.vkey)
+	kb, _ := env.Key32()
+	coldHash := txbuild.HashKey(kb)
+	stakeKey := rawOf(pair(40, "StakeSigningKeyShelley_ed25519", "StakeVerificationKeyShelley_ed25519", "Stake").vkey)
+	stakeHash := txbuild.HashKey(stakeKey)
+	run := func(desc string, wallets ...string) (*Report, error) {
+		tr := newTree()
+		putPool(tr.dir("/d"), "p", 80, desc)
+		for _, w := range wallets {
+			putWallet(tr.dir("/d"), w, 40)
+		}
+		return multi(t, tr, newMem()).Import(ctx(), ImportRequest{Dirs: []string{"/d"}, All: true})
+	}
+	good := hex.EncodeToString(coldHash[:])
+	if rep, err := run(descJSON("p", "w", "w", `"poolID": "`+good+`"`), "w"); err != nil || rep.Failed() != 0 {
+		t.Fatalf("a descriptor that agrees with its keys: %v %+v", err, rep)
+	}
+	rep, _ := run(descJSON("p", "w", "w", `"poolID": "`+strings.Repeat("00", 28)+`"`), "w")
+	if !strings.Contains(ownerOf(rep, "p").Reason, "poolID") || ownerOf(rep, "p").Written {
+		t.Errorf("a pool id that is not the cold key's: %+v", ownerOf(rep, "p"))
+	}
+	reg := func(kh string) string {
+		return `"regWitness": {"id": "x", "regPayName": "w", "witnesses": {"p.node": {"witness": {}}, "w.staking": {"witness": {}, "keyHash": "` + kh + `"}}}`
+	}
+	if rep, err := run(descJSON("p", "w", "w", reg(hex.EncodeToString(stakeHash[:]))), "w"); err != nil || rep.Failed() != 0 {
+		t.Fatalf("a witness slot that records the wallet's key hash: %v %+v", err, rep)
+	}
+	rep, _ = run(descJSON("p", "w", "w", reg(strings.Repeat("11", 28))), "w")
+	if !strings.Contains(ownerOf(rep, "p").Reason, "key hash") || ownerOf(rep, "p").Written {
+		t.Errorf("a slot that records another key hash: %+v", ownerOf(rep, "p"))
+	}
+	two := "{\n  \"poolName\": \"p\",\n  \"poolOwner\": [{\"ownerName\": \"w\", \"ownerWitness\": \"local\"}, {\"ownerName\": \"w2\", \"ownerWitness\": \"local\"}],\n  \"poolRewards\": \"w\",\n  \"poolPledge\": \"100000000\"\n}\n"
+	rep, _ = run(two, "w", "w2")
+	if r := ownerOf(rep, "p").Reason; !strings.Contains(r, `"w" and "w2"`) || ownerOf(rep, "p").Written {
+		t.Errorf("two names for one key: %+v", ownerOf(rep, "p"))
+	}
+}
+
+// A payer's witness slot records the hash of the payment key of the wallet it
+// names, and the pool's own slot the hash of its cold key; another hash refuses
+// the pool, naming the slot.
+//
+// spec: SPO-Xmulti-INV-007
+func TestXmultiPayerAndNodeSlotsRecordTheirKeyHashes(t *testing.T) {
+	cl := cold(80)
+	env, _ := pool.ParseEnvelope(cl.vkey)
+	kb, _ := env.Key32()
+	coldHash := txbuild.HashKey(kb)
+	payKey := rawOf(pair(41, "PaymentSigningKeyShelley_ed25519", "PaymentVerificationKeyShelley_ed25519", "Payment").vkey)
+	payHash := txbuild.HashKey(payKey)
+	run := func(nodeHash, payerHash string) *Report {
+		reg := `"regWitness": {"id": "x", "regPayName": "w.payment", "witnesses": {"p.node": {"witness": {}, "keyHash": "` + nodeHash + `"}, "w.payment": {"witness": {}, "keyHash": "` + payerHash + `"}}}`
+		tr := newTree()
+		putPool(tr.dir("/d"), "p", 80, descJSON("p", "w", "w", reg))
+		putWallet(tr.dir("/d"), "w", 40)
+		putPayer(tr.dir("/d"), "w.payment", 41)
+		rep, _ := multi(t, tr, newMem()).Import(ctx(), ImportRequest{Dirs: []string{"/d"}, All: true})
+		return rep
+	}
+	if rep := run(hex.EncodeToString(coldHash[:]), hex.EncodeToString(payHash[:])); !ownerOf(rep, "p").Written {
+		t.Fatalf("slots that agree with their keys: %+v", ownerOf(rep, "p"))
+	}
+	rep := run(strings.Repeat("11", 28), hex.EncodeToString(payHash[:]))
+	if r := ownerOf(rep, "p"); r.Written || !strings.Contains(r.Reason, "cold key") {
+		t.Errorf("a node slot with another hash: %+v", r)
+	}
+	rep = run(hex.EncodeToString(coldHash[:]), strings.Repeat("22", 28))
+	if r := ownerOf(rep, "p"); r.Written || !strings.Contains(r.Reason, "payment key") {
+		t.Errorf("a payer slot with another hash: %+v", r)
 	}
 }

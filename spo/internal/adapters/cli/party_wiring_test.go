@@ -78,15 +78,15 @@ func TestObligation2OwnedIsTheStoresOwnKeysOnly(t *testing.T) {
 	other := partyrig.New(t, "other", clock, ch)
 	otherH := other.AddKey(custody.RoleStake, "stranger")
 	var vk []byte
-	if err := other.Store.View(context.Background(), func(r ports.Reader) error {
+	if err := other.Store.View(context.Background(), func(r ports.NamedReader) error {
 		var err error
-		vk, err = r.Get(ports.Ref{Name: "stranger", Kind: ports.StakingVKey})
+		vk, err = r.Get(ports.NamedRef{Name: "stranger", Kind: ports.StakingVKey})
 		return err
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.Store.Update(context.Background(), func(wr ports.Writer) error {
-		return wr.Put(ports.Ref{Name: "copy", Kind: ports.StakingVKey}, vk)
+	if err := w.Store.Update(context.Background(), func(wr ports.NamedWriter) error {
+		return wr.Put(ports.NamedRef{Name: "copy", Kind: ports.StakingVKey}, vk)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -410,8 +410,8 @@ func newNetScene(t *testing.T, mode string) *netScene {
 		w *partyrig.Workspace
 		k *secret.Buffer
 	}{{s.C, ck}, {s.B, bk}} {
-		if err := x.w.Store.Update(context.Background(), func(wr ports.Writer) error {
-			return wr.PutSecret(ports.Ref{Name: "local", Kind: ports.TailcatNodeKey}, x.k)
+		if err := x.w.Store.Update(context.Background(), func(wr ports.NamedWriter) error {
+			return wr.PutSecret(ports.NamedRef{Name: "local", Kind: ports.TailcatNodeKey}, x.k)
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -427,8 +427,8 @@ func newNetScene(t *testing.T, mode string) *netScene {
 	s.B.EnrollScoped(s.C, "coord", []party.Role{party.RoleCoordinator}, party.Scope{KeyRoles: []custody.Role{custody.RoleStake}, Pools: []string{s.bech}})
 	// The invitation bob imported: the coordinator's address, sealed.
 	addr, _ := secret.TryTake([]byte("fake-tailcat-address"))
-	if err := s.B.Store.Update(context.Background(), func(wr ports.Writer) error {
-		return wr.PutSecret(ports.Ref{Name: "coord", Kind: ports.TailcatAddr}, addr)
+	if err := s.B.Store.Update(context.Background(), func(wr ports.NamedWriter) error {
+		return wr.PutSecret(ports.NamedRef{Name: "coord", Kind: ports.TailcatAddr}, addr)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -522,7 +522,7 @@ func TestServeAdmitsEnrolledSignersAndWritesSealedInvitations(t *testing.T) {
 	}
 	var got party.Invite
 	bob := n.B.Signer()
-	bob.OnInvite = func(_ ports.Writer, _ party.Party, inv party.Invite) error { got = inv; return nil }
+	bob.OnInvite = func(_ ports.NamedWriter, _ party.Party, inv party.Invite) error { got = inv; return nil }
 	if h, err := bob.Handle(context.Background(), receivedFromFile(t, files[0])); err != nil || h.Effect != "invite" {
 		t.Fatalf("bob: %+v %v", h, err)
 	}

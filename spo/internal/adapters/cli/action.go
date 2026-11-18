@@ -351,7 +351,7 @@ proposals will have are printed after submission.`,
 				guard := false
 				for _, name := range files {
 					stem := strings.TrimSuffix(strings.TrimPrefix(name, "./"), ".action")
-					raw := readPublic(ctx, s.Store, ports.Ref{Name: stem, Kind: ports.GovActionFile})
+					raw := readPublic(ctx, s.Store, ports.NamedRef{Name: stem, Kind: ports.GovActionFile})
 					if raw == nil {
 						continue
 					}

@@ -135,8 +135,8 @@ func TestVoteOnLedgerAndRefusedOnOtherVendors(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := w.Store.Update(ctx, func(wr ports.Writer) error {
-			return wr.Put(ports.Ref{Name: "d_1700000000", Kind: ports.VoteDRepFile}, vf.Envelope)
+		if err := w.Store.Update(ctx, func(wr ports.NamedWriter) error {
+			return wr.Put(ports.NamedRef{Name: "d_1700000000", Kind: ports.VoteDRepFile}, vf.Envelope)
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -188,8 +188,8 @@ func TestKeptHardwareRefusals(t *testing.T) {
 	var act dgov.ActionID
 	act.TxID[0] = 9
 	vf, _ := w.Ledger.BuildVoteFile(dgov.Vote{Voter: dgov.Voter{Role: dgov.RoleDRep, Cred: d.Credential}, Action: act, Decision: dgov.No}, "")
-	_ = w.Store.Update(ctx, func(wr ports.Writer) error {
-		return wr.Put(ports.Ref{Name: "d_1700000001", Kind: ports.VoteDRepFile}, vf.Envelope)
+	_ = w.Store.Update(ctx, func(wr ports.NamedWriter) error {
+		return wr.Put(ports.NamedRef{Name: "d_1700000001", Kind: ports.VoteDRepFile}, vf.Envelope)
 	})
 	before := w.HW.Prompts()
 	_, err := (governance.RegisterVote{Base: govBase(w), Votes: w.Ledger}).Run(ctx, governance.RegisterVoteRequest{Voter: "d", Payer: "hw.payment", Files: []string{"d_1700000001.drep.vote"}})
@@ -222,8 +222,8 @@ func TestSeveralVotesOnLedgerNeedConsent(t *testing.T) {
 			t.Fatal(err)
 		}
 		name := "d_17000000000" + string(rune('0'+i))
-		if err := w.Store.Update(ctx, func(wr ports.Writer) error {
-			return wr.Put(ports.Ref{Name: name, Kind: ports.VoteDRepFile}, vf.Envelope)
+		if err := w.Store.Update(ctx, func(wr ports.NamedWriter) error {
+			return wr.Put(ports.NamedRef{Name: name, Kind: ports.VoteDRepFile}, vf.Envelope)
 		}); err != nil {
 			t.Fatal(err)
 		}

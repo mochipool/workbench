@@ -52,15 +52,15 @@ func TestVaultRegistrySigner(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pair.SKey.Destroy()
-	if err := st.Update(context.Background(), func(w ports.Writer) error {
-		if err := w.Put(ports.Ref{Name: "tok", Kind: ports.PolicyVKey}, pair.VKey); err != nil {
+	if err := st.Update(context.Background(), func(w ports.NamedWriter) error {
+		if err := w.Put(ports.NamedRef{Name: "tok", Kind: ports.PolicyVKey}, pair.VKey); err != nil {
 			return err
 		}
-		return w.PutSecret(ports.Ref{Name: "tok", Kind: ports.PolicySKey}, pair.SKey)
+		return w.PutSecret(ports.NamedRef{Name: "tok", Kind: ports.PolicySKey}, pair.SKey)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	s := VaultRegistry{VaultSignatures{VaultSigner{Vault: st}}}
+	s := VaultRegistry{VaultSignatures{VaultSigner{Vault: st.Anchor()}}}
 	if err := ports.CheckRegistrySigner(s); err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestVaultRegistrySigner(t *testing.T) {
 	}
 	// A key the vault does not hold, and the policy key under another role,
 	// have no signer.
-	dir := RegistrySigners{Vault: st}
+	dir := RegistrySigners{Vault: st.Anchor()}
 	nobody, _ := identity.KeyHashOf(make([]byte, 32))
 	if _, err := dir.SignerFor(custody.KeyRef{Role: custody.RolePolicy, Identity: nobody}); err == nil {
 		t.Error("a key nobody holds has a signer")

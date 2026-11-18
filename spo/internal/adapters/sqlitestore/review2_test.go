@@ -147,26 +147,34 @@ func TestAuditCorruptionIsNeverAWrongCredential(t *testing.T) {
 	}
 }
 
-func TestOldSlotRowWithoutAuditIsRefusedByEpoch(t *testing.T) {
+// An old passphrase slot row put back beside the slots of a rekey, with the audit
+// rows deleted, is refused by the POLICY check, not by the key epoch: the table
+// then holds two passphrase slots that bind different recovery public key hashes
+// (and two distinct recovery factors), which domain/unlock refuses before any key
+// is derived. (In format 2 this was refused by the key epoch; the epoch refusal
+// of an old slot row in format 3 is isolated in
+// TestOldFactorSlotRowPutBackIsRefusedByTheKeyEpoch.)
+func TestOldSlotRowPutBackWithoutAuditIsRefusedByThePolicyCheck(t *testing.T) {
 	s, path, _ := scratch(t)
 	put(t, s, counter, "1")
-	var row [9]any
-	s.db.QueryRow(`SELECT id,kind,kdf_memory_kib,kdf_passes,kdf_lanes,salt,key_commit,nonce,wrapped_key FROM keyslots WHERE kind='passphrase'`).
-		Scan(&row[0], &row[1], &row[2], &row[3], &row[4], &row[5], &row[6], &row[7], &row[8])
+	var row [11]any
+	s.db.QueryRow(`SELECT id,kind,kdf_memory_kib,kdf_passes,kdf_lanes,salt,key_commit,nonce,wrapped_key,bound,rec_hash FROM keyslots WHERE kind='passphrase'`).
+		Scan(&row[0], &row[1], &row[2], &row[3], &row[4], &row[5], &row[6], &row[7], &row[8], &row[9], &row[10])
 	rekeyTo(t, s, "np")
 	s.Close()
 	db := rawDB(t, path)
 	db.Exec(`DELETE FROM audit`) // the review's bypass of the old gate
-	db.Exec(`INSERT INTO keyslots (id,kind,kdf_memory_kib,kdf_passes,kdf_lanes,salt,key_commit,nonce,wrapped_key) VALUES (?,?,?,?,?,?,?,?,?)`, row[:]...)
+	db.Exec(`INSERT INTO keyslots (id,kind,kdf_memory_kib,kdf_passes,kdf_lanes,salt,key_commit,nonce,wrapped_key,bound,rec_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?)`, row[:]...)
 	db.Close()
 	os.Remove(path + ".head")
 	for _, o := range []OpenOptions{{}, {SkipVerify: true}} {
-		if _, err := OpenWithOptions(path, pw(), o); !errors.Is(err, ErrKeyEpoch) {
-			t.Errorf("old slot put back, audit deleted (%+v): %v, want ErrKeyEpoch", o, err)
+		if _, err := OpenWithOptions(path, pw(), o); !errors.Is(err, ErrPolicyViolated) {
+			t.Errorf("old slot put back, audit deleted (%+v): %v, want ErrPolicyViolated (ErrKeyEpoch in format 2)", o, err)
 		}
 	}
-	// A credential that opens no slot at all stays a wrong credential.
-	if _, err := Open(path, passphrase("nobody")); !errors.Is(err, ErrWrongCredential) || errors.Is(err, ErrKeyEpoch) {
+	// The table check runs before any key is derived, so a credential that opens
+	// no slot gets the same refusal, not ErrWrongCredential.
+	if _, err := Open(path, passphrase("nobody")); !errors.Is(err, ErrPolicyViolated) {
 		t.Errorf("unknown passphrase: %v", err)
 	}
 }
@@ -174,7 +182,7 @@ func TestOldSlotRowWithoutAuditIsRefusedByEpoch(t *testing.T) {
 // ---- 3: a committed rekey always hands over its recovery key ----
 
 func TestRekeyCleanupFailureStillReturnsTheRecoveryKey(t *testing.T) {
-	a, path, _ := scratch(t)
+	a, path, _ := scratchPresented(t)
 	put(t, a, counter, "1")
 	// A reader in another connection holds a snapshot: the truncating WAL
 	// checkpoint is busy.
@@ -227,7 +235,7 @@ func TestRekeyHeadFileFailureStillReturnsTheRecoveryKey(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("permissions do not bind root")
 	}
-	a, path, _ := scratch(t)
+	a, path, _ := scratchPresented(t)
 	put(t, a, counter, "1")
 	dir := filepath.Dir(path)
 	// The directory refuses new files: the head file cannot be replaced.
@@ -592,7 +600,7 @@ func TestMinimumBudgetOpensAMaxSecret(t *testing.T) {
 func TestOwnerAndEventLengthsHideTheNames(t *testing.T) {
 	s, path, _ := scratch(t)
 	for _, name := range []string{"a", "pool-with-a-longer-name", strings.Repeat("n", 128)} {
-		put(t, s, ports.Ref{Name: name, Kind: ports.KesCounter}, "x")
+		put(t, s, rf(name, ports.KesCounter), "x")
 	}
 	s.Close()
 	db := rawDB(t, path)

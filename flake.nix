@@ -234,6 +234,8 @@
           doctor = wb.doctor;
           workbench = wb.workbench;
           spo = wb.spoBin;
+          # The block producer's start-up helper, installable without `spo`.
+          spo-node-keys = wb.spoBin.nodeKeys;
           spo-scripts-mainnet = (wb.spo.mkCommon { overrides.network = "Mainnet"; }).derivation;
           spo-scripts-testnet = (wb.spo.mkCommon { overrides.network = "PreProd"; }).derivation;
           # Re-exports for convenience (built by upstream flakes / IOG cache)
@@ -268,6 +270,7 @@
           workbench-tests = wb.workbench.tests;
           # Go reference implementation: vet and unit tests (no haskell toolchain).
           spo-tests = wb.spoBin.unwrapped;
+          spo-node-keys = wb.spoBin.nodeKeys;
           # Differential tests of spo against the pinned upstream scripts.
           # Needs the Cardano toolchain, so CI runs it only where the IOG
           # cache has native builds.

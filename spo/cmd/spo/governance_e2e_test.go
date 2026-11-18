@@ -19,11 +19,11 @@ import (
 
 	"github.com/mochipool/workbench/spo/internal/adapters/cli"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
-	"github.com/mochipool/workbench/spo/internal/adapters/sqlitestore"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	dgov "github.com/mochipool/workbench/spo/internal/domain/governance"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 )
 
 const (
@@ -73,19 +73,19 @@ func govSnapshot(t *testing.T, path, payAddr, stakeAddr, drepID string, deposit 
 // putPublic stores a public artefact in the sealed workspace, as another
 // machine would (the offline composition cannot make vote and action files:
 // they read the chain).
-func putPublic(t *testing.T, dir string, ref ports.Ref, data []byte) {
+func putPublic(t *testing.T, dir string, ref ports.NamedRef, data []byte) {
 	t.Helper()
-	st, err := sqlitestore.Open(filepath.Join(dir, cli.WorkspaceFile), secret.Take([]byte(testPass)))
+	st, err := openCold(filepath.Join(dir, cli.WorkspaceFile), secret.Take([]byte(testPass)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if err := st.Update(context.Background(), func(w ports.Writer) error { return w.Put(ref, data) }); err != nil {
+	if err := labels.Named(st).Update(context.Background(), func(w ports.NamedWriter) error { return w.Put(ref, data) }); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func keyHash28(t *testing.T, dir string, ref ports.Ref) [28]byte {
+func keyHash28(t *testing.T, dir string, ref ports.NamedRef) [28]byte {
 	t.Helper()
 	raw := vkeyOf(t, dir, ref)
 	h := blake2b224(raw)
@@ -210,13 +210,13 @@ func TestGovernanceOffline(t *testing.T) {
 	}
 	// The vote file is made elsewhere and submitted here.
 	led := native.Ledger{}
-	vf, err := led.BuildVoteFile(dgov.Vote{Voter: dgov.Voter{Role: dgov.RoleDRep, Cred: dgov.Credential{Hash: keyHash28(t, dir, ports.Ref{Name: govDRep, Kind: ports.DRepVKey})}},
+	vf, err := led.BuildVoteFile(dgov.Vote{Voter: dgov.Voter{Role: dgov.RoleDRep, Cred: dgov.Credential{Hash: keyHash28(t, dir, ports.NamedRef{Name: govDRep, Kind: ports.DRepVKey})}},
 		Action: id, Decision: dgov.Yes}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	voteName := govDRep + "_240101000001"
-	putPublic(t, dir, ports.Ref{Name: voteName, Kind: ports.VoteDRepFile}, vf.Envelope)
+	putPublic(t, dir, ports.NamedRef{Name: voteName, Kind: ports.VoteDRepFile}, vf.Envelope)
 	f3 := snapshot(500_000_000, false)
 	out, err = run(f3, "vote", "submit", payer, voteName+".drep.vote", "--yes")
 	if err != nil {
@@ -261,14 +261,14 @@ func TestGovernanceOffline(t *testing.T) {
 
 	// ---- the output holds no key material, and the sealed file holds no name and no key.
 	var secrets []string
-	secrets = append(secrets, secretHex(t, dir, ports.Ref{Name: govDRep, Kind: ports.DRepSKey}))
+	secrets = append(secrets, secretHex(t, dir, ports.NamedRef{Name: govDRep, Kind: ports.DRepSKey}))
 	secrets = append(secrets, secretsOfWallet(t, dir, govWallet)...)
 	notLeaked(t, all.String(), secrets...)
 	raw, err := os.ReadFile(filepath.Join(dir, cli.WorkspaceFile))
 	if err != nil {
 		t.Fatal(err)
 	}
-	hh := keyHash28(t, dir, ports.Ref{Name: govDRep, Kind: ports.DRepVKey})
+	hh := keyHash28(t, dir, ports.NamedRef{Name: govDRep, Kind: ports.DRepVKey})
 	for _, s := range append(secrets, govDRep, govWallet, drepID, hex.EncodeToString(hh[:])) {
 		if strings.Contains(string(raw), s) {
 			t.Errorf("workspace.spo contains %.12q", s)
@@ -420,15 +420,15 @@ func (k *govKoios) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 // getPublic reads one public artefact of the sealed workspace.
-func getPublic(t *testing.T, dir string, ref ports.Ref) []byte {
+func getPublic(t *testing.T, dir string, ref ports.NamedRef) []byte {
 	t.Helper()
-	st, err := sqlitestore.Open(filepath.Join(dir, cli.WorkspaceFile), secret.Take([]byte(testPass)))
+	st, err := openCold(filepath.Join(dir, cli.WorkspaceFile), secret.Take([]byte(testPass)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
 	var b []byte
-	if err := st.View(context.Background(), func(r ports.Reader) (err error) { b, err = r.Get(ref); return }); err != nil {
+	if err := labels.Named(st).View(context.Background(), func(r ports.NamedReader) (err error) { b, err = r.Get(ref); return }); err != nil {
 		t.Fatalf("%v: %v", ref, err)
 	}
 	return b
@@ -539,11 +539,11 @@ func TestGovernanceLightModeAgainstALoopbackKoios(t *testing.T) {
 	if m == nil {
 		t.Fatalf("no vote file in:\n%s", out)
 	}
-	vf, err := native.Ledger{}.DecodeVoteFile(getPublic(t, dir, ports.Ref{Name: m[1], Kind: ports.VoteDRepFile}))
+	vf, err := native.Ledger{}.DecodeVoteFile(getPublic(t, dir, ports.NamedRef{Name: m[1], Kind: ports.VoteDRepFile}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	hh := keyHash28(t, dir, ports.Ref{Name: govDRep, Kind: ports.DRepVKey})
+	hh := keyHash28(t, dir, ports.NamedRef{Name: govDRep, Kind: ports.DRepVKey})
 	if vf.Vote.Action != id || vf.Vote.Decision != dgov.Yes || vf.Vote.Voter.Role != dgov.RoleDRep || vf.Vote.Voter.Cred.Hash != hh {
 		t.Errorf("the vote file holds %+v", vf.Vote)
 	}
@@ -584,7 +584,7 @@ func TestGovernanceLightModeAgainstALoopbackKoios(t *testing.T) {
 	if am == nil {
 		t.Fatalf("no action file in:\n%s", out)
 	}
-	af, err := native.Ledger{}.DecodeActionFile(getPublic(t, dir, ports.Ref{Name: am[1], Kind: ports.GovActionFile}))
+	af, err := native.Ledger{}.DecodeActionFile(getPublic(t, dir, ports.NamedRef{Name: am[1], Kind: ports.GovActionFile}))
 	if err != nil || af.Action.Kind != dgov.InfoAction || af.Action.Prev != nil || af.Action.Deposit != 1_000_000_000 {
 		t.Errorf("the action file holds %+v (%v)", af.Action, err)
 	}
@@ -594,5 +594,5 @@ func TestGovernanceLightModeAgainstALoopbackKoios(t *testing.T) {
 			t.Errorf("a request went elsewhere: %s", c)
 		}
 	}
-	notLeaked(t, all.String(), secretHex(t, dir, ports.Ref{Name: govDRep, Kind: ports.DRepSKey}))
+	notLeaked(t, all.String(), secretHex(t, dir, ports.NamedRef{Name: govDRep, Kind: ports.DRepSKey}))
 }

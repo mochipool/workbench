@@ -11,22 +11,22 @@ import (
 	"testing"
 
 	"github.com/mochipool/workbench/spo/internal/adapters/cli"
-	"github.com/mochipool/workbench/spo/internal/adapters/sqlitestore"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 )
 
 // secretHex reads a stored signing key back through the vault and returns
 // its cborHex, to look for in the output and in the sealed file.
-func secretHex(t *testing.T, dir string, ref ports.Ref) string {
+func secretHex(t *testing.T, dir string, ref ports.NamedRef) string {
 	t.Helper()
-	st, err := sqlitestore.Open(filepath.Join(dir, cli.WorkspaceFile), secret.Take([]byte(testPass)))
+	st, err := openCold(filepath.Join(dir, cli.WorkspaceFile), secret.Take([]byte(testPass)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	buf, err := st.Open(context.Background(), ref)
+	buf, err := labels.Named(st).Open(context.Background(), ref)
 	if err != nil {
 		t.Fatalf("%v: %v", ref, err)
 	}
@@ -81,9 +81,9 @@ func TestPoolKeyChainThroughCommands(t *testing.T) {
 
 	needles := map[string]string{
 		"pool name":       poolName,
-		"cold signing":    secretHex(t, dir, ports.Ref{Name: poolName, Kind: ports.NodeSKey}),
-		"VRF signing":     secretHex(t, dir, ports.Ref{Name: poolName, Kind: ports.VrfSKey}),
-		"KES signing":     secretHex(t, dir, ports.Ref{Name: poolName, Kind: ports.KesSKey, Num: 0}),
+		"cold signing":    secretHex(t, dir, ports.NamedRef{Name: poolName, Kind: ports.NodeSKey}),
+		"VRF signing":     secretHex(t, dir, ports.NamedRef{Name: poolName, Kind: ports.VrfSKey}),
+		"KES signing":     secretHex(t, dir, ports.NamedRef{Name: poolName, Kind: ports.KesSKey, Num: 0}),
 		"envelope marker": "cborHex",
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, cli.WorkspaceFile))

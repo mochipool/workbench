@@ -15,11 +15,11 @@ import (
 	"golang.org/x/crypto/blake2b"
 
 	"github.com/mochipool/workbench/spo/internal/adapters/cli"
-	"github.com/mochipool/workbench/spo/internal/adapters/sqlitestore"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/labels"
 )
 
 // poolSnapshot writes an offlineTransfer.json with one UTxO of 1000 ADA at
@@ -51,22 +51,23 @@ func poolSnapshot(t *testing.T, path string, addrs ...string) {
 
 // storeOf opens the workspace's store for the test, which reads public
 // artefacts and plays the part of an owner's other machine.
-func storeOf(t *testing.T, dir string) *sqlitestore.Store {
+// storeOf opens the sealed workspace of dir by name (the label resolver over the store).
+func storeOf(t *testing.T, dir string) *labels.Store {
 	t.Helper()
-	st, err := sqlitestore.Open(filepath.Join(dir, cli.WorkspaceFile), secret.Take([]byte(testPass)))
+	st, err := openCold(filepath.Join(dir, cli.WorkspaceFile), secret.Take([]byte(testPass)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	return st
+	return labels.Named(st)
 }
 
 // vkeyOf reads the raw key of a verification key envelope in the store.
-func vkeyOf(t *testing.T, dir string, ref ports.Ref) []byte {
+func vkeyOf(t *testing.T, dir string, ref ports.NamedRef) []byte {
 	t.Helper()
 	st := storeOf(t, dir)
 	var raw []byte
-	if err := st.View(context.Background(), func(r ports.Reader) error {
+	if err := st.View(context.Background(), func(r ports.NamedReader) error {
 		b, err := r.Get(ref)
 		if err != nil {
 			return err
@@ -273,7 +274,7 @@ func TestPoolRegistrationAndRetirementOffline(t *testing.T) {
 	for _, w := range txs[0].witness[0] {
 		wit[hex.EncodeToString(w[0])] = true
 	}
-	for name, ref := range map[string]ports.Ref{"cold": {Name: "p", Kind: ports.NodeVKey}, "owner stake": {Name: "quartz-owner", Kind: ports.StakingVKey}, "payer": {Name: "quartz-owner.payment", Kind: ports.AddrVKey}} {
+	for name, ref := range map[string]ports.NamedRef{"cold": {Name: "p", Kind: ports.NodeVKey}, "owner stake": {Name: "quartz-owner", Kind: ports.StakingVKey}, "payer": {Name: "quartz-owner.payment", Kind: ports.AddrVKey}} {
 		if !wit[hex.EncodeToString(vkeyOf(t, r.dir, ref))] {
 			t.Errorf("no witness of the %s key", name)
 		}
@@ -281,7 +282,7 @@ func TestPoolRegistrationAndRetirementOffline(t *testing.T) {
 	if len(wit) != 3 {
 		t.Errorf("%d distinct witnesses, want 3", len(wit))
 	}
-	if pid := blake2b224(vkeyOf(t, r.dir, ports.Ref{Name: "p", Kind: ports.NodeVKey})); pid != poolIDHex {
+	if pid := blake2b224(vkeyOf(t, r.dir, ports.NamedRef{Name: "p", Kind: ports.NodeVKey})); pid != poolIDHex {
 		t.Errorf("pool id %s, key hashes to %s", poolIDHex, pid)
 	}
 	out = r.mustG(t, nil, "pool", "witness", "status", "p")
@@ -329,8 +330,8 @@ func TestPoolRegistrationAndRetirementOffline(t *testing.T) {
 			t.Errorf("workspace.spo contains the %s", what)
 		}
 	}
-	for _, k := range []string{secretHex(t, r.dir, ports.Ref{Name: "p", Kind: ports.NodeSKey}), secretHex(t, r.dir, ports.Ref{Name: "quartz-owner", Kind: ports.StakingSKey}),
-		secretHex(t, r.dir, ports.Ref{Name: "quartz-owner.payment", Kind: ports.AddrSKey})} {
+	for _, k := range []string{secretHex(t, r.dir, ports.NamedRef{Name: "p", Kind: ports.NodeSKey}), secretHex(t, r.dir, ports.NamedRef{Name: "quartz-owner", Kind: ports.StakingSKey}),
+		secretHex(t, r.dir, ports.NamedRef{Name: "quartz-owner.payment", Kind: ports.AddrSKey})} {
 		if strings.Contains(string(file), k) {
 			t.Error("workspace.spo contains key hex")
 		}
@@ -350,10 +351,10 @@ func TestPoolRegistrationWithAnOwnerSigningElsewhere(t *testing.T) {
 	r := newPoolRig(t, "quartz-owner", "second")
 	// The second owner's signing key leaves this workspace; its public key and
 	// delegation certificate stay (they are what the other party sends back).
-	secondHex := secretHex(t, r.dir, ports.Ref{Name: "second", Kind: ports.StakingSKey})
+	secondHex := secretHex(t, r.dir, ports.NamedRef{Name: "second", Kind: ports.StakingSKey})
 	st := storeOf(t, r.dir)
-	if err := st.Update(context.Background(), func(w ports.Writer) error {
-		return w.Delete(ports.Ref{Name: "second", Kind: ports.StakingSKey})
+	if err := st.Update(context.Background(), func(w ports.NamedWriter) error {
+		return w.Delete(ports.NamedRef{Name: "second", Kind: ports.StakingSKey})
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -377,9 +378,9 @@ func TestPoolRegistrationWithAnOwnerSigningElsewhere(t *testing.T) {
 	// The request file is in the workspace; an unsigned one is refused.
 	name := regexp.MustCompile(`wrote\s+(p_second_\d+)\.witness`).FindStringSubmatch(out)[1]
 	var raw []byte
-	if err := storeOf(t, r.dir).View(context.Background(), func(rd ports.Reader) error {
+	if err := storeOf(t, r.dir).View(context.Background(), func(rd ports.NamedReader) error {
 		var err error
-		raw, err = rd.Get(ports.Ref{Name: name, Kind: ports.PoolWitnessFile})
+		raw, err = rd.Get(ports.NamedRef{Name: name, Kind: ports.PoolWitnessFile})
 		return err
 	}); err != nil {
 		t.Fatal(err)
