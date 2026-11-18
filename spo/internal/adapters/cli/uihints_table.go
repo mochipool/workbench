@@ -138,7 +138,7 @@ var flagHints = map[string]map[string]string{
 	"workspace import":     {"manifest": uihint.File(".toml"), "manifest-out": uihint.NewFile(".toml")},
 	"stake delegate":       {"payer": hWallet},
 	"stake vote-delegate":  {"payer": hWallet},
-	"store verify":         {"backup": hFile},
+	"store verify":         {"backup": hFile, "checkpoint": hFile},
 	"vote submit":          {"voter": hDRep},
 	"wallet claim-rewards": {"payer": hWallet},
 }

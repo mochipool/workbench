@@ -25,6 +25,8 @@ var secretFDFlags = map[string]string{
 	"recovery-pin-fd":        uihint.SecretIn,
 	"old-recovery-pin-fd":    uihint.SecretIn,
 	"new-fido2-pin-fd":       uihint.SecretIn,
+	"checkpoint-pin-fd":      uihint.SecretIn,
+	"old-checkpoint-pin-fd":  uihint.SecretIn,
 	"token-fd":               uihint.SecretIn,
 	"message-passphrase-fd":  uihint.SecretIn,
 	"protection-key-fd":      uihint.SecretIn,

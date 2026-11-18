@@ -77,6 +77,10 @@ func newDeps(out, errw io.Writer, term cli.Terminal) cli.Deps {
 				id, h, err := sqlitestore.InspectHead(path)
 				return id, toHead(h), mapStoreErr(err)
 			},
+			InspectFacts: func(path string) (cli.BackupFacts, error) {
+				f, err := sqlitestore.InspectBackupFacts(path)
+				return cli.BackupFacts{WorkspaceID: f.WorkspaceID, Head: toHead(f.Head), SlotTable: f.SlotTable}, mapStoreErr(err)
+			},
 			OpenFactors:       openFactors,
 			VerifyFileFactors: verifyFileFactors,
 			Migrate: func(path string, pass *secret.Buffer, o cli.MigrateOptions) (cli.MigrateReport, error) {
@@ -270,6 +274,13 @@ var plainAudit func(dir string, store ports.NamedStore) ports.NamedStore
 
 // sealedStore adapts *sqlitestore.Store to cli.SealedStore.
 type sealedStore struct{ s *sqlitestore.Store }
+
+// DailyCredentialIDs lists the credential ids of the daily slots (the checkpoint
+// key may not be one).
+func (w sealedStore) DailyCredentialIDs(ctx context.Context) ([][]byte, error) {
+	ids, err := w.s.DailyCredentialIDs(ctx)
+	return ids, mapStoreErr(err)
+}
 
 func (w sealedStore) View(ctx context.Context, fn func(ports.Reader) error) error {
 	return w.s.View(ctx, fn)

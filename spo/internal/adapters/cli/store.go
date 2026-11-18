@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/mochipool/workbench/spo/internal/app/backupsink"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/platform/textsafe"
 )
@@ -91,10 +92,10 @@ func (a *app) storeCommand() *cobra.Command {
 }
 
 func (a *app) storeVerify() *cobra.Command {
-	var backupFile string
+	var backupFile, checkpointFile, checkpointPin string
 	var deep, withCold bool
 	verify := &cobra.Command{
-		Use:   "verify [--backup FILE] [--deep]",
+		Use:   "verify [--backup FILE] [--deep] [--checkpoint FILE --pin PIN]",
 		Short: "Check that the stored records match the authenticated audit chain; print the chain head",
 		Long: `Open the workspace (or --backup FILE) read-only with its passphrase and check
 the database schema, the audit chain, and that the stored bytes of every record
@@ -109,11 +110,20 @@ authenticates); its payload needs the cold sub-key factor, which --with-cold-fac
 presents once per cold-role record (a touch, or the cold-key passphrase), without
 writing anything.
 
+With --backup FILE --checkpoint FILE.checkpoint --pin <workspace id>:ck:<key hash>
+only the pair is checked, with no passphrase: the checkpoint's SSH signature
+against the pinned key hash (user presence and verification included), then the
+file's SHA-256, size, workspace id, head and slot-table hash against the signed
+statement. It does not open the backup; run store verify --backup FILE for that.
+
 ` + headAdvice,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if a.upstream {
 				return errors.New(errUpstreamStore)
+			}
+			if checkpointFile != "" || checkpointPin != "" {
+				return a.verifyCheckpointPair(backupFile, checkpointFile, checkpointPin)
 			}
 			target := a.workspaceFile()
 			if backupFile != "" {
@@ -197,6 +207,8 @@ writing anything.
 		},
 	}
 	verify.Flags().StringVar(&backupFile, "backup", "", "verify this backup file instead of the workspace")
+	verify.Flags().StringVar(&checkpointFile, "checkpoint", "", "verify the backup given by --backup against this checkpoint file (with --pin; no passphrase is asked)")
+	verify.Flags().StringVar(&checkpointPin, "pin", "", "the long-lived pin <workspace id>:ck:<checkpoint key hash>[:<minimum sequence>] for --checkpoint")
 	verify.Flags().BoolVar(&deep, "deep", false, "also decrypt every record under the current keys")
 	verify.Flags().BoolVar(&withCold, "with-cold-factor", false, "also open every cold-role record with a fresh factor presentation (a touch, or the cold-key passphrase), read-only")
 	return verify
@@ -204,6 +216,8 @@ writing anything.
 
 func (a *app) storeBackup() *cobra.Command {
 	var sinkURL string
+	var noCheckpoint bool
+	var cf checkpointFlags
 	cmd := &cobra.Command{
 		Use:   "backup [<dest>] [--sink <URL>]",
 		Short: "Write a consistent copy of the workspace, then verify the copy",
@@ -220,6 +234,15 @@ a byte is sent). The object is read back and compared before the command
 reports success, and a pin is printed: keep it somewhere other than the sink,
 restore needs it. Running the command again after an interruption is safe.
 
+If the workspace has a checkpoint key (spo workspace checkpoint-key enroll), the
+backup is also signed: after the object is verified in the sink, the checkpoint
+authenticator asks for its PIN and a touch once, and the signed statement is put
+beside the object as <name>.checkpoint. Two pins are printed: the exact pin, and
+the long-lived pin <workspace id>:ck:<key hash>. A signing failure after a
+verified upload is reported as "uploaded and verified, NOT signed" with a
+non-zero status; run the command again to sign without uploading again.
+--no-checkpoint skips signing. A backup to <dest> writes <dest>.checkpoint beside it.
+
 A backup made before a passphrase change or a new recovery key still opens
 with the passphrase and the recovery key of its own time.
 
@@ -230,13 +253,20 @@ with the passphrase and the recovery key of its own time.
 				return errors.New("give exactly one of <dest> and --sink URL")
 			}
 			if sinkURL != "" {
-				return a.backupToSink(cmd, sinkURL)
+				return a.backupToSink(cmd, sinkURL, noCheckpoint, &cf)
 			}
 			s, err := a.openSealed(cmd.Context())
 			if err != nil {
 				return err
 			}
 			defer s.closeInto(&err)
+			defer a.destroyPINs()
+			var sg *backupsink.Signing
+			if !noCheckpoint {
+				if sg, err = a.signingFor(cmd.Context(), s, &cf); err != nil {
+					return err
+				}
+			}
 			head, err := s.Sealed.BackupWithHead(cmd.Context(), args[0])
 			if err != nil {
 				return err
@@ -252,10 +282,17 @@ with the passphrase and the recovery key of its own time.
 			}
 			fmt.Fprintf(a.d.Out, "Backup head: %s\n", headLine(head))
 			fmt.Fprintln(a.d.Out, headAdvice)
+			if sg != nil {
+				if err := a.writeLocalCheckpoint(cmd.Context(), args[0], sg); err != nil {
+					return err
+				}
+			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&sinkURL, "sink", "", "send the verified backup to a sink: s3://bucket/prefix or dir:/absolute/path (instead of <dest>)")
+	cmd.Flags().BoolVar(&noCheckpoint, "no-checkpoint", false, "do not sign a checkpoint although the workspace has a checkpoint key")
+	cf.add(cmd, true, false)
 	return cmd
 }
 
@@ -283,6 +320,7 @@ func (a *app) verifyCopy(s *session, path string) (VerifyReport, error) {
 func (a *app) storeRestore() *cobra.Command {
 	var (
 		sinkURL, pinText    string
+		belowSeq            uint64
 		acceptLower         bool
 		force, older, other bool
 		weaker              bool
@@ -315,11 +353,23 @@ SHA-256). The file is used only if all of them match what it says itself; then
 the same restore runs on it, with every refusal below. An interrupted download
 is resumed by running the command again with the same pin.
 
+With the long-lived pin <workspace id>:ck:<checkpoint key hash> (add
+:<minimum sequence> to refuse older backups) the newest backup whose checkpoint
+verifies against that key hash is used: the sink's objects are looked at newest
+first (at most 16), each checkpoint is read and verified before its object is
+downloaded, and a candidate that fails is reported and skipped. Without a
+sequence the pin proves the backup is authentic, not that it is the newest. A
+checkpoint that verified for sequence N is a floor: if its object cannot be
+obtained or does not match, the restore refuses and names N; an older backup is
+restored only with --below N. A search that stops at a limit says how many
+candidates were not examined; --below starts it lower.
+
 A restore never lowers a counter. With --allow-older, when the backup does not
 contain the head of the workspace it replaces, that workspace is opened
 read-only (with the credential given for the backup; when its slots changed
 since, with its own recovery key: --recovery-key-in-fd or a prompt, and under
-hardware --current-recovery-device and --recovery-pin-fd) and, for each pool, the
+hardware --current-recovery-device and --recovery-pin-fd; a strict workspace has
+no recovery key and opens only with one of its own enrolled authenticators) and, for each pool, the
 larger of the two operational certificate issue counters and the larger KES
 counter-next are written into the restored copy before it is installed. Each
 write is audited and printed. If that workspace cannot be opened at all, the
@@ -333,8 +383,8 @@ one in mode offline (change it with: spo mode set).`,
 			if a.upstream {
 				return errors.New(errUpstreamStore)
 			}
-			if sinkURL == "" && pinText != "" {
-				return errors.New("--pin goes with --sink")
+			if sinkURL == "" && (pinText != "" || cmd.Flags().Changed("below")) {
+				return errors.New("--pin and --below go with --sink")
 			}
 			if sinkURL == "" && len(args) != 1 {
 				return errors.New("give a <backup> file, or --sink URL with --pin PIN")
@@ -442,12 +492,17 @@ one in mode offline (change it with: spo mode set).`,
 			if sinkURL == "" {
 				return run(args[0], args[0], nil)
 			}
-			return a.restoreFromSink(cmd, sinkURL, pinText, run)
+			var below *uint64
+			if cmd.Flags().Changed("below") {
+				below = &belowSeq
+			}
+			return a.restoreFromSink(cmd, sinkURL, pinText, below, run)
 		},
 	}
 	restore.Flags().StringVar(&sinkURL, "sink", "", "restore from a sink instead of a file: s3://bucket/prefix or dir:/absolute/path (needs --pin)")
-	restore.Flags().StringVar(&pinText, "pin", "", "the pin that store backup --sink printed (workspace id:head sequence:head hash:file sha256), with --sink")
+	restore.Flags().StringVar(&pinText, "pin", "", "the pin that store backup --sink printed, with --sink: the exact pin (workspace id:head sequence:head hash:file sha256), or the long-lived pin <workspace id>:ck:<checkpoint key hash>[:<minimum sequence>], which restores the newest backup whose checkpoint verifies")
 	restore.Flags().BoolVar(&acceptLower, "accept-lower-counters", false, "go on although the counters of the workspace being replaced cannot be fully read because its file is unusable (it does not parse, fails verification, or is older than its head file): the restored workspace may hold LOWER operational certificate and KES counters. Never honoured for a credential problem, and what can be read is still carried")
+	restore.Flags().Uint64Var(&belowSeq, "below", 0, "with a long-lived pin: start the search below this head sequence (after a refusal that names a sequence, or a limit stop); an older backup than a verified one is restored only this way")
 	restore.Flags().BoolVar(&force, "force", false, "replace an existing workspace")
 	restore.Flags().BoolVar(&older, "allow-older", false, "allow a backup that is older than the workspace or has diverged from it (discards the changes made since; the operational certificate and KES counters of the workspace are carried forward, never lowered)")
 	restore.Flags().BoolVar(&other, "allow-other-workspace", false, "DANGEROUS: allow a backup of a different workspace to replace this one; the current workspace and everything in it is lost (needs --force)")

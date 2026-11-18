@@ -91,9 +91,16 @@ let
     subPackages = [ "cmd/spo" ];
     ldflags = [ "-s" "-w" "-X main.version=${version}" ];
     # subPackages limits the build; the tests cover the whole module.
+    #
+    # ssh-keygen is the oracle of the checkpoint signature tests (ADR 0012 stage 2,
+    # SPO-Xbackup-SEC-017): signatures made by the code must verify with stock
+    # OpenSSH. SPO_REQUIRE_SSH_KEYGEN makes a missing tool a failure here, where
+    # the tests otherwise skip when it is absent.
+    nativeCheckInputs = [ pkgs.openssh ];
     checkPhase = ''
       runHook preCheck
       export HOME=$TMPDIR
+      export SPO_REQUIRE_SSH_KEYGEN=1
       go vet ./...
       go test ./...
       # The tests above run without the plainlayout tag. The tagged build is

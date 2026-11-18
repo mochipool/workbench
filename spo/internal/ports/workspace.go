@@ -216,7 +216,7 @@ type WorkspaceAuditor interface {
 func IsWorkspaceKind(k Kind) bool {
 	switch k {
 	case PartyKeys, PartyIdentity, PartyRecords, PartyReplay, TailcatNodeKey, TailcatPSK, TailcatAddr,
-		MultisigCoordinator, MultisigSigner, MultisigOutbox, MultisigEvents, MultisigCollection, MultisigSubmitted, ProviderToken,
+		MultisigCoordinator, MultisigSigner, MultisigOutbox, MultisigEvents, MultisigCollection, MultisigSubmitted, ProviderToken, CheckpointKey,
 		WorkspaceAuditLog:
 		return false
 	}

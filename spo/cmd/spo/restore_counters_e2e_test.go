@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -530,5 +531,81 @@ func TestRestoreOlderOverARotatedHardwareWorkspaceNeedsTheRecoveryComposite(t *t
 	}
 	if iss := h.issue(); !strings.Contains(iss, "with counter 3") {
 		t.Fatalf("%s", iss)
+	}
+}
+
+// A strict workspace has no recovery path. A restore over a strict workspace
+// whose daily authenticator changed since the backup says what is true: it can
+// be opened only with one of its own enrolled authenticators, and if none is left
+// the documented route is to move the file aside and check counters on chain. It
+// never tells the operator to present a recovery key, and --accept-lower-counters
+// is still not honoured.
+//
+// spec: SPO-Xbackup-PRE-015
+func TestRestoreOverAStrictWorkspaceWhoseDailySlotChangedHasNoRecoveryAdvice(t *testing.T) {
+	// each stand-in authenticator has its own seed, so the old authenticator cannot
+	// answer for the credential of the new daily slot
+	rig := newDeviceRunner(t)
+	dir := copyWorkspace(t)
+	_, oldRec := template(t)
+	run := func(fds map[string]string, args ...string) (string, error) {
+		full := []string{"-C", dir}
+		for flag, content := range fds {
+			f, fd := fdIn(t, content+"\n")
+			defer f.Close()
+			full = append(full, flag, fd)
+		}
+		return runFidoWith(t, rig, nil, append(full, args...)...)
+	}
+	// standard to strict on dev0
+	pf, pfd := fdIn(t, testPass+"\n")
+	defer pf.Close()
+	if out, err := run(map[string]string{"--fido2-pin-fd": fidoPIN, "--recovery-key-in-fd": oldRec}, "--passphrase-fd", pfd,
+		"--fido2-device", dev0, "workspace", "rotate", "--policy", "strict", "--yes-strict"); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	backup := filepath.Join(t.TempDir(), "strict.bak")
+	if out, err := run(map[string]string{"--fido2-pin-fd": fidoPIN}, "--fido2-device", dev0, "store", "backup", backup); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	// the daily authenticator changes to dev2 (a strict rotation names each slot it removes)
+	list, err := run(nil, "workspace", "slot", "list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var yes []string
+	for _, l := range strings.Split(list, "\n") {
+		if f := strings.Fields(l); len(f) > 1 && strings.HasPrefix(f[0], "fido2") {
+			yes = append(yes, "--yes-remove", f[1])
+		}
+	}
+	args := append([]string{"--fido2-device", dev0, "--new-fido2-device", dev2, "workspace", "rotate", "--policy", "strict", "--yes-strict"}, yes...)
+	if out, err := run(map[string]string{"--fido2-pin-fd": fidoPIN, "--new-fido2-pin-fd": fidoPIN3}, args...); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	before, _ := os.ReadFile(filepath.Join(dir, "workspace.spo"))
+	for _, accept := range []bool{false, true} {
+		a := []string{"--fido2-device", dev0, "store", "restore", backup, "--force", "--allow-older"}
+		if accept {
+			a = append(a, "--accept-lower-counters")
+		}
+		out, err := run(map[string]string{"--fido2-pin-fd": fidoPIN}, a...)
+		if err == nil {
+			t.Fatalf("accept=%v: restored over a workspace it could not open:\n%s", accept, out)
+		}
+		msg := err.Error()
+		for _, bad := range []string{"--recovery-key-in-fd", "--recovery-pin-fd", "--current-recovery-device", "--accept-lower-counters"} {
+			if strings.Contains(msg, bad) {
+				t.Errorf("accept=%v: the refusal names %s for a strict workspace: %v", accept, bad, err)
+			}
+		}
+		for _, want := range []string{"strict", "no recovery path", "enrolled authenticators", "move workspace.spo aside", "on chain"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("accept=%v: the refusal lacks %q: %v", accept, want, err)
+			}
+		}
+	}
+	if after, _ := os.ReadFile(filepath.Join(dir, "workspace.spo")); !bytes.Equal(before, after) {
+		t.Fatal("the destination changed")
 	}
 }

@@ -163,6 +163,14 @@ type PushInput struct {
 	Backup  func(ctx context.Context, dest string) (Head, error)
 	Verify  func(path string) error
 	Inspect func(path string) (id []byte, h Head, err error)
+
+	// SlotTable reads the slot-table hash of the backup file; needed when
+	// Checkpoint is set.
+	SlotTable func(path string) ([]byte, error)
+	// Checkpoint, when set, signs the statement of the backup after the object is
+	// verified in the sink and puts it beside it (stage 2). Nothing is asked of the
+	// authenticator before the sink's own checks and the read-back have passed.
+	Checkpoint *CheckpointPush
 }
 
 // PushResult is what a successful Push reports.
@@ -176,6 +184,10 @@ type PushResult struct {
 	// Uploaded is false when the object was already in the sink and only
 	// verified.
 	Uploaded bool
+	// Facts are those of the file that went to the sink.
+	Facts Facts
+	// Checkpoint is set when a checkpoint was signed and put, or found.
+	Checkpoint *CheckpointResult
 }
 
 var errNoStandardS3 = errors.New("this workspace has the standard policy, which is password-only: whoever can read the bucket could guess the passphrase offline, so an S3 sink is refused for it. Rotate the workspace to the hardware policy (spo workspace rotate --policy hardware), or back up to a directory instead (spo store backup --sink dir:/absolute/path, or spo store backup <dest>)")
@@ -309,7 +321,8 @@ func sweep(sc ports.Scratch, keep string) {
 func Push(ctx context.Context, in PushInput) (res PushResult, err error) {
 	note := noteRefused
 	defer func() {
-		if err != nil {
+		var se *StageError
+		if err != nil && !errors.As(err, &se) {
 			err = stage(err, note)
 		}
 	}()
@@ -356,6 +369,15 @@ func Push(ctx context.Context, in PushInput) (res PushResult, err error) {
 	name := ObjectName(id, h.Seq, sum)
 	res.Name, res.Size = name, size
 	res.Pin = Pin{WorkspaceID: id, Seq: h.Seq, HeadMAC: h.MAC, SHA256: sum}
+	res.Facts = Facts{WorkspaceID: id, Head: h, SHA256: sum, Size: uint64(size)}
+	if in.Checkpoint != nil {
+		if in.SlotTable == nil {
+			return PushResult{}, errors.New("a checkpoint was asked for and there is no way to read the slot table of the backup; it was not sent")
+		}
+		if res.Facts.SlotTable, err = in.SlotTable(dest); err != nil {
+			return PushResult{}, fmt.Errorf("the slot table of the backup cannot be read: %w", err)
+		}
+	}
 
 	// Only the object this file's own hash names is looked at: nothing a sink
 	// lists is downloaded, parsed or verified here. A second object for the same
@@ -391,6 +413,13 @@ func Push(ctx context.Context, in PushInput) (res PushResult, err error) {
 		}
 		return PushResult{}, fmt.Errorf("uploaded but not verified: the object could not be read back from the sink (%w)", err)
 	}
+	if in.Checkpoint != nil {
+		cp, cerr := in.Checkpoint.Run(ctx, name, res.Facts)
+		if cerr != nil {
+			return res, cerr
+		}
+		res.Checkpoint = &cp
+	}
 	return res, nil
 }
 
@@ -401,6 +430,9 @@ type BackupEntry struct {
 	Seq         uint64
 	SHA256      []byte
 	Size        int64
+	// HasCheckpoint: the sink lists a checkpoint object beside this backup. It says
+	// nothing about whether it verifies.
+	HasCheckpoint bool
 }
 
 // ListResult is what List found: the backups of the workspace, newest first,
@@ -417,13 +449,29 @@ func List(ctx context.Context, l ports.ObjectLister, ws []byte) (ListResult, err
 		return ListResult{}, err
 	}
 	var res ListResult
+	checkpoints := map[string]bool{}
 	for _, o := range infos {
+		if m := checkpointRE.FindStringSubmatch(o.Name); m != nil {
+			checkpoints[m[1]+".spo"] = true
+		}
+	}
+	matched := map[string]bool{}
+	for _, o := range infos {
+		if checkpointRE.MatchString(o.Name) {
+			continue
+		}
 		id, seq, sha, ok := ParseName(o.Name)
 		if !ok || !bytes.Equal(id, ws) {
 			res.Unrecognised = append(res.Unrecognised, o.Name)
 			continue
 		}
-		res.Backups = append(res.Backups, BackupEntry{Name: o.Name, WorkspaceID: id, Seq: seq, SHA256: sha, Size: o.Size})
+		matched[o.Name] = true
+		res.Backups = append(res.Backups, BackupEntry{Name: o.Name, WorkspaceID: id, Seq: seq, SHA256: sha, Size: o.Size, HasCheckpoint: checkpoints[o.Name]})
+	}
+	for _, o := range infos {
+		if m := checkpointRE.FindStringSubmatch(o.Name); m != nil && !matched[m[1]+".spo"] {
+			res.Unrecognised = append(res.Unrecognised, o.Name)
+		}
 	}
 	sort.SliceStable(res.Backups, func(i, j int) bool {
 		if res.Backups[i].Seq != res.Backups[j].Seq {
@@ -447,6 +495,14 @@ type FetchInput struct {
 
 	Inspect func(path string) (id []byte, h Head, err error)
 	Restore func(path string, sha256 []byte) error
+
+	// ExpectedSize, when HasExpectedSize, is the exact size the download must have
+	// (a checkpoint statement gives it).
+	ExpectedSize    int64
+	HasExpectedSize bool
+	// Check, when set, is a further check on the verified download (a checkpoint's
+	// slot-table hash); its failure is a bad object.
+	Check func(path string) error
 }
 
 var partialRE = regexp.MustCompile(`^\.spo-fetch-[0-9a-f]{64}\.partial$`)
@@ -514,7 +570,7 @@ func Fetch(ctx context.Context, in FetchInput) (err error) {
 		return err
 	}
 	defer f.Close()
-	bad := func(e error) error { keep = false; note = noteFetchBad; return e }
+	bad := func(e error) error { keep = false; note = noteFetchBad; return &BadObject{e} }
 	have, err := f.Seek(0, io.SeekEnd)
 	if err != nil {
 		return err
@@ -570,6 +626,9 @@ func Fetch(ctx context.Context, in FetchInput) (err error) {
 			return err
 		}
 	}
+	if in.HasExpectedSize && total != in.ExpectedSize {
+		return bad(fmt.Errorf("the downloaded file is %d bytes, not the %d the checkpoint says", total, in.ExpectedSize))
+	}
 	sum, _, err := hashFile(f)
 	if err != nil {
 		return err
@@ -588,6 +647,11 @@ func Fetch(ctx context.Context, in FetchInput) (err error) {
 	}
 	if h.Seq != in.Pin.Seq || !bytes.Equal(h.MAC, in.Pin.HeadMAC) {
 		return bad(fmt.Errorf("the head of the downloaded file (sequence %d) is not the head in the pin (sequence %d)", h.Seq, in.Pin.Seq))
+	}
+	if in.Check != nil {
+		if cerr := in.Check(path); cerr != nil {
+			return bad(cerr)
+		}
 	}
 	note = noteFetchRest
 	keep = false

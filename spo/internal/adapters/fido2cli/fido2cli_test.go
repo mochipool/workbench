@@ -3,9 +3,12 @@ package fido2cli_test
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -86,12 +89,14 @@ func (s stubTools) Tool(_ context.Context, n ports.ToolName) (ports.Tool, error)
 // environment, and records what the operating system saw.
 type envRunner struct {
 	cfgPath string
+	extra   []string
 	mu      sync.Mutex
 	spawns  []execx.Spawn
 }
 
 func (r *envRunner) Run(ctx context.Context, c execx.Cmd) (execx.Result, error) {
 	c.Env = append(append([]string{}, c.Env...), "FAKEFIDO_CONFIG="+r.cfgPath)
+	c.Env = append(c.Env, r.extra...)
 	return execx.OS{Observe: func(s execx.Spawn) {
 		r.mu.Lock()
 		r.spawns = append(r.spawns, s)
@@ -774,5 +779,145 @@ func TestAFIDO2SlotFromTheAdapterOpensWithTheSameFactor(t *testing.T) {
 			got.Destroy()
 		}
 		a.Destroy()
+	}
+}
+
+// ---- the signing capability (ADR 0012 stage 2) ----
+
+const signRP = "ssh:spo-checkpoint"
+
+func enrolSigner(t *testing.T, r *rig) ports.SignerEnrolment {
+	t.Helper()
+	p := pin(goodPIN)
+	defer p.Destroy()
+	en, err := r.src.EnrolSigner(context.Background(), ports.SignerEnrolRequest{RPID: signRP, PIN: p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return en
+}
+
+// A signing credential has a real P-256 public key, and an assertion over a
+// client data hash verifies under it with the standard library: the signed data
+// is the authenticator data (37 bytes) and the hash.
+//
+// spec: SPO-Xbackup-EXT-001, SPO-Xbackup-IF-005
+func TestSignerEnrolmentAndAssertionVerifyWithTheStandardLibrary(t *testing.T) {
+	r := newRig(t, nil)
+	en := enrolSigner(t, r)
+	pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), en.PublicKey)
+	if err != nil {
+		t.Fatalf("the public key is not a P-256 point: %v", err)
+	}
+	cdh := sha256.Sum256([]byte("the message"))
+	p := pin(goodPIN)
+	defer p.Destroy()
+	a, err := r.src.SignAssert(context.Background(), ports.SignRequest{RPID: signRP, CredentialID: en.CredentialID, ClientDataHash: cdh[:], PIN: p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Flags&0x01 == 0 || a.Flags&0x04 == 0 {
+		t.Fatalf("flags %#x lack presence or verification", a.Flags)
+	}
+	app := sha256.Sum256([]byte(signRP))
+	data := append(append([]byte(nil), app[:]...), a.Flags)
+	data = binary.BigEndian.AppendUint32(data, a.Counter)
+	data = append(data, cdh[:]...)
+	d := sha256.Sum256(data)
+	if !ecdsa.VerifyASN1(pub, d[:], a.Signature) {
+		t.Fatal("the signature does not verify over rpIdHash || flags || counter || client data hash")
+	}
+	// the enrolment asked for verification and made no hmac-secret credential
+	for _, c := range r.calls(t) {
+		if c.Tool == "fido2-cred" && (contains(c.Argv, "-h") || !contains(c.Argv, "-c") || !contains(c.Argv, "3")) {
+			t.Errorf("a signing credential is made with credProtect 3 and without hmac-secret: %v", c.Argv)
+		}
+		if c.Tool == "fido2-assert" && (contains(c.Argv, "-h") || !contains(c.Argv, "-v")) {
+			t.Errorf("a signing assertion: %v", c.Argv)
+		}
+	}
+	r.noSecretInArgv(t, goodPIN)
+}
+
+// A credential asked about under another relying party, or a hash that is not 32
+// bytes, is refused before the tool runs; a missing flag in the answer is refused.
+//
+// spec: SPO-Xbackup-IF-005
+func TestSignAssertRefusals(t *testing.T) {
+	p := pin(goodPIN)
+	defer p.Destroy()
+	cdh := bytes.Repeat([]byte{1}, 32)
+	for name, c := range map[string]struct {
+		mis  string
+		want error
+	}{
+		"no user presence flag":     {"noUPFlag", ports.ErrFactorFlags},
+		"no user verification flag": {"noUVFlag", ports.ErrFactorFlags},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t, func(c2 *fakeCfg) { c2.Misbehave = c.mis })
+			p2 := pin(goodPIN)
+			defer p2.Destroy()
+			en, err := r.src.EnrolSigner(context.Background(), ports.SignerEnrolRequest{RPID: signRP, PIN: p2})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = r.src.SignAssert(context.Background(), ports.SignRequest{RPID: signRP, CredentialID: en.CredentialID, ClientDataHash: cdh, PIN: p2})
+			if !errors.Is(err, c.want) {
+				t.Fatalf("%v", err)
+			}
+		})
+	}
+	r := newRig(t, nil)
+	en := enrolSigner(t, r)
+	if _, err := r.src.SignAssert(context.Background(), ports.SignRequest{RPID: signRP, CredentialID: en.CredentialID, ClientDataHash: cdh[:5], PIN: p}); err == nil {
+		t.Error("a short client data hash was sent")
+	}
+	if _, err := r.src.SignAssert(context.Background(), ports.SignRequest{RPID: "ssh:other", CredentialID: en.CredentialID, ClientDataHash: cdh, PIN: p}); !errors.Is(err, ports.ErrFactorNoCredential) {
+		t.Errorf("another relying party: %v", err)
+	}
+	bad := pin("000000")
+	defer bad.Destroy()
+	if _, err := r.src.SignAssert(context.Background(), ports.SignRequest{RPID: signRP, CredentialID: en.CredentialID, ClientDataHash: cdh, PIN: bad}); !errors.Is(err, ports.ErrFactorPIN) {
+		t.Errorf("a wrong PIN: %v", err)
+	}
+}
+
+// The checkpoint credential is made with credProtect level 3 like the unlock
+// credentials, and an authenticator that does not confirm it is refused.
+//
+// spec: SPO-Xbackup-EXT-001
+func TestSignerEnrolmentRequiresCredProtect3(t *testing.T) {
+	r := newRig(t, func(c *fakeCfg) { c.Misbehave = "credProtect" })
+	p := pin(goodPIN)
+	defer p.Destroy()
+	_, err := r.src.EnrolSigner(context.Background(), ports.SignerEnrolRequest{RPID: signRP, PIN: p})
+	if !errors.Is(err, ports.ErrFactorUnsupported) {
+		t.Fatalf("an authenticator that confirms credProtect 1: %v", err)
+	}
+	r2 := newRig(t, func(c *fakeCfg) { c.Extensions = []string{"hmac-secret"} })
+	if _, err := r2.src.EnrolSigner(context.Background(), ports.SignerEnrolRequest{RPID: signRP, PIN: p}); !errors.Is(err, ports.ErrFactorCapability) {
+		t.Fatalf("an authenticator without credProtect: %v", err)
+	}
+}
+
+// The adapter refuses an assertion whose authenticator data is not the 37 fixed
+// bytes (extra bytes, extension output) and one that echoes another client data
+// hash than the one sent.
+//
+// spec: SPO-Xbackup-EXT-002
+func TestSignAssertRefusesMalformedAnswers(t *testing.T) {
+	for _, mode := range []string{"extraAuthData", "extension", "otherHash"} {
+		t.Run(mode, func(t *testing.T) {
+			r := newRig(t, nil)
+			en := enrolSigner(t, r)
+			r.run.extra = []string{"FAKEFIDO_SIGN_MISBEHAVE=" + mode}
+			p := pin(goodPIN)
+			defer p.Destroy()
+			_, err := r.src.SignAssert(context.Background(), ports.SignRequest{RPID: signRP, CredentialID: en.CredentialID, ClientDataHash: bytes.Repeat([]byte{7}, 32), PIN: p})
+			if !errors.Is(err, ports.ErrFactorMalformed) {
+				t.Fatalf("%s: %v", mode, err)
+			}
+		})
 	}
 }

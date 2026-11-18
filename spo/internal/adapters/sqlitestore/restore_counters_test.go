@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
+	"github.com/mochipool/workbench/spo/internal/domain/unlock"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
@@ -902,4 +903,50 @@ func TestAWaitingKesKeyWithOtherMaterialIsNotHeld(t *testing.T) {
 	if got.kesNext != 2 {
 		t.Fatalf("restored kes %d/%d: the next key would reuse number 1 with other material", got.kesCur, got.kesNext)
 	}
+}
+
+// A strict workspace has no recovery path, so the refusal for a destination
+// whose daily slot changed since the backup must not tell the operator to
+// present a recovery key it cannot have. It names what is true, and
+// --accept-lower-counters is still not honoured.
+//
+// spec: SPO-Xbackup-PRE-015
+func TestStrictDestinationWhoseDailySlotChangedHasNoRecoveryAdvice(t *testing.T) {
+	path, _, f, _ := standardThenRotated(t, unlock.Strict)
+	s, err := openHW(path, f, "devA", "1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	putCounters(t, s, "poolA", cstate{issue: 3, kesCur: 1, kesNext: 2})
+	backup := filepath.Join(t.TempDir(), "strict.bak")
+	if err := s.Backup(ctx, backup); err != nil {
+		t.Fatal(err)
+	}
+	putCounters(t, s, "poolA", cstate{issue: 11, kesCur: 1, kesNext: 2})
+	if _, _, err := s.Rotate(ctx, strictPlan(t, s, f, "devB", "5678")); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	before, _ := os.ReadFile(path)
+	for _, accept := range []bool{false, true} {
+		err := RestoreWithFactors(backup, path, f.inputs("devA", "1234"), RestoreOptions{Overwrite: true, AllowOlder: true, AcceptLowerCounters: accept})
+		if !errors.Is(err, ErrCountersNeedCredential) || errors.Is(err, ErrCountersUnknown) {
+			t.Fatalf("accept=%v: %v", accept, err)
+		}
+		msg := err.Error()
+		for _, bad := range []string{"--recovery-key-in-fd", "--current-recovery-device", "--recovery-pin-fd", "--accept-lower-counters"} {
+			if strings.Contains(msg, bad) {
+				t.Errorf("accept=%v: a strict workspace has no recovery path but the refusal says %q: %v", accept, bad, err)
+			}
+		}
+		for _, want := range []string{"strict", "no recovery", "enrolled authenticators", "move workspace.spo aside", "on chain"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("accept=%v: the refusal lacks %q: %v", accept, want, err)
+			}
+		}
+		if after, _ := os.ReadFile(path); !bytes.Equal(before, after) {
+			t.Fatal("the destination changed")
+		}
+	}
+	noRestoreLeftovers(t, path)
 }

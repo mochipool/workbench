@@ -91,6 +91,56 @@ type credAuthData struct {
 	credID      []byte
 	credProtect int
 	hmacSecret  bool
+	// x and y are the coordinates of the ES256 public key (COSE, RFC 9053).
+	x, y []byte
+}
+
+// parseCOSEES256 reads an ES256 COSE key: kty 2 (EC2), alg -7, crv 1 (P-256) and
+// the two 32-byte coordinates.
+func parseCOSEES256(raw cbor.RawMessage) (x, y []byte, err error) {
+	var m map[int]any
+	if err := dec.Unmarshal(raw, &m); err != nil {
+		return nil, nil, malformed("credential public key is not a COSE map")
+	}
+	num := func(k int) (int64, bool) {
+		switch v := m[k].(type) {
+		case int64:
+			return v, true
+		case uint64:
+			return int64(v), true
+		}
+		return 0, false
+	}
+	if kty, ok := num(1); !ok || kty != 2 {
+		return nil, nil, malformed("credential public key is not an EC2 key")
+	}
+	if alg, ok := num(3); !ok || alg != -7 {
+		return nil, nil, malformed("credential public key is not ES256")
+	}
+	if crv, ok := num(-1); !ok || crv != 1 {
+		return nil, nil, malformed("credential public key is not on P-256")
+	}
+	x, _ = m[-2].([]byte)
+	y, _ = m[-3].([]byte)
+	if len(x) != 32 || len(y) != 32 {
+		return nil, nil, malformed("credential public key coordinates are not 32 bytes")
+	}
+	return x, y, nil
+}
+
+// signAuthData reads the authenticator data of a signing assertion: exactly the
+// 37 fixed bytes (relying-party hash, flags, counter), with no attested
+// credential data and no extension output, so that what the authenticator
+// signed is the data shown and an SSH signature can be rebuilt from it.
+func signAuthData(ad []byte, rpID string) (flags byte, counter uint32, err error) {
+	f, _, err := header(ad, rpID)
+	if err != nil {
+		return 0, 0, err
+	}
+	if len(ad) != 37 || f&(flagAT|flagED) != 0 {
+		return 0, 0, malformed("a signing assertion carries more than the 37 fixed bytes")
+	}
+	return f, binary.BigEndian.Uint32(ad[33:37]), nil
 }
 
 // parseCredAuthData reads the authenticator data of a makeCredential: the
@@ -114,10 +164,13 @@ func parseCredAuthData(ad []byte, rpID string) (credAuthData, error) {
 	}
 	out := credAuthData{flags: f, credID: append([]byte(nil), rest[:n]...)}
 	rest = rest[n:]
-	var key cbor.RawMessage // the COSE public key: one item, skipped
+	var key cbor.RawMessage // the COSE public key: one item
 	if rest, err = dec.UnmarshalFirst(rest, &key); err != nil {
 		return credAuthData{}, malformed("credential public key")
 	}
+	// An unlock credential's key is never used, so a key that is not ES256 only
+	// leaves x and y empty; EnrolSigner refuses an empty key.
+	out.x, out.y, _ = parseCOSEES256(key)
 	if f&flagED == 0 {
 		if len(rest) != 0 {
 			return credAuthData{}, malformed("trailing bytes after the credential data")
