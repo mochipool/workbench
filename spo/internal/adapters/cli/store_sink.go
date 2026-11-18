@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mochipool/workbench/spo/internal/app/backupsink"
+	"github.com/mochipool/workbench/spo/internal/domain/checkpoint"
 	"github.com/mochipool/workbench/spo/internal/platform/textsafe"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
@@ -85,7 +86,7 @@ func (a *app) workspaceInfo() (WorkspaceInfo, error) {
 	return a.d.Sealed.Describe(a.workspaceFile())
 }
 
-func (a *app) backupToSink(cmd *cobra.Command, url string) (err error) {
+func (a *app) backupToSink(cmd *cobra.Command, url string, noCheckpoint bool, cf *checkpointFlags) (err error) {
 	if a.upstream {
 		return errors.New(errUpstreamStore)
 	}
@@ -116,9 +117,18 @@ func (a *app) backupToSink(cmd *cobra.Command, url string) (err error) {
 		return err
 	}
 	defer s.closeInto(&err)
-	res, err := backupsink.Push(ctx, backupsink.PushInput{
+	defer a.destroyPINs()
+	// the checkpoint key, when the workspace has one (stage 2): nothing is asked of
+	// its authenticator until the object is in the sink and has been read back
+	var sg *backupsink.Signing
+	if !noCheckpoint {
+		if sg, err = a.signingFor(ctx, s, cf); err != nil {
+			return err
+		}
+	}
+	in := backupsink.PushInput{
 		Kind: sink.Kind, Writer: sink.Writer, Reader: sink.Reader, Probe: sink.Probe, Scratch: scratch,
-		Policy: info.Policy, WorkspaceID: info.ID,
+		Policy: info.Policy, WorkspaceID: info.ID, SlotTable: a.slotTableFn(),
 		Backup: func(ctx context.Context, dest string) (backupsink.Head, error) {
 			h, err := s.Sealed.BackupWithHead(ctx, dest)
 			return toSinkHead(h), err
@@ -128,8 +138,18 @@ func (a *app) backupToSink(cmd *cobra.Command, url string) (err error) {
 			return err
 		},
 		Inspect: a.inspectFn(),
-	})
+	}
+	if sg != nil {
+		in.Checkpoint = &backupsink.CheckpointPush{Writer: sink.Writer, Reader: sink.Reader, Signing: *sg}
+	}
+	res, err := backupsink.Push(ctx, in)
 	if err != nil {
+		if res.Name != "" && errors.Is(err, backupsink.ErrNotSigned) {
+			// the object is in the sink and verified: say so and give its exact pin
+			fmt.Fprintf(a.d.Out, "Backup uploaded and verified by reading it back (%d bytes), but NOT signed.\n", res.Size)
+			fmt.Fprintf(a.d.Out, "Object: %s (sink %s)\n", res.Name, safe(url))
+			fmt.Fprintf(a.d.Out, "Pin: %s\n", res.Pin)
+		}
 		return safeError(err)
 	}
 	switch {
@@ -145,19 +165,41 @@ func (a *app) backupToSink(cmd *cobra.Command, url string) (err error) {
 	fmt.Fprintf(a.d.Out, "Backup head: sequence %d, mac %s\n", res.Pin.Seq, hex.EncodeToString(res.Pin.HeadMAC))
 	fmt.Fprintf(a.d.Out, "Pin: %s\n", res.Pin)
 	fmt.Fprintln(a.d.Out, pinAdvice)
+	switch {
+	case res.Checkpoint != nil && res.Checkpoint.Existing:
+		fmt.Fprintf(a.d.Out, "A valid checkpoint was already in the sink (%s); nothing was signed.\n", safe(res.Checkpoint.Name))
+	case res.Checkpoint != nil:
+		fmt.Fprintf(a.d.Out, "Checkpoint signed and put: %s\n", safe(res.Checkpoint.Name))
+	case noCheckpoint && sg == nil:
+		if rec, lerr := (ckRecords{s.Store}).Load(ctx); lerr == nil && rec != nil {
+			fmt.Fprintln(a.d.Out, "No checkpoint was made (--no-checkpoint).")
+		}
+	}
+	if sg != nil {
+		fmt.Fprintf(a.d.Out, "Long-lived pin: %s\n", checkpoint.LongPin{WorkspaceID: res.Pin.WorkspaceID, KeyHash: sg.Record.Hash()})
+		fmt.Fprintf(a.d.Out, "Checkpoint key hash %s, enrolled %s.\n", hex.EncodeToString(sg.Record.Hash()), sg.Record.Enrolled.UTC().Format("2006-01-02T15:04:05Z"))
+		fmt.Fprintln(a.d.Out, longPinAdvice)
+		fmt.Fprintln(a.d.Out, recordPinAdvice)
+	}
 	return nil
 }
 
 func (a *app) storeBackups() *cobra.Command {
-	var sinkURL string
+	var sinkURL, pinText string
+	var below uint64
 	cmd := &cobra.Command{
-		Use:   "backups --sink <URL>",
+		Use:   "backups --sink <URL> [--pin PIN] [--below SEQ]",
 		Short: "List the backups of this workspace in a sink",
 		Long: `List the backups of this workspace that a sink holds, newest first: head
 sequence, size and object name. A name under the workspace's prefix that does not
 parse as a backup is listed as unrecognised and is never trusted. Nothing is
 downloaded and no passphrase is asked. The pin of a backup is not stored in the
-sink: it is the one store backup printed.`,
+sink: it is the one store backup printed.
+
+Each backup shows whether a checkpoint sits beside it. With --pin
+<workspace id>:ck:<checkpoint key hash> the checkpoints (at most 16, newest
+first) are also read and verified against the key hash, and each line says
+whether it verifies. A checkpoint that is listed is not thereby trusted.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if a.upstream {
@@ -178,11 +220,44 @@ sink: it is the one store backup printed.`,
 			if err != nil {
 				return safeError(err)
 			}
+			if cmd.Flags().Changed("below") {
+				kept := res.Backups[:0]
+				for _, b := range res.Backups {
+					if b.Seq < below {
+						kept = append(kept, b)
+					}
+				}
+				res.Backups = kept
+			}
+			var status map[string]backupsink.CheckpointStatus
+			if pinText != "" {
+				pin, perr := checkpoint.ParseLongPin(pinText)
+				if perr != nil {
+					return perr
+				}
+				if !bytesEqual(pin.WorkspaceID, info.ID) {
+					return errors.New("the pin names another workspace than this one")
+				}
+				status = backupsink.CheckPinned(cmd.Context(), sink.Reader, res, pin)
+			}
 			if len(res.Backups) == 0 {
 				fmt.Fprintf(a.d.Out, "No backups of this workspace in %s.\n", safe(sinkURL))
 			}
 			for _, b := range res.Backups {
-				fmt.Fprintf(a.d.Out, "sequence %d  %d bytes  sha256 %s  %s\n", b.Seq, b.Size, hex.EncodeToString(b.SHA256), safe(b.Name))
+				cp := "no checkpoint"
+				if b.HasCheckpoint {
+					cp = "checkpoint present"
+					if st, ok := status[b.Name]; ok && st.Examined {
+						if st.Err != nil {
+							cp = "checkpoint present, does NOT verify (" + textsafe.Text(st.Err.Error()) + ")"
+						} else {
+							cp = fmt.Sprintf("checkpoint verifies (sequence %d)", st.Seq)
+						}
+					} else if pinText != "" {
+						cp = "checkpoint present, not read (limit of 16)"
+					}
+				}
+				fmt.Fprintf(a.d.Out, "sequence %d  %d bytes  sha256 %s  %s  [%s]\n", b.Seq, b.Size, hex.EncodeToString(b.SHA256), safe(b.Name), cp)
 			}
 			for _, n := range res.Unrecognised {
 				fmt.Fprintf(a.d.Out, "unrecognised (ignored): %s\n", safe(n))
@@ -191,13 +266,23 @@ sink: it is the one store backup printed.`,
 		},
 	}
 	cmd.Flags().StringVar(&sinkURL, "sink", "", "the sink: s3://bucket/prefix or dir:/absolute/path")
+	cmd.Flags().StringVar(&pinText, "pin", "", "the long-lived pin <workspace id>:ck:<checkpoint key hash>: also verify the checkpoints against it")
+	cmd.Flags().Uint64Var(&below, "below", 0, "list only backups below this head sequence (start below the ones already looked at)")
 	return cmd
 }
+
+func bytesEqual(a, b []byte) bool { return hex.EncodeToString(a) == hex.EncodeToString(b) }
 
 // restoreFromSink downloads the pinned backup and runs the existing restore on
 // it. run is that restore, given the path of the verified file, a label and the
 // file's SHA-256.
-func (a *app) restoreFromSink(cmd *cobra.Command, url, pinText string, run func(path, label string, sha []byte) error) error {
+func (a *app) restoreFromSink(cmd *cobra.Command, url, pinText string, below *uint64, run func(path, label string, sha []byte) error) error {
+	if checkpoint.IsLongPin(pinText) {
+		return a.restoreLatestFromSink(cmd, url, pinText, below, run)
+	}
+	if below != nil {
+		return errors.New("--below goes with the long-lived pin <workspace id>:ck:<key hash>")
+	}
 	pin, err := backupsink.ParsePin(pinText)
 	if err != nil {
 		return err
@@ -225,4 +310,67 @@ func (a *app) restoreFromSink(cmd *cobra.Command, url, pinText string, run func(
 			return err
 		},
 	}))
+}
+
+// restoreLatestFromSink restores the newest backup whose checkpoint verifies
+// against the long-lived pin.
+func (a *app) restoreLatestFromSink(cmd *cobra.Command, url, pinText string, below *uint64, run func(path, label string, sha []byte) error) error {
+	pin, err := checkpoint.ParseLongPin(pinText)
+	if err != nil {
+		return err
+	}
+	sink, err := a.openSink(cmd.Context(), url)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(a.workspace, 0o700); err != nil {
+		return err
+	}
+	scratch, err := a.openScratch()
+	if err != nil {
+		return err
+	}
+	if a.d.Sealed.InspectFacts == nil {
+		return errors.New("this build cannot read the slot table of a backup")
+	}
+	in := backupsink.LatestInput{
+		Reader: sink.Reader, Ranger: sink.Ranger, Lister: sink.Lister, Scratch: scratch, Pin: pin,
+		Inspect: a.inspectFn(),
+		Facts: func(path string) (backupsink.Facts, error) {
+			f, err := a.d.Sealed.InspectFacts(path)
+			return backupsink.Facts{WorkspaceID: f.WorkspaceID, Head: backupsink.Head{Seq: f.Head.Seq, MAC: f.Head.MAC}, SlotTable: f.SlotTable}, err
+		},
+		Report: func(name, why string) {
+			if name == "" {
+				fmt.Fprintf(a.d.Err, "note: %s\n", textsafe.Text(why))
+				return
+			}
+			fmt.Fprintf(a.d.Err, "skipped %s: %s\n", safe(name), textsafe.Text(why))
+		},
+		Restore: func(name, path string, sha []byte) error {
+			// said before anything is installed, with the sequence about to be restored
+			seq := uint64(0)
+			if _, sq, _, ok := backupsink.ParseName(name); ok {
+				seq = sq
+			}
+			fmt.Fprintf(a.d.Out, "Restoring sequence %d: its checkpoint verified against the pinned key.\n", seq)
+			if !pin.HasMin {
+				fmt.Fprintf(a.d.Out, "This pin has no sequence: it proves this backup is authentic, not that sequence %d is the newest the sink ever held. Add :<sequence> to the pin to refuse anything older.\n", seq)
+			}
+			err := run(path, "the sink object "+name, sha)
+			if err != nil && keepsDownload(err) {
+				return backupsink.NotAboutTheFile(err)
+			}
+			return err
+		},
+	}
+	if below != nil {
+		in.Below, in.HasBelow = *below, true
+	}
+	res, err := backupsink.FetchLatest(cmd.Context(), in)
+	if err != nil {
+		return safeError(err)
+	}
+	fmt.Fprintf(a.d.Out, "The checkpoint of %s verified against the pinned key: sequence %d, signed %s.\n", safe(res.Name), res.Statement.Seq, res.Statement.Time.UTC().Format("2006-01-02T15:04:05Z"))
+	return nil
 }

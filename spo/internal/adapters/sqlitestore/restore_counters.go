@@ -13,6 +13,7 @@ import (
 
 	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
+	"github.com/mochipool/workbench/spo/internal/domain/unlock"
 	"github.com/mochipool/workbench/spo/internal/platform/seal"
 	"github.com/mochipool/workbench/spo/internal/ports"
 	"github.com/mochipool/workbench/spo/internal/ports/labels"
@@ -442,14 +443,24 @@ const (
 var ErrCountersNeedCredential = errors.New("sqlitestore: the counters of the workspace to be replaced cannot be compared")
 
 func needCredential(detail string, cause error) error {
-	return needCredentialErr(detail, cause)
+	return needCredentialErr(detail, cause, false)
 }
 
-func needCredentialErr(detail string, cause error) error {
-	if cause != nil {
-		return fmt.Errorf("%w: %s. Present that workspace's own recovery key (--recovery-key-in-fd N, or answer the prompt; under hardware also --current-recovery-device and --recovery-pin-fd). If its credentials are lost, move workspace.spo aside and restore into the empty directory: nothing can then be compared, so check every pool's counter on chain before issuing an operational certificate; nothing was replaced: %w", ErrCountersNeedCredential, detail, cause)
+const (
+	needRecoveryAdvice = "Present that workspace's own recovery key (--recovery-key-in-fd N, or answer the prompt; under hardware also --current-recovery-device and --recovery-pin-fd). If its credentials are lost, move workspace.spo aside and restore into the empty directory: nothing can then be compared, so check every pool's counter on chain before issuing an operational certificate; nothing was replaced"
+	// A strict workspace has no recovery path, so it cannot be told to present one.
+	needStrictAdvice = "The workspace to be replaced is strict: it has no recovery path, so it can be opened only with one of its own enrolled authenticators, and the one presented for the backup is not one of them. Present an authenticator that is enrolled in both (--fido2-device), if there is one. If none is left, the workspace cannot be compared: move workspace.spo aside, restore into the empty directory and check every pool's counter on chain before issuing an operational certificate; nothing was replaced"
+)
+
+func needCredentialErr(detail string, cause error, strict bool) error {
+	advice := needRecoveryAdvice
+	if strict {
+		advice = needStrictAdvice
 	}
-	return fmt.Errorf("%w: %s. Present that workspace's own recovery key (--recovery-key-in-fd N, or answer the prompt; under hardware also --current-recovery-device and --recovery-pin-fd). If its credentials are lost, move workspace.spo aside and restore into the empty directory: nothing can then be compared, so check every pool's counter on chain before issuing an operational certificate; nothing was replaced", ErrCountersNeedCredential, detail)
+	if cause != nil {
+		return fmt.Errorf("%w: %s. %s: %w", ErrCountersNeedCredential, detail, advice, cause)
+	}
+	return fmt.Errorf("%w: %s. %s", ErrCountersNeedCredential, detail, advice)
 }
 
 // isStructural reports whether err says the file itself is unusable: not a
@@ -511,11 +522,15 @@ func openDestinationReadOnly(ctx context.Context, dest string, cred credential, 
 		how, e := classify(err)
 		return nil, false, how, e
 	}
+	pol, _, derr := Describe(dest)
+	if derr == nil && pol == unlock.Strict {
+		// no recovery path exists to present, whatever CurrentRecovery holds
+		return nil, false, openNeedsCredential, needCredentialErr("the credential presented for the backup does not open the workspace to be replaced (its key slots changed since the backup)", nil, true)
+	}
 	in := o.CurrentRecovery
 	if in == nil || (in.Recovery == nil && in.Source == nil) {
 		return nil, false, openNeedsCredential, needCredential("the credential presented for the backup does not open the workspace to be replaced (its key slots changed since the backup)", nil)
 	}
-	pol, _, derr := Describe(dest)
 	if derr != nil {
 		how, e := classify(derr)
 		return nil, false, how, e

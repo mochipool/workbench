@@ -34,7 +34,7 @@ import, which only reads it. Export writes the files out again for the upstream
 scripts with every signing key encrypted in upstream's gpg form; it is recorded
 in the workspace's audit log.`,
 	}
-	c.AddCommand(a.workspaceImportCommand(), a.workspaceExportCommand(), a.workspaceMigrateCommand(), a.workspaceSlotCommand(), a.workspacePolicyCommand(), a.workspaceRotateCommand())
+	c.AddCommand(a.workspaceImportCommand(), a.workspaceExportCommand(), a.workspaceMigrateCommand(), a.workspaceSlotCommand(), a.workspacePolicyCommand(), a.workspaceRotateCommand(), a.workspaceCheckpointKeyCommand())
 	return c
 }
 

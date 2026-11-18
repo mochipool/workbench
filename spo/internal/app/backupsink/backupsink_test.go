@@ -36,6 +36,8 @@ type memSink struct {
 	hasLies   bool
 	getErrs   int  // the next Gets fail (a read-back interrupted)
 	corrupt   bool // a store that keeps different bytes than it was given
+	cpPuts    int
+	getLog    []string // names of every Get
 }
 
 func newMem(kind ports.SinkKind) *memSink {
@@ -56,8 +58,11 @@ func (m *memSink) Put(_ context.Context, name string, r io.Reader, size int64) e
 	if int64(len(b)) != size {
 		return errors.New("size")
 	}
-	// nothing may be put that was not hashed from the verified local file
-	if _, _, want, ok := ParseName(name); !ok || hex.EncodeToString(want) != sum(b) {
+	// nothing may be put that was not hashed from the verified local file; a
+	// checkpoint is the one other kind of object, named beside a backup
+	if strings.HasSuffix(name, ".checkpoint") {
+		m.cpPuts++
+	} else if _, _, want, ok := ParseName(name); !ok || hex.EncodeToString(want) != sum(b) {
 		return errors.New("test sink: the bytes put are not the bytes the name hashes")
 	}
 	if old, ok := m.objs[name]; ok && !m.overwrite {
@@ -75,6 +80,7 @@ func (m *memSink) Put(_ context.Context, name string, r io.Reader, size int64) e
 
 func (m *memSink) Get(_ context.Context, name string) (io.ReadCloser, error) {
 	m.gets++
+	m.getLog = append(m.getLog, name)
 	if m.getErrs > 0 {
 		m.getErrs--
 		return nil, errors.New("connection reset")
@@ -169,6 +175,8 @@ type rig struct {
 	restore  error
 	noRange  bool
 	scratch  *tScratch
+	// cp, when set, makes push sign a checkpoint after the object is verified.
+	cp *CheckpointPush
 }
 
 func newRig(t *testing.T, kind ports.SinkKind, policy string) *rig {
@@ -192,6 +200,10 @@ func (r *rig) push() (PushResult, error) {
 		},
 		Verify:  func(string) error { r.verifies++; return r.verify },
 		Inspect: inspectFake,
+		SlotTable: func(string) ([]byte, error) {
+			return HashBytes([]byte("slot table")), nil
+		},
+		Checkpoint: r.cp,
 	})
 }
 

@@ -15,6 +15,11 @@
 // number of bytes it read from standard input (never their content) and whether
 // it runs as the leader of its own session (no controlling terminal).
 //
+// Signing: a credential has a P-256 key derived from the seed and its id (a real
+// ES256 key pair). The makeCredential answer carries its public key, and an
+// assertion made without -h signs the authenticator data and the client data hash
+// with it, so a signature verifies with the standard library.
+//
 // hmac-secret: the credential has two secrets, one for assertions that are user
 // verified and one for assertions that are not (CTAP 2.1, section 12.5), both
 // HMAC-SHA-256 of the credential id under the seed; the output for a salt is
@@ -46,7 +51,10 @@ package main
 
 import (
 	"bufio"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
@@ -316,6 +324,18 @@ func credValid(rpID string, id []byte) bool {
 	return hmac.Equal(id[32:], mac(seed(), []byte("cred"), id[:32], []byte(rpID))[:16])
 }
 
+// signingKey is the P-256 key of a credential, derived from the seed and the
+// credential id so that the public key the makeCredential answer carries is the
+// one an assertion signs with (a real ES256 key pair, for the signing tests).
+func signingKey(id []byte) *ecdsa.PrivateKey {
+	for i := 0; ; i++ {
+		d := mac(seed(), []byte("es256-key"), id, []byte{byte(i)})
+		if k, err := ecdsa.ParseRawPrivateKey(elliptic.P256(), d); err == nil {
+			return k
+		}
+	}
+}
+
 func secretFor(id []byte, uv bool) []byte {
 	label := "nouv"
 	if uv {
@@ -456,7 +476,8 @@ func cred(args []string) {
 	ad = append(ad, make([]byte, 16)...) // aaguid
 	ad = binary.BigEndian.AppendUint16(ad, uint16(len(id)))
 	ad = append(ad, id...)
-	key, _ := cbor.Marshal(map[int]any{1: 2, 3: -7, -1: 1, -2: make([]byte, 32), -3: make([]byte, 32)})
+	pub, _ := signingKey(id).PublicKey.Bytes() // 0x04 || X || Y
+	key, _ := cbor.Marshal(map[int]any{1: 2, 3: -7, -1: 1, -2: pub[1:33], -3: pub[33:65]})
 	ad = append(ad, key...)
 	if len(ext) > 0 {
 		e, _ := cbor.Marshal(ext)
@@ -564,7 +585,32 @@ func assert(args []string) {
 	}
 	w := out(o)
 	defer w.Close()
-	fmt.Fprintf(w, "%s\n%s\n%s\n%s\n", lines[0], rpID, wrap(ad), b64([]byte("sig")))
+	// FAKEFIDO_SIGN_MISBEHAVE is read by this stand-in only, to make a plain
+	// (signing) assertion malformed in one way: extraAuthData (38 bytes),
+	// extension (extension output after the 37 bytes, ED flag set) or otherHash
+	// (the echoed client data hash is not the one sent).
+	echoed := lines[0]
+	if !o.flags['h'] {
+		switch os.Getenv("FAKEFIDO_SIGN_MISBEHAVE") {
+		case "extraAuthData":
+			ad = append(ad, 0xAA)
+		case "extension":
+			ad[32] |= flagED
+			e, _ := cbor.Marshal(map[string]any{"x": 1})
+			ad = append(ad, e...)
+		case "otherHash":
+			echoed = b64(make([]byte, 32))
+		}
+	}
+	sig := []byte("sig")
+	if !o.flags['h'] {
+		// a plain assertion: the authenticator signs authenticator data || client
+		// data hash with the credential's key (CTAP2 getAssertion)
+		cdh := b64d(lines[0])
+		digest := sha256.Sum256(append(append([]byte(nil), ad...), cdh...))
+		sig, _ = ecdsa.SignASN1(rand.Reader, signingKey(id), digest[:])
+	}
+	fmt.Fprintf(w, "%s\n%s\n%s\n%s\n", echoed, rpID, wrap(ad), b64(sig))
 	if withHMAC {
 		sec := secretFor(id, uv)
 		if mis("otherSecret") {

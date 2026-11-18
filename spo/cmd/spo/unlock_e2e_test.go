@@ -88,8 +88,8 @@ func newFidoRig(t *testing.T, seed, misbehave string) *fidoRig {
 	t.Helper()
 	tmp := t.TempDir()
 	r := &fidoRig{dir: buildFakeFido(t), cfg: filepath.Join(tmp, "fakefido.json"), log: filepath.Join(tmp, "calls.log")}
-	c := map[string]any{"seed": seed, "devices": []string{"/dev/fake-hidraw0", "/dev/fake-hidraw1"}, "pin": fidoPIN,
-		"pins":     map[string]string{"/dev/fake-hidraw1": fidoPIN2},
+	c := map[string]any{"seed": seed, "devices": []string{"/dev/fake-hidraw0", "/dev/fake-hidraw1", "/dev/fake-hidraw2"}, "pin": fidoPIN,
+		"pins":     map[string]string{"/dev/fake-hidraw1": fidoPIN2, "/dev/fake-hidraw2": fidoPIN3},
 		"versions": []string{"U2F_V2", "FIDO_2_0", "FIDO_2_1"}, "extensions": []string{"credProtect", "hmac-secret"},
 		"misbehave": misbehave, "log": r.log}
 	raw, _ := json.Marshal(c)

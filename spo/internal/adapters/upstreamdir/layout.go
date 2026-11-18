@@ -77,6 +77,7 @@ var layout = map[ports.Kind]func(r ports.NamedRef) string{
 	ports.TailcatNodeKey: func(r ports.NamedRef) string { return r.Name + ".tailcat.nodekey" },
 	ports.TailcatPSK:     func(r ports.NamedRef) string { return r.Name + ".tailcat.psk" },
 	ports.TailcatAddr:    func(r ports.NamedRef) string { return r.Name + ".tailcat.addr" },
+	ports.CheckpointKey:  func(r ports.NamedRef) string { return r.Name + ".checkpoint.key" },
 	// spec: SPO-Xparty-SEC-003, SPO-Xparty-OUT-004
 	ports.MultisigCoordinator: func(r ports.NamedRef) string { return r.Name + ".multisig.coordinator" },
 	ports.MultisigSigner:      func(r ports.NamedRef) string { return r.Name + ".multisig.signer" },

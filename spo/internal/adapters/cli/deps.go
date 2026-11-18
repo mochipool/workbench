@@ -38,6 +38,9 @@ type Deps struct {
 	// Factors is the FIDO2 factor source (ADR 0011). Nil where the binary cannot
 	// reach one: a command that needs a factor then fails before any prompt.
 	Factors ports.FactorSource
+	// Signer is the FIDO2 signing capability of the checkpoint key (ADR 0012
+	// stage 2). Nil means Factors is asked for it (the libfido2 source has both).
+	Signer ports.SignatureFactor
 	// NodeAddressWarning returns the warning to print for a node address that
 	// is plain TCP to a non-loopback host, "" otherwise. Nil: no warning.
 	NodeAddressWarning func(address string) string
@@ -301,12 +304,29 @@ type SealedOps struct {
 	// workspace file without any key (what a backup says about itself). Nil
 	// where it is not available.
 	InspectHead func(path string) (id []byte, h Head, err error)
+	// InspectFacts reads, without any key, what a checkpoint statement names about
+	// a backup or workspace file: workspace id, head and slot-table hash. Nil where
+	// it is not available.
+	InspectFacts func(path string) (BackupFacts, error)
 	// OpenFactors unlocks through a fido2-hmac or composite slot.
 	OpenFactors func(path string, in FactorOpen, o OpenOptions) (SealedStore, error)
 	// VerifyFileFactors verifies a workspace or backup file read-only, unlocking
 	// through its FIDO2 slots (a hardware workspace has no passphrase). deep also
 	// decrypts every record.
 	VerifyFileFactors func(path string, in FactorOpen, deep bool) (VerifyReport, error)
+}
+
+// BackupFacts is what a file says about itself without a key.
+type BackupFacts struct {
+	WorkspaceID []byte
+	Head        Head
+	SlotTable   []byte
+}
+
+// CheckpointFacts is the optional interface of a SealedStore that lists the
+// credential ids of its daily slots (the checkpoint key may not be one).
+type CheckpointFacts interface {
+	DailyCredentialIDs(ctx context.Context) ([][]byte, error)
 }
 
 // WorkspaceInfo is the policy and the slot table of a workspace file.

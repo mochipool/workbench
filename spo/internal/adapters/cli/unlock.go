@@ -106,6 +106,10 @@ func (a *app) pinCallback(role string, device func() string, fd func() int, fres
 						flag = "--recovery-pin-fd N"
 					case "new-daily":
 						flag = "--new-fido2-pin-fd N"
+					case "checkpoint":
+						flag = "--checkpoint-pin-fd N"
+					case "old-checkpoint":
+						flag = "--old-checkpoint-pin-fd N"
 					}
 					return nil, fmt.Errorf("no terminal to ask for the %s authenticator PIN on; give it on a file descriptor with %s", role, flag)
 				}

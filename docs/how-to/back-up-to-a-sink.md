@@ -1,8 +1,8 @@
 # Back up to a sink: a directory or an S3 bucket
 
-Reference: [`spo-cli.md`](../reference/spo-cli.md#store-backup). Background: [ADR 0012](../explanation/adr/0012-server-backup-and-deployment.md), decisions 4 and 9, stage 1. Spec: [Xbackup](../../spec/extensions/Xbackup.md).
+Reference: [`spo-cli.md`](../reference/spo-cli.md#store-backup). Background: [ADR 0012](../explanation/adr/0012-server-backup-and-deployment.md), decisions 4, 9 and 13, stages 1 and 2. Spec: [Xbackup](../../spec/extensions/Xbackup.md).
 
-**Nothing here has been run against a real bucket.** The S3 adapter was tested only against an in-process fake on 127.0.0.1. Treat the first real upload as a test: do it with a throw-away workspace, then restore it.
+**Nothing here has been run against a real bucket or a real authenticator.** The S3 adapter was tested only against an in-process fake on 127.0.0.1, and the checkpoint key only against a stand-in for the libfido2 tools. Treat the first real upload, and the first real checkpoint signature, as a test: do it with a throw-away workspace, then restore it.
 
 The file that goes to the sink is the sealed backup `spo store backup` already makes. The tool adds no encryption. A sink holder sees the workspace id, the file size, the object name and the time, and can try to open the file only with what unlocks the workspace.
 
@@ -84,6 +84,86 @@ spo -C newws store restore --sink s3://my-backup-bucket/mainnet --pin <the pin> 
 The tool downloads the object the pin names to a private partial file, and uses it only when its SHA-256, workspace id and head are exactly the pin's. Then the built restore runs on it unchanged, so all its refusals apply: a backup with a weaker policy, another workspace, an older head. A hardware backup is verified through the daily authenticator (`--fido2-device`, `--fido2-pin-fd`).
 
 `--allow-older` works with `--sink` and follows the counter rule: a restore never lowers an operational-certificate or KES counter. Whenever a workspace is being replaced and can be opened, it is opened read-only (with the credential given for the backup, or its own recovery key if that no longer opens it: `--recovery-key-in-fd`, and under hardware `--current-recovery-device` and `--recovery-pin-fd`; the recovery key is asked for only then) and, for each pool, the larger issue counter and KES counter-next are written into the restored copy before it is installed. The command lists what it carried. This also holds for a backup that contains the workspace's head, because `pool opcert issue --counter N` can lower a stored counter inside one chain. If a workspace's credentials changed and neither the backup's nor its recovery key opens it, the restore refuses and names those flags; `--accept-lower-counters` is not honoured for that. If its credentials are lost, move `workspace.spo` aside and restore into the empty directory: no comparison is possible then, so check every pool's counter on chain before issuing a certificate. `--accept-lower-counters` is only for a workspace file that is unusable. A file that does not parse or fails verification compares nothing; replacing a file that is not a workspace at all (`--allow-other-workspace`) needs `--allow-weaker-policy` and `--accept-lower-counters` together, and the first refusal names both. A file that unlocks but is older than its head file (rolled back, or someone rewrote the head file) still has its own counters carried as a floor, with a warning that the true counters may be higher: check every pool's counter on chain before issuing a certificate. The refusal for a changed credential is always a refusal, also without `--allow-older` and also for a backup that contains the workspace's head, because `pool opcert issue --counter N` can lower a counter inside one chain.
+
+## The checkpoint key and the long-lived pin
+
+The pin above fixes one exact file, so it has to be written down again after every backup. A **checkpoint key** lets you keep one pin that does not change and still restore the newest authentic backup from a sink nobody trusts.
+
+The checkpoint key is a FIDO2 credential on an authenticator of yours, used as an OpenSSH security-key signing key (`sk-ecdsa-sha2-nistp256@openssh.com`). After a backup is in the sink and has been read back, the key signs a short statement of it (workspace id, head sequence and MAC, hash of the slot table, SHA-256 and size of the file, time, key hash). The statement and its signature go to the sink as `<object name>.checkpoint`. The signature is a standard SSH signature (`PROTOCOL.sshsig`).
+
+### Enrol the key
+
+```
+spo -C ws workspace checkpoint-key enroll --checkpoint-device /dev/hidraw3
+```
+
+The authenticator asks for its PIN and a touch. The command prints the key hash, the SSH public key line and the long-lived pin. Rules:
+
+* The checkpoint authenticator is **not the daily authenticator** of any slot. The command refuses the token the session unlocked with, after resolving both (a missing `--fido2-device` auto-picks a token, and a path with symbolic links is followed), and before it makes a credential it asks the candidate token, without a touch, whether it holds any daily slot's credential, and refuses if it does. Under `standard` there is no daily credential, so only the first rule applies. The probe has not been run on a real authenticator.
+* It **may be the recovery authenticator** of a `hardware` workspace. The trade-off is yours: the recovery token is then used at every backup (a PIN and a touch each time), and a backup machine that holds it holds the recovery composite's second factor. A token kept only for checkpoints costs one more token.
+* The first key needs only the unlocked workspace. **Replacing or removing** a key needs the current recovery credential under `standard` and `hardware` (`--recovery-key-in-fd`, and under `hardware` also `--recovery-device` and `--recovery-pin-fd`). A `strict` workspace has no recovery path, so it needs a signature by the existing key on its own authenticator (`--old-checkpoint-device`, `--old-checkpoint-pin-fd`); if that token is lost, the key cannot be changed.
+* The record (public key, credential id, key hash) is sealed with everything else, in the audit chain, and a workspace rotation keeps it. `spo workspace checkpoint-key show` prints it again.
+
+The flag is `--checkpoint-device` because `--fido2-device` already names the authenticator that unlocks a `hardware` or `strict` workspace.
+
+### Back up with a checkpoint
+
+```
+spo -C ws store backup --sink s3://my-backup-bucket/mainnet --checkpoint-device /dev/hidraw3
+```
+
+The sink's own checks, the upload and the read-back come first, with no prompt for the checkpoint authenticator. Then it asks for the PIN and one touch, signs, puts `<name>.checkpoint` (never overwriting) and reads it back. It prints **both pins**:
+
+```
+Pin: <workspace id>:<head sequence>:<head hash>:<sha256 of the file>
+Long-lived pin: <workspace id>:ck:<checkpoint key hash>
+```
+
+Record the long-lived pin from the output of `checkpoint-key enroll` (or from `show`, at a time you trust the workspace), not from a later backup's output: the key record is sealed inside the workspace, and whoever holds the daily factor and a modified build could rewrite it, which would change the pin a later backup prints. The backup output shows the key hash and enrolment date beside the pin so you can compare them with what you recorded.
+
+If signing fails after the upload (a wrong PIN, an authenticator not touched in time), the command says "uploaded and verified, but NOT signed", prints the exact pin of the verified object and exits non-zero. Run it again: it finds the object, does not upload it again and signs. `--no-checkpoint` skips signing (the pin of stage 1 only). A backup to a file (`store backup FILE`) writes `FILE.checkpoint` beside it.
+
+### What each pin proves
+
+| Pin | Restore with it | What it proves |
+| --- | --- | --- |
+| `<ws>:<seq>:<head hash>:<sha256>` | That one file, no checkpoint needed | The bytes are exactly the file you pinned. Re-record it after every backup. |
+| `<ws>:ck:<key hash>` | The newest backup whose checkpoint verifies | The backup was signed by your checkpoint key, so it is a backup you made. **It does not prove the backup is the newest the sink ever held.** |
+| `<ws>:ck:<key hash>:<sequence>` | The newest verifying backup of at least that head sequence | Authentic, and not older than that sequence. |
+
+**Without a sequence the pin proves authenticity, not freshness.** A sink that hides your newer backups and offers an older checkpoint and object that were once valid is accepted by `<ws>:ck:<key hash>`, and refused by a pin whose sequence is newer. Raise the sequence in the pin from time to time (after a backup, note its head sequence from the `Pin:` line); the tests show both outcomes.
+
+### Restore from the long-lived pin
+
+```
+spo -C newws store restore --sink s3://my-backup-bucket/mainnet --pin <ws>:ck:<key hash> --network mainnet
+```
+
+The tool lists the workspace's objects and looks at the newest first, at most 16. For each it reads the checkpoint (at most 16 KiB), verifies the signature against the key hash in your pin (the public key travels inside the signature and is trusted only because its hash is the pinned one, never because it is in the sink), and checks that the statement names your workspace, a sequence at least the pin's minimum and the object's own name. Only then does it download the object, check its size, SHA-256, workspace id, head and slot-table hash against the statement and run the built restore. A candidate that fails is printed (with what the sink supplied escaped) and skipped, and nothing is downloaded for a candidate whose checkpoint does not verify. A network failure or a refusal of the restore itself stops the search: it never restores an older backup because a newer one could not be fetched. If no candidate verifies the restore is refused and nothing changes.
+
+If a checkpoint **verified** for sequence N but its object is missing from the sink or does not match, the restore **refuses and names N**: a backup that existed is not quietly replaced by an older one. Restore an older one only with `--below N` (`spo store restore ... --pin <ws>:ck:<key hash> --below N`), which you give knowing sequence N existed. A search that stops at a limit (at most 16 candidates with a checkpoint, 256 names) says how many candidates it did not examine and that a valid backup may exist below them; `--below SEQ` starts it lower, and `store backups --below SEQ` lists from there. Candidates with no checkpoint do not use up the 16. The `time` in a statement is informational: no decision uses it.
+
+`spo store backups --sink URL --pin <ws>:ck:<key hash>` shows per backup whether its checkpoint verifies. `spo store verify --backup FILE --checkpoint FILE.checkpoint --pin <ws>:ck:<key hash>` checks a local pair with no passphrase.
+
+### Check a checkpoint with stock OpenSSH
+
+The checkpoint is a statement, a blank line and an armored SSH signature. Split it, put the key line from `checkpoint-key show` in an `allowed_signers` file, and verify:
+
+```
+sed '/^$/,$d' name.checkpoint > statement              # the statement: the lines before the blank line
+sed '1,/^$/d' name.checkpoint > statement.sig          # the signature: the lines after it
+echo 'operator namespaces="spo/checkpoint/v1" sk-ecdsa-sha2-nistp256@openssh.com AAAA...' > allowed_signers
+ssh-keygen -Y verify -f allowed_signers -I operator -n spo/checkpoint/v1 -s statement.sig < statement
+```
+
+(These commands were run against a checkpoint made by the tests and printed `Good "spo/checkpoint/v1" signature`.) **Stock `ssh-keygen -Y verify` accepts a signature without the user-presence flag and without the user-verification flag** (confirmed against OpenSSH 10.6, and `allowed_signers` has no option to require them), so it proves the signature is by that key and no more. `spo store verify --checkpoint` and every restore check both flags themselves.
+
+### Limits
+
+* No real authenticator was used. The `fido2-cred` and `fido2-assert` options that make and use the credential are read from libfido2's documentation and have been run only against a stand-in; the signature layout is confirmed against stock `ssh-keygen`.
+* The key type is ECDSA P-256 (every FIDO2 authenticator has it); Ed25519 security keys are not supported.
+* A checkpoint says the backup is a backup you made; it does not say the workspace in it is good, or the newest (see the table).
+* Losing the checkpoint authenticator does not lose backups: the exact pins still restore, and the key can be replaced with the recovery credential (not under `strict`, which needs the old key).
 
 ## When a transfer is interrupted
 

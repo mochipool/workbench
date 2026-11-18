@@ -37,6 +37,11 @@ const (
 	// ProviderToken is the API token of a chain provider; the Ref name is
 	// the provider ("koios"). Secret (ADR 0004, concern N3).
 	ProviderToken Kind = "provider.token"
+	// CheckpointKey is the record of the workspace's checkpoint key (ADR 0012
+	// stage 2): the SSH public key, its credential id and key hash, in one record
+	// named "checkpoint". Not secret (Sensitive, ADR 0004): it holds a public key
+	// and a credential id, no key material.
+	CheckpointKey Kind = "workspace.checkpoint-key"
 )
 
 // Wallet artefacts (SPO-Pfiles-OUT-001, OUT-002, OUT-004). The Name of a
@@ -97,8 +102,8 @@ var kinds = map[Kind]kindInfo{
 	KesVKey: {numbered: true}, KesSKey: {secret: true, numbered: true},
 	KesCounter: {}, KesCounterNext: {},
 	OpCert: {numbered: true}, KesExpire: {},
-	ProviderToken: {secret: true},
-	AddrFile:      {}, AddrVKey: {}, AddrSKey: {secret: true}, AddrHwsFile: {},
+	ProviderToken: {secret: true}, CheckpointKey: {},
+	AddrFile: {}, AddrVKey: {}, AddrSKey: {secret: true}, AddrHwsFile: {},
 	StakingAddr: {}, StakingVKey: {}, StakingSKey: {secret: true}, StakingHwsFile: {},
 	StakingCert: {}, PaymentMnemonics: {secret: true},
 	DelegCert: {}, VoteDelegCert: {}, StakingDeregCert: {}, DRepVKey: {},
