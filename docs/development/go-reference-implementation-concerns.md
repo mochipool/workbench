@@ -241,3 +241,7 @@ These behaviours are dangerous or wrong. The Go implementation fixes them by def
 | P2 | major | **CI** runs `spec-lint`, Go tests, contract tests (X3) and `govulncheck`. | Added to `.github/workflows/validate-nix.yml`. |
 | P3 | major | **Upstream bumps** must flow through the spec, then the tests, then the code. | The release procedure in [`spec/README.md`](../../spec/README.md#absorbing-an-upstream-release) gains a final step: re-run the tests that cite changed ids. |
 | P4 | minor | **Subagent model routing.** The user's rule applies: an explicit `model` on every dispatch, `sonnet` for work, `opus` for review. | Followed. |
+
+## Stage 4 relay and mailbox (ADR 0013, proposed): state
+
+Built and reviewed, in process only: the domain package `domain/mailbox`, the relay ports `ports/relayport` with their contract suites, the directory mailbox store `adapters/mailboxstore`, the access-list loader `adapters/relayconfig`, the shared configuration parser `platform/tomlsubset`, and the fake tunnel `test/fakenet`. Not built: the session logic, the tunnel adapter, the mailbox client, the relay binary and the wiring. Nothing has run on a real tunnel or a real relay host. Open obligations for the session work package are in [`spec/extensions/Xmailbox.md`](../../spec/extensions/Xmailbox.md) ("What a session must still do"): the access re-check next to `Put`, and `MailboxAcker` for the ack handler.
