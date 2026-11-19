@@ -24,6 +24,24 @@ type Stream interface {
 	SetWriteDeadline(t time.Time) error
 }
 
+// Aborter is an optional interface of a Stream: Abort ends the stream at once
+// and abortively (a reset on a TCP-like tunnel: nothing is sent after the bytes
+// already in flight, the peer sees an error, no state is kept for a closing
+// handshake). Close is the orderly end. A caller that revokes a peer or sheds a
+// connection calls Abort through the helper below; code that only needs Close
+// does not change.
+type Aborter interface {
+	Abort() error
+}
+
+// Abort ends s abortively when it can (Aborter) and with Close when it cannot.
+func Abort(s Stream) error {
+	if a, ok := s.(Aborter); ok {
+		return a.Abort()
+	}
+	return s.Close()
+}
+
 // ErrListenerClosed is what Accept returns, wrapped or as is, once the listener
 // was closed. The server stops serving on it, without an error to report.
 var ErrListenerClosed = errors.New("the listener is closed")

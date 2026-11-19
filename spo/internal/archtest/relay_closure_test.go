@@ -3,6 +3,7 @@ package archtest
 import (
 	"encoding/json"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -23,36 +24,13 @@ var relayPackages = []string{
 	module + "/internal/app/relay",
 }
 
-// relayBanned are the import-path fragments no relay package may reach.
-var relayBanned = []string{
-	"filippo.io/age",
-	"/internal/adapters/envelope",
-	"/internal/adapters/sqlitestore",
-	"modernc.org/sqlite",
-	"/internal/platform/secret",
-	"github.com/awnumar/memguard",
-	"golang.org/x/crypto/chacha20poly1305",
-	"/internal/domain/unlock",
-	// key agreement, key encapsulation, key derivation and authenticated
-	// encryption: what an envelope is opened with, or a tunnel is keyed with
-	"crypto/ecdh",
-	"golang.org/x/crypto/curve25519",
-	"crypto/hpke",
-	"crypto/mlkem",
-	"crypto/hkdf",
-	"golang.org/x/crypto/hkdf",
-	"golang.org/x/crypto/nacl", // every package below it
-}
+// relayBanned are the import-path fragments no one of the four packages above
+// may reach: the hard bans and the primitive bans of tunnel_closure_test.go,
+// which states the rule for the whole relay side, the tunnel adapter included.
+var relayBanned = slices.Concat(relayHardBans, relayPrimitiveBans)
 
 // bannedBy returns the banned fragment that dep contains, or "".
-func bannedBy(dep string) string {
-	for _, b := range relayBanned {
-		if strings.Contains(dep, b) {
-			return b
-		}
-	}
-	return ""
-}
+func bannedBy(dep string) string { return banOf(dep, relayBanned) }
 
 // The banned list bites what it names and spares what the relay needs (ed25519
 // verification, blake2b ids, crypto/rand).

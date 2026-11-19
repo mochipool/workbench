@@ -147,6 +147,19 @@ type OutItem struct {
 	// ColdKey marks a request for a pool cold key, which no network
 	// transport carries (SPO-Xparty-PRE-004).
 	ColdKey bool `json:"coldKey,omitempty"`
+	// Refused is set when a transport answered ports.ErrRefusedByTransport for
+	// the item (SPO-Xparty-INV-040). The item stays unsent and is not offered to
+	// a transport of the same kind again until RefusedRetryAfter has passed or
+	// the operator asks (Outbox.RetryRefused); a transport of the other kind is
+	// offered it at once.
+	Refused *OutRefusal `json:"refused,omitempty"`
+}
+
+// OutRefusal records why and when a transport refused an item.
+type OutRefusal struct {
+	At     int64  `json:"at"`     // unix seconds
+	Via    string `json:"via"`    // the transport kind that refused it: "network" or "file"
+	Reason string `json:"reason"` // the transport's own text, cut to 200 bytes, control characters replaced
 }
 
 // FileName is the name the file transport gives the item
