@@ -36,29 +36,13 @@ const (
 	CodeBinding Code = 7
 )
 
-// ValidIn reports whether s is a defined status of the version. Valid is
-// ValidIn(Version1).
-func (s Status) ValidIn(version uint) bool {
-	switch version {
-	case Version1:
-		return s <= StatusUnavailable
-	case Version2:
-		return s <= StatusUnbound
-	}
-	return false
-}
+// ValidIn reports whether s is a defined status of the version. There is one
+// version, 2; every other number has no statuses. Valid is ValidIn(Version2).
+func (s Status) ValidIn(version uint) bool { return version == Version2 && s <= StatusUnbound }
 
-// ValidIn reports whether c is a defined code of the version. Valid is
-// ValidIn(Version1).
-func (c Code) ValidIn(version uint) bool {
-	switch version {
-	case Version1:
-		return c <= CodeShuttingDown
-	case Version2:
-		return c <= CodeBinding
-	}
-	return false
-}
+// ValidIn reports whether c is a defined code of the version. There is one
+// version, 2; every other number has no codes. Valid is ValidIn(Version2).
+func (c Code) ValidIn(version uint) bool { return version == Version2 && c <= CodeBinding }
 
 // RevokeStatus is the result of a Revoke: 0 recorded, 2 refused. The value 1 is
 // not used.
@@ -106,8 +90,12 @@ type AuthV2 struct {
 	Senders     []WalletKey
 }
 
-// AuthOKV2: relay to client, the limits that apply and the `until` of the
-// binding as the relay recorded it (unix seconds).
+// AuthOKV2: relay to client,
+//
+//	[2, max envelope, max entries, max bytes, retention seconds, until]
+//
+// the limits that apply and the `until` of the binding as the relay recorded it
+// (unix seconds).
 type AuthOKV2 struct {
 	MaxEnvelope      uint64
 	MaxEntries       uint64

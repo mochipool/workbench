@@ -18,8 +18,10 @@ import (
 	"os"
 	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 	"unsafe"
@@ -535,10 +537,25 @@ func (a *acceptAll) run(l *Listener) {
 	}()
 }
 
+// isReset reports a dial that the listener answered with a reset: tailcat's
+// netstack gives the error as text ("connection reset by peer"), not as an errno.
+func isReset(err error) bool {
+	return errors.Is(err, syscall.ECONNRESET) || strings.Contains(err.Error(), "connection reset by peer")
+}
+
 // Connections that stay open do not stop the teardown: just under the cap
 // they complete, and far over it the cap sheds the rest abortively, so the
 // netstack never holds the number of endpoints at which tailcat's close
 // deadlocks (more than about 512).
+//
+// A shed connection is reset as soon as the listener takes it from the netstack.
+// The dialer's netstack usually reports the connection established before that
+// reset arrives, but on a loaded machine the reset can be handled first, and the
+// Dial itself then fails with "connection reset by peer". That is the listener
+// doing what it must (over the cap, or with its backlog full), not a fault of
+// the dialer: such a dial is counted, and the test checks that the listener did
+// shed at least as many connections as there were reset dials. A retry would
+// only be shed again.
 //
 // spec: SPO-Xmailbox-INV-027
 func TestTeardownCompletesWithManyOpenConnections(t *testing.T) {
@@ -557,16 +574,34 @@ func TestTeardownCompletesWithManyOpenConnections(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 			defer cancel()
 			var held []relayport.Stream
+			resets := 0
 			for i := 0; i < sz.n; i++ {
 				s, _, err := d.Dial(ctx)
 				if err != nil {
+					if isReset(err) { // shed by the listener before the dial returned
+						resets++
+						continue
+					}
 					t.Fatalf("Dial %d: %v", i, err)
 				}
 				held = append(held, s)
 			}
-			time.Sleep(300 * time.Millisecond)
+			// every connection the dialer made reaches the listener: accepted or shed
 			st := l.Stats()
-			t.Logf("%d dialed: accepted %d, shed %d, endpoints %d", sz.n, st.Accepted, st.Shed, tcpEndpoints(t, l.server()))
+			for wait := time.Now().Add(20 * time.Second); st.Accepted+st.Shed < int64(sz.n) && time.Now().Before(wait); st = l.Stats() {
+				time.Sleep(20 * time.Millisecond)
+			}
+			t.Logf("%d dialed: held %d, reset at dial %d; accepted %d, shed %d, endpoints %d", sz.n, len(held), resets, st.Accepted, st.Shed, tcpEndpoints(t, l.server()))
+			if st.Accepted+st.Shed < int64(sz.n) {
+				t.Fatalf("the listener saw %d connections of the %d dialled", st.Accepted+st.Shed, sz.n)
+			}
+			if int64(resets) > st.Shed {
+				t.Fatalf("%d dials were reset but the listener shed only %d: a reset that is not a shed", resets, st.Shed)
+			}
+			// the teardown below must face many open connections, or it proves nothing
+			if floor := int64(min(sz.n, DefaultListenerMaxStreams) / 2); st.Accepted < floor {
+				t.Fatalf("only %d connections are open at the listener, fewer than %d", st.Accepted, floor)
+			}
 			if sz.n > DefaultListenerMaxStreams && st.Accepted > int64(DefaultListenerMaxStreams) {
 				t.Errorf("accepted %d streams, the cap is %d", st.Accepted, DefaultListenerMaxStreams)
 			}

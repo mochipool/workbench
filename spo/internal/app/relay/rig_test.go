@@ -17,6 +17,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/adapters/bindingstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/mailboxstore"
 	"github.com/mochipool/workbench/spo/internal/app/relay"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/domain/mailbox"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/domain/relaybind"
@@ -897,7 +898,7 @@ func (r *rig) dialNode(p *peer, from *fakenet.Node, f fakenet.Fault) *conn {
 	}
 	r.t.Cleanup(func() { s.Close() })
 	rs := &rxStream{Stream: s}
-	return &conn{t: r.t, r: r, s: rs, rxs: rs, p: p, relayKey: r.relay.Key, stage: mailbox.StageUnversioned}
+	return &conn{t: r.t, r: r, s: rs, rxs: rs, p: p, relayKey: r.relay.Key, stage: mailbox.StageV2PreAuth}
 }
 
 // rxStream counts the bytes the client has read: what the relay has sent that
@@ -944,6 +945,38 @@ func frame(t testing.TB, m mailbox.Message) []byte {
 		t.Fatal(err)
 	}
 	return f
+}
+
+// retiredAuthFrame is the frame of the Auth of the retired version 1,
+// `[1, 1, fingerprint, signature]`, written by hand: the code that made it is
+// deleted, and the relay must refuse it.
+func retiredAuthFrame(t testing.TB, fp party.Fingerprint) []byte {
+	t.Helper()
+	b, err := identity.EncodeCanonical([]any{uint64(1), uint64(1), fp[:], make([]byte, 64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := mailbox.AppendFrame(nil, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+// retiredPutFrame is the frame of the Put of the retired version 1,
+// `[3, request id, to, mid, size]`, with its raw frame.
+func retiredPutFrame(t testing.TB, to party.Fingerprint, env []byte) []byte {
+	t.Helper()
+	mid := mailbox.HashOf(env)
+	b, err := identity.EncodeCanonical([]any{uint64(3), uint64(1), to[:], mid[:], uint64(len(env))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := mailbox.AppendFrame(nil, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(f, rawFrame(t, env)...)
 }
 
 func rawFrame(t testing.TB, env []byte) []byte {

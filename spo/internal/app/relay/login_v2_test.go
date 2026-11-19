@@ -87,32 +87,8 @@ func TestChallengeOffersOnlyVersion2(t *testing.T) {
 // spec: SPO-Xmailbox-OUT-082, SPO-Xmailbox-PRE-053
 func TestOblig1StageMachine(t *testing.T) {
 	env := envelope(10, 1)
-	v1auth := func(t *testing.T, r *rig) []byte {
-		b, err := mailbox.Encode(mailbox.Auth{Version: 1, Fingerprint: r.a.fp})
-		if err != nil {
-			t.Fatal(err)
-		}
-		f, err := mailbox.AppendFrame(nil, b)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return f
-	}
-	v1put := func(t *testing.T, r *rig) []byte {
-		h, err := mailbox.NewPutOf(1, r.b.fp, env)
-		if err != nil {
-			t.Fatal(err)
-		}
-		b, err := mailbox.Encode(h)
-		if err != nil {
-			t.Fatal(err)
-		}
-		f, err := mailbox.AppendFrame(nil, b)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return append(f, rawFrame(t, env)...)
-	}
+	v1auth := func(t *testing.T, r *rig) []byte { return retiredAuthFrame(t, r.a.fp) }
+	v1put := func(t *testing.T, r *rig) []byte { return retiredPutFrame(t, r.b.fp, env) }
 	revoke := func(t *testing.T, r *rig) []byte {
 		return frame(t, deviceRevoke(t, r.a, 1, startTime))
 	}

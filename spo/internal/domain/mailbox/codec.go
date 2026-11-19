@@ -8,18 +8,6 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 )
 
-// ChooseVersion picks the protocol version for a Challenge's [min, max]: the
-// only version this code speaks, if it is in the range.
-func ChooseVersion(min, max uint) (uint, error) {
-	if min < 1 || min > max || max > MaxVersion {
-		return 0, bad(ErrMalformed, "version range %d..%d", min, max)
-	}
-	if min > Version1 { // min <= max and min >= 1, so max >= 1 as well
-		return 0, bad(ErrVersion, "this code speaks version %d, the peer %d..%d", Version1, min, max)
-	}
-	return Version1, nil
-}
-
 func checkVersion(v uint) error {
 	if v < 1 || v > MaxVersion {
 		return bad(ErrRange, "version %d", v)
@@ -50,22 +38,7 @@ func (m Challenge) fields() ([]any, error) {
 	return []any{uint64(m.Min), uint64(m.Max), m.Nonce[:], m.RelayKey[:], uint64(m.RelayTime)}, nil
 }
 
-func (m Auth) fields() ([]any, error) {
-	if err := checkVersion(m.Version); err != nil {
-		return nil, err
-	}
-	return []any{uint64(m.Version), m.Fingerprint[:], m.Signature[:]}, nil
-}
-
-func (m AuthOK) checked() error {
-	if err := checkVersion(m.Version); err != nil {
-		return err
-	}
-	return checkAuthOKLimits(m.MaxEnvelope, m.MaxEntries, m.MaxBytes, m.RetentionSeconds)
-}
-
-// checkAuthOKLimits is the range check of the four limits an AuthOK announces,
-// the same in both versions.
+// checkAuthOKLimits is the range check of the four limits an AuthOK announces.
 func checkAuthOKLimits(maxEnvelope, maxEntries, maxBytes, retention uint64) error {
 	if err := checkSize(maxEnvelope); err != nil {
 		return err
@@ -80,20 +53,6 @@ func checkAuthOKLimits(maxEnvelope, maxEntries, maxBytes, retention uint64) erro
 		return bad(ErrRange, "retention %d is not 1 to %d seconds", retention, MaxRetentionSeconds)
 	}
 	return nil
-}
-
-func (m AuthOK) fields() ([]any, error) {
-	if err := m.checked(); err != nil {
-		return nil, err
-	}
-	return []any{uint64(m.Version), m.MaxEnvelope, m.MaxEntries, m.MaxBytes, m.RetentionSeconds}, nil
-}
-
-func (m Put) fields() ([]any, error) {
-	if err := checkSize(uint64(m.Size)); err != nil {
-		return nil, err
-	}
-	return []any{uint64(m.RequestID), m.To[:], m.Mid[:], uint64(m.Size)}, nil
 }
 
 func (m PutResult) fields() ([]any, error) {
@@ -169,35 +128,22 @@ func (m Error) fields() ([]any, error) {
 	return []any{uint64(m.Code)}, nil
 }
 
-// Encode returns the canonical CBOR of a header frame body in protocol version
-// 1: an array whose first element is the message type. It refuses a message
-// that only exists in version 2. EncodeV writes either version.
-func Encode(m Message) ([]byte, error) { return EncodeV(Version1, m) }
+// Encode returns the canonical CBOR of a header frame body: an array whose first
+// element is the message type. There is one protocol version, 2; Encode is
+// EncodeV(Version2, m).
+func Encode(m Message) ([]byte, error) { return EncodeV(Version2, m) }
 
-// EncodeV returns the canonical CBOR of a header frame body for the version.
-// A message is written in one version only: the version 1 shapes (Auth, Put,
-// AuthOK) are refused in version 2, the version 2 shapes (AuthV2, PutV2,
-// AuthOKV2, the Revoke frames and RevokeResult) in version 1, and the status
-// and code ranges are those of the version. Challenge, Fetch, Items, Ack and
-// AckResult are the same in both.
+// EncodeV returns the canonical CBOR of a header frame body for the version,
+// which can only be Version2: every other number is ErrVersion. The status and
+// code ranges are those of version 2.
 func EncodeV(version uint, m Message) ([]byte, error) {
 	if m == nil {
 		return nil, bad(ErrMalformed, "no message")
 	}
-	var f []any
-	var err error
-	switch version {
-	case Version1:
-		f, err = m.fields()
-	case Version2:
-		v2, ok := m.(v2Message)
-		if !ok {
-			return nil, bad(ErrVersion, "%T does not exist in version 2", m)
-		}
-		f, err = v2.fieldsV2()
-	default:
+	if version != Version2 {
 		return nil, bad(ErrVersion, "version %d", version)
 	}
+	f, err := m.fields()
 	if err != nil {
 		return nil, err
 	}
@@ -343,45 +289,29 @@ func asArray(v any, what string) ([]any, error) {
 // direction it reads, so a frame the peer may not send is refused by type
 // alone, before its fields are looked at.
 //
-//	client to relay: Auth, Put, Fetch, Ack
-//	relay to client: Challenge, AuthOK, PutResult, Items, AckResult, Error
+//	client to relay: Auth (1), Put (3), Fetch (5), Ack (7), Revoke (10)
+//	relay to client: Challenge (0), AuthOK (2), PutResult (4), Items (6),
+//	                 AckResult (8), Error (9), RevokeResult (11)
 
-// DecodeFromClient parses a header frame body that arrived from a client (the
-// relay's side). It accepts only Auth, Put, Fetch and Ack; any other known type
-// is ErrDirection and an unknown one ErrUnknownType.
-func DecodeFromClient(frame []byte) (Message, error) { return decode(frame, true) }
-
-// DecodeFromRelay parses a header frame body that arrived from the relay (the
-// client's side). It accepts only Challenge, AuthOK, PutResult, Items,
-// AckResult and Error; any other known type is ErrDirection and an unknown one
-// ErrUnknownType.
-func DecodeFromRelay(frame []byte) (Message, error) { return decode(frame, false) }
-
-// fromClient reports whether the client may send t; known is false for a type
-// that does not exist.
-func fromClient(t uint64) (client, known bool) {
+// senderOf says who sends type t, and whether the type exists. Types 12 and up
+// never do.
+func senderOf(t uint64) (client, known bool) {
 	switch MsgType(t) {
-	case MsgAuth, MsgPut, MsgFetch, MsgAck:
+	case MsgAuth, MsgPut, MsgFetch, MsgAck, MsgRevoke:
 		return true, true
-	case MsgChallenge, MsgAuthOK, MsgPutResult, MsgItems, MsgAckResult, MsgError:
+	case MsgChallenge, MsgAuthOK, MsgPutResult, MsgItems, MsgAckResult, MsgError, MsgRevokeResult:
 		return false, true
 	}
 	return false, false
 }
 
-// decode parses one header frame body. It refuses a body over MaxHeaderFrame
-// by its length, then structure over the bounds, then anything that is not
-// canonical CBOR (the decoded value must re-encode to the input), then a type
-// the sender may not send, then any array of the wrong arity, any field of the
-// wrong kind or length and any value out of range.
-func decode(frame []byte, wantClient bool) (Message, error) {
-	return decodeIn(StageV1, frame, wantClient)
-}
-
-// decodeIn is decode at a stage of the connection. At StageV1 it is exactly the
-// version 1 decoder; the other stages add the version 2 frames and shapes and
-// refuse a frame of the right sender at the wrong stage with ErrStage, after
-// the type and the direction and before any field is read.
+// decodeIn parses one header frame body at a stage of the connection. It refuses
+// a body over MaxHeaderFrame by its length, then structure over the bounds, then
+// anything that is not canonical CBOR (the decoded value must re-encode to the
+// input), then a type that does not exist (ErrUnknownType), a type the sender may
+// not send (ErrDirection) and a type the stage does not allow (ErrStage), all by
+// the type alone, then any array of the wrong arity, any field of the wrong kind
+// or length and any value out of range.
 func decodeIn(stage Stage, frame []byte, wantClient bool) (Message, error) {
 	if !stage.Valid() {
 		return nil, bad(ErrStage, "%v", stage)
@@ -407,7 +337,7 @@ func decodeIn(stage Stage, frame []byte, wantClient bool) (Message, error) {
 	if !ok {
 		return nil, bad(ErrMalformed, "the message type is not an unsigned integer")
 	}
-	if client, known := senderOf(stage, t); !known {
+	if client, known := senderOf(t); !known {
 		return nil, bad(ErrUnknownType, "type %d", t)
 	} else if client != wantClient {
 		who := "relay"
@@ -425,25 +355,15 @@ func decodeIn(stage Stage, frame []byte, wantClient bool) (Message, error) {
 		}
 		return nil
 	}
-	v2 := stage != StageV1
 	switch MsgType(t) { // MsgType is a uint64: nothing is truncated
 	case MsgChallenge:
 		return decodeChallenge(a, arity)
 	case MsgAuth:
-		if v2 {
-			return decodeAuthIn(stage, a, arity)
-		}
-		return decodeAuth(a, arity)
+		return decodeAuthV2(a, arity)
 	case MsgAuthOK:
-		if v2 {
-			return decodeAuthOKV2(a, arity)
-		}
-		return decodeAuthOK(a, arity)
+		return decodeAuthOKV2(a, arity)
 	case MsgPut:
-		if v2 {
-			return decodePutV2(a, arity)
-		}
-		return decodePut(a, arity)
+		return decodePutV2(a, arity)
 	case MsgRevoke:
 		return decodeRevoke(a, arity)
 	case MsgRevokeResult:
@@ -456,11 +376,7 @@ func decodeIn(stage Stage, frame []byte, wantClient bool) (Message, error) {
 		if err != nil {
 			return nil, err
 		}
-		top := StatusUnavailable
-		if v2 {
-			top = StatusUnbound
-		}
-		st, err := asUint(a[2], uint64(top), "status")
+		st, err := asUint(a[2], uint64(StatusUnbound), "status")
 		if err != nil {
 			return nil, err
 		}
@@ -488,11 +404,7 @@ func decodeIn(stage Stage, frame []byte, wantClient bool) (Message, error) {
 		if err := arity(1); err != nil {
 			return nil, err
 		}
-		top := CodeShuttingDown
-		if stage == StageV2PreAuth || stage == StageV2Authed {
-			top = CodeBinding
-		}
-		c, err := asUint(a[1], uint64(top), "error code")
+		c, err := asUint(a[1], uint64(CodeBinding), "error code")
 		if err != nil {
 			return nil, err
 		}
@@ -532,79 +444,6 @@ func decodeChallenge(a []any, arity func(int) error) (Message, error) {
 	copy(c.Nonce[:], nonce)
 	copy(c.RelayKey[:], key)
 	return c, nil
-}
-
-func decodeAuth(a []any, arity func(int) error) (Message, error) {
-	if err := arity(3); err != nil {
-		return nil, err
-	}
-	v, err := asRange(a[1], 1, MaxVersion, "version")
-	if err != nil {
-		return nil, err
-	}
-	f, err := asFixed(a[2], len(party.Fingerprint{}), "fingerprint")
-	if err != nil {
-		return nil, err
-	}
-	s, err := asFixed(a[3], SignatureSize, "signature")
-	if err != nil {
-		return nil, err
-	}
-	m := Auth{Version: uint(v)}
-	copy(m.Fingerprint[:], f)
-	copy(m.Signature[:], s)
-	return m, nil
-}
-
-func decodeAuthOK(a []any, arity func(int) error) (Message, error) {
-	if err := arity(5); err != nil {
-		return nil, err
-	}
-	var m AuthOK
-	v, err := asRange(a[1], 1, MaxVersion, "version")
-	if err != nil {
-		return nil, err
-	}
-	m.Version = uint(v)
-	if m.MaxEnvelope, err = asRange(a[2], 1, MaxEnvelopeBytes, "max envelope"); err != nil {
-		return nil, err
-	}
-	if m.MaxEntries, err = asRange(a[3], 1, MaxMailboxEntries, "max entries"); err != nil {
-		return nil, err
-	}
-	if m.MaxBytes, err = asRange(a[4], 1, MaxMailboxBytes, "max bytes"); err != nil {
-		return nil, err
-	}
-	if m.RetentionSeconds, err = asRange(a[5], 1, MaxRetentionSeconds, "retention seconds"); err != nil {
-		return nil, err
-	}
-	return m, nil
-}
-
-func decodePut(a []any, arity func(int) error) (Message, error) {
-	if err := arity(4); err != nil {
-		return nil, err
-	}
-	id, err := asUint(a[1], math.MaxUint32, "request id")
-	if err != nil {
-		return nil, err
-	}
-	to, err := asFixed(a[2], len(party.Fingerprint{}), "to")
-	if err != nil {
-		return nil, err
-	}
-	mid, err := asFixed(a[3], HashSize, "mid")
-	if err != nil {
-		return nil, err
-	}
-	size, err := asRange(a[4], 1, MaxEnvelopeBytes, "size")
-	if err != nil {
-		return nil, err
-	}
-	m := Put{RequestID: uint32(id), Size: uint32(size)}
-	copy(m.To[:], to)
-	copy(m.Mid[:], mid)
-	return m, nil
 }
 
 func decodeFetch(a []any, arity func(int) error) (Message, error) {

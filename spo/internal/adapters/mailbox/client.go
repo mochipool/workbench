@@ -25,12 +25,40 @@
 // loses is recovered only while the coordinator keeps running its pump and the
 // request has not expired (SPO-Xmailbox-INV-020).
 //
-// Logout without closing the application: the caller closes this client (Close
-// interrupts a dial, a handshake, a long-poll, a put and every wait, drops the
-// envelopes fetched and not yet delivered and the position of the next fetch),
-// closes the stream dialer it gave the client, and destroys the identity that
-// its auth signer signs with. The client holds no key; closing it does not
-// destroy the signer's.
+// The client speaks version 2 of the protocol only (ADR 0014): a device logs in
+// with a binding, the statement a wallet key signed that says "this device uses
+// key K as its mailbox address from T1 until T2", and the list of wallet keys it
+// expects mail from. The client holds the binding as bytes (it is checked locally
+// when it is given, and never presented once it has expired), signs the login
+// with the device key through the typed relayport.AuthSigner and signs nothing
+// with a wallet key itself. A put is addressed to the pair (wallet key, device)
+// that the caller's Resolver gives for the party; a party without a wallet key is
+// ports.ErrNoRoute and nothing is dialled. Pending revokes are sent before the
+// login on every connection (RevokeBook). SetBinding gives the client a renewed
+// binding, SetSenders a changed expected-sender set (the client logs in again so
+// that the relay holds the new list), and ErrBindingRefused and ErrNotAllowed say
+// that the binding must be renewed or that the operator excludes the key.
+//
+// Logout without closing the application (ADR 0014 decision 8), in this order:
+//
+//  1. cancel the contexts of the Receive loop and of the sends in flight;
+//  2. acknowledge what was handled (AckContext, bounded to two seconds by the
+//     caller's context);
+//  3. close this client: Close interrupts a dial, a handshake, a long-poll, a put
+//     and every wait, drops the envelopes fetched and not yet delivered and the
+//     position of the next fetch, and later calls return ports.ErrClosed;
+//  4. close the stream dialer given to the client, which stops the tunnel engine
+//     that holds the node key (closing the stream alone does not);
+//  5. destroy the local identity that the auth signer signs with.
+//
+// The client holds no key, so closing it destroys none; it persists nothing, so
+// the binding and the pending revokes stay with the caller, untouched. "Forget
+// this device" is: fetch and handle the queue (a revoke deletes it), put the
+// device's own revokes in the RevokeBook and call SendRevokes, then close as
+// above, then delete the stored bindings. A device that has no binding it may
+// present (a new device that revokes a lost one with a wallet-signed revoke)
+// sends with a RevokeSender, which holds no binding and no signer and cannot log
+// in.
 package mailbox
 
 import (
@@ -45,13 +73,14 @@ import (
 
 	wire "github.com/mochipool/workbench/spo/internal/domain/mailbox"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
+	"github.com/mochipool/workbench/spo/internal/domain/relaybind"
 	"github.com/mochipool/workbench/spo/internal/ports"
 	"github.com/mochipool/workbench/spo/internal/ports/relayport"
 )
 
 // Config is what a Client needs.
 //
-// spec: SPO-Xmailbox-IF-009
+// spec: SPO-Xmailbox-IF-009, SPO-Xmailbox-IF-016
 type Config struct {
 	// Dialer opens a stream to the relay. It reports the peer's node key as the
 	// tunnel authenticated it; the client compares it with RelayKey.
@@ -59,17 +88,42 @@ type Config struct {
 	// RelayKey is the relay's node key, pinned at enrolment. A connection to
 	// any other key is closed before anything is signed. Required.
 	RelayKey party.NodeKey
-	// NodeKey is the client's own node public key, the one the relay's access
-	// list holds for this party. The auth signer is given this, never a value
-	// from the relay. Required.
+	// NodeKey is the client's own node public key, the one the tunnel
+	// authenticates for this device and the login signs over. The auth signer is
+	// given this, never a value from the relay. Required.
 	NodeKey party.NodeKey
-	// Self is this party's fingerprint, the claim in Auth. Required.
+	// Self is this party's device fingerprint, the claim in Auth; it must be the
+	// fingerprint of Device. Required.
 	Self party.Fingerprint
+	// Device are the public keys of the device identity. The relay has no identity
+	// document, so they travel in the Auth and the relay computes the fingerprint
+	// from them. Required.
+	Device wire.DeviceKeys
+	// Binding is presented at login, exactly the bytes app/relaybinding returns.
+	// It is verified locally at construction: it parses, verifies, is for this
+	// device, is inside its window on Clock and inside Policy. Required.
+	Binding Binding
+	// Senders are the wallet keys of the parties this device expects mail from.
+	// The client sorts them, drops repeats and keeps at most 64 (the first 64
+	// distinct in the given order, with an event for the rest).
+	Senders []wire.WalletKey
+	// Resolve maps a recipient party fingerprint to its wallet key and device. It
+	// is the caller's, from the party registry. Required.
+	Resolve Resolver
+	// Revokes is the book of pending revokes; nil means none.
+	Revokes RevokeBook
+	// Policy is the lifetime and skew policy the binding is checked against; the
+	// zero value is relaybind.DefaultPolicy.
+	Policy relaybind.Policy
+	// RenewMargin is how close to its end the binding may come before the client
+	// says so (an EventRenew at each connection); zero is 14 days.
+	RenewMargin time.Duration
 	// Signer signs the auth proof (relayport.AuthSigner). Required.
 	Signer relayport.AuthSigner
-	// Clock gives the time for the skew warning, the dial limit and the window of
-	// stale-connection retries (and nothing else; stream deadlines are real
-	// time). Required.
+	// Clock gives the time for the skew warning, the dial limit, the window of
+	// stale-connection retries, the window of the binding and of the pending revokes
+	// and the renewal margin (and nothing else; stream deadlines are real time).
+	// Required.
 	Clock relayport.Clock
 	// Limits are the client's own bounds; zero fields take the table.
 	Limits Limits
@@ -83,22 +137,45 @@ type Config struct {
 // that arrives while a Receive waits for a long-poll waits for it (bounded by
 // its context and OpTimeout). Receive is for one goroutine.
 type Client struct {
-	cfg Config
-	lim Limits
+	cfg    Config
+	lim    Limits
+	margin time.Duration // the renewal margin
+
+	// credMu guards cr, which is replaced and never changed in place.
+	credMu sync.Mutex
+	cr     *creds
+	// identityReset is set by SetBinding: the next operation forgets the wait that
+	// a refused binding caused.
+	identityReset atomic.Bool
 
 	sem      chan struct{} // the operation slot: one request at a time
 	closed   atomic.Bool
 	closedCh chan struct{}
 	once     sync.Once
 
+	// revokeOnly is set for the client inside a RevokeSender: no connection of it
+	// goes past the revokes, so no Auth is ever signed or sent.
+	revokeOnly bool
+
 	// Held by the goroutine that has the slot:
 	cn       *conn
 	fails    int
 	nextDial time.Time
+	// idErr is the refusal of the identity (ErrBindingRefused, ErrNotAllowed) that
+	// set the wait until nextDial, or nil when another failure set it: a Send inside
+	// that wait returns it, so the caller still learns why.
+	idErr error
+	// report, while SendRevokes runs, collects what happened to each revoke.
+	report   *RevokeReport
 	lastDrop Reason
 	everConn bool
 	dials    []time.Time // when the last dials began, on the injected clock
 	stale    []time.Time // when the last stale-connection retries were made
+	// revokeSent is, for each revoke pending at the last exchange, the number of
+	// the exchange that last sent it (in memory only; revokeRound counts the
+	// exchanges): the least recently sent go first.
+	revokeSent  map[string]uint64
+	revokeRound uint64
 
 	curMu      sync.Mutex
 	cur        relayport.Stream   // the stream Close interrupts
@@ -135,20 +212,46 @@ var (
 // New checks the configuration and makes a client. It does not dial.
 func New(cfg Config) (*Client, error) {
 	switch {
-	case cfg.Dialer == nil, cfg.Signer == nil, cfg.Clock == nil:
-		return nil, errors.New("mailbox: a dialer, an auth signer and a clock are required")
+	case cfg.Dialer == nil, cfg.Signer == nil, cfg.Clock == nil, cfg.Resolve == nil:
+		return nil, errors.New("mailbox: a dialer, an auth signer, a clock and a resolver are required")
 	case cfg.RelayKey == (party.NodeKey{}):
 		return nil, errors.New("mailbox: the relay's pinned node key is required")
 	case cfg.NodeKey == (party.NodeKey{}):
 		return nil, errors.New("mailbox: the client's own node key is required")
 	case cfg.Self == (party.Fingerprint{}):
 		return nil, errors.New("mailbox: the party fingerprint is required")
+	case cfg.Device.Fingerprint() != cfg.Self:
+		return nil, errors.New("mailbox: the fingerprint is not that of the device keys")
+	case cfg.RenewMargin < 0:
+		return nil, errors.New("mailbox: the renewal margin is negative")
 	}
 	lim, err := cfg.Limits.resolved()
 	if err != nil {
 		return nil, err
 	}
-	return &Client{cfg: cfg, lim: lim, sem: make(chan struct{}, 1), closedCh: make(chan struct{})}, nil
+	c := &Client{cfg: cfg, lim: lim, margin: cfg.RenewMargin, sem: make(chan struct{}, 1), closedCh: make(chan struct{})}
+	if c.margin == 0 {
+		c.margin = defaultRenewMargin
+	}
+	if err := c.policy().Validate(); err != nil {
+		return nil, fmt.Errorf("mailbox: the binding policy: %w", err)
+	}
+	from, until, hash, err := checkBinding(cfg.Binding, cfg.Self, cfg.Clock.Now().Unix(), c.policy())
+	if err != nil {
+		return nil, err
+	}
+	senders, sendersHash, dropped, err := canonSenders(cfg.Senders)
+	if err != nil {
+		return nil, fmt.Errorf("mailbox: the expected senders: %w", err)
+	}
+	c.cr = &creds{
+		binding: Binding{Statement: append([]byte(nil), cfg.Binding.Statement...), Key: append([]byte(nil), cfg.Binding.Key...)},
+		from:    from, until: until, bindingHash: hash, senders: senders, sendersHash: sendersHash,
+	}
+	if dropped > 0 {
+		c.emit(Event{Kind: EventSenders, Reason: ReasonLimit, Count: dropped})
+	}
+	return c, nil
 }
 
 // Transport is the client as the sending side of multisig: its kind is a
@@ -260,6 +363,10 @@ func (c *Client) drop(cn *conn, why Reason) {
 // needs needLife must fit before the lifetime ends) and how long it sat unused.
 func (c *Client) unusable(cn *conn, needLife time.Duration, needOut uint64) Reason {
 	switch {
+	case cn.sendersHash != c.snapshot().sendersHash:
+		// the relay fixed the expected-sender list when this connection logged in:
+		// log in again so that it holds the new one (obligation 9)
+		return ReasonSenders
 	case cn.requests >= c.lim.MaxRequests:
 		return ReasonRequests
 	case cn.written+needOut > c.lim.MaxBytesWritten:
@@ -327,17 +434,60 @@ func (c *Client) failed(err error) {
 		d *= 2
 	}
 	d = min(d, c.lim.BackoffMax)
+	c.idErr = nil
+	if errors.Is(err, ErrBindingRefused) || errors.Is(err, ErrNotAllowed) {
+		// only a new binding or the operator can change this answer: the longest wait
+		d = c.lim.BackoffMax
+		c.idErr = err
+	}
 	c.nextDial = time.Now().Add(d)
 	code, has := codeOf(err)
 	c.emit(Event{Kind: EventFailed, Reason: reasonOf(err), Code: code, HasCode: has, Backoff: d})
 }
 
-func (c *Client) succeeded() { c.fails, c.nextDial = 0, time.Time{} }
+func (c *Client) succeeded() { c.fails, c.nextDial, c.idErr = 0, time.Time{}, nil }
+
+// beforeDial waits out, or refuses to start, what stands between the client and a
+// new connection: the backoff after a failure (unless skipBackoff) and the
+// client's own limit on new connections. A client that must not wait (Send) gets
+// an error; one that may sleeps. The client's own limit counts connections that
+// returned a stream and is on the injected clock: each one signs a challenge, and
+// the relay lets a key open six a minute. A dial that fails before it has a
+// stream is not a connection (the relay never saw it) and is paced by the
+// backoff; every dial that returned a stream is counted by connect.
+func (c *Client) beforeDial(ctx context.Context, wait, skipBackoff bool) error {
+	if d := time.Until(c.nextDial); d > 0 && !skipBackoff {
+		if !wait {
+			return newErr(ReasonBackoff, nil, ErrUnreachable)
+		}
+		if err := c.sleep(ctx, d); err != nil {
+			return err
+		}
+	}
+	for {
+		d := c.dialWait()
+		if d <= 0 {
+			return nil
+		}
+		if !wait {
+			return newErr(ReasonDialLimit, nil, ErrUnreachable)
+		}
+		if err := c.sleep(ctx, d); err != nil {
+			return err
+		}
+	}
+}
 
 // acquire returns a connection that can carry the next request, opening one
 // when needed. A client that must not wait (Send) gets an error while the
-// backoff runs; one that may (Receive, Ack) sleeps it out.
+// backoff runs: the refusal of the identity when that is what set the backoff
+// (OUT-092, OUT-094), otherwise ErrUnreachable with the reason backoff; one that
+// may wait (Receive, Ack) sleeps it out and then tries, and so learns the refusal
+// again.
 func (c *Client) acquire(ctx context.Context, wait bool, needLife time.Duration, needOut uint64) (*conn, bool, error) {
+	if c.identityReset.Swap(false) { // a new binding: the wait of a refused one is over
+		c.nextDial, c.fails, c.idErr = time.Time{}, 0, nil
+	}
 	if cn := c.cn; cn != nil {
 		why := c.unusable(cn, needLife, needOut)
 		if why == ReasonNone {
@@ -345,31 +495,13 @@ func (c *Client) acquire(ctx context.Context, wait bool, needLife time.Duration,
 		}
 		c.drop(cn, why)
 	}
-	if d := time.Until(c.nextDial); d > 0 {
-		if !wait {
-			return nil, false, newErr(ReasonBackoff, nil, ErrUnreachable)
-		}
-		if err := c.sleep(ctx, d); err != nil {
-			return nil, false, err
-		}
+	if !wait && c.idErr != nil && time.Until(c.nextDial) > 0 {
+		return nil, false, c.idErr
 	}
-	// The client's own limit on new connections: each one signs a challenge, and
-	// the relay lets a key open six a minute. A dial that fails before it has a
-	// stream is not a connection (the relay never saw it) and is paced by the
-	// backoff; every dial that returned a stream is counted by connect.
-	for {
-		d := c.dialWait()
-		if d <= 0 {
-			break
-		}
-		if !wait {
-			return nil, false, newErr(ReasonDialLimit, nil, ErrUnreachable)
-		}
-		if err := c.sleep(ctx, d); err != nil {
-			return nil, false, err
-		}
+	if err := c.beforeDial(ctx, wait, false); err != nil {
+		return nil, false, err
 	}
-	cn, err := c.connect(ctx)
+	cn, err := c.connect(ctx, false)
 	if err != nil {
 		if ctx.Err() == nil && !c.isClosed() {
 			c.failed(err)
@@ -463,6 +595,16 @@ func (c *Client) Send(ctx context.Context, to party.Fingerprint, envelope []byte
 	if c.isClosed() {
 		return ports.ErrClosed
 	}
+	route, ok := c.cfg.Resolve(to)
+	if !ok || route.WalletKey == (wire.WalletKey{}) {
+		// a party with no wallet key is reachable by file or direct connection only:
+		// nothing is dialled and nothing is looked up at a relay
+		c.emit(Event{Kind: EventNoRoute, Reason: ReasonNoWalletKey, To: to})
+		return fmt.Errorf("%w: %s", ports.ErrNoRoute, reasonText(ReasonNoWalletKey))
+	}
+	if route.Device == (party.Fingerprint{}) {
+		route.Device = to
+	}
 	octx, cancel := context.WithTimeout(ctx, c.lim.OpTimeout)
 	defer cancel()
 	if err := c.acquireSlot(octx); err != nil {
@@ -474,7 +616,7 @@ func (c *Client) Send(ctx context.Context, to party.Fingerprint, envelope []byte
 	var mid wire.Hash
 	err := c.do(octx, false, 0, uint64(len(envelope))+2*wire.MaxHeaderFrame, func(cn *conn) error {
 		var e error
-		st, mid, e = c.put(cn, to, envelope)
+		st, mid, e = c.put(cn, route, envelope)
 		return e
 	})
 	if err != nil {
@@ -483,9 +625,10 @@ func (c *Client) Send(ctx context.Context, to party.Fingerprint, envelope []byte
 	return c.statusErr(st, to, mid)
 }
 
-// put sends one Put and reads its result.
-func (c *Client) put(cn *conn, to party.Fingerprint, env []byte) (wire.Status, wire.Hash, error) {
-	hdr, err := wire.NewPutOf(cn.newID(), to, env)
+// put sends one Put, addressed to the pair (wallet key, device) of the route, and
+// reads its result.
+func (c *Client) put(cn *conn, route Route, env []byte) (wire.Status, wire.Hash, error) {
+	hdr, err := wire.NewPutV2Of(cn.newID(), route.WalletKey, route.Device, env)
 	if err != nil {
 		return 0, wire.Hash{}, err
 	}
@@ -541,6 +684,10 @@ func (c *Client) statusErr(st wire.Status, to party.Fingerprint, mid wire.Hash) 
 		return noRoute(ReasonBusy)
 	case wire.StatusUnavailable:
 		return noRoute(ReasonStorage)
+	case wire.StatusUnbound:
+		// the recipient has no valid binding to that key at this relay (it may bind
+		// later): the item stays queued
+		return noRoute(ReasonUnbound)
 	case wire.StatusRefused:
 		return refused(ReasonRefused, "the relay refused it")
 	case wire.StatusTooLarge:

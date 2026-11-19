@@ -54,10 +54,12 @@ var bannedClosure = []string{
 var allowedImports = map[string]bool{
 	"bytes": true, "context": true, "errors": true, "fmt": true, "io": true, "slices": true,
 	"sync": true, "sync/atomic": true, "time": true,
-	module + "/internal/domain/mailbox":  true,
-	module + "/internal/domain/party":    true,
-	module + "/internal/ports":           true,
-	module + "/internal/ports/relayport": true,
+	module + "/internal/domain/mailbox": true,
+	module + "/internal/domain/party":   true,
+	// the binding is checked locally with the pure domain of the relay's statements
+	module + "/internal/domain/relaybind": true,
+	module + "/internal/ports":            true,
+	module + "/internal/ports/relayport":  true,
 }
 
 // fileWriters are the names of the functions that create, change or remove a

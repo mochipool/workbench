@@ -9,6 +9,7 @@ import (
 
 	"golang.org/x/crypto/blake2b"
 
+	"github.com/mochipool/workbench/spo/internal/domain/mailbox"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/domain/relaybind"
 	"github.com/mochipool/workbench/spo/internal/domain/relayregistry"
@@ -70,6 +71,13 @@ func deviceOf(n byte) deviceKeys {
 // Device is the fingerprint of a device made from one byte: the fingerprint of
 // real keys (a test device-signed revoke is signed by them: DeviceRevoke).
 func Device(n byte) party.Fingerprint { return deviceOf(n).fp }
+
+// DeviceKeysOf are the two public keys of Device(n): their fingerprint is
+// Device(n).
+func DeviceKeysOf(n byte) mailbox.DeviceKeys {
+	k := deviceOf(n)
+	return mailbox.DeviceKeys{Ed25519: k.ed, X25519: k.x}
+}
 
 func head(major byte, n uint64) []byte {
 	m := major << 5

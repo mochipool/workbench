@@ -34,9 +34,10 @@ func TestEveryPutStatusIsMapped(t *testing.T) {
 		{wire.StatusBadHash, want{refused: true}},
 		{wire.StatusBusy, want{noRoute: true}},
 		{wire.StatusUnavailable, want{noRoute: true}},
+		{wire.StatusUnbound, want{noRoute: true}},
 	}
 	var mu sync.Mutex
-	var seen []wire.Put
+	var seen []wire.PutV2
 	var bodies [][]byte
 	next := 0
 	h := newHostile(t, func(s *sconn) {
@@ -83,6 +84,9 @@ func TestEveryPutStatusIsMapped(t *testing.T) {
 		if !bytes.Equal(got, env) || p.To != to || p.Mid != wire.HashOf(env) || int(p.Size) != len(env) {
 			t.Errorf("status %d: the relay saw a Put that does not match the envelope", tc.st)
 		}
+		if p.WalletKey != routeOf(to).WalletKey {
+			t.Errorf("status %d: the Put names the wallet key %x, not the resolver's", tc.st, p.WalletKey)
+		}
 	}
 	// refused statuses are events with the status and the item; no-route ones too
 	ref := h.ev.of(mailbox.EventRefused)
@@ -94,11 +98,11 @@ func TestEveryPutStatusIsMapped(t *testing.T) {
 			t.Errorf("a refusal event does not name the status and the recipient: %+v", e)
 		}
 	}
-	if n := len(h.ev.of(mailbox.EventNoRoute)); n != 3 {
-		t.Fatalf("no-route events = %d, want 3", n)
+	if n := len(h.ev.of(mailbox.EventNoRoute)); n != 4 {
+		t.Fatalf("no-route events = %d, want 4", n)
 	}
 	// the operator-visible reasons
-	for st, text := range map[wire.Status]string{wire.StatusFull: "full", wire.StatusBusy: "busy", wire.StatusUnavailable: "storage"} {
+	for st, text := range map[wire.Status]string{wire.StatusFull: "full", wire.StatusBusy: "busy", wire.StatusUnavailable: "storage", wire.StatusUnbound: "unbound"} {
 		found := false
 		for _, e := range h.ev.of(mailbox.EventNoRoute) {
 			found = found || (e.Status == st && string(e.Reason) == text)
@@ -113,10 +117,10 @@ func TestEveryPutStatusIsMapped(t *testing.T) {
 //
 // spec: SPO-Xmailbox-OUT-038
 func TestNoRouteSaysWhy(t *testing.T) {
-	for st, text := range map[wire.Status]string{wire.StatusFull: "full", wire.StatusBusy: "busy", wire.StatusUnavailable: "storage"} {
+	for st, text := range map[wire.Status]string{wire.StatusFull: "full", wire.StatusBusy: "busy", wire.StatusUnavailable: "storage", wire.StatusUnbound: "unbound"} {
 		h := newHostile(t, func(s *sconn) {
 			s.serve(hs{}, func(m wire.Message) bool {
-				if p, ok := m.(wire.Put); ok {
+				if p, ok := m.(wire.PutV2); ok {
 					s.send(wire.PutResult{RequestID: p.RequestID, Status: st})
 				}
 				return true
@@ -135,15 +139,15 @@ func TestNoRouteSaysWhy(t *testing.T) {
 //
 // spec: SPO-Xmailbox-PRE-025
 func TestPutReplyViolations(t *testing.T) {
-	cases := map[string]func(s *sconn, p wire.Put){
-		"wrong request id": func(s *sconn, p wire.Put) {
+	cases := map[string]func(s *sconn, p wire.PutV2){
+		"wrong request id": func(s *sconn, p wire.PutV2) {
 			s.send(wire.PutResult{RequestID: p.RequestID + 1, Status: wire.StatusStored})
 		},
-		"an Items reply":        func(s *sconn, p wire.Put) { s.send(wire.Items{RequestID: p.RequestID}) },
-		"an AckResult reply":    func(s *sconn, p wire.Put) { s.send(wire.AckResult{RequestID: p.RequestID}) },
-		"a client-only type":    func(s *sconn, p wire.Put) { s.send(wire.Fetch{RequestID: p.RequestID, MaxItems: 1}) },
-		"a status above seven":  func(s *sconn, p wire.Put) { s.header([]any{uint64(4), uint64(p.RequestID), uint64(8)}) },
-		"a non-canonical reply": func(s *sconn, p wire.Put) { s.raw([]byte{0, 0, 0, 4, 0x9f, 0x04, 0x00, 0xff}) },
+		"an Items reply":        func(s *sconn, p wire.PutV2) { s.send(wire.Items{RequestID: p.RequestID}) },
+		"an AckResult reply":    func(s *sconn, p wire.PutV2) { s.send(wire.AckResult{RequestID: p.RequestID}) },
+		"a client-only type":    func(s *sconn, p wire.PutV2) { s.send(wire.Fetch{RequestID: p.RequestID, MaxItems: 1}) },
+		"a status above eight":  func(s *sconn, p wire.PutV2) { s.header([]any{uint64(4), uint64(p.RequestID), uint64(9)}) },
+		"a non-canonical reply": func(s *sconn, p wire.PutV2) { s.raw([]byte{0, 0, 0, 4, 0x9f, 0x04, 0x00, 0xff}) },
 	}
 	for name, reply := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -245,8 +249,7 @@ func TestStallDuringAPut(t *testing.T) {
 	t.Run("a cut mid-body", func(t *testing.T) {
 		h := newHostile(t, putOK)
 		d := h.net.Dialer(h.me.node, h.relay)
-		auth, _ := wire.Encode(wire.Auth{Version: 1})
-		cut := int64(4+len(auth)) + 100
+		cut := int64(h.me.authFrameLen(t, h.me.binding(), h.me.senders)) + 100
 		d.Plan(fakenet.Fault{CutClientToServer: fakenet.Int64(cut)})
 		err := h.clientVia(d).Send(context.Background(), party.Fingerprint{1}, newEnv(5000, 1))
 		if !errors.Is(err, ports.ErrNoRoute) {

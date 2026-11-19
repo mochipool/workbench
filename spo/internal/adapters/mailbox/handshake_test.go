@@ -1,6 +1,7 @@
 package mailbox_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -9,6 +10,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/adapters/mailbox"
 	wire "github.com/mochipool/workbench/spo/internal/domain/mailbox"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
+	"github.com/mochipool/workbench/spo/internal/domain/relaybind"
 	"github.com/mochipool/workbench/spo/internal/ports"
 	"github.com/mochipool/workbench/spo/test/fakenet"
 )
@@ -19,7 +21,7 @@ func sendOnce(c *mailbox.Client) error {
 
 func putOK(s *sconn) {
 	s.serve(hs{}, func(m wire.Message) bool {
-		if p, ok := m.(wire.Put); ok {
+		if p, ok := m.(wire.PutV2); ok {
 			s.send(wire.PutResult{RequestID: p.RequestID, Status: wire.StatusStored})
 		}
 		return true
@@ -30,7 +32,7 @@ func putOK(s *sconn) {
 // another key is closed on before the relay's Challenge is read, nothing is
 // signed and nothing is sent.
 //
-// spec: SPO-Xmailbox-PRE-024
+// spec: SPO-Xmailbox-PRE-024, SPO-Xmailbox-OUT-089
 func TestDialerKeyMismatchSignsNothing(t *testing.T) {
 	h := newHostile(t, putOK)
 	other := party.NodeKey{9, 9}
@@ -60,9 +62,10 @@ func ctxFor(t *testing.T, d time.Duration) context.Context {
 }
 
 // A Challenge that names another relay key closes the connection before
-// anything is signed: the relay sees the client close and never an Auth.
+// anything is signed or revoked: the relay sees the client close and never an
+// Auth or a Revoke, even with a revoke pending.
 //
-// spec: SPO-Xmailbox-PRE-024, SPO-Xmailbox-SEC-029
+// spec: SPO-Xmailbox-PRE-024, SPO-Xmailbox-SEC-029, SPO-Xmailbox-OUT-089
 func TestChallengeWithAnotherRelayKeyClosesWithoutSigning(t *testing.T) {
 	other := party.NodeKey{7, 7, 7}
 	closed := make(chan bool, 4)
@@ -70,6 +73,8 @@ func TestChallengeWithAnotherRelayKeyClosesWithoutSigning(t *testing.T) {
 		s.challenge(hs{relayKey: &other})
 		closed <- s.waitClosed()
 	})
+	rs := h.me.wallet.RevokeStatement(party.Fingerprint{9}, false, startTime-10)
+	h.book = &testBook{pending: []mailbox.Revoke{{Kind: mailbox.RevokeByWalletKey, Until: h.me.until, Sign1: rs.Sign1, Key: rs.COSEKey}}}
 	c := h.client()
 	err := sendOnce(c)
 	if !errors.Is(err, ports.ErrNoRoute) || !errors.Is(err, mailbox.ErrRelayKey) {
@@ -81,19 +86,23 @@ func TestChallengeWithAnotherRelayKeyClosesWithoutSigning(t *testing.T) {
 	if !<-closed {
 		t.Fatal("the client did not close the connection")
 	}
-	if h.authCount() != 0 {
-		t.Fatal("an Auth reached the relay")
+	if h.authCount() != 0 || len(h.revokeRecs()) != 0 {
+		t.Fatal("an Auth or a Revoke reached a relay that is not the pinned one")
 	}
 }
 
 // The signer is given the pinned relay key and our own node key, never a value
-// from the Challenge, and the signature it returns verifies over exactly those
-// values with the nonce and time of that Challenge.
+// from the Challenge, and the signature it returns verifies, at the relay, over
+// exactly those values with the nonce and time of that Challenge, the full hash
+// of the binding presented and the hash of the canonical sender list presented.
+// The Auth carries the device's fingerprint and keys, the binding bytes as given
+// and the canonical (sorted, unique) list.
 //
-// spec: SPO-Xmailbox-SEC-029, SPO-Xmailbox-OUT-040, SPO-Xmailbox-IF-008
+// spec: SPO-Xmailbox-SEC-029, SPO-Xmailbox-SEC-071, SPO-Xmailbox-OUT-089, SPO-Xmailbox-IF-017
 func TestSignerGetsThePinnedKeyAndOwnNodeKey(t *testing.T) {
 	h := newHostile(t, putOK)
-	c := h.client()
+	hi, lo, mid := wire.WalletKey{9}, wire.WalletKey{1}, wire.WalletKey{5}
+	c := h.client(func(cfg *mailbox.Config) { cfg.Senders = []wire.WalletKey{hi, lo, hi, mid, lo} })
 	if err := sendOnce(c); err != nil {
 		t.Fatal(err)
 	}
@@ -108,22 +117,50 @@ func TestSignerGetsThePinnedKeyAndOwnNodeKey(t *testing.T) {
 	if got.nodeKey != h.me.node.Key {
 		t.Fatalf("signer was given node key %x, not our own", got.nodeKey)
 	}
-	if got.version != 1 {
-		t.Fatalf("version = %d", got.version)
-	}
 	h.mu.Lock()
 	rec := h.auths[0]
 	h.mu.Unlock()
 	if got.nonce != rec.nonce || got.relayTime != rec.relayTime {
 		t.Fatal("the signer was not given the nonce and the relay time of the Challenge")
 	}
-	if rec.auth.Fingerprint != h.me.fp || rec.auth.Version != 1 {
-		t.Fatal("Auth does not carry our fingerprint and the chosen version")
+	a := rec.auth
+	if a.Fingerprint != h.me.fp || a.Keys != h.me.keys {
+		t.Fatal("Auth does not carry our fingerprint and our device keys")
 	}
-	err := wire.VerifyAuth(h.me.id, h.me.node.Key, rec.auth.Signature, wire.AuthParams{Version: 1, RelayKey: h.relay.Key,
-		ClientNodeKey: h.me.node.Key, Nonce: rec.nonce, RelayTime: rec.relayTime, Fingerprint: h.me.fp})
+	if !bytes.Equal(a.Sign1, h.me.stmt.Sign1) || !bytes.Equal(a.Key, h.me.stmt.COSEKey) {
+		t.Fatal("Auth does not carry the binding as it was given")
+	}
+	want := []wire.WalletKey{lo, mid, hi}
+	if len(a.Senders) != 3 || a.Senders[0] != want[0] || a.Senders[1] != want[1] || a.Senders[2] != want[2] {
+		t.Fatalf("Auth senders = %x, want the sorted unique list %x", a.Senders, want)
+	}
+	sh, err := wire.SendersHash(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.sendersHash != sh {
+		t.Fatal("the signer was not given the hash of the canonical sender list")
+	}
+	st, err := relaybind.ParseStatement(h.me.stmt.Sign1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.bindingHash != st.FullHash() {
+		t.Fatal("the signer was not given the full hash of the binding presented")
+	}
+	// the relay verifies the Auth as app/relay does
+	err = wire.VerifyAuthV2(a.Keys, h.me.node.Key, a.Signature, wire.AuthV2Params{RelayKey: h.relay.Key,
+		ClientNodeKey: h.me.node.Key, Nonce: rec.nonce, RelayTime: rec.relayTime, Fingerprint: h.me.fp,
+		BindingHash: st.FullHash(), SendersHash: sh})
 	if err != nil {
 		t.Fatalf("the relay cannot verify the Auth: %v", err)
+	}
+	vkey, err := relaybind.ParseCOSEKey(a.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := relaybind.VerifyBinding(st, vkey, a.Keys.Fingerprint(), startTime, relaybind.DefaultPolicy()); err != nil {
+		t.Fatalf("the relay cannot verify the binding: %v", err)
 	}
 }
 
@@ -150,9 +187,9 @@ func TestSignerFailureEndsTheHandshake(t *testing.T) {
 // off warns, exactly five does not, an absurd value warns and the handshake
 // still completes with the value signed as given.
 //
-// spec: SPO-Xmailbox-OUT-040, SPO-Xmailbox-OUT-042
+// spec: SPO-Xmailbox-OUT-089, SPO-Xmailbox-OUT-042
 func TestRelayTimeOnlyWarns(t *testing.T) {
-	const now = 1_700_000_000
+	const now = startTime
 	for _, tc := range []struct {
 		name string
 		rt   int64
@@ -167,7 +204,7 @@ func TestRelayTimeOnlyWarns(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHostile(t, func(s *sconn) {
 				s.serve(hs{relayTime: tc.rt}, func(m wire.Message) bool {
-					if p, ok := m.(wire.Put); ok {
+					if p, ok := m.(wire.PutV2); ok {
 						s.send(wire.PutResult{RequestID: p.RequestID, Status: wire.StatusStored})
 					}
 					return true
@@ -193,35 +230,76 @@ func TestRelayTimeOnlyWarns(t *testing.T) {
 
 // Every handshake violation: nothing is delivered or sent after it, the
 // connection is closed, and it is a protocol error (a misconfiguration or a
-// hostile relay), which Receive returns instead of retrying.
+// hostile relay), which Receive returns instead of retrying. The version 1
+// frames of the former protocol are among them: there is one version.
 //
-// spec: SPO-Xmailbox-PRE-024, SPO-Xmailbox-OUT-039
+// spec: SPO-Xmailbox-PRE-024, SPO-Xmailbox-PRE-058, SPO-Xmailbox-OUT-039, SPO-Xmailbox-SEC-072
 func TestHandshakeViolations(t *testing.T) {
-	auth := wire.Auth{Version: 1}
+	auth := wire.AuthV2{Sign1: []byte{1}, Key: []byte{1}}
+	untilOf := func() int64 { return startTime + 30*24*3600 }
+	okLimits := func(until uint64) []any {
+		return []any{uint64(wire.MsgAuthOK), uint64(2), uint64(1000), uint64(1), uint64(1), uint64(1), until}
+	}
 	cases := []struct {
 		name   string
 		script func(s *sconn)
 		is     error
 	}{
 		{"first frame is a client-only type (Put)", func(s *sconn) {
-			s.send(wire.Put{RequestID: 1, Size: 1})
+			s.send(wire.PutV2{RequestID: 1, Size: 1})
 			s.waitClosed()
 		}, mailbox.ErrProtocol},
 		{"first frame is a client-only type (Auth)", func(s *sconn) { s.send(auth); s.waitClosed() }, mailbox.ErrProtocol},
+		{"first frame is a client-only type (Revoke)", func(s *sconn) {
+			s.send(wire.RevokeByWallet{RequestID: 1, Sign1: []byte{1}, Key: []byte{1}})
+			s.waitClosed()
+		}, mailbox.ErrProtocol},
 		{"first frame is PutResult", func(s *sconn) { s.send(wire.PutResult{}); s.waitClosed() }, mailbox.ErrProtocol},
 		{"garbage", func(s *sconn) { s.raw([]byte{0, 0, 0, 3, 0xff, 0xff, 0xff}); s.waitClosed() }, mailbox.ErrProtocol},
 		{"oversized header claim", func(s *sconn) { s.raw([]byte{0xff, 0xff, 0xff, 0xff}); s.waitClosed() }, mailbox.ErrProtocol},
-		{"version range the client cannot speak", func(s *sconn) { s.challenge(hs{min: 2, max: 3}); s.waitClosed() }, mailbox.ErrProtocol},
+		{"a Challenge that offers only version 1", func(s *sconn) { s.challenge(hs{min: 1, max: 1}); s.waitClosed() }, mailbox.ErrProtocol},
+		{"version range above what the client speaks", func(s *sconn) { s.challenge(hs{min: 3, max: 4}); s.waitClosed() }, mailbox.ErrProtocol},
+		{"a malformed version range", func(s *sconn) {
+			s.header([]any{uint64(0), uint64(0), uint64(2), make([]byte, 32), make([]byte, 32), uint64(1)})
+			s.waitClosed()
+		}, mailbox.ErrProtocol},
 		{"AuthOK is not AuthOK", func(s *sconn) {
 			s.handshake(hs{authOKFunc: func() wire.Message { return wire.PutResult{} }})
 			s.waitClosed()
 		}, mailbox.ErrProtocol},
-		{"AuthOK of another version", func(s *sconn) {
-			s.handshake(hs{authOKFunc: func() wire.Message {
-				return wire.AuthOK{Version: 2, MaxEnvelope: 1000, MaxEntries: 1, MaxBytes: 1, RetentionSeconds: 1}
-			}})
+		{"a RevokeResult instead of AuthOK", func(s *sconn) {
+			s.handshake(hs{authOKFunc: func() wire.Message { return wire.RevokeResult{RequestID: 1, Status: wire.RevokeRecorded} }})
 			s.waitClosed()
 		}, mailbox.ErrProtocol},
+		{"an AuthOK in the shape of version 1 (no until)", func(s *sconn) {
+			s.handshake(hs{noAuthOK: true})
+			s.header([]any{uint64(wire.MsgAuthOK), uint64(1), uint64(1000), uint64(1), uint64(1), uint64(1)})
+			s.waitClosed()
+		}, mailbox.ErrProtocol},
+		{"an AuthOK of version 1 with an until", func(s *sconn) {
+			s.handshake(hs{noAuthOK: true})
+			s.header([]any{uint64(wire.MsgAuthOK), uint64(1), uint64(1000), uint64(1), uint64(1), uint64(1), uint64(untilOf())})
+			s.waitClosed()
+		}, mailbox.ErrProtocol},
+		{"an AuthOK with an until of zero", func(s *sconn) {
+			s.handshake(hs{noAuthOK: true})
+			s.header(okLimits(0))
+			s.waitClosed()
+		}, mailbox.ErrProtocol},
+		{"an AuthOK with an until beyond the binding's", func(s *sconn) {
+			s.handshake(hs{until: untilOf() + 1})
+			s.waitClosed()
+		}, mailbox.ErrProtocol},
+		{"an AuthOK with an until that has passed", func(s *sconn) {
+			s.handshake(hs{until: startTime - 1})
+			s.waitClosed()
+		}, mailbox.ErrProtocol},
+		{"an AuthOK that announces nothing it may announce", func(s *sconn) {
+			s.handshake(hs{noAuthOK: true})
+			s.header([]any{uint64(wire.MsgAuthOK), uint64(2), uint64(0), uint64(1), uint64(1), uint64(1), uint64(untilOf())})
+			s.waitClosed()
+		}, mailbox.ErrProtocol},
+		{"an Error frame with a code of no version", func(s *sconn) { s.header([]any{uint64(wire.MsgError), uint64(8)}); s.waitClosed() }, mailbox.ErrProtocol},
 		{"an Error frame instead of the Challenge", func(s *sconn) { s.send(wire.Error{Code: wire.CodeRevoked}); s.waitClosed() }, mailbox.ErrRelayError},
 		{"an Error frame instead of AuthOK", func(s *sconn) {
 			s.handshake(hs{authOKFunc: func() wire.Message { return wire.Error{Code: wire.CodeAuth} }})
@@ -249,6 +327,31 @@ func TestHandshakeViolations(t *testing.T) {
 				t.Fatalf("Receive = (%d bytes, %v), want error %v", len(got.Envelope), rerr, tc.is)
 			}
 		})
+	}
+}
+
+// A Challenge that offers only version 1 is refused with the version error of the
+// domain behind it, before anything is signed or sent: there is no downgrade.
+//
+// spec: SPO-Xmailbox-PRE-058, SPO-Xmailbox-SEC-072, SPO-Xmailbox-OUT-050
+func TestAChallengeOfVersionOneOnlyIsRefusedAndNothingIsSigned(t *testing.T) {
+	h := newHostile(t, func(s *sconn) {
+		s.challenge(hs{min: 1, max: 1})
+		s.waitClosed()
+	})
+	err := sendOnce(h.client())
+	if !errors.Is(err, mailbox.ErrProtocol) || !errors.Is(err, wire.ErrVersion) {
+		t.Fatalf("Send = %v, want ErrProtocol wrapping the domain's ErrVersion", err)
+	}
+	if n := len(h.me.sg.calls()); n != 0 || h.authCount() != 0 {
+		t.Fatalf("%d signatures and %d Auths after a Challenge that offers only version 1", n, h.authCount())
+	}
+	var failed bool
+	for _, e := range h.ev.of(mailbox.EventFailed) {
+		failed = failed || e.Reason == mailbox.ReasonVersion
+	}
+	if !failed {
+		t.Fatal("no failure event with the reason version")
 	}
 }
 
@@ -282,12 +385,12 @@ func TestStallDuringTheHandshake(t *testing.T) {
 // above the announced limit is not sent and is refused by the transport, and
 // a relay that announces more than the client allows does not loosen it.
 //
-// spec: SPO-Xmailbox-OUT-040
+// spec: SPO-Xmailbox-OUT-089
 func TestAuthOKTightensTheEnvelopeLimit(t *testing.T) {
-	puts := make(chan wire.Put, 8)
+	puts := make(chan wire.PutV2, 8)
 	h := newHostile(t, func(s *sconn) {
 		s.serve(hs{maxEnv: 1000}, func(m wire.Message) bool {
-			if p, ok := m.(wire.Put); ok {
+			if p, ok := m.(wire.PutV2); ok {
 				puts <- p
 				s.send(wire.PutResult{RequestID: p.RequestID, Status: wire.StatusStored})
 			}
@@ -334,29 +437,17 @@ func TestLimitsAboveTheTableAreRefused(t *testing.T) {
 		"dials<0":  func(l *mailbox.Limits) { l.DialsPerMinute = -1 },
 		"backoff":  func(l *mailbox.Limits) { l.BackoffMin, l.BackoffMax = time.Second, time.Millisecond },
 	} {
-		cfg := mailbox.Config{Dialer: h.net.Dialer(h.me.node, h.relay), RelayKey: h.relay.Key, NodeKey: h.me.node.Key, Self: h.me.fp,
-			Signer: h.me.sg, Clock: relayClock(1)}
+		cfg := h.config(h.net.Dialer(h.me.node, h.relay))
+		cfg.Limits = mailbox.Limits{}
 		f(&cfg.Limits)
 		if _, err := mailbox.New(cfg); !errors.Is(err, mailbox.ErrLimits) {
 			t.Errorf("%s: New = %v, want ErrLimits", name, err)
 		}
 	}
 	// the ceilings themselves are accepted, and so is the zero value
-	ok := mailbox.DefaultLimits()
-	if _, err := mailbox.New(mailbox.Config{Dialer: h.net.Dialer(h.me.node, h.relay), RelayKey: h.relay.Key, NodeKey: h.me.node.Key,
-		Self: h.me.fp, Signer: h.me.sg, Clock: relayClock(1), Limits: ok}); err != nil {
+	ok := h.config(h.net.Dialer(h.me.node, h.relay))
+	ok.Limits = mailbox.DefaultLimits()
+	if _, err := mailbox.New(ok); err != nil {
 		t.Fatalf("the table itself: %v", err)
-	}
-	for name, cfg := range map[string]mailbox.Config{
-		"no dialer": {RelayKey: h.relay.Key, NodeKey: h.me.node.Key, Self: h.me.fp, Signer: h.me.sg, Clock: relayClock(1)},
-		"no key":    {Dialer: h.net.Dialer(h.me.node, h.relay), NodeKey: h.me.node.Key, Self: h.me.fp, Signer: h.me.sg, Clock: relayClock(1)},
-		"no node":   {Dialer: h.net.Dialer(h.me.node, h.relay), RelayKey: h.relay.Key, Self: h.me.fp, Signer: h.me.sg, Clock: relayClock(1)},
-		"no self":   {Dialer: h.net.Dialer(h.me.node, h.relay), RelayKey: h.relay.Key, NodeKey: h.me.node.Key, Signer: h.me.sg, Clock: relayClock(1)},
-		"no signer": {Dialer: h.net.Dialer(h.me.node, h.relay), RelayKey: h.relay.Key, NodeKey: h.me.node.Key, Self: h.me.fp, Clock: relayClock(1)},
-		"no clock":  {Dialer: h.net.Dialer(h.me.node, h.relay), RelayKey: h.relay.Key, NodeKey: h.me.node.Key, Self: h.me.fp, Signer: h.me.sg},
-	} {
-		if _, err := mailbox.New(cfg); err == nil {
-			t.Errorf("%s: New accepted an incomplete configuration", name)
-		}
 	}
 }

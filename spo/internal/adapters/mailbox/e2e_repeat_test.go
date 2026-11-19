@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	wire "github.com/mochipool/workbench/spo/internal/domain/mailbox"
 	"github.com/mochipool/workbench/spo/internal/ports"
 	"github.com/mochipool/workbench/spo/test/fakenet"
 )
@@ -119,10 +118,9 @@ func TestAnUnackedEnvelopeComesAgain(t *testing.T) {
 // spec: SPO-Xmailbox-OUT-035, SPO-Xmailbox-OUT-041
 func TestACutMidPutStoresNothingAndTheRetryStoresOnce(t *testing.T) {
 	w := newWorld(t)
-	auth, _ := wire.Encode(wire.Auth{Version: 1})
 	d := w.net.Dialer(w.a.node, w.relay)
 	// cut after the Auth frame, the Put header and part of the body
-	d.Plan(fakenet.Fault{CutClientToServer: fakenet.Int64(int64(4+len(auth)) + 120 + 1500)})
+	d.Plan(fakenet.Fault{CutClientToServer: fakenet.Int64(int64(w.a.authFrameLen(t, w.a.binding(), w.a.senders)) + 120 + 1500)})
 	ca := w.clientVia(w.a, d)
 	env := body(5000, 3)
 	err := ca.Send(context.Background(), w.b.fp, env)

@@ -2,17 +2,17 @@ package mailbox
 
 import "time"
 
-// Protocol version 2 (ADR 0014, work package 2). Version 1 stays beside it
-// until the relay session and the client have moved; then it is removed
-// (nothing is deployed). A field is never added to an array: version 2 is the
-// shape of the ADR, with the abuse bounds of decision 5 in it.
+// Protocol version 2 (ADR 0014, work package 2), the only version: version 1 was
+// deleted when the relay session and the client moved. A field is never added to
+// an array: a new shape is a new version. Version 2 is the shape of the ADR, with
+// the abuse bounds of decision 5 in it.
 const (
 	// Version2 is the version of the wallet-key identity.
 	Version2 = 2
 
-	// AuthLabelV2 is the first element of the signed version 2 auth array. It
-	// differs from AuthLabel (version 1) and from every other label a device key
-	// signs, including "spo/relay-revoke-device/v1" (ADR 0014 decisions 3 and 7).
+	// AuthLabelV2 is the first element of the signed auth array. It differs from
+	// every other label a device key signs, including
+	// "spo/relay-revoke-device/v1" (ADR 0014 decisions 3 and 7).
 	AuthLabelV2 = "spo/mailbox-auth/v2"
 
 	// WalletKeySize is the size of a wallet key hash K: Blake2b-224 of the

@@ -1,8 +1,14 @@
-// Package mailbox is the pure domain of the relay mailbox of ADR 0013: the
-// wire frames, their strict canonical decoding, the envelope hash, the bytes
-// a client signs to authenticate, the quota arithmetic and the retention
-// rule. It does no I/O and holds no state. Everything read from the wire is
-// checked against a named bound before anything is allocated or read for it.
+// Package mailbox is the pure domain of the relay mailbox of ADR 0013 and ADR
+// 0014: the wire frames of protocol version 2 (the only version), their strict
+// canonical decoding at the stage of a connection, the envelope hash, the bytes a
+// device signs to authenticate, the quota arithmetic and the retention rule. It
+// does no I/O and holds no state. Everything read from the wire is checked against
+// a named bound before anything is allocated or read for it.
+//
+// Protocol version 1 (ADR 0013) was deleted when the relay session and the client
+// moved to version 2. Some names still carry a "V2" suffix (AuthV2, PutV2,
+// AuthOKV2, AuthBytesV2, VerifyAuthV2, DecodeFromClientIn): renaming them would
+// touch every user for no gain, so they stay.
 package mailbox
 
 import (
@@ -13,15 +19,8 @@ import (
 
 // Protocol constants.
 const (
-	// Version1 is the only protocol version of this record. A field is never
-	// added to an array: a new shape is a new version.
-	Version1 = 1
 	// MaxVersion bounds any version number on the wire.
 	MaxVersion = 0xFFFF
-
-	// AuthLabel is the first element of the signed auth array (ADR 0013
-	// decision 3). It is distinct from every other signing label.
-	AuthLabel = "spo/mailbox-auth/v1"
 
 	// MaxTime is the largest unix time (the end of year 9999) the protocol
 	// accepts as a relay time or as an entry's arrival time.

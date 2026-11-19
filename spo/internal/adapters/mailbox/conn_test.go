@@ -201,7 +201,7 @@ func TestConnectionReuseAndItsBounds(t *testing.T) {
 	ids := map[int][]uint32{} // connection number -> request ids seen
 	script := func(s *sconn) {
 		s.serve(hs{}, func(m wire.Message) bool {
-			if p, ok := m.(wire.Put); ok {
+			if p, ok := m.(wire.PutV2); ok {
 				mu.Lock()
 				ids[s.n] = append(ids[s.n], p.RequestID)
 				mu.Unlock()
@@ -275,7 +275,7 @@ func TestConnectionReuseAndItsBounds(t *testing.T) {
 func TestAStaleConnectionIsReplacedOnce(t *testing.T) {
 	h := newHostile(t, func(s *sconn) {
 		s.serve(hs{}, func(m wire.Message) bool {
-			if p, ok := m.(wire.Put); ok {
+			if p, ok := m.(wire.PutV2); ok {
 				s.send(wire.PutResult{RequestID: p.RequestID, Status: wire.StatusStored})
 				return s.n != 1 // the relay closes its idle connection after the first put
 			}
@@ -350,7 +350,7 @@ func TestBackoffIsBounded(t *testing.T) {
 func TestBackoffResetsAfterASuccess(t *testing.T) {
 	h := newHostile(t, func(s *sconn) {
 		s.serve(hs{}, func(m wire.Message) bool {
-			if p, ok := m.(wire.Put); ok {
+			if p, ok := m.(wire.PutV2); ok {
 				s.send(wire.PutResult{RequestID: p.RequestID, Status: wire.StatusStored})
 				return false // the relay closes its connection after one put
 			}
@@ -471,7 +471,9 @@ func TestEventsCarryNoPeerText(t *testing.T) {
 	for _, r := range []mailbox.Reason{mailbox.ReasonNone, mailbox.ReasonDial, mailbox.ReasonRelayKey, mailbox.ReasonVersion, mailbox.ReasonProtocol,
 		mailbox.ReasonLimit, mailbox.ReasonHash, mailbox.ReasonTimeout, mailbox.ReasonPeer, mailbox.ReasonRelayError, mailbox.ReasonSigner,
 		mailbox.ReasonBackoff, mailbox.ReasonLifetime, mailbox.ReasonRequests, mailbox.ReasonBytes, mailbox.ReasonIdle, mailbox.ReasonFull,
-		mailbox.ReasonBusy, mailbox.ReasonStorage, mailbox.ReasonRefused, mailbox.ReasonTooLarge, mailbox.ReasonBadHash, mailbox.ReasonSkew} {
+		mailbox.ReasonBusy, mailbox.ReasonStorage, mailbox.ReasonRefused, mailbox.ReasonTooLarge, mailbox.ReasonBadHash, mailbox.ReasonSkew,
+		mailbox.ReasonDialLimit, mailbox.ReasonBinding, mailbox.ReasonBindingExpired, mailbox.ReasonNotAllowed, mailbox.ReasonUnbound,
+		mailbox.ReasonNoWalletKey, mailbox.ReasonSenders} {
 		known[r] = true
 	}
 	for _, e := range h.ev.all() {

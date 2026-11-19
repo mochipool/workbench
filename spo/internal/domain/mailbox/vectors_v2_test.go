@@ -64,7 +64,7 @@ type vectorFileV2 struct {
 }
 
 var stageNames = map[string]mailbox.Stage{
-	"unversioned": mailbox.StageUnversioned, "v2_preauth": mailbox.StageV2PreAuth, "v2_authed": mailbox.StageV2Authed,
+	"v2_preauth": mailbox.StageV2PreAuth, "v2_authed": mailbox.StageV2Authed,
 }
 
 func hexList(items ...[]byte) []any {
@@ -150,9 +150,9 @@ func buildVectorsV2(t *testing.T) []byte {
 		m                        mailbox.Message
 		fields                   map[string]any
 	}{
-		{"challenge_both_versions", "challenge", "unversioned", "relay", mailbox.Challenge{Min: 1, Max: 2, Nonce: nonce(1), RelayKey: nk(2), RelayTime: 1700000000},
+		{"challenge_range_1_2", "challenge", "v2_preauth", "relay", mailbox.Challenge{Min: 1, Max: 2, Nonce: nonce(1), RelayKey: nk(2), RelayTime: 1700000000},
 			map[string]any{"min": 1, "max": 2, "nonce": x(nonceb(1)), "relay_key": x(nkb(2)), "relay_time": 1700000000}},
-		{"challenge_v2_only", "challenge", "unversioned", "relay", mailbox.Challenge{Min: 2, Max: 2, Nonce: nonce(1), RelayKey: nk(2), RelayTime: 1700000000},
+		{"challenge_v2_only", "challenge", "v2_preauth", "relay", mailbox.Challenge{Min: 2, Max: 2, Nonce: nonce(1), RelayKey: nk(2), RelayTime: 1700000000},
 			map[string]any{"min": 2, "max": 2, "nonce": x(nonceb(1)), "relay_key": x(nkb(2)), "relay_time": 1700000000}},
 		{"auth_v2", "auth_v2", "v2_preauth", "client", typical, authFields(typical)},
 		{"auth_v2_no_senders", "auth_v2", "v2_preauth", "client", empty, authFields(empty)},

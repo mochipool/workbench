@@ -229,14 +229,31 @@ func TestClientOfVersion2RefusesAnOfferOfVersion1(t *testing.T) {
 	}
 }
 
-// The version 1 functions are pinned by the committed version 1 vectors and a
-// set of malformed inputs, independently of the stage code: for every frame the
-// version 1 function and the decoder at StageV1 give the same message and the
-// same error, and every vector decodes to a message that is written back to the
-// vector's bytes by the version 1 encoder.
+// The frames of the retired version 1 are refused by every decoder at every stage
+// and from either side, whatever their fields: an Auth of version 1, an Auth
+// with the old arity, a Put and an AuthOK of the old shapes. The committed
+// vectors of the shared frames still decode, each as one message of its own side.
 //
-// spec: SPO-Xmailbox-OUT-052, SPO-Xmailbox-OUT-011
-func TestVersion1FunctionsArePinnedByTheCommittedVectors(t *testing.T) {
+// spec: SPO-Xmailbox-OUT-052, SPO-Xmailbox-PRE-029, SPO-Xmailbox-OUT-011
+func TestTheFramesOfTheRetiredVersionAreRefused(t *testing.T) {
+	retired := [][]byte{
+		cbor(t, 1, 1, fpb(1), sigb(1)),         // the Auth of version 1
+		cbor(t, 1, 2, fpb(1), sigb(1)),         // the old arity under version 2
+		cbor(t, 2, 1, 10, 11, 12, 13),          // the AuthOK of version 1
+		cbor(t, 2, 2, 10, 11, 12, 13),          // the old arity under version 2
+		cbor(t, 3, 7, fpb(4), hashb(5), 99),    // the Put of version 1
+		cbor(t, 3, 7, fpb(4), hashb(5), 99, 0), // one field more
+	}
+	for _, st := range []mailbox.Stage{mailbox.StageV2PreAuth, mailbox.StageV2Authed} {
+		for i, c := range retired {
+			if m, err := mailbox.DecodeFromClientIn(st, c); err == nil {
+				t.Errorf("retired frame %d decoded from the client at %v as %T", i, st, m)
+			}
+			if m, err := mailbox.DecodeFromRelayIn(st, c); err == nil {
+				t.Errorf("retired frame %d decoded from the relay at %v as %T", i, st, m)
+			}
+		}
+	}
 	raw, err := os.ReadFile("testdata/vectors.json")
 	if err != nil {
 		t.Fatal(err)
@@ -245,117 +262,16 @@ func TestVersion1FunctionsArePinnedByTheCommittedVectors(t *testing.T) {
 	if err := json.Unmarshal(raw, &vf); err != nil {
 		t.Fatal(err)
 	}
-	if len(vf.Frames) < 13 {
-		t.Fatalf("%d frames", len(vf.Frames))
-	}
-	clientTypes := map[uint]bool{1: true, 3: true, 5: true, 7: true}
-	same := func(name string, a, b mailbox.Message, errA, errB error) {
-		t.Helper()
-		if (errA == nil) != (errB == nil) || (errA != nil && errA.Error() != errB.Error()) {
-			t.Errorf("%s: %v / %v", name, errA, errB)
-			return
-		}
-		if errA != nil {
-			if a != nil || b != nil {
-				t.Errorf("%s: a message with an error", name)
-			}
-			return
-		}
-		x, errX := mailbox.Encode(a)
-		y, errY := mailbox.Encode(b)
-		if errX != nil || errY != nil || string(x) != string(y) {
-			t.Errorf("%s: the messages differ", name)
-		}
-	}
 	for _, v := range vf.Frames {
 		c := unhex(t, v.CBORHex)
-		a, errA := mailbox.DecodeFromClient(c)
-		b, errB := mailbox.DecodeFromClientIn(mailbox.StageV1, c)
-		same("client "+v.Name, a, b, errA, errB)
-		a, errA = mailbox.DecodeFromRelay(c)
-		b, errB = mailbox.DecodeFromRelayIn(mailbox.StageV1, c)
-		same("relay "+v.Name, a, b, errA, errB)
-		// The right side decodes the vector and writes it back byte for byte.
-		var m mailbox.Message
-		var err error
-		if clientTypes[v.Type] {
-			m, err = mailbox.DecodeFromClient(c)
-		} else {
-			m, err = mailbox.DecodeFromRelay(c)
-		}
-		if err != nil {
-			t.Errorf("%s: %v", v.Name, err)
-			continue
-		}
-		if again, err := mailbox.Encode(m); err != nil || string(again) != string(c) {
-			t.Errorf("%s: re-encoded to %x, %v", v.Name, again, err)
-		}
-		// The other side refuses it as the wrong direction.
-		if clientTypes[v.Type] {
-			if _, err := mailbox.DecodeFromRelay(c); !errors.Is(err, mailbox.ErrDirection) {
-				t.Errorf("%s: from the relay: %v", v.Name, err)
+		okSides := 0
+		for _, w := range []where{{mailbox.StageV2PreAuth, true}, {mailbox.StageV2Authed, true}, {mailbox.StageV2PreAuth, false}, {mailbox.StageV2Authed, false}} {
+			if _, err := decodeIn(w, c); err == nil {
+				okSides++
 			}
-		} else if _, err := mailbox.DecodeFromClient(c); !errors.Is(err, mailbox.ErrDirection) {
-			t.Errorf("%s: from the client: %v", v.Name, err)
 		}
-	}
-	// Malformed and hostile input, the same through both.
-	malformed := [][]byte{
-		nil, {}, {0x00}, {0xff}, {0x80}, {0x81, 0x00}, {0x81, 0x0c}, {0x82, 0x01, 0x01},
-		cbor(t, 1), cbor(t, 1, 1), cbor(t, 1, 2, fpb(1), sigb(1)), cbor(t, 1, "1", fpb(1), sigb(1)),
-		cbor(t, 1, 1, fpb(1)), cbor(t, 1, 1, fpb(1), sigb(1), 0), cbor(t, 1, 1, bs(19, 1), sigb(1)),
-		cbor(t, 3, 1, fpb(1), hashb(1), 0), cbor(t, 3, 1, fpb(1), hashb(1), 1<<20+1), cbor(t, 3, uint64(1<<32), fpb(1), hashb(1), 5),
-		cbor(t, 5, 1, "", 17, 0), cbor(t, 5, 1, hashb(1), 0, 0), cbor(t, 5, 1, hashb(1), 1, 21),
-		cbor(t, 7, 1, []any{}), cbor(t, 7, 1, []any{hashb(1), hashb(1)}),
-		cbor(t, 0, 1, 1, nonceb(1), nkb(1), 1), cbor(t, 0, 2, 1, nonceb(1), nkb(1), 1), cbor(t, 0, 0, 1, nonceb(1), nkb(1), 1),
-		cbor(t, 2, 1, 0, 1, 1, 1), cbor(t, 2, 1, 1, 1, 1, uint64(1<<40)), cbor(t, 4, 1, 8), cbor(t, 4, 1, 7), cbor(t, 9, 6), cbor(t, 9, 5),
-		cbor(t, 10, 1, 0, edb(1), xkb(1), 1, sigb(1)), cbor(t, 11, 1, 0), cbor(t, 12), cbor(t, 3, "x"), cbor(t, "x"), cbor(t, uint64(1<<64-1)),
-		append(cbor(t, 1, 1, fpb(1), sigb(1)), 0), append(cbor(t, 9, 1), 0x00, 0x00),
-	}
-	for i, c := range malformed {
-		a, errA := mailbox.DecodeFromClient(c)
-		b, errB := mailbox.DecodeFromClientIn(mailbox.StageV1, c)
-		same("client malformed "+string(rune('a'+i%26)), a, b, errA, errB)
-		a, errA = mailbox.DecodeFromRelay(c)
-		b, errB = mailbox.DecodeFromRelayIn(mailbox.StageV1, c)
-		same("relay malformed "+string(rune('a'+i%26)), a, b, errA, errB)
-	}
-	// Pinned results of the version 1 rules that version 2 changed: a Revoke is
-	// not a type, a status of 8 and a code of 6 are out of range, an Auth of
-	// another version is refused.
-	for _, c := range []struct {
-		name  string
-		frame []byte
-		relay bool
-		want  error
-	}{
-		{"revoke", cbor(t, 10, 1, 0, edb(1), xkb(1), 1, sigb(1)), false, mailbox.ErrUnknownType},
-		{"revoke result", cbor(t, 11, 1, 0), true, mailbox.ErrUnknownType},
-		{"status 8", cbor(t, 4, 1, 8), true, mailbox.ErrRange},
-		{"code 6", cbor(t, 9, 6), true, mailbox.ErrRange},
-		{"code 7", cbor(t, 9, 7), true, mailbox.ErrRange},
-	} {
-		var err1, err2 error
-		if c.relay {
-			_, err1 = mailbox.DecodeFromRelay(c.frame)
-			_, err2 = mailbox.DecodeFromRelayIn(mailbox.StageV1, c.frame)
-		} else {
-			_, err1 = mailbox.DecodeFromClient(c.frame)
-			_, err2 = mailbox.DecodeFromClientIn(mailbox.StageV1, c.frame)
-		}
-		if !errors.Is(err1, c.want) || !errors.Is(err2, c.want) {
-			t.Errorf("%s: %v / %v, want %v", c.name, err1, err2, c.want)
-		}
-	}
-	// Version 1 leaves the Auth's version to the session: an Auth that says 2
-	// decodes (as it always did) and is the session's to refuse.
-	for _, decode := range []func([]byte) (mailbox.Message, error){
-		mailbox.DecodeFromClient,
-		func(b []byte) (mailbox.Message, error) { return mailbox.DecodeFromClientIn(mailbox.StageV1, b) },
-	} {
-		m, err := decode(cbor(t, 1, 2, fpb(1), sigb(1)))
-		if a, ok := m.(mailbox.Auth); err != nil || !ok || a.Version != 2 {
-			t.Errorf("a version 1 shape that says version 2: %v, %v", m, err)
+		if okSides == 0 {
+			t.Errorf("the shared frame %s decodes nowhere", v.Name)
 		}
 	}
 }

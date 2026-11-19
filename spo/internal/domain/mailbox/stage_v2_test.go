@@ -7,8 +7,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/mailbox"
 )
 
-// The frames of the table, by name: one valid frame of each kind, in the
-// version that writes it.
+// The frames of the table, by name: one valid frame of each kind.
 type namedFrame struct {
 	name  string
 	frame []byte
@@ -17,51 +16,45 @@ type namedFrame struct {
 func tableFrames(t *testing.T) []namedFrame {
 	t.Helper()
 	h := hash(9)
-	v1 := func(m mailbox.Message) []byte { return mustEncodeV(t, 1, m) }
-	v2 := func(m mailbox.Message) []byte { return mustEncodeV(t, 2, m) }
+	enc := func(m mailbox.Message) []byte { return mustEncodeV(t, 2, m) }
 	keys := mailbox.DeviceKeys{Ed25519: edk(5), X25519: xk(6)}
 	return []namedFrame{
-		{"challenge", v1(mailbox.Challenge{Min: 1, Max: 2, Nonce: nonce(1), RelayKey: nk(2), RelayTime: 5})},
-		{"auth v1", v1(mailbox.Auth{Version: 1, Fingerprint: fp(3), Signature: sig(4)})},
-		{"auth v2", v2(mailbox.AuthV2{Fingerprint: fp(3), Signature: sig(4), Keys: keys, Sign1: bs(10, 7), Key: bs(5, 8), Senders: []mailbox.WalletKey{wk(1)}})},
-		{"authok v1", v1(mailbox.AuthOK{Version: 1, MaxEnvelope: 10, MaxEntries: 11, MaxBytes: 12, RetentionSeconds: 13})},
-		{"authok v2", v2(mailbox.AuthOKV2{MaxEnvelope: 10, MaxEntries: 11, MaxBytes: 12, RetentionSeconds: 13, Until: 14})},
-		{"put v1", v1(mailbox.Put{RequestID: 7, To: fp(4), Mid: hash(5), Size: 99})},
-		{"put v2", v2(mailbox.PutV2{RequestID: 7, WalletKey: wk(3), To: fp(4), Mid: hash(5), Size: 99})},
-		{"put result", v1(mailbox.PutResult{RequestID: 7, Status: mailbox.StatusFull})},
-		{"fetch", v1(mailbox.Fetch{RequestID: 8, After: &h, MaxItems: 1})},
-		{"items", v1(mailbox.Items{RequestID: 8, Entries: []mailbox.Item{{Mid: hash(1), Size: 10}}})},
-		{"ack", v1(mailbox.Ack{RequestID: 9, Mids: []mailbox.Hash{hash(1)}})},
-		{"ack result", v1(mailbox.AckResult{RequestID: 9, Deleted: 1})},
-		{"error", v1(mailbox.Error{Code: mailbox.CodeAuth})},
-		{"revoke device", v2(mailbox.RevokeByDevice{RequestID: 3, Keys: keys, NotBefore: 5, Signature: sig(9)})},
-		{"revoke wallet", v2(mailbox.RevokeByWallet{RequestID: 4, Sign1: bs(10, 3), Key: bs(5, 4)})},
-		{"revoke result", v2(mailbox.RevokeResult{RequestID: 3, Status: mailbox.RevokeRecorded})},
+		{"challenge", enc(mailbox.Challenge{Min: 2, Max: 2, Nonce: nonce(1), RelayKey: nk(2), RelayTime: 5})},
+		{"auth", enc(mailbox.AuthV2{Fingerprint: fp(3), Signature: sig(4), Keys: keys, Sign1: bs(10, 7), Key: bs(5, 8), Senders: []mailbox.WalletKey{wk(1)}})},
+		{"authok", enc(mailbox.AuthOKV2{MaxEnvelope: 10, MaxEntries: 11, MaxBytes: 12, RetentionSeconds: 13, Until: 14})},
+		{"put", enc(mailbox.PutV2{RequestID: 7, WalletKey: wk(3), To: fp(4), Mid: hash(5), Size: 99})},
+		{"put result", enc(mailbox.PutResult{RequestID: 7, Status: mailbox.StatusFull})},
+		{"fetch", enc(mailbox.Fetch{RequestID: 8, After: &h, MaxItems: 1})},
+		{"items", enc(mailbox.Items{RequestID: 8, Entries: []mailbox.Item{{Mid: hash(1), Size: 10}}})},
+		{"ack", enc(mailbox.Ack{RequestID: 9, Mids: []mailbox.Hash{hash(1)}})},
+		{"ack result", enc(mailbox.AckResult{RequestID: 9, Deleted: 1})},
+		{"error", enc(mailbox.Error{Code: mailbox.CodeAuth})},
+		{"revoke device", enc(mailbox.RevokeByDevice{RequestID: 3, Keys: keys, NotBefore: 5, Signature: sig(9)})},
+		{"revoke wallet", enc(mailbox.RevokeByWallet{RequestID: 4, Sign1: bs(10, 3), Key: bs(5, 4)})},
+		{"revoke result", enc(mailbox.RevokeResult{RequestID: 3, Status: mailbox.RevokeRecorded})},
 	}
 }
 
-// The table of who may send which frame, in which version and state. A frame
-// not in a cell is refused. This is the table of the spec, written out
-// independently of the decoder.
+// The table of who may send which frame, at which stage. A frame not in a cell
+// is refused. This is the table of the spec, written out independently of the
+// decoder. The Challenge is the first frame of a connection, so the stage before
+// the Auth takes it (a client that reads a second one stops itself: it expects an
+// AuthOK or a RevokeResult).
 var acceptedFrames = map[struct {
 	stage  mailbox.Stage
 	client bool
 }][]string{
-	{mailbox.StageUnversioned, true}:  {"auth v1", "auth v2", "revoke device", "revoke wallet"},
-	{mailbox.StageUnversioned, false}: {"challenge", "error"},
-	{mailbox.StageV1, true}:           {"auth v1", "put v1", "fetch", "ack"},
-	{mailbox.StageV1, false}:          {"challenge", "authok v1", "put result", "items", "ack result", "error"},
-	{mailbox.StageV2PreAuth, true}:    {"auth v2", "revoke device", "revoke wallet"},
-	{mailbox.StageV2PreAuth, false}:   {"authok v2", "error", "revoke result"},
-	{mailbox.StageV2Authed, true}:     {"put v2", "fetch", "ack"},
-	{mailbox.StageV2Authed, false}:    {"put result", "items", "ack result", "error"},
+	{mailbox.StageV2PreAuth, true}:  {"auth", "revoke device", "revoke wallet"},
+	{mailbox.StageV2PreAuth, false}: {"challenge", "authok", "error", "revoke result"},
+	{mailbox.StageV2Authed, true}:   {"put", "fetch", "ack"},
+	{mailbox.StageV2Authed, false}:  {"put result", "items", "ack result", "error"},
 }
 
 // spec: SPO-Xmailbox-OUT-051, SPO-Xmailbox-PRE-029
 func TestTheStageTable(t *testing.T) {
 	frames := tableFrames(t)
-	if len(acceptedFrames) != 8 {
-		t.Fatal("the table has eight cells")
+	if len(acceptedFrames) != 4 {
+		t.Fatal("the table has four cells")
 	}
 	for cell, names := range acceptedFrames {
 		ok := map[string]bool{}
@@ -96,9 +89,9 @@ func sameBytesOf(t *testing.T, m mailbox.Message, frame []byte) bool {
 	return err == nil && sameBytes(b, frame)
 }
 
-// Each refusal of the table names its reason: a type that does not exist in
-// the version, the wrong sender, a frame of the right sender at the wrong
-// stage, or the shape of the other version.
+// Each refusal of the table names its reason: the wrong sender, or a frame of
+// the right sender at the wrong stage; a frame of the retired version 1 is the
+// wrong version or the wrong shape.
 //
 // spec: SPO-Xmailbox-OUT-051, SPO-Xmailbox-PRE-029
 func TestTheStageTableRefusalsNameTheirReason(t *testing.T) {
@@ -115,47 +108,26 @@ func TestTheStageTableRefusalsNameTheirReason(t *testing.T) {
 		at   call
 		want error
 	}{
-		// A version 2 frame on a version 1 connection. Types 10 and 11 do not
-		// exist in version 1 (as they never did); the version 2 shapes of types
-		// that exist in both are the wrong shape.
-		{"revoke device", call{mailbox.StageV1, true}, mailbox.ErrUnknownType},
-		{"revoke wallet", call{mailbox.StageV1, true}, mailbox.ErrUnknownType},
-		{"revoke result", call{mailbox.StageV1, false}, mailbox.ErrUnknownType},
-		{"auth v2", call{mailbox.StageV1, true}, mailbox.ErrMalformed},
-		{"put v2", call{mailbox.StageV1, true}, mailbox.ErrMalformed},
-		{"authok v2", call{mailbox.StageV1, false}, mailbox.ErrMalformed},
-		// A version 1 frame on a version 2 connection.
-		{"auth v1", call{mailbox.StageV2PreAuth, true}, mailbox.ErrVersion},
-		{"put v1", call{mailbox.StageV2Authed, true}, mailbox.ErrMalformed},
-		{"authok v1", call{mailbox.StageV2PreAuth, false}, mailbox.ErrMalformed},
 		// The wrong sender.
 		{"revoke device", call{mailbox.StageV2PreAuth, false}, mailbox.ErrDirection},
-		{"revoke wallet", call{mailbox.StageUnversioned, false}, mailbox.ErrDirection},
+		{"revoke wallet", call{mailbox.StageV2PreAuth, false}, mailbox.ErrDirection},
 		{"revoke result", call{mailbox.StageV2PreAuth, true}, mailbox.ErrDirection},
-		{"revoke result", call{mailbox.StageUnversioned, true}, mailbox.ErrDirection},
-		{"auth v2", call{mailbox.StageV2PreAuth, false}, mailbox.ErrDirection},
+		{"auth", call{mailbox.StageV2PreAuth, false}, mailbox.ErrDirection},
 		{"challenge", call{mailbox.StageV2PreAuth, true}, mailbox.ErrDirection},
 		{"put result", call{mailbox.StageV2Authed, true}, mailbox.ErrDirection},
 		// The right sender at the wrong stage.
-		{"put v2", call{mailbox.StageV2PreAuth, true}, mailbox.ErrStage},
+		{"put", call{mailbox.StageV2PreAuth, true}, mailbox.ErrStage},
 		{"fetch", call{mailbox.StageV2PreAuth, true}, mailbox.ErrStage},
 		{"ack", call{mailbox.StageV2PreAuth, true}, mailbox.ErrStage},
-		{"put v2", call{mailbox.StageUnversioned, true}, mailbox.ErrStage},
-		{"fetch", call{mailbox.StageUnversioned, true}, mailbox.ErrStage},
-		{"auth v2", call{mailbox.StageV2Authed, true}, mailbox.ErrStage},
-		{"auth v1", call{mailbox.StageV2Authed, true}, mailbox.ErrStage},
+		{"auth", call{mailbox.StageV2Authed, true}, mailbox.ErrStage},
 		{"revoke device", call{mailbox.StageV2Authed, true}, mailbox.ErrStage},
 		{"revoke wallet", call{mailbox.StageV2Authed, true}, mailbox.ErrStage},
-		{"challenge", call{mailbox.StageV2PreAuth, false}, mailbox.ErrStage},
 		{"challenge", call{mailbox.StageV2Authed, false}, mailbox.ErrStage},
-		{"authok v2", call{mailbox.StageV2Authed, false}, mailbox.ErrStage},
-		{"authok v2", call{mailbox.StageUnversioned, false}, mailbox.ErrStage},
-		{"authok v1", call{mailbox.StageUnversioned, false}, mailbox.ErrStage},
+		{"authok", call{mailbox.StageV2Authed, false}, mailbox.ErrStage},
 		{"revoke result", call{mailbox.StageV2Authed, false}, mailbox.ErrStage},
-		{"revoke result", call{mailbox.StageUnversioned, false}, mailbox.ErrStage},
 		{"put result", call{mailbox.StageV2PreAuth, false}, mailbox.ErrStage},
 		{"items", call{mailbox.StageV2PreAuth, false}, mailbox.ErrStage},
-		{"ack result", call{mailbox.StageUnversioned, false}, mailbox.ErrStage},
+		{"ack result", call{mailbox.StageV2PreAuth, false}, mailbox.ErrStage},
 	} {
 		var err error
 		if c.at.client {
@@ -167,32 +139,37 @@ func TestTheStageTableRefusalsNameTheirReason(t *testing.T) {
 			t.Errorf("%s at %v (client=%v): %v, want %v", c.name, c.at.stage, c.at.client, err, c.want)
 		}
 	}
-	// A version 1 Auth before a version is chosen is the version 1 Auth; one
-	// with another version number is refused.
-	for _, v := range []uint64{0, 3, 65535} {
-		_, err := mailbox.DecodeFromClientIn(mailbox.StageUnversioned, cbor(t, 1, v, fpb(3), sigb(4)))
+	// The frames of the retired version 1 on a version 2 connection: an Auth of
+	// version 1 (or any version but 2) is the wrong version, and a Put or an AuthOK
+	// of the old shape is the wrong shape.
+	for _, v := range []uint64{0, 1, 3, 65535} {
+		_, err := mailbox.DecodeFromClientIn(mailbox.StageV2PreAuth, cbor(t, 1, v, fpb(3), sigb(4)))
 		if !errors.Is(err, mailbox.ErrVersion) {
 			t.Errorf("an Auth of version %d: %v", v, err)
 		}
 	}
-	if _, err := mailbox.DecodeFromClientIn(mailbox.StageUnversioned, cbor(t, 1)); !errors.Is(err, mailbox.ErrMalformed) {
+	if _, err := mailbox.DecodeFromClientIn(mailbox.StageV2PreAuth, cbor(t, 1)); !errors.Is(err, mailbox.ErrMalformed) {
 		t.Errorf("an Auth with no version: %v", err)
 	}
-	if _, err := mailbox.DecodeFromClientIn(mailbox.StageUnversioned, cbor(t, 1, "2", fpb(3), sigb(4))); !errors.Is(err, mailbox.ErrMalformed) {
+	if _, err := mailbox.DecodeFromClientIn(mailbox.StageV2PreAuth, cbor(t, 1, "2", fpb(3), sigb(4))); !errors.Is(err, mailbox.ErrMalformed) {
 		t.Errorf("an Auth with a text version: %v", err)
 	}
-	if m, err := mailbox.DecodeFromClientIn(mailbox.StageUnversioned, byName["auth v1"]); err != nil {
-		t.Errorf("a version 1 Auth before a version is chosen: %v", err)
-	} else if _, ok := m.(mailbox.Auth); !ok {
-		t.Errorf("decoded to %T", m)
+	if _, err := mailbox.DecodeFromClientIn(mailbox.StageV2Authed, cbor(t, 3, 7, fpb(4), hashb(5), 99)); !errors.Is(err, mailbox.ErrMalformed) {
+		t.Errorf("a Put of the retired shape: %v", err)
 	}
-	if m, err := mailbox.DecodeFromClientIn(mailbox.StageUnversioned, byName["auth v2"]); err != nil {
-		t.Errorf("a version 2 Auth before a version is chosen: %v", err)
+	if _, err := mailbox.DecodeFromRelayIn(mailbox.StageV2PreAuth, cbor(t, 2, 1, 10, 11, 12, 13)); !errors.Is(err, mailbox.ErrMalformed) {
+		t.Errorf("an AuthOK of the retired shape (five fields): %v", err)
+	}
+	if _, err := mailbox.DecodeFromRelayIn(mailbox.StageV2PreAuth, cbor(t, 2, 1, 10, 11, 12, 13, 14)); !errors.Is(err, mailbox.ErrVersion) {
+		t.Errorf("an AuthOK of version 1 with an until: %v", err)
+	}
+	if m, err := mailbox.DecodeFromClientIn(mailbox.StageV2PreAuth, byName["auth"]); err != nil {
+		t.Errorf("an Auth: %v", err)
 	} else if _, ok := m.(mailbox.AuthV2); !ok {
 		t.Errorf("decoded to %T", m)
 	}
 	// An invalid stage refuses everything.
-	for _, st := range []mailbox.Stage{0, 5, 255} {
+	for _, st := range []mailbox.Stage{0, 3, 4, 255} {
 		for name, b := range byName {
 			if _, err := mailbox.DecodeFromClientIn(st, b); !errors.Is(err, mailbox.ErrStage) {
 				t.Errorf("stage %d from the client, %s: %v", st, name, err)
@@ -218,17 +195,16 @@ func TestStageIsDecidedByTheTypeAlone(t *testing.T) {
 		return false
 	}
 	for cell, names := range acceptedFrames {
-		_ = names
 		allowedTypes := map[uint64]bool{}
 		for _, n := range names {
 			switch n {
 			case "challenge":
 				allowedTypes[0] = true
-			case "auth v1", "auth v2":
+			case "auth":
 				allowedTypes[1] = true
-			case "authok v1", "authok v2":
+			case "authok":
 				allowedTypes[2] = true
-			case "put v1", "put v2":
+			case "put":
 				allowedTypes[3] = true
 			case "put result":
 				allowedTypes[4] = true
@@ -257,10 +233,6 @@ func TestStageIsDecidedByTheTypeAlone(t *testing.T) {
 				_, err = mailbox.DecodeFromRelayIn(cell.stage, junk)
 			}
 			switch {
-			case cell.stage == mailbox.StageV1 && typ >= 10:
-				if !errors.Is(err, mailbox.ErrUnknownType) {
-					t.Errorf("%v client=%v type %d: %v", cell.stage, cell.client, typ, err)
-				}
 			case sender(typ) != cell.client:
 				if !errors.Is(err, mailbox.ErrDirection) {
 					t.Errorf("%v client=%v type %d: %v", cell.stage, cell.client, typ, err)

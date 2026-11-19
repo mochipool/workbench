@@ -342,15 +342,7 @@ func TestUnspokenVersionIsRefused(t *testing.T) {
 	r := newRig(t)
 	c := r.dial(r.a)
 	recvChallenge(t, c)
-	b, err := mailbox.Encode(mailbox.Auth{Version: 1, Fingerprint: r.a.fp})
-	if err != nil {
-		t.Fatal(err)
-	}
-	f, err := mailbox.AppendFrame(nil, b)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.write(f)
+	c.write(retiredAuthFrame(t, r.a.fp))
 	if code := c.expectError(); code != mailbox.CodeVersion {
 		t.Fatalf("code %d, want version", code)
 	}

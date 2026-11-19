@@ -221,7 +221,7 @@ func fuzzSession(f *testing.F, authed bool) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		c := &conn{t: t, s: s, p: a, relayKey: relayNode.Key, stage: mailbox.StageUnversioned}
+		c := &conn{t: t, s: s, p: a, relayKey: relayNode.Key, stage: mailbox.StageV2PreAuth}
 		defer s.Close()
 		if authed {
 			c.handshake()

@@ -45,14 +45,15 @@ func sig(b byte) (s [64]byte) {
 	return
 }
 
-// samples is one valid message of every type (two for fetch and items).
+// samples is one valid message of every type of protocol version 2 (two for
+// fetch and items), with no stage: the round-trip tests use DecodeAny.
 func samples() []mailbox.Message {
 	h := hash(9)
 	return []mailbox.Message{
-		mailbox.Challenge{Min: 1, Max: 1, Nonce: nonce(1), RelayKey: nk(2), RelayTime: 1700000000},
-		mailbox.Auth{Version: 1, Fingerprint: fp(3), Signature: sig(4)},
-		mailbox.AuthOK{Version: 1, MaxEnvelope: mailbox.MaxEnvelopeBytes, MaxEntries: 256, MaxBytes: 64 << 20, RetentionSeconds: mailbox.DefaultRetentionSeconds},
-		mailbox.Put{RequestID: 7, To: fp(4), Mid: hash(5), Size: 1234},
+		mailbox.Challenge{Min: 2, Max: 2, Nonce: nonce(1), RelayKey: nk(2), RelayTime: 1700000000},
+		mailbox.AuthV2{Fingerprint: fp(3), Signature: sig(4), Keys: mailbox.DeviceKeys{Ed25519: edk(5), X25519: xk(6)}, Sign1: bs(150, 7), Key: bs(40, 8), Senders: []mailbox.WalletKey{wk(1), wk(2), wk(9)}},
+		mailbox.AuthOKV2{MaxEnvelope: mailbox.MaxEnvelopeBytes, MaxEntries: 256, MaxBytes: 64 << 20, RetentionSeconds: mailbox.DefaultRetentionSeconds, Until: 1707776000},
+		mailbox.PutV2{RequestID: 7, WalletKey: wk(3), To: fp(4), Mid: hash(5), Size: 1234},
 		mailbox.PutResult{RequestID: 7, Status: mailbox.StatusStored},
 		mailbox.Fetch{RequestID: 8, MaxItems: 16, WaitSeconds: 20},
 		mailbox.Fetch{RequestID: 9, After: &h, MaxItems: 1, WaitSeconds: 0},
@@ -61,6 +62,9 @@ func samples() []mailbox.Message {
 		mailbox.Ack{RequestID: 9, Mids: []mailbox.Hash{hash(1), hash(2)}},
 		mailbox.AckResult{RequestID: 9, Deleted: 2},
 		mailbox.Error{Code: mailbox.CodeAuth},
+		mailbox.RevokeByDevice{RequestID: 3, Keys: mailbox.DeviceKeys{Ed25519: edk(5), X25519: xk(6)}, NotBefore: 1700000000, Signature: sig(9)},
+		mailbox.RevokeByWallet{RequestID: 4, Sign1: bs(120, 3), Key: bs(40, 4)},
+		mailbox.RevokeResult{RequestID: 3, Status: mailbox.RevokeRecorded},
 	}
 }
 
@@ -81,6 +85,14 @@ func cbor(t testing.TB, items ...any) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// bstr is the CBOR byte string of b, for a length below 256, written by hand.
+func bstr(b []byte) []byte {
+	if len(b) < 24 {
+		return append([]byte{0x40 + byte(len(b))}, b...)
+	}
+	return append([]byte{0x58, byte(len(b))}, b...)
 }
 
 func bs(n int, v byte) []byte {

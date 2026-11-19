@@ -1,53 +1,25 @@
 package multiparty
 
 import (
-	"crypto/ed25519"
+	"context"
+	"crypto/sha256"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/envelope"
 	"github.com/mochipool/workbench/spo/internal/adapters/mailbox"
 	"github.com/mochipool/workbench/spo/internal/adapters/mailboxstore"
 	"github.com/mochipool/workbench/spo/internal/app/multisig"
+	apprelay "github.com/mochipool/workbench/spo/internal/app/relay"
 	wire "github.com/mochipool/workbench/spo/internal/domain/mailbox"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
+	"github.com/mochipool/workbench/spo/internal/domain/relayregistry"
 	"github.com/mochipool/workbench/spo/internal/ports"
 	"github.com/mochipool/workbench/spo/internal/ports/relayport"
+	"github.com/mochipool/workbench/spo/internal/ports/relayport/relayporttest"
+	"github.com/mochipool/workbench/spo/test/fakenet"
 	"github.com/mochipool/workbench/spo/test/multiparty/partyrig"
 )
-
-// mailboxSigner signs the mailbox auth with the party's own Ed25519 key, read
-// from the workspace's vault: the real local identity gets this method in a
-// later work package, and the client under test holds no key either way.
-type mailboxSigner struct {
-	priv ed25519.PrivateKey
-	fp   party.Fingerprint
-}
-
-func (s mailboxSigner) SignMailboxAuth(relayKey, clientNodeKey party.NodeKey, nonce [32]byte, relayTime int64, version uint) ([64]byte, error) {
-	var out [64]byte
-	b, err := wire.AuthBytes(wire.AuthParams{Version: version, RelayKey: relayKey, ClientNodeKey: clientNodeKey, Nonce: nonce, RelayTime: relayTime, Fingerprint: s.fp})
-	if err != nil {
-		return out, err
-	}
-	copy(out[:], ed25519.Sign(s.priv, b))
-	return out, nil
-}
-
-func signerOf(t *testing.T, w *partyrig.Workspace) mailboxSigner {
-	t.Helper()
-	keys, err := w.Kit.Vault.Open(ctx, ports.NamedRef{Name: envelope.LocalName, Kind: ports.PartyKeys})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var seed []byte
-	if err := keys.Use(func(b []byte) error { seed = append([]byte(nil), b[:32]...); return nil }); err != nil {
-		t.Fatal(err)
-	}
-	keys.Destroy()
-	return mailboxSigner{priv: ed25519.NewKeyFromSeed(seed), fp: w.Identity.Fingerprint}
-}
 
 type mailboxWorld struct {
 	*world
@@ -57,55 +29,167 @@ type mailboxWorld struct {
 	pairCnt func() uint64 // entries in bob's mailbox from the coordinator
 }
 
-// accessOf is a fixed access list of two parties.
-type accessOf struct{ es []relayport.AccessEntry }
+// seededRand is a deterministic nonce source: the relay's nonces differ per
+// connection and are not secret in a test.
+type seededRand struct{ n uint64 }
 
-func (a accessOf) Lookup(fp party.Fingerprint) (relayport.AccessEntry, bool) {
-	for _, e := range a.es {
-		if e.Fingerprint == fp {
-			return e, true
-		}
+func (r *seededRand) Read(p []byte) (int, error) {
+	r.n++
+	for off := 0; off < len(p); off += 32 {
+		sum := sha256.Sum256([]byte{byte(r.n), byte(r.n >> 8), byte(off), 'm'})
+		copy(p[off:], sum[:])
 	}
-	return relayport.AccessEntry{}, false
+	return len(p), nil
 }
 
-func (a accessOf) LookupNode(k party.NodeKey) (relayport.AccessEntry, bool) {
-	for _, e := range a.es {
-		if e.Node == k {
-			return e, true
-		}
-	}
-	return relayport.AccessEntry{}, false
+// mailboxMachine is what one machine needs of the relay: its device identity
+// signs the login through the REAL local identity (the typed signer on
+// envelope.Local), the device is bound by a software wallet, and the client
+// presents that binding.
+type mailboxMachine struct {
+	ws     *partyrig.Workspace
+	wallet *relayporttest.Wallet
+	node   *fakenet.Node
+	keys   wire.DeviceKeys
+	local  relayport.AuthSigner
+	stmt   relayporttest.Statements
 }
 
-func (a accessOf) NodeKeys() []party.NodeKey {
-	var out []party.NodeKey
-	for _, e := range a.es {
-		out = append(out, e.Node)
+func newMachine(t *testing.T, ws *partyrig.Workspace, node *fakenet.Node, walletByte byte, now time.Time) *mailboxMachine {
+	t.Helper()
+	li, err := ws.Kit.Local(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return out
+	t.Cleanup(li.Destroy) // logout: destroy the identity the signer signs with
+	signer, ok := li.(relayport.AuthSigner)
+	if !ok {
+		t.Fatal("the local identity does not implement the typed auth signer")
+	}
+	id := li.Identity()
+	m := &mailboxMachine{ws: ws, wallet: relayporttest.NewWallet(walletByte), node: node, local: signer,
+		keys: wire.DeviceKeys{Ed25519: id.Ed25519, X25519: id.X25519}}
+	if m.keys.Fingerprint() != ws.Identity.Fingerprint {
+		t.Fatal("the device keys are not the workspace's identity")
+	}
+	m.stmt = m.wallet.BindingStatement(ws.Identity.Fingerprint, now.Unix()-60, now.Unix()+30*24*3600, false)
+	return m
 }
+
+func (m *mailboxMachine) wkey() wire.WalletKey { return wire.WalletKey(m.wallet.Key) }
 
 // newMailboxWorld is the two-owner pool registration world with the real relay
-// (app/relay over the real directory store) between the two machines, on the
-// in-process fake tunnel. Neither machine accepts a connection.
-//
-// PENDING ADR 0014 work package 7: the relay session (app/relay) speaks protocol
-// version 2 only since work package 6 and the mailbox client still speaks version
-// 1, so this world cannot be built and the test that uses it skips. Work package
-// 7 rebuilds it: a version 2 relay over fakenet (as the rig of internal/app/relay
-// does) with the real directory store and a registry, each machine's device bound
-// by a wallet key, and the client logging in with a binding. The version 1 world
-// (an access list of the two parties' identity documents with `send_to`) is in
-// the history of this file.
+// (app/relay, protocol version 2, over the real directory store and a registry)
+// between the two machines, on the in-process fake tunnel. Each machine is a
+// device bound by its own software wallet key, its client logs in with that
+// binding and signs the login with the real local identity, and expects mail from
+// the other machine's wallet key. Neither machine accepts a connection.
 func newMailboxWorld(t *testing.T) *mailboxWorld {
 	t.Helper()
-	t.Skip(pendingWorkPackage7)
-	return nil
-}
+	fakenet.CheckLeaks(t)
+	n := fakenet.New()
+	relayNode, cn, bn := n.Node("relay"), n.Node("coord"), n.Node("bob")
+	w := newWorldOpt(t, worldOpt{nodeB: &bn.Key, nodeC: &cn.Key})
+	now := w.clock.Now()
+	coord := newMachine(t, w.C, cn, 1, now)
+	bob := newMachine(t, w.B, bn, 2, now)
 
-// pendingWorkPackage7 is the reason the test of this file skips.
-const pendingWorkPackage7 = "pending ADR 0014 work package 7: the client speaks version 1, the relay session version 2 only"
+	st, _, err := mailboxstore.Open(t.TempDir(), w.clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	guard := apprelay.NewGuard(st)
+	regCfg := relayregistry.DefaultConfig()
+	regCfg.Evictable = guard.Evictable
+	reg, err := relayporttest.NewMemRegistry(regCfg, w.clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lim := apprelay.DefaultLimits()
+	lim.UnauthBudget = 2 * time.Second
+	lim.IdleTimeout, lim.BodyTimeout, lim.WriteTimeout = 5*time.Second, 5*time.Second, 5*time.Second
+	vl, err := lim.Validated()
+	if err != nil {
+		t.Fatal(err)
+	}
+	vq, err := wire.DefaultOpenQuota().Validated()
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := apprelay.New(apprelay.Config{Writer: st, Reader: st, Acker: st, Retractor: st, MailboxRevoker: st, Usage: st,
+		Registry: reg, Guard: guard, Clock: w.clock, Rand: &seededRand{}, RelayKey: relayNode.Key,
+		Quota: vq, Limits: vl, Policy: regCfg.Policy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := n.Listen(relayNode, []party.NodeKey{cn.Key, bn.Key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rctx, stop := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(rctx, ln) }()
+	t.Cleanup(func() {
+		stop()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("the relay's Serve did not return")
+		}
+		ln.Close()
+	})
+
+	// the resolver is what the party registry will supply in work package 8: the
+	// wallet key of each enrolled party, and its device
+	routes := map[party.Fingerprint]mailbox.Route{
+		w.C.Identity.Fingerprint: {WalletKey: coord.wkey(), Device: w.C.Identity.Fingerprint},
+		w.B.Identity.Fingerprint: {WalletKey: bob.wkey(), Device: w.B.Identity.Fingerprint},
+	}
+	resolve := func(to party.Fingerprint) (mailbox.Route, bool) { r, ok := routes[to]; return r, ok }
+	client := func(me, other *mailboxMachine) *mailbox.Client {
+		l := mailbox.DefaultLimits()
+		l.WaitSeconds, l.MinPoll = 1, 5*time.Millisecond
+		l.BackoffMin, l.BackoffMax = 10*time.Millisecond, 80*time.Millisecond
+		c, err := mailbox.New(mailbox.Config{
+			Dialer: n.Dialer(me.node, relayNode), RelayKey: relayNode.Key, NodeKey: me.node.Key,
+			Self: me.ws.Identity.Fingerprint, Device: me.keys,
+			Binding: mailbox.Binding{Statement: me.stmt.Sign1, Key: me.stmt.COSEKey},
+			Senders: []wire.WalletKey{other.wkey()}, Resolve: resolve, Signer: me.local, Clock: w.clock, Limits: l,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { c.Close() })
+		return c
+	}
+	// each device is bound, with the list it expects, as an earlier login left it
+	for _, p := range []struct {
+		m     *mailboxMachine
+		other *mailboxMachine
+	}{{coord, bob}, {bob, coord}} {
+		pr, err := p.m.wallet.TryPresent(p.m.ws.Identity.Fingerprint, now.Unix()-60, now.Unix()+30*24*3600, now.Unix(), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := reg.Register(ctx, pr); err != nil {
+			t.Fatal(err)
+		}
+		senders, _ := wire.CanonicalSenders([]wire.WalletKey{p.other.wkey()})
+		if err := reg.SetExpectedSenders(ctx, p.m.ws.Identity.Fingerprint, senders); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := &mailboxWorld{world: w, store: st, cc: client(coord, bob), bc: client(bob, coord), bob: w.bobSigner()}
+	m.pairCnt = func() uint64 {
+		u, err := st.Usage(ctx, w.B.Identity.Fingerprint, w.C.Identity.Fingerprint)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return u.PairEntries
+	}
+	return m
+}
 
 func (m *mailboxWorld) pump(w *partyrig.Workspace, tr ports.Transport, rcv ports.EnvelopeReceiver, h multisig.Handler, effects *[]string) multisig.Pump {
 	return multisig.Pump{Outbox: w.Outbox(), Send: tr, Receive: rcv, Handle: h, Idle: 400 * time.Millisecond,
@@ -119,7 +203,9 @@ func (m *mailboxWorld) pump(w *partyrig.Workspace, tr ports.Transport, rcv ports
 // relay stored it again after bob's ack) and receives the response; bob's next
 // run is delivered the repeated request and answers it from his stored response
 // without signing again; the coordinator accepts the repeated response without
-// effect and without a security event. The registration is submitted once.
+// effect and without a security event. The registration is submitted once. Each
+// machine logs in with its binding and signs the login with its real local
+// identity (protocol version 2).
 //
 // spec: SPO-Xmailbox-INV-017, SPO-Xparty-INV-017, SPO-Xparty-INV-041, SPO-Xmailbox-IF-009, SPO-Xmailbox-OUT-035
 func TestMailboxOutboxRePutsAndTheSignerReAnswers(t *testing.T) {
@@ -150,7 +236,7 @@ func TestMailboxOutboxRePutsAndTheSignerReAnswers(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(bEff) != 1 || bEff[0] != "stored" {
-		t.Fatalf("bob's effects = %v", bEff)
+		t.Fatalf("bob's effects = %v (events %+v)", bEff, w.B.Events())
 	}
 	if n := m.pairCnt(); n != 0 {
 		t.Fatalf("entries after bob's ack = %d", n)

@@ -22,7 +22,7 @@ func TestTheConnectionIsNotReusedAfterTooLarge(t *testing.T) {
 	h := newHostile(t, func(s *sconn) {
 		puts := 0
 		s.serve(hs{}, func(m wire.Message) bool {
-			p, ok := m.(wire.Put)
+			p, ok := m.(wire.PutV2)
 			if !ok {
 				return true
 			}

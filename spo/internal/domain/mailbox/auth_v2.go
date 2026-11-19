@@ -2,13 +2,16 @@ package mailbox
 
 import (
 	"crypto/ed25519"
+	"fmt"
+	"math"
 
 	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 )
 
-// AuthV2Params are the typed, fixed-length inputs of the signed version 2 auth
-// array. There is no field for arbitrary bytes, and no Version: it is 2.
+// AuthV2Params are the typed, fixed-length inputs of the signed auth array
+// (ADR 0014 decision 7). There is no field for arbitrary bytes, and no Version:
+// it is 2.
 type AuthV2Params struct {
 	RelayKey      party.NodeKey // the key the client pinned, never read from the challenge
 	ClientNodeKey party.NodeKey // the client's own node key
@@ -23,15 +26,15 @@ type AuthV2Params struct {
 	SendersHash [HashSize]byte
 }
 
-// AuthBytesV2 are the bytes a device signs to authenticate a version 2
-// connection (ADR 0014 decision 7): the canonical CBOR array
+// AuthBytesV2 are the bytes a device signs to authenticate a connection (ADR 0014
+// decision 7): the canonical CBOR array
 //
 //	[AuthLabelV2, 2, relay node key, client node key, nonce, relay time,
 //	 fingerprint, binding hash, senders hash]
 //
 // The label is the first element of the array, not a prefix of the bytes; the
-// array has 9 elements, where the version 1 array has 7 and the device revoke
-// array 3. Every argument is typed and fixed length.
+// array has 9 elements, and the device revoke array has 3. Every argument is typed
+// and fixed length.
 func AuthBytesV2(p AuthV2Params) ([]byte, error) {
 	if p.RelayTime < 0 || p.RelayTime > MaxTime {
 		return nil, bad(ErrRange, "relay time %d is not 0 to %d", p.RelayTime, int64(MaxTime))
@@ -49,14 +52,14 @@ func AuthBytesV2(p AuthV2Params) ([]byte, error) {
 	})
 }
 
-// VerifyAuthV2 authenticates one version 2 connection. keys are the device's
-// Ed25519 and X25519 keys as the client presented them in its Auth (the relay
-// has no identity document); tunnelPeer is the node key the tunnel
-// authenticated for this connection; p.RelayKey is the relay's own key and
-// p.BindingHash and p.SendersHash are the values the relay computed from what
-// was presented (relaybind's FullHash of the statement, and SendersHash of the
-// list), never values the client states. The function enforces, in this order
-// and each with its own error:
+// VerifyAuthV2 authenticates one connection. keys are the device's Ed25519 and
+// X25519 keys as the client presented them in its Auth (the relay has no identity
+// document); tunnelPeer is the node key the tunnel authenticated for this
+// connection; p.RelayKey is the relay's own key and p.BindingHash and
+// p.SendersHash are the values the relay computed from what was presented
+// (relaybind's FullHash of the statement, and SendersHash of the list), never
+// values the client states. The function enforces, in this order and each with its
+// own error:
 //
 //   - the Ed25519 key is not a small-order point and is a canonical encoding
 //     (ErrAuthWeakKey);
@@ -67,11 +70,11 @@ func AuthBytesV2(p AuthV2Params) ([]byte, error) {
 //   - sig is an Ed25519 signature of the presented key over AuthBytesV2(p)
 //     (ErrAuth alone).
 //
-// Every refusal but a range error satisfies errors.Is(err, ErrAuth). Version 1
-// also compared the client node key with the identity's: there is no identity
-// document at the relay, so that check does not exist here. The binding itself
-// is verified by the caller with relaybind.VerifyBinding, with the fingerprint
-// this function's caller computed from the same keys.
+// Every refusal but a range error satisfies errors.Is(err, ErrAuth). There is no
+// identity document at the relay, so there is no check that the node key is the
+// identity's. The binding itself is verified by the caller with
+// relaybind.VerifyBinding, with the fingerprint this function's caller computed
+// from the same keys.
 func VerifyAuthV2(keys DeviceKeys, tunnelPeer party.NodeKey, sig [SignatureSize]byte, p AuthV2Params) error {
 	if err := checkDeviceKey(keys.Ed25519[:]); err != nil {
 		return authFail(ErrAuthWeakKey)
@@ -90,4 +93,22 @@ func VerifyAuthV2(keys DeviceKeys, tunnelPeer party.NodeKey, sig [SignatureSize]
 		return bad(ErrAuth, "the signature does not verify")
 	}
 	return nil
+}
+
+func authFail(reason error) error { return fmt.Errorf("%w: %w", ErrAuth, reason) }
+
+// Skew is the distance in whole seconds between a relay's claimed time and the
+// local clock, never negative. It saturates at the largest int64 instead of
+// wrapping, so callers compare it with ClockSkewWarningSeconds and never do
+// time.Duration arithmetic on a relay-supplied value.
+func Skew(relayTime, now int64) int64 {
+	hi, lo := relayTime, now
+	if lo > hi {
+		hi, lo = lo, hi
+	}
+	d := uint64(hi) - uint64(lo) // hi >= lo: the unsigned difference is exact
+	if d > math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(d)
 }
