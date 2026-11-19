@@ -251,6 +251,12 @@ func TestLongPollIsKeyedByRecipient(t *testing.T) {
 	// now a put to B, from A's other connection, while A waits again, does not
 	// wake A: a wake would make A's fetch read its mailbox again, and a read is
 	// what a List call counts
+	// A's first put to B builds the stranger book of B's queue with a listing
+	// (the first admission for a recipient), and that listing would be mistaken for
+	// a re-read by A. Make it before the hook is armed.
+	if got := a2.put(2, r.b.fp, envelope(50, 4)).Status; got != mailbox.StatusStored {
+		t.Fatalf("put status %d", got)
+	}
 	lists = r.store.listCalls()
 	relistedC := make(chan struct{}, 8)
 	r.store.arm(func(f *faultStore) { f.AfterList = func() { relistedC <- struct{}{} } })
@@ -361,11 +367,13 @@ func TestRequestIDIsUniqueOnTheConnection(t *testing.T) {
 	b2.fetch(1, nil, 1, 0)
 }
 
-// A party that has left the access list is refused on its next fetch or ack,
-// on a connection the reload did not reach, with the revoked code.
+// A device whose binding was revoked in the registry is refused on its next
+// fetch or ack, on a connection that nothing closed (no CloseDevice), with the
+// binding code. (Version 1: a party removed from the access list, with the
+// revoked code.)
 //
-// spec: SPO-Xmailbox-SEC-024
-func TestFetchAndAckAfterRemovalAreRefused(t *testing.T) {
+// spec: SPO-Xmailbox-SEC-024, SPO-Xmailbox-OUT-085
+func TestFetchAndAckAfterRevocationAreRefused(t *testing.T) {
 	for name, send := range map[string]func(c *conn){
 		"fetch": func(c *conn) { c.send(mailbox.Fetch{RequestID: 1, MaxItems: 1}) },
 		"ack":   func(c *conn) { c.send(mailbox.Ack{RequestID: 1, Mids: []mailbox.Hash{{1}}}) },
@@ -373,10 +381,12 @@ func TestFetchAndAckAfterRemovalAreRefused(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			r := newRig(t)
 			b, _ := r.login(r.b)
-			r.acc.remove(r.b.fp)
+			if _, err := r.reg.Revoke(context.Background(), r.b.wallet.WalletRevoke(t, r.b.fp, startTime, startTime)); err != nil {
+				t.Fatal(err)
+			}
 			send(b)
-			if code := b.expectError(); code != mailbox.CodeRevoked {
-				t.Fatalf("code %d, want revoked", code)
+			if code := b.expectError(); code != mailbox.CodeBinding {
+				t.Fatalf("code %d, want binding", code)
 			}
 			b.expectClosed()
 		})

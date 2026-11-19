@@ -6,7 +6,6 @@ import (
 
 	"github.com/mochipool/workbench/spo/internal/app/relay"
 	"github.com/mochipool/workbench/spo/internal/domain/mailbox"
-	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/test/fakenet"
 )
 
@@ -43,10 +42,20 @@ func TestRequestsPerConnection(t *testing.T) {
 	}
 }
 
-// authFrameLen is the length of any Auth frame (the signature is a fixed-size
-// byte string).
-func authFrameLen(t *testing.T) int {
-	return len(frame(t, mailbox.Auth{Version: 1, Fingerprint: party.Fingerprint{1}, Signature: [64]byte{1}}))
+// authFrameLen is the length of the Auth frame the honest login of p sends (the
+// signature is a fixed-size byte string, so the length does not depend on it).
+func authFrameLen(t *testing.T, p *peer) int {
+	return len(frame(t, mailbox.AuthV2{Fingerprint: p.fp, Keys: p.dev.keys(), Sign1: p.stmt.Sign1, Key: p.stmt.COSEKey, Senders: p.senders}))
+}
+
+// rigPeers makes the peers a and b of a rig, for a size that must be known before
+// the rig is made.
+func rigPeers() (a, b *peer) {
+	n := fakenet.New()
+	a, b = newPeer(n, "alice", 1), newPeer(n, "bob", 2)
+	a.senders = sortedKeys(b.wkey())
+	b.senders = sortedKeys(a.wkey())
+	return a, b
 }
 
 // Bytes per connection, counted over header frames: the exact total is
@@ -55,7 +64,8 @@ func authFrameLen(t *testing.T) int {
 // spec: SPO-Xmailbox-INV-012
 func TestBytesPerConnectionOverHeaders(t *testing.T) {
 	f := len(frame(t, mailbox.Fetch{RequestID: 0, MaxItems: 1}))
-	total := uint64(authFrameLen(t) + 2*f)
+	_, pb := rigPeers()
+	total := uint64(authFrameLen(t, pb) + 2*f)
 	for _, tc := range []struct {
 		name    string
 		max     uint64
@@ -81,19 +91,19 @@ func TestBytesPerConnectionOverHeaders(t *testing.T) {
 // spec: SPO-Xmailbox-INV-012
 func TestBytesPerConnectionOverABody(t *testing.T) {
 	env := envelope(300, 1)
-	bobFP := newPeer(fakenet.New(), "bob").fp // the same on every net
-	hf0 := frame(t, mailboxPutTo(bobFP, env))
+	pa, pb := rigPeers() // the same on every net
+	hf0 := frame(t, mailboxPutTo(pb, env))
 	for _, tc := range []struct {
 		name  string
 		slack int64
 		ok    bool
 	}{{"exactly", 0, true}, {"one under", -1, false}} {
 		t.Run(tc.name, func(t *testing.T) {
-			max := uint64(int64(authFrameLen(t)+len(hf0)+4+len(env)) + tc.slack)
+			max := uint64(int64(authFrameLen(t, pa)+len(hf0)+4+len(env)) + tc.slack)
 			r := newRig(t, withLimits(func(l *relay.Limits) { l.MaxBytes = max }))
 			a, _ := r.login(r.a)
 			before := r.read.Load()
-			hf := frame(t, mailboxPutTo(r.b.fp, env))
+			hf := frame(t, mailboxPutTo(r.b, env))
 			a.write(append(append([]byte(nil), hf...), rawFrame(t, env)...))
 			if tc.ok {
 				if m, ok := a.recv().(mailbox.PutResult); !ok || m.Status != mailbox.StatusStored {
@@ -114,8 +124,8 @@ func TestBytesPerConnectionOverABody(t *testing.T) {
 	}
 }
 
-func mailboxPutTo(to party.Fingerprint, env []byte) mailbox.Put {
-	p, _ := mailbox.NewPutOf(1, to, env)
+func mailboxPutTo(to *peer, env []byte) mailbox.PutV2 {
+	p, _ := mailbox.NewPutV2Of(1, to.wkey(), to.fp, env)
 	return p
 }
 
@@ -127,7 +137,7 @@ func TestConnectionLifetime(t *testing.T) {
 	r := newRig(t, withLimits(func(l *relay.Limits) {
 		l.ConnLifetime = 400 * time.Millisecond
 		l.IdleTimeout = 5 * time.Second
-		l.HandshakeTimeout = 400 * time.Millisecond
+		l.UnauthBudget = 400 * time.Millisecond
 	}))
 	b, _ := r.login(r.b)
 	b.fetch(1, nil, 1, 0)
@@ -238,10 +248,10 @@ func TestTotalConnections(t *testing.T) {
 	r.login(r.c)
 }
 
-// Puts per party per minute: the limit is stored, one more is busy and its
+// Puts per wallet key per minute: the limit is stored, one more is busy and its
 // body is consumed; the window moves with the relay's clock.
 //
-// spec: SPO-Xmailbox-INV-012
+// spec: SPO-Xmailbox-INV-012, SPO-Xmailbox-OUT-084
 func TestPutsPerMinute(t *testing.T) {
 	r := newRig(t, withLimits(func(l *relay.Limits) { l.MaxPutsPerMinute = 2 }))
 	a, _ := r.login(r.a)
@@ -277,8 +287,7 @@ func TestConcurrentPutsPerSender(t *testing.T) {
 	a1, _ := r.login(r.a)
 	a2, _ := r.login(r.a)
 	env := envelope(90, 1)
-	h, _ := mailbox.NewPutOf(1, r.b.fp, env)
-	a1.write(append(frame(t, h), rawFrame(t, env)...))
+	a1.write(append(a1.putHeader(1, r.b.fp, env), rawFrame(t, env)...))
 	eventually(t, "the first put to reach the store", func() bool { return len(r.store.putCalls()) == 1 })
 	if got := a2.put(1, r.b.fp, envelope(90, 2)).Status; got != mailbox.StatusBusy {
 		t.Fatalf("second concurrent put: %d, want busy", got)
@@ -305,8 +314,7 @@ func TestTwoConcurrentPutsAreAllowedAtTheDefault(t *testing.T) {
 	a2, _ := r.login(r.a)
 	for i, c := range []*conn{a1, a2} {
 		env := envelope(90, byte(i+1))
-		h, _ := mailbox.NewPutOf(1, r.b.fp, env)
-		c.write(append(frame(t, h), rawFrame(t, env)...))
+		c.write(append(c.putHeader(1, r.b.fp, env), rawFrame(t, env)...))
 	}
 	eventually(t, "both puts to reach the store", func() bool { return len(r.store.putCalls()) == 2 })
 	close(gate)
@@ -320,18 +328,24 @@ func TestTwoConcurrentPutsAreAllowedAtTheDefault(t *testing.T) {
 // The quota bounds, each hit exactly: the store decides from the usage and the
 // session reports full.
 //
-// spec: SPO-Xmailbox-OUT-026, SPO-Xmailbox-INV-012
+// The queue bound of open mode cannot be tiny (OpenQuota.Validate keeps a full
+// envelope of room beyond the stranger allowance), so the mailbox-bytes case is
+// two envelopes of 512 KiB + 1 byte against a queue of exactly their sum, with the
+// smallest stranger allowance; every other case keeps its small figure.
+//
+// spec: SPO-Xmailbox-OUT-026, SPO-Xmailbox-INV-012, SPO-Xmailbox-OUT-084
 func TestQuotaBoundsAreReportedAsFull(t *testing.T) {
+	const half = 512<<10 + 1
 	for _, tc := range []struct {
 		name string
-		q    func(q *mailbox.Quota)
+		q    func(q *mailbox.OpenQuota)
 		size int
 	}{
-		{"pair entries", func(q *mailbox.Quota) { q.PairEntries = 2 }, 50},
-		{"mailbox entries", func(q *mailbox.Quota) { q.MailboxEntries = 2 }, 50},
-		{"pair bytes", func(q *mailbox.Quota) { q.PairBytes = 100 }, 50},
-		{"mailbox bytes", func(q *mailbox.Quota) { q.MailboxBytes = 100 }, 50},
-		{"sender bytes", func(q *mailbox.Quota) { q.SenderBytes = 100 }, 50},
+		{"pair entries", func(q *mailbox.OpenQuota) { q.Quota.PairEntries = 2 }, 50},
+		{"mailbox entries", func(q *mailbox.OpenQuota) { q.Quota.MailboxEntries = 2; q.StrangerEntries = 1 }, 50},
+		{"pair bytes", func(q *mailbox.OpenQuota) { q.Quota.PairBytes = 100 }, 50},
+		{"mailbox bytes", func(q *mailbox.OpenQuota) { q.Quota.MailboxBytes = 2 * half; q.StrangerBytes = 1 }, half},
+		{"sender bytes", func(q *mailbox.OpenQuota) { q.Quota.SenderBytes = 100 }, 50},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newRig(t, withQuota(tc.q))

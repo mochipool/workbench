@@ -15,13 +15,14 @@ import (
 	"github.com/mochipool/workbench/spo/internal/adapters/mailboxstore"
 	"github.com/mochipool/workbench/spo/internal/app/relay"
 	"github.com/mochipool/workbench/spo/internal/domain/mailbox"
+	"github.com/mochipool/workbench/spo/internal/domain/relaybind"
 	"github.com/mochipool/workbench/spo/internal/ports/relayport"
 	"github.com/mochipool/workbench/spo/internal/ports/relayport/relayporttest"
 )
 
 // New refuses a configuration with a missing piece.
 //
-// spec: SPO-Xmailbox-IF-005
+// spec: SPO-Xmailbox-IF-015
 func TestNewRefusesAMissingPiece(t *testing.T) {
 	r := newRig(t)
 	good := r.config()
@@ -29,18 +30,20 @@ func TestNewRefusesAMissingPiece(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, mut := range map[string]func(c *relay.Config){
-		"writer":     func(c *relay.Config) { c.Writer = nil },
-		"reader":     func(c *relay.Config) { c.Reader = nil },
-		"acker":      func(c *relay.Config) { c.Acker = nil },
-		"retractor":  func(c *relay.Config) { c.Retractor = nil },
-		"usage":      func(c *relay.Config) { c.Usage = nil },
-		"access":     func(c *relay.Config) { c.Access = nil },
-		"clock":      func(c *relay.Config) { c.Clock = nil },
-		"rand":       func(c *relay.Config) { c.Rand = nil },
-		"relay key":  func(c *relay.Config) { c.RelayKey = [32]byte{} },
-		"quota":      func(c *relay.Config) { c.Quota = mailbox.ValidQuota{} },
-		"limits":     func(c *relay.Config) { c.Limits = relay.ValidLimits{} },
-		"empty list": func(c *relay.Config) { c.Access = newAccess() },
+		"writer":          func(c *relay.Config) { c.Writer = nil },
+		"reader":          func(c *relay.Config) { c.Reader = nil },
+		"acker":           func(c *relay.Config) { c.Acker = nil },
+		"retractor":       func(c *relay.Config) { c.Retractor = nil },
+		"mailbox revoker": func(c *relay.Config) { c.MailboxRevoker = nil },
+		"usage":           func(c *relay.Config) { c.Usage = nil },
+		"registry":        func(c *relay.Config) { c.Registry = nil },
+		"guard":           func(c *relay.Config) { c.Guard = nil },
+		"clock":           func(c *relay.Config) { c.Clock = nil },
+		"rand":            func(c *relay.Config) { c.Rand = nil },
+		"relay key":       func(c *relay.Config) { c.RelayKey = [32]byte{} },
+		"quota":           func(c *relay.Config) { c.Quota = mailbox.ValidOpenQuota{} },
+		"limits":          func(c *relay.Config) { c.Limits = relay.ValidLimits{} },
+		"policy":          func(c *relay.Config) { c.Policy = relaybind.Policy{} },
 	} {
 		c := good
 		mut(&c)
@@ -59,7 +62,7 @@ func TestNewRefusesAMissingPiece(t *testing.T) {
 // Every limit has a ceiling in the table and a floor above zero: the ceiling is
 // allowed, one more is refused, zero is refused.
 //
-// spec: SPO-Xmailbox-IF-005, SPO-Xmailbox-INV-012
+// spec: SPO-Xmailbox-IF-015, SPO-Xmailbox-INV-012
 func TestLimitsMayOnlyTighten(t *testing.T) {
 	if _, err := relay.DefaultLimits().Validated(); err != nil {
 		t.Fatal(err)
@@ -110,13 +113,17 @@ func TestLimitsMayOnlyTighten(t *testing.T) {
 		{"ack", u(func(l *relay.Limits) *uint { return &l.MaxAck }, mailbox.MaxAckHashes)},
 		{"connections", n(func(l *relay.Limits) *int { return &l.MaxConnections }, mailbox.MaxConnections)},
 		{"per key", n(func(l *relay.Limits) *int { return &l.MaxConnsPerKey }, mailbox.MaxConnsPerKey)},
+		{"per device", n(func(l *relay.Limits) *int { return &l.MaxConnsPerDevice }, mailbox.MaxConnsPerDevice)},
+		{"per wallet key", n(func(l *relay.Limits) *int { return &l.MaxConnsPerWalletKey }, mailbox.MaxConnsPerWalletKey)},
 		{"new per minute", n(func(l *relay.Limits) *int { return &l.MaxNewConnsPerMinute }, mailbox.MaxNewConnsPerKeyPerMinute)},
 		{"requests", n(func(l *relay.Limits) *int { return &l.MaxRequests }, mailbox.MaxRequestsPerConn)},
 		{"puts per minute", n(func(l *relay.Limits) *int { return &l.MaxPutsPerMinute }, mailbox.MaxPutsPerPartyPerMinute)},
 		{"concurrent puts", n(func(l *relay.Limits) *int { return &l.MaxConcurrentPuts }, mailbox.MaxConnsPerKey)},
 		{"lifetime", d(func(l *relay.Limits) *time.Duration { return &l.ConnLifetime }, mailbox.ConnLifetime)},
 		{"idle", d(func(l *relay.Limits) *time.Duration { return &l.IdleTimeout }, mailbox.IdleTimeout)},
-		{"handshake", d(func(l *relay.Limits) *time.Duration { return &l.HandshakeTimeout }, mailbox.HandshakeTimeout)},
+		{"unauthenticated connections", n(func(l *relay.Limits) *int { return &l.MaxUnauthConns }, mailbox.MaxUnauthConnections)},
+		{"revokes", n(func(l *relay.Limits) *int { return &l.MaxRevokes }, mailbox.MaxRevokesPerConn)},
+		{"unauthenticated budget", d(func(l *relay.Limits) *time.Duration { return &l.UnauthBudget }, mailbox.UnauthBudget)},
 		{"body", d(func(l *relay.Limits) *time.Duration { return &l.BodyTimeout }, mailbox.IdleTimeout)},
 		{"write", d(func(l *relay.Limits) *time.Duration { return &l.WriteTimeout }, mailbox.IdleTimeout)},
 		{"bytes", func(l *relay.Limits, over, zero bool) {
@@ -177,14 +184,16 @@ func TestLimitsMayOnlyTighten(t *testing.T) {
 	}
 }
 
-// The server holds narrow capabilities: no field of its configuration can
-// delete a mailbox, sweep or close the store, and the source of the package
-// (apart from the sweeper) never names those capabilities.
+// The server holds narrow capabilities: no field of its configuration can sweep
+// or close a store or the registry; the one field that can delete a whole queue
+// is MailboxRevoker, and the source of the package names that capability and its
+// method only in the server's configuration and in the revoke path (revoke.go).
+// The sweeper's capabilities are named in the sweeper alone.
 //
-// spec: SPO-Xmailbox-IF-005, SPO-Xmailbox-SEC-024
-func TestServerHoldsNoRevokerNoExpirerNoFullStore(t *testing.T) {
+// spec: SPO-Xmailbox-IF-015, SPO-Xmailbox-SEC-024
+func TestServerHoldsNoExpirerNoFullStore(t *testing.T) {
 	ct := reflect.TypeFor[relay.Config]()
-	banned := []string{"RemoveMailbox", "Sweep", "Close"}
+	banned := []string{"Sweep", "Close", "Stats"}
 	for i := range ct.NumField() {
 		f := ct.Field(i)
 		if f.Type.Kind() != reflect.Interface {
@@ -194,6 +203,9 @@ func TestServerHoldsNoRevokerNoExpirerNoFullStore(t *testing.T) {
 			if _, ok := f.Type.MethodByName(m); ok {
 				t.Errorf("Config.%s (%s) has the method %s", f.Name, f.Type, m)
 			}
+		}
+		if _, ok := f.Type.MethodByName("RemoveMailbox"); ok && f.Name != "MailboxRevoker" {
+			t.Errorf("Config.%s (%s) can delete a mailbox", f.Name, f.Type)
 		}
 	}
 	if _, ok := reflect.TypeFor[relay.Server]().MethodByName("Remove"); ok {
@@ -221,9 +233,13 @@ func TestServerHoldsNoRevokerNoExpirerNoFullStore(t *testing.T) {
 				return true
 			}
 			switch id.Name {
-			case "RemoveMailbox", "MailboxRevoker", "MailboxStore":
+			case "MailboxStore":
 				t.Errorf("%s names %s", fn, id.Name)
-			case "MailboxExpirer", "Sweep":
+			case "RemoveMailbox", "MailboxRevoker":
+				if fn != "server.go" && fn != "revoke.go" {
+					t.Errorf("%s names %s", fn, id.Name)
+				}
+			case "MailboxExpirer", "RegistryExpirer", "Sweep":
 				if fn != "sweeper.go" {
 					t.Errorf("%s names %s", fn, id.Name)
 				}
@@ -233,15 +249,18 @@ func TestServerHoldsNoRevokerNoExpirerNoFullStore(t *testing.T) {
 	}
 }
 
-// The package imports the standard library, domain/mailbox, domain/party and
-// ports/relayport and nothing else of this module.
+// The package imports the standard library, the relay-side domain packages
+// (mailbox, party, relaybind, relayregistry) and ports/relayport and nothing else
+// of this module.
 //
 // spec: SPO-Xmailbox-SEC-009
 func TestImportsAreTheRelayPortsOnly(t *testing.T) {
 	allowed := map[string]bool{
-		"github.com/mochipool/workbench/spo/internal/domain/mailbox":  true,
-		"github.com/mochipool/workbench/spo/internal/domain/party":    true,
-		"github.com/mochipool/workbench/spo/internal/ports/relayport": true,
+		"github.com/mochipool/workbench/spo/internal/domain/mailbox":       true,
+		"github.com/mochipool/workbench/spo/internal/domain/party":         true,
+		"github.com/mochipool/workbench/spo/internal/domain/relaybind":     true,
+		"github.com/mochipool/workbench/spo/internal/domain/relayregistry": true,
+		"github.com/mochipool/workbench/spo/internal/ports/relayport":      true,
 	}
 	files, _ := filepath.Glob("*.go")
 	for _, fn := range files {

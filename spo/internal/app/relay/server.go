@@ -10,14 +10,28 @@ import (
 
 	"github.com/mochipool/workbench/spo/internal/domain/mailbox"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
+	"github.com/mochipool/workbench/spo/internal/domain/relaybind"
 	"github.com/mochipool/workbench/spo/internal/ports/relayport"
 )
 
-// Config is everything a Server needs, as narrow capabilities (ADR 0008). There
-// is no field for relayport.MailboxRevoker, MailboxExpirer or the whole store:
-// the session cannot delete a mailbox or sweep.
+// Registry is what a session needs of the relay's binding registry: it reads
+// bindings and tombstones, registers a verified binding, records a verified
+// revoke, and reads and replaces a device's expected-sender list. The sweep
+// (relayport.RegistryExpirer) is the Sweeper's, not the session's.
+type Registry interface {
+	relayport.RegistryReader
+	relayport.Registrar
+	relayport.Revoker
+	relayport.ExpectedSenderReader
+	relayport.ExpectedSenderWriter
+}
+
+// Config is everything a Server needs, as narrow capabilities (ADR 0008). The
+// ack handler has only the acker; the whole store and the expirer are not
+// fields. MailboxRevoker is held for exactly one use: the purge of a revoked
+// device's queue in the revoke path (SPO-Xmailbox-IF-015).
 //
-// spec: SPO-Xmailbox-IF-005
+// spec: SPO-Xmailbox-IF-015
 type Config struct {
 	Writer relayport.MailboxWriter
 	Reader relayport.MailboxReader
@@ -27,16 +41,30 @@ type Config struct {
 	// sender's (SPO-Xmailbox-SEC-021, SEC-023); it is the only capability the
 	// session uses to compensate.
 	Retractor relayport.MailboxRetractor
-	Usage     relayport.MailboxUsageReader
-	Access    relayport.AccessList
-	Clock     relayport.Clock
+	// MailboxRevoker deletes a whole queue. Only the revoke path uses it: when a
+	// verified revoke invalidates a device's binding the queue sealed to it goes.
+	MailboxRevoker relayport.MailboxRevoker
+	Usage          relayport.MailboxUsageReader
+	// Registry is the durable registry of bindings, tombstones and expected-sender
+	// lists.
+	Registry Registry
+	// Guard is the eviction guard the registry's Config.Evictable is Guard.Evictable
+	// of; the server marks a device connected from its login to its last close.
+	Guard *Guard
+	Clock relayport.Clock
 	// Rand is the source of nonces (crypto/rand.Reader in production).
 	Rand io.Reader
 	// RelayKey is the relay's own node key, sent in the Challenge and signed
 	// over by the client.
 	RelayKey party.NodeKey
-	Quota    mailbox.ValidQuota
-	Limits   ValidLimits
+	// Quota is the open-mode quota (ADR 0014 decision 5).
+	Quota  mailbox.ValidOpenQuota
+	Limits ValidLimits
+	// Policy is the relay's tightening of the binding lifetime and of the clock
+	// skew. It must be the Policy of the registry's configuration: the session
+	// verifies with it and the registry checks the lifetime against it again
+	// (obligation 12).
+	Policy relaybind.Policy
 	// Events receives the operator log records; nil drops them.
 	Events EventSink
 }
@@ -50,26 +78,40 @@ type Server struct {
 	rd      relayport.MailboxReader
 	ack     relayport.MailboxAcker
 	retract relayport.MailboxRetractor
+	purge   relayport.MailboxRevoker // the revoke path only (revoke.go)
 	usage   relayport.MailboxUsageReader
-	access  relayport.AccessList
+	reg     Registry
+	guard   *Guard
 	clock   relayport.Clock
 	rand    io.Reader
 	key     party.NodeKey
-	quota   mailbox.ValidQuota
-	lim     Limits
-	sink    EventSink
-	notes   *notifier
+	quota   mailbox.ValidOpenQuota
+	// storeQuota is the part of the quota the store decides under its lock: the
+	// bounds of ADR 0013 (queue, pair, sender, global), valid for one party because
+	// the open-mode rule (devices times the queue bound) was checked by quota.
+	storeQuota mailbox.ValidQuota
+	policy     relaybind.Policy
+	lim        Limits
+	sink       EventSink
+	notes      *notifier
+	book       *book
 
-	mu       sync.Mutex
-	live     int
-	perKey   map[party.NodeKey]int
-	recent   map[party.NodeKey][]time.Time // admitted connections in the last minute
-	puts     map[party.Fingerprint][]time.Time
-	inflight map[party.Fingerprint]int
-	sessions map[*session]struct{}
-	rejects  map[party.NodeKey][]time.Time // replies sent to refused connections in the last minute, at most rejectTableSize keys
-	writers  int                           // reject writers running, at most maxRejectWriters
-	swept    time.Time                     // the relay's time of the last sweep of the three windows above
+	mu     sync.Mutex
+	live   int
+	unauth int // live connections that have not logged in
+	perKey map[party.NodeKey]int
+	// perDevice and perWallet count the logged-in connections of a device and of a
+	// wallet key (SPO-Xmailbox-PRE-056); a session is in them from its admission at
+	// login to its release.
+	perDevice map[party.Fingerprint]int
+	perWallet map[relaybind.KeyHash]int
+	recent    map[party.NodeKey][]time.Time // admitted connections in the last minute
+	puts      map[relaybind.KeyHash][]time.Time
+	inflight  map[party.Fingerprint]int
+	sessions  map[*session]struct{}
+	rejects   map[party.NodeKey][]time.Time // replies sent to refused connections in the last minute, at most rejectTableSize keys
+	writers   int                           // reject writers running, at most maxRejectWriters
+	swept     time.Time                     // the relay's time of the last sweep of the three windows above
 }
 
 const (
@@ -83,13 +125,12 @@ const (
 )
 
 // New checks cfg and makes a Server. It refuses a missing capability, a zero
-// relay key, a quota or limits that were not validated and an empty access
-// list (the tunnel allow-list is exactly the list: an empty one admits no one,
-// concern T2).
+// relay key, a quota, limits or policy that were not validated or are outside
+// their bounds.
 func New(cfg Config) (*Server, error) {
 	switch {
-	case cfg.Writer == nil, cfg.Reader == nil, cfg.Acker == nil, cfg.Retractor == nil, cfg.Usage == nil,
-		cfg.Access == nil, cfg.Clock == nil, cfg.Rand == nil:
+	case cfg.Writer == nil, cfg.Reader == nil, cfg.Acker == nil, cfg.Retractor == nil, cfg.MailboxRevoker == nil,
+		cfg.Usage == nil, cfg.Registry == nil, cfg.Guard == nil, cfg.Clock == nil, cfg.Rand == nil:
 		return nil, fmt.Errorf("%w: a capability is missing", ErrConfig)
 	case cfg.RelayKey == (party.NodeKey{}):
 		return nil, fmt.Errorf("%w: the relay's node key is zero", ErrConfig)
@@ -97,21 +138,29 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("%w: the quota was not validated", ErrConfig)
 	case cfg.Limits.IsZero():
 		return nil, fmt.Errorf("%w: the limits were not validated", ErrConfig)
-	case len(cfg.Access.NodeKeys()) == 0:
-		return nil, fmt.Errorf("%w: the access list is empty", ErrConfig)
+	}
+	if err := cfg.Policy.Validate(); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrConfig, err)
+	}
+	sq, err := cfg.Quota.Quota().Quota.Validated(1)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrConfig, err)
 	}
 	lim := cfg.Limits.Limits()
 	return &Server{
-		w: cfg.Writer, rd: cfg.Reader, ack: cfg.Acker, retract: cfg.Retractor, usage: cfg.Usage,
-		access: cfg.Access, clock: cfg.Clock, rand: cfg.Rand, key: cfg.RelayKey,
-		quota: cfg.Quota, lim: lim, sink: cfg.Events,
-		notes:    newNotifier(lim.MaxConnections),
-		perKey:   map[party.NodeKey]int{},
-		recent:   map[party.NodeKey][]time.Time{},
-		puts:     map[party.Fingerprint][]time.Time{},
-		inflight: map[party.Fingerprint]int{},
-		sessions: map[*session]struct{}{},
-		rejects:  map[party.NodeKey][]time.Time{},
+		w: cfg.Writer, rd: cfg.Reader, ack: cfg.Acker, retract: cfg.Retractor, purge: cfg.MailboxRevoker, usage: cfg.Usage,
+		reg: cfg.Registry, guard: cfg.Guard, clock: cfg.Clock, rand: cfg.Rand, key: cfg.RelayKey,
+		quota: cfg.Quota, storeQuota: sq, policy: cfg.Policy, lim: lim, sink: cfg.Events,
+		notes:     newNotifier(lim.MaxConnections),
+		book:      newBook(),
+		perKey:    map[party.NodeKey]int{},
+		perDevice: map[party.Fingerprint]int{},
+		perWallet: map[relaybind.KeyHash]int{},
+		recent:    map[party.NodeKey][]time.Time{},
+		puts:      map[relaybind.KeyHash][]time.Time{},
+		inflight:  map[party.Fingerprint]int{},
+		sessions:  map[*session]struct{}{},
+		rejects:   map[party.NodeKey][]time.Time{},
 	}, nil
 }
 
@@ -142,6 +191,11 @@ const sweepEvery = 5 * time.Second
 // closes them all (each gets the shutting-down code). The listener belongs to
 // the caller, who closes it.
 //
+// Who may connect is the listener's job (ADR 0014 decision 5: the tunnel admits
+// the device node keys the operator lists); the session receives the tunnel
+// peer's node key, requires the client's node key in the login to be that key,
+// and admits a device only with a valid binding.
+//
 // How an Accept error ends it (SPO-Xmailbox-INV-013): the context's end and a
 // closed listener (relayport.ErrListenerClosed) return nil; an error the listener
 // marked retryable (relayport.ErrAcceptRetry) is waited out for a delay that
@@ -150,9 +204,9 @@ const sweepEvery = 5 * time.Second
 // shutting down) and then waits for them, so a failed listener does not leave
 // the connections running until their lifetimes end.
 //
-// A connection that is refused at accept (a bound, an unlisted node key) is
-// answered, when there is room, by a bounded number of reject writers off this
-// goroutine: the accept path never writes to a peer (SPO-Xmailbox-OUT-034).
+// A connection that is refused at accept (a bound) is answered, when there is
+// room, by a bounded number of reject writers off this goroutine: the accept
+// path never writes to a peer (SPO-Xmailbox-OUT-034).
 func (s *Server) Serve(ctx context.Context, ln relayport.StreamListener) error {
 	sctx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
@@ -192,11 +246,12 @@ func (s *Server) Serve(ctx context.Context, ln relayport.StreamListener) error {
 	}
 }
 
-// admit decides one new connection, in this order: the total bound, the access
-// list (an unlisted node key, such as a revoked one that the tunnel still
-// admits, is refused before any counter is kept for it), live connections of
-// the key, new connections of the key in the last minute. It records the
-// connection when it admits it.
+// admit decides one new connection, in this order: the total bound, the
+// unauthenticated slots, live connections of the tunnel node key, new
+// connections of the node key in the last minute. It records the connection
+// (and its unauthenticated slot) when it admits it. The node key costs a peer
+// nothing, so these bounds are no abuse bound by themselves (ADR 0014
+// decision 5); the slots and the budget are.
 //
 // spec: SPO-Xmailbox-PRE-021, SPO-Xmailbox-INV-012
 func (s *Server) admit(peer party.NodeKey) (mailbox.Code, Reason, bool) {
@@ -207,8 +262,8 @@ func (s *Server) admit(peer party.NodeKey) (mailbox.Code, Reason, bool) {
 	if s.live >= s.lim.MaxConnections {
 		return mailbox.CodeLimit, ReasonLimit, false
 	}
-	if _, ok := s.access.LookupNode(peer); !ok {
-		return mailbox.CodeRevoked, ReasonUnlisted, false
+	if s.unauth >= s.lim.MaxUnauthConns {
+		return mailbox.CodeLimit, ReasonLimit, false
 	}
 	if s.perKey[peer] >= s.lim.MaxConnsPerKey {
 		return mailbox.CodeLimit, ReasonLimit, false
@@ -221,6 +276,7 @@ func (s *Server) admit(peer party.NodeKey) (mailbox.Code, Reason, bool) {
 	s.recent[peer] = append(recent, now)
 	s.perKey[peer]++
 	s.live++
+	s.unauth++
 	return 0, ReasonNone, true
 }
 
@@ -241,8 +297,7 @@ func inWindow(ts []time.Time, now time.Time) []time.Time {
 // tables, at most once in sweepEvery of the relay's time (and at once when the
 // clock has stepped back). The tables hold only keys with an event in the last
 // minute, so they are bounded by the keys that were active in it, not by every
-// key that was ever seen; a key that has left the access list goes with the
-// rest. mu is held.
+// key that was ever seen. mu is held.
 func (s *Server) sweepLocked(now time.Time) {
 	if age := now.Sub(s.swept); !s.swept.IsZero() && age >= 0 && age < sweepEvery {
 		return
@@ -314,7 +369,7 @@ func (s *Server) reject(ctx context.Context, wg *sync.WaitGroup, st relayport.St
 	}
 	s.emit(Event{Kind: EventRejected, Node: peer, Reason: reason, Code: code, HasCode: true})
 	var f []byte
-	if b, err := mailbox.Encode(mailbox.Error{Code: code}); err == nil {
+	if b, err := mailbox.EncodeV(mailbox.Version2, mailbox.Error{Code: code}); err == nil {
 		f, _ = mailbox.AppendFrame(nil, b)
 	}
 	wg.Add(1)
@@ -342,67 +397,137 @@ func (s *Server) release(sess *session) {
 	defer s.mu.Unlock()
 	s.sweepLocked(now)
 	s.live--
+	if sess.unauthHeld {
+		sess.unauthHeld = false
+		s.unauth--
+	}
 	if s.perKey[sess.peer]--; s.perKey[sess.peer] <= 0 {
 		delete(s.perKey, sess.peer)
+	}
+	if sess.counted {
+		sess.counted = false
+		if s.perDevice[sess.cdev]--; s.perDevice[sess.cdev] <= 0 {
+			delete(s.perDevice, sess.cdev)
+		}
+		if s.perWallet[sess.ckey]--; s.perWallet[sess.ckey] <= 0 {
+			delete(s.perWallet, sess.ckey)
+		}
 	}
 	delete(s.sessions, sess)
 }
 
-// register makes an authenticated session known to CloseParty.
-func (s *Server) register(sess *session) {
+// admitLogin counts a session that has proved a device and its wallet key against
+// the live connections of that device and of that wallet key. It reports false,
+// counting nothing, when either bound is reached: the login ends with the `limit`
+// code before anything is registered. The tunnel node key costs a peer nothing, so
+// the per-node bounds of admit are no abuse bound; these follow the identity
+// (SPO-Xmailbox-PRE-056). release gives the place back on every exit.
+func (s *Server) admitLogin(sess *session, device party.Fingerprint, key relaybind.KeyHash) bool {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.perDevice[device] >= s.lim.MaxConnsPerDevice || s.perWallet[key] >= s.lim.MaxConnsPerWalletKey {
+		return false
+	}
+	s.perDevice[device]++
+	s.perWallet[key]++
+	sess.counted, sess.cdev, sess.ckey = true, device, key
+	return true
+}
+
+// loggedIn frees the unauthenticated slot of a session that completed its login
+// and makes the session known to CloseDevice and CloseKey.
+func (s *Server) loggedIn(sess *session) {
+	s.mu.Lock()
+	if sess.unauthHeld {
+		sess.unauthHeld = false
+		s.unauth--
+	}
 	s.sessions[sess] = struct{}{}
 	s.mu.Unlock()
 }
 
-// CloseParty ends the live sessions of fp with the revoked code. The access
-// list reload calls it, after it has replaced the list and before it removes
-// the mailbox. A session that has not authenticated yet is not touched: it
-// looks its party up again when it authenticates, and every request of an
-// authenticated session looks it up again too.
+// CloseDevice ends the live sessions of a device with the binding code. It is
+// what a future reload of the operator's configuration calls, and what a verified
+// revoke calls for each device it invalidated. A session that has not logged in
+// is not touched: it is bound by its own login. Every request of a logged-in
+// session looks its binding up again, so a session that is not reached still
+// ends at its next request or wake (SPO-Xmailbox-SEC-025).
 //
 // spec: SPO-Xmailbox-SEC-024
-func (s *Server) CloseParty(fp party.Fingerprint) {
+func (s *Server) CloseDevice(device party.Fingerprint) int {
+	return s.closeWhere(func(x *session) bool { return x.fp == device }, ReasonRevoked)
+}
+
+// CloseKey ends the live sessions of every device bound to a wallet key.
+func (s *Server) CloseKey(key relaybind.KeyHash) int {
+	return s.closeWhere(func(x *session) bool { return x.key == key }, ReasonRevoked)
+}
+
+func (s *Server) closeWhere(pred func(*session) bool, why Reason) int {
 	s.mu.Lock()
 	var hit []*session
 	for sess := range s.sessions {
-		if sess.fp == fp {
+		if pred(sess) {
 			hit = append(hit, sess)
 		}
 	}
 	s.mu.Unlock()
 	for _, sess := range hit {
-		sess.revoke()
+		sess.revoke(mailbox.CodeBinding, why)
 	}
+	return len(hit)
 }
 
-// takePut counts one put of sender against the per-minute bound and the bound
-// on puts in flight. It reports false, counting nothing, when either is passed.
-func (s *Server) takePut(fp party.Fingerprint) bool {
+// countPut counts one put attempt of a sender against the per-minute budget of its
+// wallet key (summed over its devices) and reports whether the budget had room.
+// An attempt is counted whatever its fate (SPO-Xmailbox-SEC-070): a put that is
+// answered unbound or unavailable costs the sender the same as one that is stored,
+// so the question "is this (wallet key, device) bound here?" is limited by the
+// budget and not only by the request and connection rates. An attempt that finds
+// the window full is refused and adds nothing, so the window never holds more than
+// MaxPutsPerMinute entries.
+func (s *Server) countPut(key relaybind.KeyHash) bool {
 	now := s.clock.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.countPutLocked(key, now)
+}
+
+func (s *Server) countPutLocked(key relaybind.KeyHash, now time.Time) bool {
 	s.sweepLocked(now)
-	recent := inWindow(s.puts[fp], now)
-	if len(recent) >= s.lim.MaxPutsPerMinute || s.inflight[fp] >= s.lim.MaxConcurrentPuts {
-		if len(recent) == 0 {
-			delete(s.puts, fp)
-		} else {
-			s.puts[fp] = recent
-		}
+	recent := inWindow(s.puts[key], now)
+	if len(recent) >= s.lim.MaxPutsPerMinute {
+		s.puts[key] = recent
 		return false
 	}
-	s.puts[fp] = append(recent, now)
-	s.inflight[fp]++
+	s.puts[key] = append(recent, now)
 	return true
 }
 
-func (s *Server) donePut(fp party.Fingerprint) {
+// takePut counts the attempt (countPut) and takes one of the puts in flight of the
+// sender's device. It reports false when the budget is spent or the device's puts
+// in flight are at their bound; the attempt is counted in the second case too, and
+// no place in flight is held when it reports false.
+func (s *Server) takePut(key relaybind.KeyHash, device party.Fingerprint) bool {
+	now := s.clock.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.countPutLocked(key, now) {
+		return false
+	}
+	if s.inflight[device] >= s.lim.MaxConcurrentPuts {
+		return false
+	}
+	s.inflight[device]++
+	return true
+}
+
+func (s *Server) donePut(device party.Fingerprint) {
 	now := s.clock.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sweepLocked(now)
-	if s.inflight[fp]--; s.inflight[fp] <= 0 {
-		delete(s.inflight, fp)
+	if s.inflight[device]--; s.inflight[device] <= 0 {
+		delete(s.inflight, device)
 	}
 }

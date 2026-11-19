@@ -10,18 +10,24 @@ import (
 
 	"github.com/mochipool/workbench/spo/internal/domain/mailbox"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
+	"github.com/mochipool/workbench/spo/internal/domain/relaybind"
+	"github.com/mochipool/workbench/spo/internal/domain/relayregistry"
 	"github.com/mochipool/workbench/spo/internal/ports/relayport"
 )
 
-// A session is one connection: version negotiation, Challenge, Auth, AuthOK,
-// then requests (Put, Fetch, Ack) one at a time until a bound, an error, the
-// peer or the server ends it (ADR 0013 decisions 3 and 6). It reads only
-// through mailbox.ReadHeaderFrame and mailbox.ReadRawFrame and decodes only
-// with mailbox.DecodeFromClient.
+// A session is one connection of protocol version 2 (ADR 0014 decision 7): the
+// Challenge, then before login at most MaxRevokes Revoke frames and one Auth
+// (all within UnauthBudget), the AuthOK, then requests (Put, Fetch, Ack) one at a
+// time until a bound, an error, the peer, the end of the device's binding or the
+// server ends it. It reads only through mailbox.ReadHeaderFrame and
+// mailbox.ReadRawFrame and decodes only with mailbox.DecodeFromClientIn at the
+// stage the connection is in; the stage is moved only by AfterRevoke and
+// AfterAuth (obligation 1).
 //
 // Every blocking read and write has a deadline set on the stream first, the
-// earliest of the phase's bound and the end of the connection's lifetime, so a
-// stalled peer cannot hold a goroutine or a store reservation past it.
+// earliest of the phase's bound, the end of the connection's lifetime and the
+// end of the device's binding, so a stalled peer cannot hold a goroutine or a
+// store reservation past it.
 
 // past is a time that has passed: a deadline that ends a blocked operation.
 var past = time.Unix(1, 0)
@@ -45,9 +51,25 @@ type session struct {
 	start   time.Time
 	lifeEnd time.Time
 
-	fp       party.Fingerprint // set at AuthOK
+	stage mailbox.Stage
+	// fp is the device (the fingerprint of the keys that signed the login), key
+	// the wallet key its binding names and until the binding's end as the registry
+	// recorded it; all are set at login.
+	fp       party.Fingerprint
+	key      relaybind.KeyHash
+	until    int64
+	untilEnd time.Time // until, as a deadline of the process clock
 	authed   bool
-	revoked  atomic.Bool
+	entered  bool // the guard counts this session as connecting its device
+
+	unauthHeld bool // guarded by srv.mu
+	// counted: the session holds a place in the per-device and per-wallet-key
+	// connection counts (cdev, ckey); guarded by srv.mu.
+	counted bool
+	cdev    party.Fingerprint
+	ckey    relaybind.KeyHash
+
+	revEnd   atomic.Pointer[end] // set by revoke: why a revoked session ends
 	ids      map[uint32]struct{}
 	requests int
 	sent     uint64 // bytes written to the peer: headers and raw frames, against Limits.MaxBytesSent
@@ -73,7 +95,8 @@ func (c *countReader) Read(p []byte) (int, error) {
 }
 
 func newSession(srv *Server, st relayport.Stream, peer party.NodeKey) *session {
-	return &session{srv: srv, st: st, rd: &countReader{r: st}, peer: peer, ids: map[uint32]struct{}{}}
+	stage, _ := mailbox.StageForOffer(mailbox.V2) // version 2 is the only version the relay offers
+	return &session{srv: srv, st: st, rd: &countReader{r: st}, peer: peer, ids: map[uint32]struct{}{}, stage: stage, unauthHeld: true}
 }
 
 func minTime(a, b time.Time) time.Time {
@@ -83,10 +106,14 @@ func minTime(a, b time.Time) time.Time {
 	return a
 }
 
-// dl is the deadline for an operation that may take d: the earlier of now+d
-// and the end of the connection's lifetime.
+// dl is the deadline for an operation that may take d: the earlier of now+d,
+// the end of the connection's lifetime and the end of the device's binding.
 func (s *session) dl(d time.Duration) time.Time {
-	return minTime(time.Now().Add(d), s.lifeEnd)
+	t := minTime(time.Now().Add(d), s.lifeEnd)
+	if !s.untilEnd.IsZero() {
+		t = minTime(t, s.untilEnd)
+	}
+	return t
 }
 
 // setRead and setWrite set a deadline and then look at the context once more:
@@ -106,13 +133,15 @@ func (s *session) setWrite(t time.Time) {
 	}
 }
 
+func (s *session) revoked() bool { return s.revEnd.Load() != nil }
+
 // revoke ends the session: the context is cancelled (a waiting fetch wakes) and
 // both deadlines are set in the past, so that a blocked read returns and so
 // does a blocked write: a revoked session that is stalled in a frame to a peer
 // that does not read ends at once, not after the write timeout of each frame
 // it still has to send. setRead and setWrite do not overwrite them.
-func (s *session) revoke() {
-	s.revoked.Store(true)
+func (s *session) revoke(code mailbox.Code, why Reason) {
+	s.revEnd.CompareAndSwap(nil, &end{code, true, why})
 	s.cancel()
 	s.st.SetDeadline(past)
 }
@@ -143,8 +172,11 @@ func (s *session) run(parent context.Context) {
 		s.settleWatch()
 		s.cancel()
 		s.st.Close()
+		if s.entered {
+			s.srv.guard.leave(s.fp)
+		}
 		s.srv.release(s)
-		e := Event{Kind: EventClose, Node: s.peer, Party: s.fp, Reason: s.result.reason}
+		e := Event{Kind: EventClose, Node: s.peer, Party: s.fp, Key: s.key, Reason: s.result.reason}
 		if s.result.reply {
 			e.Code, e.HasCode = s.result.code, true
 		}
@@ -173,13 +205,13 @@ func (s *session) serve() end {
 		}
 		var id uint32
 		switch m := m.(type) {
-		case mailbox.Put:
+		case mailbox.PutV2:
 			id = m.RequestID
 		case mailbox.Fetch:
 			id = m.RequestID
 		case mailbox.Ack:
 			id = m.RequestID
-		default: // Auth again
+		default:
 			return end{mailbox.CodeProtocol, true, ReasonProtocol}
 		}
 		if _, dup := s.ids[id]; dup {
@@ -187,7 +219,7 @@ func (s *session) serve() end {
 		}
 		s.ids[id] = struct{}{}
 		switch m := m.(type) {
-		case mailbox.Put:
+		case mailbox.PutV2:
 			e = s.handlePut(m)
 		case mailbox.Fetch:
 			e = s.handleFetch(m)
@@ -207,15 +239,19 @@ func (s *session) classify(err error, writing bool) *end {
 	switch {
 	case s.parent.Err() != nil:
 		return &end{mailbox.CodeShuttingDown, true, ReasonShutdown}
-	case s.revoked.Load():
-		return &end{mailbox.CodeRevoked, true, ReasonRevoked}
+	case s.revoked():
+		e := *s.revEnd.Load()
+		return &e
 	case isTimeout(err):
 		if writing {
 			return &end{reason: ReasonPeer}
 		}
+		now := time.Now()
 		switch {
-		case !time.Now().Before(s.lifeEnd):
+		case !now.Before(s.lifeEnd):
 			return &end{mailbox.CodeLimit, true, ReasonLifetime}
+		case !s.untilEnd.IsZero() && !now.Before(s.untilEnd):
+			return &end{mailbox.CodeBinding, true, ReasonExpired}
 		case !s.authed:
 			return &end{mailbox.CodeLimit, true, ReasonHandshake}
 		default:
@@ -240,7 +276,7 @@ func isProtocol(err error) bool {
 	for _, e := range []error{
 		mailbox.ErrFrameSize, mailbox.ErrNotCanonical, mailbox.ErrShape, mailbox.ErrMalformed,
 		mailbox.ErrRange, mailbox.ErrUnknownType, mailbox.ErrDirection, mailbox.ErrSize,
-		mailbox.ErrTooLarge, mailbox.ErrHash,
+		mailbox.ErrTooLarge, mailbox.ErrHash, mailbox.ErrStage,
 	} {
 		if errors.Is(err, e) {
 			return true
@@ -249,9 +285,9 @@ func isProtocol(err error) bool {
 	return false
 }
 
-// readMsg reads and decodes one header frame from the client under deadline t.
-// Before authentication it is the only way anything is read, and a frame of
-// any type but Auth is then refused by the caller.
+// readMsg reads and decodes one header frame from the client under deadline t,
+// at the stage of the connection. Before login it is the only way anything is
+// read, and the decoder of the stage allows only Revoke and Auth.
 func (s *session) readMsg(t time.Time) (mailbox.Message, *end) {
 	s.setRead(t)
 	body, err := mailbox.ReadHeaderFrame(s.rd)
@@ -261,22 +297,27 @@ func (s *session) readMsg(t time.Time) (mailbox.Message, *end) {
 	if s.rd.n > s.srv.lim.MaxBytes {
 		return nil, &end{mailbox.CodeLimit, true, ReasonBytes}
 	}
-	m, err := mailbox.DecodeFromClient(body)
+	m, err := mailbox.DecodeFromClientIn(s.stage, body)
 	if err != nil {
 		return nil, s.classify(err, false)
 	}
 	return m, nil
 }
 
-// writeFrame writes one header frame under the write deadline t.
+// encodeFrame is the frame of a message in version 2, the only version.
+func encodeFrame(m mailbox.Message) ([]byte, error) {
+	b, err := mailbox.EncodeV(mailbox.Version2, m)
+	if err != nil {
+		return nil, err
+	}
+	return mailbox.AppendFrame(nil, b)
+}
+
+// send writes one header frame under the write deadline t.
 func (s *session) send(m mailbox.Message, t time.Time) *end {
-	b, err := mailbox.Encode(m)
+	f, err := encodeFrame(m)
 	if err != nil {
 		return &end{reason: ReasonProtocol} // a bug: nothing the peer sent
-	}
-	f, err := mailbox.AppendFrame(nil, b)
-	if err != nil {
-		return &end{reason: ReasonProtocol}
 	}
 	// every header the relay sends counts against what the connection may send;
 	// the Error frame of a closing session is the one frame that does not
@@ -297,11 +338,7 @@ func (s *session) reply(m mailbox.Message) *end { return s.send(m, s.dl(s.srv.li
 // deadline, set after the shutdown watcher can no longer overwrite it.
 func (s *session) sendError(code mailbox.Code) {
 	s.settleWatch()
-	b, err := mailbox.Encode(mailbox.Error{Code: code})
-	if err != nil {
-		return
-	}
-	f, err := mailbox.AppendFrame(nil, b)
+	f, err := encodeFrame(mailbox.Error{Code: code})
 	if err != nil {
 		return
 	}
@@ -309,89 +346,255 @@ func (s *session) sendError(code mailbox.Code) {
 	s.st.Write(f)
 }
 
-// nonceReader reads the nonce; a failing source ends the session before a
-// challenge is sent.
+// handshake runs the Challenge, the Revokes a peer may send before login and the
+// login itself, all within the unauthenticated budget of the whole connection.
 func (s *session) handshake() *end {
 	srv := s.srv
-	hsEnd := minTime(s.start.Add(srv.lim.HandshakeTimeout), s.lifeEnd)
+	hsEnd := minTime(s.start.Add(srv.lim.UnauthBudget), s.lifeEnd)
 
 	var nonce [mailbox.NonceSize]byte
 	if _, err := io.ReadFull(srv.rand, nonce[:]); err != nil {
 		return &end{reason: ReasonRandom}
 	}
 	relayTime := min(max(srv.clock.Now().Unix(), 0), mailbox.MaxTime)
-	if e := s.send(mailbox.Challenge{Min: mailbox.Version1, Max: mailbox.Version1, Nonce: nonce, RelayKey: srv.key, RelayTime: relayTime}, hsEnd); e != nil {
+	// the relay offers version 2 and nothing else
+	if e := s.send(mailbox.Challenge{Min: mailbox.Version2, Max: mailbox.Version2, Nonce: nonce, RelayKey: srv.key, RelayTime: relayTime}, hsEnd); e != nil {
 		return e
 	}
+	revokes := 0
+	for {
+		m, e := s.readMsg(hsEnd)
+		if e != nil {
+			return e
+		}
+		switch m := m.(type) {
+		case mailbox.AuthV2:
+			return s.login(m, nonce, relayTime, hsEnd)
+		case mailbox.RevokeByDevice, mailbox.RevokeByWallet:
+			// every Revoke that decoded moves the stage, refused or not, and counts
+			// toward the bound: the ninth ends the connection
+			stage, err := s.stage.AfterRevoke(m)
+			if err != nil {
+				return &end{mailbox.CodeProtocol, true, ReasonProtocol}
+			}
+			s.stage = stage
+			if revokes++; revokes > srv.lim.MaxRevokes {
+				return &end{mailbox.CodeLimit, true, ReasonRevokes}
+			}
+			if e := s.handleRevoke(m, hsEnd); e != nil {
+				return e
+			}
+		default:
+			return &end{mailbox.CodeProtocol, true, ReasonProtocol}
+		}
+	}
+}
 
-	m, e := s.readMsg(hsEnd)
-	if e != nil {
-		return e
+// loginFail ends a failed login with its code and records the reason.
+func (s *session) loginFail(code mailbox.Code, r Reason) *end {
+	s.srv.emit(Event{Kind: EventAuthFail, Node: s.peer, Reason: r, Code: code, HasCode: true})
+	return &end{code, true, r}
+}
+
+// login authenticates the device and admits its binding (ADR 0014 decision 7,
+// obligations 2, 7, 8, 10 to 13 and 18):
+//
+//   - the device fingerprint is computed ONCE, from the presented keys, and is
+//     the value both VerifyAuthV2 and relaybind.VerifyBinding take;
+//   - the signed bytes commit to the full hash of the statement presented in THIS
+//     Auth and to the hash of the sender list as received, both computed here;
+//   - the relay's own key, nonce and time, and the tunnel's node key, are the
+//     relay's, never the frame's;
+//   - the binding is verified with the registry's policy, then registered (the
+//     registry admits it against its tombstones and the allow-list decides after
+//     that), then the expected-sender list is replaced, on every login;
+//   - the answer carries the binding's `until` as the registry recorded it.
+func (s *session) login(a mailbox.AuthV2, nonce [mailbox.NonceSize]byte, relayTime int64, hsEnd time.Time) *end {
+	srv := s.srv
+	fp := a.Keys.Fingerprint()
+	if a.Fingerprint != fp {
+		return s.loginFail(mailbox.CodeAuth, ReasonFingerprint)
 	}
-	auth, ok := m.(mailbox.Auth)
-	if !ok {
-		return &end{mailbox.CodeProtocol, true, ReasonProtocol}
+	st, err := relaybind.ParseStatement(a.Sign1)
+	if err != nil {
+		return s.loginFail(mailbox.CodeBinding, ReasonBinding)
 	}
-	if auth.Version != mailbox.Version1 {
-		srv.emit(Event{Kind: EventAuthFail, Node: s.peer, Reason: ReasonVersion})
-		return &end{mailbox.CodeVersion, true, ReasonVersion}
+	vkey, err := relaybind.ParseCOSEKey(a.Key)
+	if err != nil {
+		return s.loginFail(mailbox.CodeBinding, ReasonBinding)
 	}
-	// The party is the one the tunnel's node key belongs to. The fingerprint in
-	// Auth is a claim that must equal that entry's; it never selects an entry.
-	ent, ok := srv.access.LookupNode(s.peer)
-	if !ok {
-		srv.emit(Event{Kind: EventAuthFail, Node: s.peer, Reason: ReasonUnlisted})
-		return &end{mailbox.CodeRevoked, true, ReasonUnlisted}
+	sendersHash, err := mailbox.SendersHash(a.Senders)
+	if err != nil {
+		return s.loginFail(mailbox.CodeAuth, ReasonSignature)
 	}
-	fail := func(r Reason) *end {
-		srv.emit(Event{Kind: EventAuthFail, Node: s.peer, Reason: r})
-		return &end{mailbox.CodeAuth, true, r}
-	}
-	id := ent.Document.Identity
-	if auth.Fingerprint != ent.Fingerprint || id.Fingerprint() != ent.Fingerprint {
-		return fail(ReasonFingerprint)
-	}
-	if err := mailbox.VerifyAuth(id, s.peer, auth.Signature, mailbox.AuthParams{
-		Version:       auth.Version,
+	if err := mailbox.VerifyAuthV2(a.Keys, s.peer, a.Signature, mailbox.AuthV2Params{
 		RelayKey:      srv.key,   // the relay's own, never the client's
 		ClientNodeKey: s.peer,    // the tunnel's, never the client's
 		Nonce:         nonce,     // this connection's
 		RelayTime:     relayTime, // as sent
-		Fingerprint:   ent.Fingerprint,
+		Fingerprint:   fp,
+		BindingHash:   st.FullHash(), // of the statement presented in this Auth
+		SendersHash:   sendersHash,   // of the list as received
 	}); err != nil {
 		switch {
+		case errors.Is(err, mailbox.ErrAuthWeakKey):
+			return s.loginFail(mailbox.CodeAuth, ReasonWeakKey)
 		case errors.Is(err, mailbox.ErrAuthFingerprint):
-			return fail(ReasonFingerprint)
-		case errors.Is(err, mailbox.ErrAuthTunnelKey), errors.Is(err, mailbox.ErrAuthIdentityNode), errors.Is(err, mailbox.ErrAuthNoNodeKey):
-			return fail(ReasonBinding)
+			return s.loginFail(mailbox.CodeAuth, ReasonFingerprint)
+		case errors.Is(err, mailbox.ErrAuthTunnelKey):
+			return s.loginFail(mailbox.CodeAuth, ReasonTunnelKey)
 		}
-		return fail(ReasonSignature)
+		return s.loginFail(mailbox.CodeAuth, ReasonSignature)
 	}
-	ok2 := mailbox.AuthOK{
-		Version:          mailbox.Version1,
+	vb, err := relaybind.VerifyBinding(st, vkey, fp, srv.clock.Now().Unix(), srv.policy)
+	if err != nil {
+		return s.loginFail(mailbox.CodeBinding, ReasonBinding)
+	}
+	presented, err := relayregistry.NewPresented(vb, a.Sign1, a.Key)
+	if err != nil {
+		return s.loginFail(mailbox.CodeBinding, ReasonBinding)
+	}
+	// the connection bounds follow the identity the login proved: a place for this
+	// device and its wallet key is taken before anything is registered, so a login
+	// that is refused for them registers and replaces nothing
+	if !srv.admitLogin(s, fp, vb.Key()) {
+		return s.loginFail(mailbox.CodeLimit, ReasonLimit)
+	}
+	// the device counts as connected before it is registered, so that the
+	// registration of another device cannot evict the binding it is making
+	srv.guard.enter(fp)
+	s.entered = true
+	s.fp = fp
+	res, err := srv.reg.Register(s.ctx, presented)
+	if err != nil {
+		return s.registryFail(err)
+	}
+	if err := srv.reg.SetExpectedSenders(s.ctx, fp, a.Senders); err != nil {
+		if errors.Is(err, relayregistry.ErrNotBound) || errors.Is(err, relayregistry.ErrBadSenders) {
+			return s.loginFail(mailbox.CodeBinding, ReasonBinding)
+		}
+		return s.registryFail(err)
+	}
+	q := srv.quota.Quota().Quota
+	until := res.Entry.Binding.Until
+	if e := s.send(mailbox.AuthOKV2{
 		MaxEnvelope:      uint64(srv.lim.MaxEnvelope),
-		MaxEntries:       srv.quota.Quota().MailboxEntries,
-		MaxBytes:         srv.quota.Quota().MailboxBytes,
+		MaxEntries:       q.MailboxEntries,
+		MaxBytes:         q.MailboxBytes,
 		RetentionSeconds: srv.lim.RetentionSeconds,
-	}
-	if e := s.send(ok2, hsEnd); e != nil {
+		Until:            until,
+	}, hsEnd); e != nil {
 		return e
 	}
-	s.fp, s.authed = ent.Fingerprint, true
-	srv.register(s)
-	srv.emit(Event{Kind: EventAuthOK, Node: s.peer, Party: s.fp})
+	stage, err := s.stage.AfterAuth(a)
+	if err != nil {
+		return &end{mailbox.CodeProtocol, true, ReasonProtocol}
+	}
+	s.stage = stage
+	s.key, s.authed = res.Entry.Key, true
+	s.setUntil(until)
+	srv.loggedIn(s)
+	srv.emit(Event{Kind: EventAuthOK, Node: s.peer, Party: s.fp, Key: s.key})
 	return nil
 }
 
-// sender looks the authenticated party up again: its entry must still exist
-// with the node key this connection came from. A reload that removed it, or
-// gave it another node key, ends the session (SPO-Xmailbox-SEC-024).
-func (s *session) sender() (relayport.AccessEntry, bool) {
-	ent, ok := s.srv.access.Lookup(s.fp)
-	if !ok || ent.Node != s.peer || ent.Fingerprint != s.fp {
-		return relayport.AccessEntry{}, false
+// registryFail maps an error of Register to the code of the login (obligation
+// 18): a binding error is `binding`, the allow-list `not_allowed`, a bound of the
+// registry `limit`, anything else (the registry is closed, its storage failed) the
+// "not now" code.
+func (s *session) registryFail(err error) *end {
+	switch {
+	case s.parent.Err() != nil:
+		return &end{mailbox.CodeShuttingDown, true, ReasonShutdown}
+	case errors.Is(err, relayregistry.ErrNotAllowed):
+		return s.loginFail(mailbox.CodeNotAllowed, ReasonNotAllowed)
+	case errors.Is(err, relayregistry.ErrLimit):
+		return s.loginFail(mailbox.CodeLimit, ReasonLimit)
+	case isBindingError(err):
+		return s.loginFail(mailbox.CodeBinding, ReasonBinding)
 	}
-	return ent, true
+	return s.loginFail(mailbox.CodeShuttingDown, ReasonRegistry)
+}
+
+// isBindingError reports whether err is a refusal of the binding itself: one of
+// relaybind's verification errors or the registry's refusal of an older or
+// inconsistent statement.
+func isBindingError(err error) bool {
+	for _, e := range []error{
+		relaybind.ErrBadEncoding, relaybind.ErrWrongKey, relaybind.ErrBadSignature, relaybind.ErrPayloadNotCanonical,
+		relaybind.ErrDeviceMismatch, relaybind.ErrNotYetValid, relaybind.ErrExpired, relaybind.ErrLifetime,
+		relaybind.ErrLifetimePolicy, relaybind.ErrWeakKey, relaybind.ErrAddressForm, relaybind.ErrRevoked,
+		relaybind.ErrUnverified, relaybind.ErrRange,
+		relayregistry.ErrOlderBinding, relayregistry.ErrInconsistent,
+	} {
+		if errors.Is(err, e) {
+			return true
+		}
+	}
+	return false
+}
+
+// setUntil records the end of the device's binding and maps it onto the process
+// clock, so that every deadline of the session ends no later than the binding
+// does (obligation 3). The registry is asked again on each request, so a binding
+// that is renewed under the same key extends the session.
+func (s *session) setUntil(until int64) {
+	s.until = until
+	s.untilEnd = time.Now().Add(time.Duration(until-s.srv.clock.Now().Unix()) * time.Second)
+}
+
+type boundState int
+
+const (
+	boundOK boundState = iota
+	boundGone
+	boundErr
+)
+
+// lookup asks the registry again whether the session's device is still served
+// under the wallet key it logged in with: its binding is not expired, not
+// revoked by a tombstone and not replaced under another key (obligation 15).
+func (s *session) lookup() (relayregistry.Entry, boundState) {
+	ent, ok, err := s.srv.reg.Lookup(s.ctx, s.fp)
+	if err != nil {
+		return relayregistry.Entry{}, boundErr
+	}
+	if !ok || ent.Key != s.key || ent.Device != s.fp {
+		return relayregistry.Entry{}, boundGone
+	}
+	if ent.Binding.Until != s.until {
+		s.setUntil(ent.Binding.Until)
+	}
+	return ent, boundOK
+}
+
+// goneEnd is the end of a session whose binding is no longer served: the
+// `binding` code, which tells the client to sign a new one.
+func (s *session) goneEnd() *end {
+	if s.srv.clock.Now().Unix() > s.until {
+		return &end{mailbox.CodeBinding, true, ReasonExpired}
+	}
+	return &end{mailbox.CodeBinding, true, ReasonRevoked}
+}
+
+// failedLookup is the end for a registry that could not answer.
+func (s *session) failedLookup() *end {
+	if s.parent.Err() != nil || s.revoked() {
+		return s.classify(context.Canceled, false)
+	}
+	return &end{mailbox.CodeShuttingDown, true, ReasonRegistry}
+}
+
+// recheck is the check made at the start of every request and after every wake:
+// nil when the device is still served.
+func (s *session) recheck() *end {
+	switch _, st := s.lookup(); st {
+	case boundGone:
+		return s.goneEnd()
+	case boundErr:
+		return s.failedLookup()
+	}
+	return nil
 }
 
 type access int
@@ -399,19 +602,27 @@ type access int
 const (
 	accessOK access = iota
 	accessSenderGone
-	accessDenied
+	accessUnbound
+	accessUnavailable
 )
 
-// authorize is the access decision for a put to to: the sender is still the
-// listed party, the recipient is listed and the sender may put to it. A denial
-// is the same whether the recipient is unknown or forbidden.
-func (s *session) authorize(to party.Fingerprint) access {
-	ent, ok := s.sender()
-	if !ok {
+// authorize is the access decision for a put to the pair (wallet key, device) of
+// m: the sender's own binding is still served (it can expire or be revoked in the
+// middle of a connection), and the recipient device is still bound to the wallet
+// key the put names.
+func (s *session) authorize(m mailbox.PutV2) access {
+	switch _, st := s.lookup(); st {
+	case boundGone:
 		return accessSenderGone
+	case boundErr:
+		return accessUnavailable
 	}
-	if _, ok := s.srv.access.Lookup(to); !ok || !ent.MaySendTo(to) {
-		return accessDenied
+	ent, ok, err := s.srv.reg.Lookup(s.ctx, m.To)
+	switch {
+	case err != nil:
+		return accessUnavailable
+	case !ok || ent.Key != relaybind.KeyHash(m.WalletKey):
+		return accessUnbound
 	}
 	return accessOK
 }
@@ -432,13 +643,16 @@ func (s *session) retractOwn(to party.Fingerprint, mid mailbox.Hash) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(s.ctx), compensateTimeout)
 	defer cancel()
 	_, err := s.srv.retract.Retract(ctx, to, s.fp, mid)
+	if err == nil {
+		s.srv.forget(ctx, to, s.fp, mid)
+	}
 	return err
 }
 
 // handlePut: SPO-Xmailbox-OUT-026, PRE-022.
-func (s *session) handlePut(m mailbox.Put) *end {
+func (s *session) handlePut(m mailbox.PutV2) *end {
 	srv := s.srv
-	ev := Event{Kind: EventPut, Node: s.peer, Party: s.fp, Recipient: m.To, Mid: m.Mid, Size: m.Size}
+	ev := Event{Kind: EventPut, Node: s.peer, Party: s.fp, Key: s.key, Recipient: m.To, RcptKey: m.WalletKey, Mid: m.Mid, Size: m.Size}
 	// the bytes of the raw frame count against the connection before one is read
 	if s.rd.n+4+uint64(m.Size) > srv.lim.MaxBytes {
 		return &end{mailbox.CodeLimit, true, ReasonBytes}
@@ -446,6 +660,7 @@ func (s *session) handlePut(m mailbox.Put) *end {
 	// an envelope above the limit announced in AuthOK: the body is not read, so
 	// the stream is out of step and the connection closes after the answer
 	if m.Size > srv.lim.MaxEnvelope {
+		srv.countPut(s.key) // an attempt that reaches a decision counts (SPO-Xmailbox-SEC-070); the answer is too_large whatever the budget
 		ev.Status, ev.Reason = mailbox.StatusTooLarge, ReasonTooLarge
 		srv.emit(ev)
 		if e := s.reply(mailbox.PutResult{RequestID: m.RequestID, Status: mailbox.StatusTooLarge}); e != nil {
@@ -453,21 +668,30 @@ func (s *session) handlePut(m mailbox.Put) *end {
 		}
 		return &end{reason: ReasonTooLarge}
 	}
-	switch s.authorize(m.To) {
-	case accessSenderGone:
-		ev.Status, ev.Reason = mailbox.StatusRefused, ReasonRevoked
+	acc := s.authorize(m)
+	if acc == accessSenderGone {
+		g := s.goneEnd()
+		ev.Status, ev.Reason = mailbox.StatusRefused, g.reason
 		srv.emit(ev)
 		if e := s.reply(mailbox.PutResult{RequestID: m.RequestID, Status: mailbox.StatusRefused}); e != nil {
 			return e
 		}
-		return &end{mailbox.CodeRevoked, true, ReasonRevoked}
-	case accessDenied:
-		return s.refuse(m, ev, mailbox.StatusRefused, ReasonRefused)
+		return g
 	}
-	if !srv.takePut(s.fp) {
+	// Every attempt that reaches a decision is counted against the sender's budget
+	// BEFORE the answer about the recipient is given, so a sender over its budget is
+	// told busy whatever the pair, and the oracle "is (wallet key, device) bound
+	// here?" is no faster than the budget (SPO-Xmailbox-SEC-070).
+	if !srv.takePut(s.key, s.fp) {
 		return s.refuse(m, ev, mailbox.StatusBusy, ReasonRate)
 	}
 	defer srv.donePut(s.fp)
+	switch acc {
+	case accessUnbound:
+		return s.refuse(m, ev, mailbox.StatusUnbound, ReasonUnbound)
+	case accessUnavailable:
+		return s.refuse(m, ev, mailbox.StatusUnavailable, ReasonRegistry)
+	}
 
 	status, reason, after, e := s.store(m)
 	if e != nil {
@@ -490,7 +714,7 @@ func (s *session) handlePut(m mailbox.Put) *end {
 // stream stays in step. Its hash is not an answer: a refused put whose bytes
 // are wrong is still refused, so that the hash check cannot tell a prober
 // which recipients exist (SPO-Xmailbox-SEC-023).
-func (s *session) refuse(m mailbox.Put, ev Event, status mailbox.Status, reason Reason) *end {
+func (s *session) refuse(m mailbox.PutV2, ev Event, status mailbox.Status, reason Reason) *end {
 	if e := s.drain(m); e != nil {
 		return e
 	}
@@ -501,7 +725,7 @@ func (s *session) refuse(m mailbox.Put, ev Event, status mailbox.Status, reason 
 
 // drain reads the raw frame of a put and drops it, under the body deadline. A
 // hash that does not match is not an error here.
-func (s *session) drain(m mailbox.Put) *end {
+func (s *session) drain(m mailbox.PutV2) *end {
 	s.setRead(s.dl(s.srv.lim.BodyTimeout))
 	err := mailbox.ReadRawFrame(s.rd, m.Size, s.srv.lim.MaxEnvelope, m.Mid, nil)
 	if err != nil && !errors.Is(err, mailbox.ErrHash) {
@@ -532,24 +756,57 @@ func (g *gate) stop(pr *io.PipeReader) {
 }
 
 // store runs the put against the store: the access decision again next to the
-// call, the body streamed through ReadRawFrame into the store, the outcome
-// mapped to a status, and the decision once more after a stored put.
+// call, the open-mode admission (the stranger allowance and the wallet key's
+// total as a sender), the body streamed through ReadRawFrame into the store, the
+// outcome mapped to a status, and the decision once more after a stored put.
 //
 // spec: SPO-Xmailbox-OUT-026, SPO-Xmailbox-SEC-021, SPO-Xmailbox-SEC-023
 //
 // It returns the status to answer, the reason for the log, an end to apply after
-// the answer has been sent (a revoked sender is answered refused and closed) and
-// an end that replaces the answer (the stream failed).
-func (s *session) store(m mailbox.Put) (status mailbox.Status, reason Reason, after, fatal *end) {
+// the answer has been sent (a session whose binding ended is answered refused and
+// closed) and an end that replaces the answer (the stream failed).
+func (s *session) store(m mailbox.PutV2) (status mailbox.Status, reason Reason, after, fatal *end) {
 	srv := s.srv
-	// Re-check next to the Put. A reload between the first check and here is
-	// seen; one after this line is caught by the check after the Put.
-	switch s.authorize(m.To) {
+	// Re-check next to the Put. A change between the first check and here is seen;
+	// one after this line is caught by the check after the Put.
+	switch s.authorize(m) {
 	case accessSenderGone:
-		return mailbox.StatusRefused, ReasonRevoked, &end{mailbox.CodeRevoked, true, ReasonRevoked}, nil
-	case accessDenied:
-		return mailbox.StatusRefused, ReasonRefused, nil, s.drain(m)
+		return mailbox.StatusRefused, s.goneEnd().reason, s.goneEnd(), nil
+	case accessUnbound:
+		return mailbox.StatusUnbound, ReasonUnbound, nil, s.drain(m)
+	case accessUnavailable:
+		return mailbox.StatusUnavailable, ReasonRegistry, nil, s.drain(m)
 	}
+
+	// "listed" is the session's bound wallet key against the recipient's stored
+	// list, never a field of a frame
+	list, err := srv.reg.ExpectedSenders(s.ctx, m.To)
+	if err != nil {
+		return mailbox.StatusUnavailable, ReasonRegistry, nil, s.drain(m)
+	}
+	listed := onList(list, mailbox.WalletKey(s.key))
+	// Admission waits for the stranger book's lock and reads the store and the
+	// registry under it, so it runs under the session's own deadline for a put: the
+	// earliest of BodyTimeout, the end of the connection and the end of the
+	// device's binding (SPO-Xmailbox-INV-037).
+	actx, acancel := context.WithDeadline(s.ctx, s.dl(srv.lim.BodyTimeout))
+	adm, tok, err := srv.admitPut(actx, m.To, s.fp, s.key, m.Mid, m.Size, listed)
+	acancel()
+	switch {
+	case err != nil:
+		if s.parent.Err() != nil || s.revoked() {
+			return 0, ReasonPeer, nil, s.classify(err, false)
+		}
+		return mailbox.StatusUnavailable, ReasonStore, nil, s.drain(m)
+	case adm != mailbox.StatusStored:
+		r := ReasonNone
+		if adm == mailbox.StatusTooLarge {
+			r = ReasonTooLarge
+		}
+		return adm, r, nil, s.drain(m)
+	}
+	kept := false // the entry is in the store when this ends
+	defer func() { srv.finish(tok, kept) }()
 
 	pr, pw := io.Pipe()
 	g := &gate{pw: pw}
@@ -566,10 +823,10 @@ func (s *session) store(m mailbox.Put) (status mailbox.Status, reason Reason, af
 	}()
 	out, perr := srv.w.Put(s.ctx, relayport.MailboxPut{
 		Recipient: m.To,
-		Sender:    s.fp, // the authenticated party, never anything the peer sent
+		Sender:    s.fp, // the authenticated device, never anything the peer sent
 		Mid:       m.Mid,
 		Size:      m.Size,
-		Quota:     srv.quota,
+		Quota:     srv.storeQuota,
 	}, pr)
 	g.stop(pr)
 	rawErr := <-done
@@ -578,7 +835,9 @@ func (s *session) store(m mailbox.Put) (status mailbox.Status, reason Reason, af
 		if out == relayport.MailboxStored && perr == nil {
 			// a store that kept bytes that do not match: take this sender's copy out
 			// again, and no other sender's
-			s.retractOwn(m.To, m.Mid) //nolint:errcheck // the answer is bad_hash either way
+			if s.retractOwn(m.To, m.Mid) != nil { //nolint:errcheck // the answer is bad_hash either way
+				kept = true
+			}
 		}
 		if errors.Is(rawErr, mailbox.ErrHash) {
 			return mailbox.StatusBadHash, ReasonBadHash, nil, nil
@@ -593,27 +852,30 @@ func (s *session) store(m mailbox.Put) (status mailbox.Status, reason Reason, af
 	}
 	switch out {
 	case relayport.MailboxStored:
-		// The whole decision once more, now that the entry is visible: a reload
-		// that landed between the check next to the Put and the store's commit
-		// (the recipient removed with its mailbox before the store reserved; the
-		// sender removed, given another node key or CloseParty'd while the body
-		// was committing; send_to withdrawn) leaves an entry that access no longer
-		// allows. It is taken back with this sender's own retraction, never with
-		// the ack that deletes every sender's copy, and the sender is told refused
-		// (and, when it is the sender that is gone, the revoked code after).
-		switch s.authorize(m.To) {
+		// The whole decision once more, now that the entry is visible: a revoke that
+		// landed between the check next to the Put and the store's commit (the
+		// recipient's binding removed with its queue before the store reserved; the
+		// sender's binding revoked or ended while the body was committing) leaves an
+		// entry that access no longer allows. It is taken back with this sender's own
+		// retraction, never with the ack that deletes every sender's copy.
+		kept = true
+		switch s.authorize(m) {
 		case accessOK:
 			srv.notes.wake(m.To)
 			return mailbox.StatusStored, ReasonNone, nil, nil
 		case accessSenderGone:
-			reason := ReasonRevoked
-			if s.retractOwn(m.To, m.Mid) != nil {
+			reason := s.goneEnd().reason
+			if s.retractOwn(m.To, m.Mid) == nil {
+				kept = false
+			} else {
 				reason = ReasonStore
 			}
-			return mailbox.StatusRefused, reason, &end{mailbox.CodeRevoked, true, ReasonRevoked}, nil
+			return mailbox.StatusRefused, reason, s.goneEnd(), nil
 		default:
 			reason := ReasonCompensated
-			if s.retractOwn(m.To, m.Mid) != nil {
+			if s.retractOwn(m.To, m.Mid) == nil {
+				kept = false
+			} else {
 				reason = ReasonStore
 			}
 			return mailbox.StatusRefused, reason, nil, nil
@@ -630,23 +892,16 @@ func (s *session) store(m mailbox.Put) (status mailbox.Status, reason Reason, af
 	return mailbox.StatusUnavailable, ReasonStore, nil, nil
 }
 
-// stillListed reports whether the party is still on the access list with the
-// node key of this connection.
-func (s *session) stillListed() bool {
-	_, ok := s.sender()
-	return ok
-}
-
 // handleFetch: SPO-Xmailbox-OUT-027, SEC-022.
 //
-// The party is looked up again at the start, after every wake of a long-poll
-// and immediately before anything is sent: a reload that gave it another node
-// key or removed it, without CloseParty, is not served by a connection that was
-// parked (SPO-Xmailbox-SEC-024). Nothing the reload must do is relied on.
+// The device's binding is looked up again at the start, after every wake of a
+// long-poll and immediately before anything is sent: a device whose binding was
+// revoked or ended, without any call to CloseDevice, is not served by a connection
+// that was parked (SPO-Xmailbox-SEC-025). Nothing the revoke must do is relied on.
 func (s *session) handleFetch(m mailbox.Fetch) *end {
 	srv := s.srv
-	if !s.stillListed() {
-		return s.revokedEnd()
+	if e := s.recheck(); e != nil {
+		return e
 	}
 	max := int(min(m.MaxItems, srv.lim.MaxItems))
 	wait := min(m.WaitSeconds, srv.lim.MaxWaitSeconds)
@@ -658,7 +913,7 @@ func (s *session) handleFetch(m mailbox.Fetch) *end {
 		// the wait is not missed
 		if w = srv.notes.subscribe(s.fp); w != nil {
 			defer srv.notes.unsubscribe(w)
-			timer := time.NewTimer(min(time.Duration(wait)*time.Second, time.Until(s.lifeEnd)))
+			timer := time.NewTimer(min(time.Duration(wait)*time.Second, time.Until(s.dl(time.Duration(wait)*time.Second))))
 			defer timer.Stop()
 			timeout = timer.C
 		}
@@ -676,8 +931,8 @@ func (s *session) handleFetch(m mailbox.Fetch) *end {
 		}
 		select {
 		case <-w.ch:
-			if !s.stillListed() {
-				return s.revokedEnd()
+			if e := s.recheck(); e != nil {
+				return e
 			}
 		case <-timeout:
 			return s.sendEmpty(m.RequestID)
@@ -687,13 +942,11 @@ func (s *session) handleFetch(m mailbox.Fetch) *end {
 	}
 }
 
-func (s *session) revokedEnd() *end { return &end{mailbox.CodeRevoked, true, ReasonRevoked} }
-
 // maxVanishedPages bounds how many pages in a row may be found gone while
 // they are opened before the fetch gives up with the "not now" code.
 const maxVanishedPages = 16
 
-// page reads one page of the party's mailbox, after `after`, and opens its
+// page reads one page of the device's mailbox, after `after`, and opens its
 // first entry: it returns the entries from that one on, the open reader of the
 // first, and whether more follow. An entry that has been removed since it was
 // listed is left out of the front of the page (the header lists exactly the
@@ -705,7 +958,7 @@ func (s *session) page(after *mailbox.Hash, max int) (rest []relayport.MailboxEn
 	for range maxVanishedPages {
 		entries, more, err := s.collect(after, max)
 		if err != nil {
-			if s.parent.Err() != nil || s.revoked.Load() {
+			if s.parent.Err() != nil || s.revoked() {
 				return nil, nil, false, s.classify(err, false)
 			}
 			return nil, nil, false, s.storeFailure()
@@ -714,8 +967,8 @@ func (s *session) page(after *mailbox.Hash, max int) (rest []relayport.MailboxEn
 			return nil, nil, false, nil
 		}
 		// immediately before anything is sent
-		if !s.stillListed() {
-			return nil, nil, false, s.revokedEnd()
+		if e := s.recheck(); e != nil {
+			return nil, nil, false, e
 		}
 		entries, more = s.fit(entries, more)
 		if len(entries) == 0 {
@@ -746,7 +999,7 @@ func (s *session) openHead(entries []relayport.MailboxEntry) ([]relayport.Mailbo
 			continue // removed since it was listed
 		}
 		if err != nil {
-			if s.parent.Err() != nil || s.revoked.Load() {
+			if s.parent.Err() != nil || s.revoked() {
 				return nil, nil, s.classify(err, false)
 			}
 			return nil, nil, s.storeFailure()
@@ -788,19 +1041,19 @@ func replyCost(entries []relayport.MailboxEntry, more bool) (uint64, bool) {
 		items[i] = mailbox.Item{Mid: e.Mid, Size: e.Size}
 		cost += 4 + uint64(e.Size)
 	}
-	b, err := mailbox.Encode(mailbox.Items{Entries: items, More: more})
+	b, err := mailbox.EncodeV(mailbox.Version2, mailbox.Items{Entries: items, More: more})
 	if err != nil {
 		return 0, false
 	}
 	return cost + 4 + uint64(len(b)), true
 }
 
-// sendEmpty answers a fetch with nothing to return. The party is looked up
-// once more first: a party that left while it waited is answered revoked, not
-// with an empty reply.
+// sendEmpty answers a fetch with nothing to return. The binding is looked up
+// once more first: a device whose binding ended while it waited is answered with
+// the binding code, not with an empty reply.
 func (s *session) sendEmpty(id uint32) *end {
-	if !s.stillListed() {
-		return s.revokedEnd()
+	if e := s.recheck(); e != nil {
+		return e
 	}
 	if cost, _ := replyCost(nil, false); cost > s.room() {
 		return &end{mailbox.CodeLimit, true, ReasonEgress}
@@ -808,8 +1061,8 @@ func (s *session) sendEmpty(id uint32) *end {
 	return s.sendItems(id, nil, nil, false)
 }
 
-// collect lists the party's own mailbox (the recipient is the authenticated
-// party and nothing the request says) from after, leaving out entries above the
+// collect lists the device's own mailbox (the recipient is the authenticated
+// device and nothing the request says) from after, leaving out entries above the
 // announced envelope limit, which the client would refuse and which must not
 // hide those behind them.
 func (s *session) collect(after *mailbox.Hash, max int) ([]relayport.MailboxEntry, bool, error) {
@@ -875,7 +1128,7 @@ func (s *session) sendItems(id uint32, entries []relayport.MailboxEntry, first i
 				return &end{reason: ReasonVanished}
 			}
 			if err != nil {
-				if s.parent.Err() != nil || s.revoked.Load() {
+				if s.parent.Err() != nil || s.revoked() {
 					return s.classify(err, true)
 				}
 				return &end{reason: ReasonStore}
@@ -888,7 +1141,7 @@ func (s *session) sendItems(id uint32, entries []relayport.MailboxEntry, first i
 		}
 		total += uint64(it.Size)
 	}
-	ev := Event{Kind: EventFetch, Node: s.peer, Party: s.fp, Count: len(items), Bytes: total}
+	ev := Event{Kind: EventFetch, Node: s.peer, Party: s.fp, Key: s.key, Count: len(items), Bytes: total}
 	if len(entries) > 0 {
 		if w := srv.clock.Now().Sub(time.Unix(entries[0].Arrival, 0)); w > 0 {
 			ev.Waited = w
@@ -910,7 +1163,7 @@ func (s *session) sendFrame(rc io.Reader, size uint32) *end {
 		return s.classify(err, true)
 	}
 	if _, err := io.CopyN(s.st, rc, int64(size)); err != nil {
-		if isTimeout(err) || s.parent.Err() != nil || s.revoked.Load() {
+		if isTimeout(err) || s.parent.Err() != nil || s.revoked() {
 			return s.classify(err, true)
 		}
 		return &end{reason: ReasonVanished} // the entry is not what was listed: the stream is out of step
@@ -920,29 +1173,35 @@ func (s *session) sendFrame(rc io.Reader, size uint32) *end {
 }
 
 // handleAck: SPO-Xmailbox-OUT-028, SEC-022. The recipient is the authenticated
-// party: an ack can name an entry only of its own mailbox.
+// device: an ack can name an entry only of its own mailbox.
 func (s *session) handleAck(m mailbox.Ack) *end {
 	srv := s.srv
 	if uint(len(m.Mids)) > srv.lim.MaxAck {
 		return &end{mailbox.CodeLimit, true, ReasonLimit}
 	}
-	if !s.stillListed() {
-		return &end{mailbox.CodeRevoked, true, ReasonRevoked}
+	if e := s.recheck(); e != nil {
+		return e
 	}
 	deleted := 0
+	// the release of the stranger accounting waits for the book's lock until the
+	// session's own deadline for a request (SPO-Xmailbox-INV-037)
+	bctx, bcancel := context.WithDeadline(s.ctx, s.dl(srv.lim.BodyTimeout))
+	defer bcancel()
 	for _, mid := range m.Mids {
 		ok, err := srv.ack.Remove(s.ctx, s.fp, mid)
 		if err != nil {
-			if s.parent.Err() != nil || s.revoked.Load() {
+			if s.parent.Err() != nil || s.revoked() {
 				return s.classify(err, false)
 			}
 			return s.storeFailure()
 		}
 		if ok {
 			deleted++
+			// every copy of the id went: so did the stranger accounting of each
+			srv.forgetMid(bctx, s.fp, mid)
 		}
 	}
 	deleted = min(deleted, len(m.Mids))
-	srv.emit(Event{Kind: EventAck, Node: s.peer, Party: s.fp, Count: len(m.Mids), Deleted: deleted})
+	srv.emit(Event{Kind: EventAck, Node: s.peer, Party: s.fp, Key: s.key, Count: len(m.Mids), Deleted: deleted})
 	return s.reply(mailbox.AckResult{RequestID: m.RequestID, Deleted: uint(deleted)})
 }
