@@ -53,7 +53,7 @@ func NewRoot(d Deps) *cobra.Command {
 	root.PersistentFlags().IntVar(&a.newColdFD, "new-cold-passphrase-fd", -1,
 		"read the NEW cold-key passphrase of a rotation from this inherited file descriptor instead of prompting")
 	root.PersistentFlags().StringVar(&a.unlock, "unlock", "",
-		"how to unlock the workspace: passphrase, fido2 (a daily authenticator) or recovery-composite (the recovery key typed at a prompt AND the second authenticator) (default: the passphrase when the workspace has a passphrase slot, else fido2)")
+		"how to unlock the workspace: passphrase, fido2 (a daily authenticator), backend (a composite slot of a Vault or KMS factor AND its passphrase or authenticator) or recovery-composite (the recovery key typed at a prompt AND the second authenticator) (default: the passphrase when the workspace has a passphrase slot, else fido2)")
 	root.PersistentFlags().StringVar(&a.fido2Device, "fido2-device", "", "the FIDO2 authenticator to use (a device path as fido2-token -L prints it); default: the only one connected")
 	root.PersistentFlags().IntVar(&a.fido2PinFD, "fido2-pin-fd", -1, "read the authenticator PIN from this inherited file descriptor instead of prompting")
 	root.PersistentFlags().BoolVar(&a.acceptRollback, "accept-rollback", false,

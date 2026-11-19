@@ -141,6 +141,30 @@ type passphraseGate struct {
 	note func() string
 }
 
+// reauthFactors is the gate of a factor session. ADR 0011, Amends ADR 0005: the
+// gate is "a fresh presentation of a factor that the workspace policy accepts".
+// There is no workspace passphrase here; the slot's factors are presented again
+// and the answer checked against the slot.
+func (g passphraseGate) reauthFactors(ctx context.Context, note string) error {
+	ra, ok := g.s.Sealed.(FactorReauth)
+	backend := g.a.unlock == "backend"
+	// a backend session presents the composite again (the backend and its
+	// passphrase typed at the terminal, or its authenticator): a
+	// backend-plus-passphrase session needs no FIDO2 factor source
+	if !ok || (g.a.d.Factors == nil && !backend) {
+		return errors.New("this workspace unlocks through FIDO2 factors and there is no factor source to ask again: nothing was signed")
+	}
+	if backend {
+		fmt.Fprintf(g.a.d.Err, "Present the Vault or KMS composite again to sign (%s): its passphrase at the terminal, or its authenticator.\n", note)
+	} else {
+		fmt.Fprintf(g.a.d.Err, "Present the authenticator again to sign (%s).\n", note)
+	}
+	if err := ra.Reauthenticate(ctx, g.a.reauthOpen()); err != nil {
+		return fmt.Errorf("the factors were not presented again, so nothing was signed: %w", err)
+	}
+	return nil
+}
+
 func (g passphraseGate) Reauthenticate(ctx context.Context, key custody.KeyRef, bodyHash [32]byte) error {
 	if g.s == nil || (g.s.Pass == nil && !g.s.factorSession) {
 		return errors.New("there is no workspace passphrase to check against: nothing was signed")
@@ -171,18 +195,7 @@ func (g passphraseGate) Reauthenticate(ctx context.Context, key custody.KeyRef, 
 	fmt.Fprintf(g.a.d.Out, "About to sign with the %s key%s, key hash %s, over body %x (%s).\n", key.Role, label, key.Identity, bodyHash[:], note)
 	flushTypedAhead(g.a.term)
 	if g.s.factorSession {
-		// ADR 0011, Amends ADR 0005: the gate is "a fresh presentation of a factor
-		// that the workspace policy accepts". There is no passphrase here; the
-		// authenticator is asked again and its answer checked against the slot.
-		ra, ok := g.s.Sealed.(FactorReauth)
-		if !ok || g.a.d.Factors == nil {
-			return errors.New("this workspace unlocks through FIDO2 factors and there is no factor source to ask again: nothing was signed")
-		}
-		fmt.Fprintf(g.a.d.Err, "Present the authenticator again to sign (%s).\n", note)
-		if err := ra.Reauthenticate(ctx, g.a.reauthOpen()); err != nil {
-			return fmt.Errorf("the authenticator was not presented again, so nothing was signed: %w", err)
-		}
-		return nil
+		return g.reauthFactors(ctx, note)
 	}
 	typed, err := g.a.term.ReadSecret(ctx, "Type the workspace passphrase again to sign ("+note+"): ")
 	if errors.Is(err, ErrNoTerminal) {

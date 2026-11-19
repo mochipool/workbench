@@ -40,7 +40,7 @@ import (
 //
 //	passphrase: ["argon2id", memory KiB, passes, lanes, salt]
 //	fido2:      [credential id, relying-party id, hmac-secret salt, touch probe result]
-//	backend:    [key reference]
+//	backend:    [backend kind, address, namespace, key reference, wrapped B]
 //	recovery:   []
 //
 // The commitment is slotCommit of the slot key, exactly as for the older kinds,
@@ -73,8 +73,25 @@ const (
 	maxCredentialID = 1024 // CTAP 2.1 allows credential ids up to 1023 bytes
 	maxRPID         = 255
 	maxBackendRef   = 512
+	maxBackendNS    = 256
+	maxBackendKind  = 32
+	maxBackendBlob  = 4096 // ports.MaxWrappedBlob
 	maxFactors      = 8
 )
+
+// printableNoSpace reports whether s is 1..max bytes of printable ASCII
+// without spaces.
+func printableNoSpace(s string, max int) bool {
+	if len(s) == 0 || len(s) > max {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x21 || s[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
 
 // FactorParams is one factor of a slot: its kind, id and the parameters that
 // are bound in the slot's associated data. Only the fields of its kind are
@@ -97,8 +114,17 @@ type FactorParams struct {
 	// enforced" for an authenticator that is not no longer opens.
 	Touch uint8
 
-	// FactorBackend: the Vault or KMS key reference.
-	BackendKeyRef string
+	// FactorBackend: the backend's public parameters and the wrapped secret B
+	// (ADR 0011 decision 5). Kind is the backend kind ("vault-transit",
+	// "aws-kms"), Address its base URL, Namespace the Vault namespace ("" for
+	// none), KeyRef the Vault "<mount>/<key>" or the KMS key ARN, and Blob what
+	// the backend returned when it wrapped B for this slot. None is secret; all
+	// are bound in the slot's associated data.
+	BackendKind      string
+	BackendAddress   string
+	BackendNamespace string
+	BackendKeyRef    string
+	BackendBlob      []byte
 }
 
 // FactorRef is the (kind, id) pair that orders a factor and enters the key
@@ -137,9 +163,10 @@ func (f FactorParams) validate() error {
 	}
 	noPass := f.KDF == (KDFParams{}) && len(f.KDFSalt) == 0
 	noFIDO := len(f.CredentialID) == 0 && f.RPID == "" && len(f.HMACSalt) == 0 && f.Touch == 0
+	noBackend := f.BackendKind == "" && f.BackendAddress == "" && f.BackendNamespace == "" && f.BackendKeyRef == "" && len(f.BackendBlob) == 0
 	switch f.Kind {
 	case FactorPassphrase:
-		if err := only(noFIDO && f.BackendKeyRef == ""); err != nil {
+		if err := only(noFIDO && noBackend); err != nil {
 			return err
 		}
 		if err := f.KDF.validate(); err != nil {
@@ -149,9 +176,9 @@ func (f FactorParams) validate() error {
 			return fmt.Errorf("%w: passphrase factor salt", ErrFormat)
 		}
 	case FactorRecovery:
-		return only(noPass && noFIDO && f.BackendKeyRef == "")
+		return only(noPass && noFIDO && noBackend)
 	case FactorFIDO2:
-		if err := only(noPass && f.BackendKeyRef == ""); err != nil {
+		if err := only(noPass && noBackend); err != nil {
 			return err
 		}
 		if len(f.CredentialID) == 0 || len(f.CredentialID) > maxCredentialID ||
@@ -162,8 +189,11 @@ func (f FactorParams) validate() error {
 		if err := only(noPass && noFIDO); err != nil {
 			return err
 		}
-		if f.BackendKeyRef == "" || len(f.BackendKeyRef) > maxBackendRef {
-			return fmt.Errorf("%w: backend key reference", ErrFormat)
+		if !printableNoSpace(f.BackendKind, maxBackendKind) || !printableNoSpace(f.BackendAddress, maxBackendRef) ||
+			!printableNoSpace(f.BackendKeyRef, maxBackendRef) || len(f.BackendNamespace) > maxBackendNS ||
+			(f.BackendNamespace != "" && !printableNoSpace(f.BackendNamespace, maxBackendNS)) ||
+			len(f.BackendBlob) == 0 || len(f.BackendBlob) > maxBackendBlob {
+			return fmt.Errorf("%w: backend factor parameters", ErrFormat)
 		}
 	default:
 		return fmt.Errorf("%w: factor kind %d", ErrFormat, f.Kind)
@@ -179,7 +209,7 @@ func (f FactorParams) entry() []any {
 	case FactorFIDO2:
 		params = []any{f.CredentialID, f.RPID, f.HMACSalt, uint64(f.Touch)}
 	case FactorBackend:
-		params = []any{f.BackendKeyRef}
+		params = []any{f.BackendKind, f.BackendAddress, f.BackendNamespace, f.BackendKeyRef, f.BackendBlob}
 	default:
 		params = []any{}
 	}

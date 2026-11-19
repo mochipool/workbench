@@ -17,7 +17,7 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 | `BackupToSink` | [`Xbackup`](../extensions/Xbackup.md) | 67 |
 | `ConvertKeptKey` | [`Xcustody`](../extensions/Xcustody.md) | 100 |
 | `DiscoverSources` | [`Xmulti`](../extensions/Xmulti.md) | 55 |
-| `EnrolFactor` | [`Xunlock`](../extensions/Xunlock.md) | 81 |
+| `EnrolFactor` | [`Xunlock`](../extensions/Xunlock.md) | 112 |
 | `EnrollParty` | [`Xparty`](../extensions/Xparty.md) | 76 |
 | `ExportNodeKeys` | [`Xcustody`](../extensions/Xcustody.md) | 100 |
 | `ExportWorkspace` | [`Xcustody`](../extensions/Xcustody.md) | 100 |
@@ -32,7 +32,7 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 | `SealKey` | [`Pfiles`](../upstream/patterns/Pfiles.md) | 51 |
 | `SnapshotWorkspace` | [`Xsnapshot`](../extensions/Xsnapshot.md) | 18 |
 | `StoreArtefact` | [`Pfiles`](../upstream/patterns/Pfiles.md) | 51 |
-| `UnlockWorkspace` | [`Xunlock`](../extensions/Xunlock.md) | 81 |
+| `UnlockWorkspace` | [`Xunlock`](../extensions/Xunlock.md) | 112 |
 | `UnprotectSigningKey` | [`01protectKey`](../upstream/scripts/01_protectKey.md) | 29 |
 
 ## `transaction-construction`
@@ -232,4 +232,4 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 | [`25a_genAction`](../upstream/scripts/25a_genAction.md) | Generate a governance action file | governance | 75 | draft |
 | [`25b_regAction`](../upstream/scripts/25b_regAction.md) | Submit governance actions | governance, transaction-construction | 71 | draft |
 
-Totals: 78 specs, 3265 requirements, 96 use cases.
+Totals: 78 specs, 3296 requirements, 96 use cases.

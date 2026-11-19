@@ -50,6 +50,7 @@ var relayBinaryBans = []string{
 	"/internal/adapters/gpg",
 	"/internal/adapters/envelope",
 	"/internal/adapters/sqlitestore",
+	"/internal/adapters/vaultkms", // the unlock backends: the relay links no store encryption
 	"/internal/adapters/partystore",
 	"/internal/adapters/cli",
 	"/internal/adapters/tui",

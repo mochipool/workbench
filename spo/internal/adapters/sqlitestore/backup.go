@@ -201,7 +201,7 @@ func RestoreWithOptions(backupPath, destPath string, passphrase *secret.Buffer, 
 // unlocks through FIDO2 factors (hardware or strict): the backup is verified
 // through its factor slots (VerifyFileFactors), not with a passphrase.
 func RestoreWithFactors(backupPath, destPath string, in FactorInputs, o RestoreOptions) error {
-	if in.Source == nil {
+	if !in.canPresent() {
 		return errors.New("sqlitestore: no factor source")
 	}
 	return restore(backupPath, destPath, credential{kind: credFactors, factors: &in}, o)

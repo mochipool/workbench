@@ -89,7 +89,7 @@ var layoutRefusedCommands = []string{
 	"tx settle", "tx status",
 	"vote create", "vote submit", "vote tally",
 	"wallet claim-rewards", "wallet merge", "wallet new", "wallet rename", "wallet send", "wallet send-assets",
-	"workspace checkpoint-key enroll", "workspace checkpoint-key remove", "workspace export", "workspace import", "workspace migrate", "workspace policy set", "workspace rotate", "workspace slot add-fido2", "workspace slot remove",
+	"workspace checkpoint-key enroll", "workspace checkpoint-key remove", "workspace export", "workspace import", "workspace migrate", "workspace policy set", "workspace rotate", "workspace slot add-backend", "workspace slot add-fido2", "workspace slot remove",
 }
 
 // LayoutAccess is the access class of a command when -C names a layout; a command

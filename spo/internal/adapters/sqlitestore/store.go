@@ -1223,6 +1223,9 @@ type FactorInfo struct {
 	// Touch is the stored result of the enrolment touch probe (0 when the factor
 	// is not a FIDO2 credential or the probe did not run).
 	Touch uint8
+	// Backend is the public reference of a Vault or KMS factor (zero for any
+	// other kind). It holds no credential.
+	Backend ports.BackendRef
 }
 
 // SlotInfo describes a key slot. Kind and id are structural data.

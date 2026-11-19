@@ -638,7 +638,7 @@ func VerifyFilePayloads(path string, passphrase *secret.Buffer) (VerifyResult, e
 // touch). A backup of a hardware workspace has the same slots, so this is how
 // `store backup` verifies its copy under that policy. Read-only.
 func VerifyFileFactors(path string, in FactorInputs, payloads bool) (VerifyResult, error) {
-	if in.Source == nil {
+	if !in.canPresent() {
 		return VerifyResult{}, errors.New("sqlitestore: no factor source")
 	}
 	return verifyFile(path, credential{kind: credFactors, factors: &in}, payloads)

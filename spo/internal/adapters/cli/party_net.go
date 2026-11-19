@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -208,6 +209,18 @@ func (r *partyRun) serve(ctx context.Context, invites []string, outboxDir string
 	w := a.d.Out
 	fmt.Fprintf(w, "Serving over tailcat.\n  fingerprint  %s\n  node key     %x\n  admitting    %d signer node key(s)\n", id.Fingerprint(), pub[:], len(allowed))
 	fmt.Fprintln(w, "The address is a secret and is not shown: a signer gets it only in an invitation sealed to it.")
+	// From here the server is up: a stop (Ctrl-C) at any step is a clean stop,
+	// not an error, whatever step the cancel reaches first.
+	stopped := func(err error, unwritten []string) error {
+		if ctx.Err() == nil {
+			return err
+		}
+		if len(unwritten) > 0 {
+			fmt.Fprintf(a.d.Err, "stopped before the invitation for %s was written\n", strings.Join(unwritten, ", "))
+		}
+		fmt.Fprintln(w, "Stopped serving.")
+		return nil
+	}
 
 	if len(invites) > 0 {
 		// Writing an invitation by file hands EVERY envelope waiting in the
@@ -215,7 +228,7 @@ func (r *partyRun) serve(ctx context.Context, invites []string, outboxDir string
 		// and a request that went into a file is delivered and is not sent over
 		// tailcat. So invitations are written while nothing else waits.
 		if pending, err := r.node().Outbox().Pending(ctx); err != nil {
-			return err
+			return stopped(err, invites)
 		} else if len(pending) > 0 {
 			return fmt.Errorf("the outbox holds %d envelope(s) that writing an invitation by file would carry away too (requests meant for tailcat would be delivered as files and never sent over it): write the invitations first, with nothing queued (spo party serve --invite NAME), then queue requests; or empty the outbox with spo party outbox export DIR", len(pending))
 		}
@@ -235,10 +248,10 @@ func (r *partyRun) serve(ctx context.Context, invites []string, outboxDir string
 		var text string
 		_ = addr.Use(func(b []byte) error { text = string(b); return nil })
 		addr.Destroy()
-		for _, n := range invites {
+		for i, n := range invites {
 			if err := co.SendInvite(ctx, n, party.Invite{Address: text, Node: pub}, bag.Transport()); err != nil {
 				bag.Close()
-				return fmt.Errorf("invitation for %s: %w", n, err)
+				return stopped(fmt.Errorf("invitation for %s: %w", n, err), invites[i:])
 			}
 			fmt.Fprintf(w, "  invitation for %s written to %s\n", n, d.outbox)
 		}
@@ -247,7 +260,7 @@ func (r *partyRun) serve(ctx context.Context, invites []string, outboxDir string
 
 	known, err := co.AllowOwners(ctx)
 	if err != nil {
-		return err
+		return stopped(err, nil)
 	}
 	ob := r.node().Outbox()
 	tr := srv.Transport()

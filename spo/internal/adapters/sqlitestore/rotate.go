@@ -203,7 +203,7 @@ func (s *Store) PresentRecovery(ctx context.Context, in FactorInputs) (*Recovery
 			}
 		}
 		for _, f := range ts.fs.Spec.Factors {
-			o, ferr := factorOutput(ctx, f, &in)
+			o, ferr := factorOutput(ctx, ts.fs.Spec, f, &in)
 			if ferr != nil {
 				destroy()
 				if errors.Is(ferr, ports.ErrFactorNoCredential) {
@@ -503,6 +503,14 @@ func (s *Store) Rotate(ctx context.Context, plan RotatePlan) (recovery *secret.B
 	}
 	if !plan.Policy.Valid() || len(plan.Slots) == 0 {
 		return nil, "", fmt.Errorf("%w: a rotation needs a policy and at least one slot", ErrPolicyViolated)
+	}
+	for _, sp := range plan.Slots {
+		for _, f := range sp.Factors {
+			if f.Params.Kind == seal.FactorBackend {
+				// the wrap at the backend is bound to a slot id the rotation has not drawn
+				return nil, "", fmt.Errorf("%w: a rotation does not create a Vault or KMS backend slot; add it afterwards (workspace slot add-backend)", ErrPolicyViolated)
+			}
+		}
 	}
 	if err := s.checkPlanCredentials(ctx, plan); err != nil {
 		return nil, "", err
@@ -858,6 +866,11 @@ func (s *Store) RemoveSlotByRotation(ctx context.Context, req RemoveRequest) (*s
 		case seal.SlotRecovery:
 			plan.Slots = append(plan.Slots, SlotPlan{Kind: seal.SlotRecovery})
 		default:
+			for _, f := range ts.fs.Spec.Factors {
+				if f.Kind == seal.FactorBackend {
+					return nil, "", fmt.Errorf("%w: slot %x stays and has a Vault or KMS backend factor, which a rotation cannot re-create (its wrap at the backend is bound to the slot id); remove that slot first and add it again afterwards", ErrPolicyViolated, ts.id)
+				}
+			}
 			var fps []FactorPlan
 			// the old-salt outputs of ALL the slot's factors, in the slot's order:
 			// the slot must open with them and give this handle's master key, or the

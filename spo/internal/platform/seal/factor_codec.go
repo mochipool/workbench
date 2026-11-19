@@ -66,7 +66,9 @@ func DecodeFactors(b []byte) ([]FactorParams, error) {
 			}
 			f.Touch = uint8(touch)
 		case FactorBackend:
-			if len(p) != 1 || cbor.Unmarshal(p[0], &f.BackendKeyRef) != nil {
+			if len(p) != 5 || cbor.Unmarshal(p[0], &f.BackendKind) != nil || cbor.Unmarshal(p[1], &f.BackendAddress) != nil ||
+				cbor.Unmarshal(p[2], &f.BackendNamespace) != nil || cbor.Unmarshal(p[3], &f.BackendKeyRef) != nil ||
+				cbor.Unmarshal(p[4], &f.BackendBlob) != nil {
 				return bad()
 			}
 		case FactorRecovery:

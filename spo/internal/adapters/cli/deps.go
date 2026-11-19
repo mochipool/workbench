@@ -51,6 +51,12 @@ type Deps struct {
 	// Signer is the FIDO2 signing capability of the checkpoint key (ADR 0012
 	// stage 2). Nil means Factors is asked for it (the libfido2 source has both).
 	Signer ports.SignatureFactor
+	// KeyWrap builds the client of a Vault or KMS backend (ADR 0011 decision 5)
+	// for the reference a slot stores (or [vault]/[kms] names, when a slot is
+	// added), with the client-side settings of spo.toml (either may be nil). Nil
+	// where the binary has no backend client: a command that needs one fails
+	// before any prompt.
+	KeyWrap func(ref ports.BackendRef, vault *VaultConfig, kms *KMSConfig) (ports.KeyWrapBackend, error)
 	// NodeAddressWarning returns the warning to print for a node address that
 	// is plain TCP to a non-loopback host, "" otherwise. Nil: no warning.
 	NodeAddressWarning func(address string) string
@@ -147,6 +153,35 @@ type WorkspaceConfig struct {
 	Tailcat *TailcatConfig
 	// Registry is the optional [registry] section: the token-registry server.
 	Registry *RegistryConfig
+	// Vault and KMS are the optional [vault] and [kms] sections: the backend of
+	// a Vault or KMS unlock factor and how this client authenticates to it (ADR
+	// 0011 decision 5). They never hold a credential.
+	Vault *VaultConfig
+	KMS   *KMSConfig
+}
+
+// VaultConfig is the [vault] section. Its address, namespace, mount and key
+// are the authority at every unlock (a slot's stored reference is a claim
+// checked against them).
+type VaultConfig struct {
+	Address, Namespace, Mount, Key string
+	CAFile                         string
+	Auth                           string
+	TokenFile                      string
+	JWTMount, JWTRole, JWTFile     string
+	TimeoutSeconds                 int
+	AllowLoopbackHTTP              bool
+}
+
+// KMSConfig is the [kms] section. The KMS and STS endpoints are the public ones
+// of the key ARN's region unless the Private* opt-ins name others.
+type KMSConfig struct {
+	KeyARN                                         string
+	PrivateEndpoint, PrivateCAFile                 string
+	PrivateSTSEndpoint, PrivateSTSCAFile           string
+	RoleARN, WebIdentityTokenFile, RoleSessionName string
+	TimeoutSeconds                                 int
+	AllowLoopbackHTTP                              bool
 }
 
 // NodeConfig is the [node] section: Address is a socket path, unix:PATH or
@@ -451,6 +486,28 @@ type FactorOpen struct {
 	Passphrase func(ctx context.Context) (*secret.Buffer, error)
 	Recovery   func(ctx context.Context) (*secret.Buffer, error)
 	Notify     func(msg string)
+	// Backend returns the client of the Vault or KMS backend a slot names; nil
+	// when the command does not present a backend factor (--unlock backend).
+	Backend func(ctx context.Context, ref ports.BackendRef) (ports.KeyWrapBackend, error)
+	// BackendCheck compares the reference a slot claims with [vault] or [kms] of
+	// spo.toml, with no credential and no call; the store runs it before it asks
+	// for any factor of the slot.
+	BackendCheck func(ref ports.BackendRef) error
+}
+
+// AddBackendRequest is `workspace slot add-backend`: the backend client and the
+// other factor of the composite (a new passphrase, or a new FIDO2 credential on
+// the authenticator of FIDO2).
+type AddBackendRequest struct {
+	Client     ports.KeyWrapBackend
+	Passphrase *secret.Buffer // the composite's own passphrase, when With is passphrase
+	FIDO2      *FactorOpen    // the authenticator to enrol, when With is fido2
+}
+
+// BackendSlotAdmin is the optional interface of a SealedStore that can add a
+// composite slot with a Vault or KMS factor.
+type BackendSlotAdmin interface {
+	AddBackendSlot(ctx context.Context, req AddBackendRequest) (id []byte, err error)
 }
 
 // RotateRequest is the table a rotation writes. Policy standard: Passphrase is
@@ -561,10 +618,13 @@ type Slot struct {
 	Factors []string
 	// Touch is parallel to Factors: for a FIDO2 factor the stored result of the
 	// enrolment touch probe as a phrase ("touch not enforced"), else "".
-	Touch  []string
-	ID     []byte
-	Kind   string // "passphrase" or "recovery"
-	Detail string // key-derivation parameters of a passphrase slot
+	Touch []string
+	// Backend is parallel to Factors: for a Vault or KMS factor its public
+	// reference (kind, address, namespace, key), else "".
+	Backend []string
+	ID      []byte
+	Kind    string // "passphrase" or "recovery"
+	Detail  string // key-derivation parameters of a passphrase slot
 }
 
 // SealedStore is an unlocked sealed workspace.

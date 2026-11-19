@@ -54,6 +54,10 @@ type app struct {
 	// memory, destroyed by destroyPINs): the rotation that recovers the workspace
 	// presents it again as the proof, without asking twice.
 	recText *secret.Buffer
+	// compositePass is the passphrase of a backend composite as read once from
+	// --passphrase-fd (guarded memory, destroyed by destroyPINs); every open of
+	// this run gets a copy. The approval gate never uses it.
+	compositePass *secret.Buffer
 	// keepRecovery is set by the one command (workspace rotate) that presents the recovery
 	// key typed for its session a second time, as the proof; any other command destroys
 	// what it read at once.
@@ -307,6 +311,9 @@ func (a *app) open(ctx context.Context) (*session, error) {
 				// a factor session has no passphrase: say what was presented
 				if a.unlock == "recovery-composite" {
 					return nil, errors.New("the recovery credential presented (the recovery key and its authenticator) is not the current one for this workspace: a rotation replaces the recovery key and the recovery authenticator, so the old ones no longer open it")
+				}
+				if a.unlock == "backend" {
+					return nil, errors.New("the factors presented do not open a Vault or KMS composite slot of this workspace: the composite's passphrase (or authenticator) is wrong, or the backend gave back a secret that is not this slot's")
 				}
 				return nil, errors.New("the authenticator presented does not open this workspace: it holds no credential of any slot, or its PIN or touch was refused")
 			}

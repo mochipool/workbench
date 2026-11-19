@@ -34,6 +34,7 @@ func newDeps(out, errw io.Writer, term cli.Terminal) cli.Deps {
 		Toolchain: noToolchain{},
 		StoreGone: storeGone,
 		RelayLock: relayLock,
+		KeyWrap:   keyWrap,
 		Config: cli.ConfigOps{
 			Load:     loadConfig,
 			Create:   func(dir string, c cli.WorkspaceConfig) error { return config.Create(dir, toConfig(c)) },
@@ -282,6 +283,14 @@ func loadConfig(dir string) (cli.WorkspaceConfig, error) {
 	if c.Tailcat != nil {
 		out.Tailcat = &cli.TailcatConfig{Port: c.Tailcat.Port, DERPMapURL: c.Tailcat.DERPMapURL}
 	}
+	if v := c.Vault; v != nil {
+		x := cli.VaultConfig(*v)
+		out.Vault = &x
+	}
+	if k := c.KMS; k != nil {
+		x := cli.KMSConfig(*k)
+		out.KMS = &x
+	}
 	return out, nil
 }
 
@@ -315,6 +324,14 @@ func toConfig(c cli.WorkspaceConfig) config.Config {
 	}
 	if c.Tailcat != nil {
 		out.Tailcat = &config.Tailcat{Port: c.Tailcat.Port, DERPMapURL: c.Tailcat.DERPMapURL}
+	}
+	if v := c.Vault; v != nil {
+		x := config.Vault(*v)
+		out.Vault = &x
+	}
+	if k := c.KMS; k != nil {
+		x := config.KMS(*k)
+		out.KMS = &x
 	}
 	return out
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -21,19 +22,22 @@ func (a *app) useFactors() (bool, error) { return a.useFactorsFor(a.workspaceFil
 // file's own slot table decides.
 func (a *app) useFactorsFor(path string) (bool, error) {
 	switch a.unlock {
-	case "", "passphrase", "fido2", "recovery-composite":
+	case "", "passphrase", "fido2", "recovery-composite", "backend":
 	default:
-		return false, fmt.Errorf("--unlock %q: use passphrase, fido2 or recovery-composite", a.unlock)
+		return false, fmt.Errorf("--unlock %q: use passphrase, fido2, backend or recovery-composite", a.unlock)
 	}
 	if a.d.Sealed.Describe == nil {
-		if a.unlock == "fido2" || a.unlock == "recovery-composite" {
-			return false, errors.New("--unlock fido2 is not available in this build")
+		if a.unlock == "fido2" || a.unlock == "recovery-composite" || a.unlock == "backend" {
+			return false, fmt.Errorf("--unlock %s is not available in this build", a.unlock)
 		}
 		return false, nil
 	}
 	info, err := a.d.Sealed.Describe(path)
 	if err != nil {
 		return false, err
+	}
+	if a.unlock == "backend" {
+		return true, a.checkBackendUnlock(info)
 	}
 	hasPass := false
 	for _, s := range info.Slots {
@@ -61,6 +65,10 @@ func (a *app) destroyPINs() {
 	for k, p := range a.pins {
 		p.Destroy()
 		delete(a.pins, k)
+	}
+	if a.compositePass != nil {
+		a.compositePass.Destroy()
+		a.compositePass = nil
 	}
 }
 
@@ -138,13 +146,276 @@ func (a *app) pinCallback(role string, device func() string, fd func() int, fres
 func (a *app) factorOpen() FactorOpen { return a.factorOpenFor(false) }
 
 func (a *app) factorOpenFor(fresh bool) FactorOpen {
-	return FactorOpen{
+	f := FactorOpen{
 		Source: a.d.Factors, Device: a.fido2Device,
 		PIN:        a.pinCallback("daily", func() string { return a.fido2Device }, func() int { return a.fido2PinFD }, fresh),
 		Passphrase: a.factorPassphrase(),
 		Recovery:   a.factorRecovery(),
 		Notify:     func(m string) { fmt.Fprintln(a.d.Err, m) },
 	}
+	if a.unlock == "backend" {
+		// a backend composite's other factor: its own passphrase (prompt or
+		// --passphrase-fd; at the approval gate the terminal only), or the FIDO2
+		// authenticator above. The slot's backend is checked against spo.toml
+		// before anything of the slot is asked.
+		f.Backend = a.backendResolver()
+		f.BackendCheck = a.backendCheck
+		f.Passphrase = a.compositePassphraseFor(fresh)
+	}
+	return f
+}
+
+// backendCheck compares the backend a slot claims with [vault] or [kms] of
+// spo.toml: the local configuration is the authority. A slot whose kind,
+// address, namespace or key differs, or whose kind has no section, is refused
+// with both values shown, before any credential is loaded, any other factor is
+// asked for, or any call is made.
+func (a *app) backendCheck(claim ports.BackendRef) error {
+	cfg := WorkspaceConfig{}
+	if a.d.Config.Load != nil {
+		c, err := a.d.Config.Load(a.workspace)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if err == nil {
+			cfg = c
+		}
+	}
+	kind := ""
+	switch claim.Kind {
+	case ports.BackendVaultTransit:
+		kind = "vault"
+	case ports.BackendAWSKMS:
+		kind = "kms"
+	default:
+		return fmt.Errorf("%w: the slot names a backend of kind %q, which spo.toml cannot name", ports.ErrBackendMismatch, claim.Kind)
+	}
+	local, err := backendRefFromConfig(kind, cfg)
+	if err != nil {
+		return fmt.Errorf("%w: the slot names %s, and %v", ports.ErrBackendMismatch, claim, err)
+	}
+	return ports.CheckBackendClaim(claim, local)
+}
+
+// checkBackendUnlock refuses --unlock backend before any prompt when the binary
+// has no backend client or no slot of the table has a backend factor.
+func (a *app) checkBackendUnlock(info WorkspaceInfo) error {
+	if a.d.KeyWrap == nil {
+		return errors.New("--unlock backend: this binary has no Vault or KMS client: nothing was asked")
+	}
+	for _, s := range info.Slots {
+		for _, f := range s.Factors {
+			if f == "backend" {
+				return nil
+			}
+		}
+	}
+	return errors.New("--unlock backend: no slot of this workspace has a Vault or KMS factor (see: spo workspace slot list): nothing was asked")
+}
+
+// compositePassphraseFor reads the passphrase of a backend composite. For an
+// open (fresh false): from --passphrase-fd, read once per run and handed out as
+// copies (a second backend slot, or the cold factor, gets the same passphrase,
+// not the end of the descriptor), else a prompt. For the approval gate (fresh
+// true): the terminal only, every time; a descriptor given at start does not
+// satisfy a fresh presentation, as with the passphrase and FIDO2 gates.
+func (a *app) compositePassphraseFor(fresh bool) func(context.Context) (*secret.Buffer, error) {
+	return func(ctx context.Context) (*secret.Buffer, error) {
+		if !fresh && a.passphraseFDSet() {
+			if a.compositePass == nil {
+				p, err := readFDSecret(a.passFD, "the passphrase")
+				if err != nil {
+					return nil, err
+				}
+				a.compositePass = p
+			}
+			held := a.compositePass
+			return secret.Fill(held.Len(), func(dst []byte) error { return held.Use(func(b []byte) error { copy(dst, b); return nil }) })
+		}
+		prompt := "Passphrase of the Vault or KMS composite slot: "
+		if fresh {
+			prompt = "Passphrase of the Vault or KMS composite slot, again to sign: "
+		}
+		p, err := a.term.ReadSecret(ctx, prompt)
+		if errors.Is(err, ErrNoTerminal) {
+			if fresh {
+				return nil, errors.New("no terminal to ask for the composite's passphrase on: an approval needs it typed again, and --passphrase-fd does not satisfy that; nothing was signed")
+			}
+			return nil, errors.New("no terminal to ask for the passphrase on; give it on a file descriptor with --passphrase-fd N")
+		}
+		return p, err
+	}
+}
+
+// backendResolver returns the client of the backend a slot names, with the
+// client-side settings of spo.toml ([vault] and [kms]: CA file, auth method,
+// web identity, the private-endpoint opt-ins). The reference is checked against
+// spo.toml again here (the store checks it before it asks for any factor), so
+// no client is ever built for a backend the file does not name. A missing
+// spo.toml names no backend.
+func (a *app) backendResolver() func(ctx context.Context, ref ports.BackendRef) (ports.KeyWrapBackend, error) {
+	if a.d.KeyWrap == nil {
+		return nil
+	}
+	return func(ctx context.Context, ref ports.BackendRef) (ports.KeyWrapBackend, error) {
+		if err := a.backendCheck(ref); err != nil {
+			return nil, err
+		}
+		var vc *VaultConfig
+		var kc *KMSConfig
+		if a.d.Config.Load != nil {
+			if c, err := a.d.Config.Load(a.workspace); err == nil {
+				vc, kc = c.Vault, c.KMS
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+		}
+		return a.d.KeyWrap(ref, vc, kc)
+	}
+}
+
+// backendRefFromConfig is the backend [vault] or [kms] names, for a new slot.
+func backendRefFromConfig(kind string, c WorkspaceConfig) (ports.BackendRef, error) {
+	switch kind {
+	case "vault":
+		v := c.Vault
+		if v == nil || v.Address == "" || v.Key == "" {
+			return ports.BackendRef{}, fmt.Errorf("spo.toml has no [vault] section with address and key: add one (see docs/how-to/unlock-with-vault-or-kms.md)")
+		}
+		mount := v.Mount
+		if mount == "" {
+			mount = "transit"
+		}
+		return ports.BackendRef{Kind: ports.BackendVaultTransit, Address: v.Address, Namespace: v.Namespace, Key: mount + "/" + v.Key}, nil
+	case "kms":
+		k := c.KMS
+		if k == nil || k.KeyARN == "" {
+			return ports.BackendRef{}, fmt.Errorf("spo.toml has no [kms] section with key_arn: add one (see docs/how-to/unlock-with-vault-or-kms.md)")
+		}
+		ep := k.PrivateEndpoint // an opt-in for a private endpoint only
+		if ep == "" {
+			var err error
+			if ep, err = defaultKMSEndpoint(k.KeyARN); err != nil {
+				return ports.BackendRef{}, err
+			}
+		}
+		return ports.BackendRef{Kind: ports.BackendAWSKMS, Address: ep, Key: k.KeyARN}, nil
+	}
+	return ports.BackendRef{}, fmt.Errorf("--backend %q: use vault or kms", kind)
+}
+
+// defaultKMSEndpoint is the public KMS endpoint of the region in a key ARN
+// (arn:<partition>:kms:<region>:...).
+func defaultKMSEndpoint(arn string) (string, error) {
+	p := strings.Split(arn, ":")
+	if len(p) < 6 || p[0] != "arn" || p[2] != "kms" || p[3] == "" {
+		return "", fmt.Errorf("[kms] key_arn is not a KMS key ARN (arn:aws:kms:<region>:<account>:key/<id>)")
+	}
+	suffix := ".amazonaws.com"
+	if p[1] == "aws-cn" {
+		suffix += ".cn"
+	}
+	return "https://kms." + p[3] + suffix, nil
+}
+
+func (a *app) slotAddBackend() *cobra.Command {
+	var backend, with string
+	newPassFD := -1
+	cmd := &cobra.Command{
+		Use:   "add-backend --backend vault|kms --with passphrase|fido2",
+		Short: "Add a composite slot of a Vault or KMS factor AND a passphrase or FIDO2 factor",
+		Long: `Opens the workspace with its current factors and adds a composite slot of two
+factors (ADR 0011 decisions 5 and 6): a Vault Transit or AWS KMS key that wraps a
+random 32-byte secret for this slot, AND a factor the backend does not control.
+Neither alone opens the slot: whoever runs the backend lacks the other factor, and
+a copy of the workspace with the other factor lacks the backend.
+
+  --backend vault  the key in the [vault] section of spo.toml (address,
+                   namespace, mount, key). The Vault token is yours: VAULT_TOKEN,
+                   the token helper file of "vault login", or a JWT login
+                   ([vault] auth = "jwt"). It is never stored in the workspace.
+  --backend kms    the key ARN in the [kms] section. Credentials must be
+                   short-lived: AWS_SESSION_TOKEN with the access key in the
+                   environment, or a web identity token file and role ARN.
+                   Static access keys are refused.
+
+  --with passphrase  a NEW passphrase for this slot only (asked twice, or
+                     --new-passphrase-fd). Under hardware and strict this is
+                     refused: a backend there needs a FIDO2 factor.
+  --with fido2       a NEW credential on the authenticator --fido2-device.
+
+The slot stores the backend's address and key name (or ARN) and the wrapped
+secret; the slot's associated data binds them. Unlock with --unlock backend.
+spo.toml stays the authority: an unlock refuses a slot whose backend differs
+from [vault] or [kms] before it reads any credential or asks anything.
+Under standard the passphrase and recovery slots still open the workspace alone,
+so this slot adds a way in, not strength. Remove it with workspace slot remove.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) (err error) {
+			if a.d.KeyWrap == nil {
+				return errors.New("this binary has no Vault or KMS client: nothing was asked")
+			}
+			switch with {
+			case "passphrase":
+			case "fido2":
+				if a.d.Factors == nil {
+					return errors.New("--with fido2: this binary has no FIDO2 factor source (the libfido2 tools are not in the toolchain manifest): nothing was asked")
+				}
+			default:
+				return errors.New("--with is required: passphrase or fido2")
+			}
+			cfg, err := a.loadConfig()
+			if err != nil {
+				return err
+			}
+			ref, err := backendRefFromConfig(backend, cfg)
+			if err != nil {
+				return err
+			}
+			if err := ref.Validate(); err != nil {
+				return err
+			}
+			if a.d.Sealed.Describe != nil {
+				if info, derr := a.d.Sealed.Describe(a.workspaceFile()); derr == nil && info.Policy != "standard" && with == "passphrase" {
+					return fmt.Errorf("this workspace has the policy %s: a Vault or KMS factor there needs a FIDO2 factor beside it (--with fido2); a backend with a passphrase is not hardware: nothing was asked", info.Policy)
+				}
+			}
+			client, err := a.d.KeyWrap(ref, cfg.Vault, cfg.KMS)
+			if err != nil {
+				return err
+			}
+			s, err := a.openSealed(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer s.closeInto(&err)
+			adm, ok := s.Sealed.(BackendSlotAdmin)
+			if !ok {
+				return errors.New("this workspace handle cannot add a backend slot")
+			}
+			req := AddBackendRequest{Client: client}
+			if with == "passphrase" {
+				if req.Passphrase, err = a.newPassphrase(cmd.Context(), newPassFD, "--new-passphrase-fd"); err != nil {
+					return err
+				}
+				defer req.Passphrase.Destroy()
+			} else {
+				f := a.factorOpen()
+				f.Backend = nil
+				req.FIDO2 = &f
+			}
+			id, err := adm.AddBackendSlot(cmd.Context(), req)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(a.d.Out, "added composite slot %x: %s AND a %s factor. Unlock with --unlock backend.\n", id, ref, with)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&backend, "backend", "", "vault or kms: the backend that [vault] or [kms] in spo.toml names")
+	cmd.Flags().StringVar(&with, "with", "", "passphrase or fido2: the factor beside the backend, new for this slot")
+	cmd.Flags().IntVar(&newPassFD, "new-passphrase-fd", -1, "read the NEW passphrase of the composite (--with passphrase) from this file descriptor instead of prompting (twice)")
+	return cmd
 }
 
 // reauthOpen is what the approval gate presents of a factor session: the daily
@@ -157,7 +428,7 @@ func (a *app) workspaceSlotCommand() *cobra.Command {
 		Use:   "slot",
 		Short: "The unlock slots of the workspace (ADR 0011)",
 	}
-	c.AddCommand(a.slotList(), a.slotAddFIDO2(), a.slotRemove())
+	c.AddCommand(a.slotList(), a.slotAddFIDO2(), a.slotAddBackend(), a.slotRemove())
 	return c
 }
 
@@ -170,6 +441,9 @@ func slotDetail(s Slot) string {
 		d += f
 		if i < len(s.Touch) && s.Touch[i] != "" {
 			d += " (" + s.Touch[i] + ")"
+		}
+		if i < len(s.Backend) && s.Backend[i] != "" {
+			d += " (" + s.Backend[i] + ")"
 		}
 	}
 	if s.Legacy {

@@ -138,6 +138,124 @@ type Tailcat struct {
 	DERPMapURL string
 }
 
+// Vault is the [vault] section: the Vault Transit key of a backend unlock
+// factor and how this client authenticates to it (ADR 0011 decision 5). No
+// token is ever in it: the token comes from VAULT_TOKEN, the token helper file
+// or a JWT login, on this machine. Address, Namespace, Mount and Key are read
+// when a slot is added, and they are the authority at every unlock: a slot
+// stores them too, but a slot whose stored reference differs from these is
+// refused before any credential is loaded or anything is sent.
+type Vault struct {
+	Address, Namespace, Mount, Key string
+	CAFile                         string
+	// Auth is "token" (default) or "jwt".
+	Auth                       string
+	TokenFile                  string
+	JWTMount, JWTRole, JWTFile string
+	TimeoutSeconds             int
+	// AllowLoopbackHTTP is allow_loopback_http = true: plain http to a loopback
+	// IP address (a test server, a local agent). Default false: TLS always.
+	AllowLoopbackHTTP bool
+}
+
+// KMS is the [kms] section: the AWS KMS key of a backend unlock factor and the
+// web identity this client exchanges for short-lived credentials. No access key
+// is ever in it, and static keys are refused at use. The KMS and STS endpoints
+// are the public ones of the key ARN's partition and region, with the system
+// roots; the Private* fields are opt-ins for private endpoints (a VPC
+// endpoint) only.
+type KMS struct {
+	KeyARN                                         string
+	PrivateEndpoint, PrivateCAFile                 string
+	PrivateSTSEndpoint, PrivateSTSCAFile           string
+	RoleARN, WebIdentityTokenFile, RoleSessionName string
+	TimeoutSeconds                                 int
+	// AllowLoopbackHTTP is allow_loopback_http = true: plain http to a loopback
+	// IP address for a private endpoint (a test server). Default false.
+	AllowLoopbackHTTP bool
+}
+
+// MaxBackendTimeoutSeconds bounds [vault] and [kms] timeout_seconds.
+const MaxBackendTimeoutSeconds = 600
+
+func (v *Vault) fields() [][2]any {
+	return [][2]any{{"address", &v.Address}, {"namespace", &v.Namespace}, {"mount", &v.Mount}, {"key", &v.Key}, {"ca_file", &v.CAFile},
+		{"auth", &v.Auth}, {"token_file", &v.TokenFile}, {"jwt_mount", &v.JWTMount}, {"jwt_role", &v.JWTRole}, {"jwt_file", &v.JWTFile},
+		{"timeout_seconds", &v.TimeoutSeconds}, {"allow_loopback_http", &v.AllowLoopbackHTTP}}
+}
+
+func (k *KMS) fields() [][2]any {
+	return [][2]any{{"key_arn", &k.KeyARN}, {"private_endpoint", &k.PrivateEndpoint}, {"private_ca_file", &k.PrivateCAFile},
+		{"private_sts_endpoint", &k.PrivateSTSEndpoint}, {"private_sts_ca_file", &k.PrivateSTSCAFile},
+		{"role_arn", &k.RoleARN}, {"web_identity_token_file", &k.WebIdentityTokenFile}, {"role_session_name", &k.RoleSessionName},
+		{"timeout_seconds", &k.TimeoutSeconds}, {"allow_loopback_http", &k.AllowLoopbackHTTP}}
+}
+
+// parseFields reads the entries of a section into the fields named.
+func parseFields(section string, entries []entry, fields [][2]any) error {
+	for _, e := range entries {
+		var dst any
+		for _, f := range fields {
+			if f[0].(string) == e.key {
+				dst = f[1]
+			}
+		}
+		switch p := dst.(type) {
+		case *string:
+			s, err := e.val.str(section + "." + e.key)
+			if err != nil {
+				return err
+			}
+			*p = s
+		case *int:
+			if e.val.kind != kindInt {
+				return fmt.Errorf("line %d: key %q must be a whole number", e.val.line, section+"."+e.key)
+			}
+			if e.val.i < 1 || e.val.i > MaxBackendTimeoutSeconds {
+				return fmt.Errorf("line %d: [%s] %s must be 1 to %d", e.val.line, section, e.key, MaxBackendTimeoutSeconds)
+			}
+			*p = int(e.val.i)
+		case *bool:
+			if e.val.kind != kindBool {
+				return fmt.Errorf("line %d: key %q must be true or false", e.val.line, section+"."+e.key)
+			}
+			*p = e.val.b
+		default:
+			return fmt.Errorf("line %d: unknown key %q in [%s]", e.val.line, e.key, section)
+		}
+	}
+	return nil
+}
+
+func validateFields(section string, fields [][2]any) error {
+	for _, f := range fields {
+		if p, ok := f[1].(*string); ok && hasActiveChar(*p) {
+			return fmt.Errorf("[%s] %s has a control or bidirectional character", section, f[0])
+		}
+	}
+	return nil
+}
+
+func marshalFields(b *strings.Builder, q *quoter, section string, fields [][2]any) {
+	fmt.Fprintf(b, "\n[%s]\n", section)
+	for _, f := range fields {
+		switch p := f[1].(type) {
+		case *string:
+			if *p != "" {
+				fmt.Fprintf(b, "%s = %s\n", f[0], q.quote("["+section+"] "+f[0].(string), *p))
+			}
+		case *int:
+			if *p > 0 {
+				fmt.Fprintf(b, "%s = %d\n", f[0], *p)
+			}
+		case *bool:
+			if *p {
+				fmt.Fprintf(b, "%s = true\n", f[0])
+			}
+		}
+	}
+}
+
 // Config is the content of spo.toml.
 type Config struct {
 	Network string
@@ -168,6 +286,9 @@ type Config struct {
 	Tailcat *Tailcat
 	// Registry is nil when the file has no [registry] section.
 	Registry *Registry
+	// Vault and KMS are nil when the file has no [vault] or [kms] section.
+	Vault *Vault
+	KMS   *KMS
 }
 
 var versionText = regexp.MustCompile(`^[0-9]+(\.[0-9]+){1,3}$`)
@@ -326,6 +447,31 @@ func (c Config) Validate() error {
 	}
 	if t := c.Tailcat; t != nil && (t.Port < 0 || t.Port > 65535) {
 		return errors.New("[tailcat] port must be 1 to 65535")
+	}
+	if v := c.Vault; v != nil {
+		if err := validateFields("vault", v.fields()); err != nil {
+			return err
+		}
+		if v.Auth != "" && v.Auth != "token" && v.Auth != "jwt" {
+			return fmt.Errorf("[vault] auth %q is not token or jwt", v.Auth)
+		}
+		if v.TimeoutSeconds < 0 || v.TimeoutSeconds > MaxBackendTimeoutSeconds {
+			return fmt.Errorf("[vault] timeout_seconds must be 1 to %d", MaxBackendTimeoutSeconds)
+		}
+	}
+	if k := c.KMS; k != nil {
+		if err := validateFields("kms", k.fields()); err != nil {
+			return err
+		}
+		if k.TimeoutSeconds < 0 || k.TimeoutSeconds > MaxBackendTimeoutSeconds {
+			return fmt.Errorf("[kms] timeout_seconds must be 1 to %d", MaxBackendTimeoutSeconds)
+		}
+		if k.PrivateCAFile != "" && k.PrivateEndpoint == "" {
+			return errors.New("[kms] private_ca_file is the CA of private_endpoint: set private_endpoint too, or remove it (the public endpoint uses the system roots)")
+		}
+		if k.PrivateSTSCAFile != "" && k.PrivateSTSEndpoint == "" {
+			return errors.New("[kms] private_sts_ca_file is the CA of private_sts_endpoint: set private_sts_endpoint too, or remove it (the public STS endpoint uses the system roots)")
+		}
 	}
 	return nil
 }
@@ -521,6 +667,16 @@ func Parse(data []byte) (Config, error) {
 					return Config{}, fmt.Errorf("line %d: unknown key %q in [tailcat]", e.val.line, e.key)
 				}
 			}
+		case "vault":
+			c.Vault = &Vault{}
+			if err := parseFields("vault", sec.entries, c.Vault.fields()); err != nil {
+				return Config{}, err
+			}
+		case "kms":
+			c.KMS = &KMS{}
+			if err := parseFields("kms", sec.entries, c.KMS.fields()); err != nil {
+				return Config{}, err
+			}
 		default:
 			return Config{}, fmt.Errorf("line %d: unknown section [%s]", sec.line, sec.name)
 		}
@@ -627,6 +783,12 @@ func Marshal(c Config) ([]byte, error) {
 		if c.Handles.URL != "" {
 			fmt.Fprintf(&b, "url = %s\n", q.quote("[handles] url", c.Handles.URL))
 		}
+	}
+	if c.Vault != nil {
+		marshalFields(&b, &q, "vault", c.Vault.fields())
+	}
+	if c.KMS != nil {
+		marshalFields(&b, &q, "kms", c.KMS.fields())
 	}
 	if q.err != nil {
 		return nil, fmt.Errorf("the configuration cannot be saved: %w", q.err)
