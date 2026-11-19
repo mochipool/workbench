@@ -607,7 +607,7 @@ func TestTombstoneIsKeptWhileTheBindingItBlocksStillVerifies(t *testing.T) {
 // spec: SPO-Xrelaybind-PRE-014
 func TestAddressPartNames(t *testing.T) {
 	seen := map[string]bool{}
-	for _, p := range []relaybind.AddressPart{relaybind.PartKeyHash, relaybind.PartEnterprise, relaybind.PartReward, relaybind.PartBasePayment, relaybind.PartBaseStake} {
+	for _, p := range []relaybind.AddressPart{relaybind.PartKeyHash, relaybind.PartEnterprise, relaybind.PartReward, relaybind.PartBasePayment} {
 		s := p.String()
 		if s == "unknown" || seen[s] {
 			t.Errorf("part %d is named %q", p, s)

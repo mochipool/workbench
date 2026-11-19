@@ -10,16 +10,21 @@ import "bytes"
 //   - the 28-byte key hash K;
 //   - an enterprise or reward address of exactly 29 bytes whose credential is a
 //     KEY hash equal to K (header types 6 and 14);
-//   - a base address of exactly 57 bytes in which a KEY-hash credential equal to
-//     K is the payment part (header types 0 and 2) or the stake part (types 0
-//     and 1).
+//   - a base address of exactly 57 bytes whose PAYMENT credential is a KEY hash
+//     equal to K (header types 0 and 2).
+//
+// K as only the stake part of a base address is refused (owner decision,
+// 2026-11-18): a wallet that signs for a base address signs with the payment
+// key, and a wallet that signs with the stake key presents the reward address,
+// so no honest wallet writes that form, and it would show another party's
+// payment address beside K. A wallet without a staking part uses its payment
+// key; a stake key identifies itself by the key hash or the reward address.
 //
 // A script credential never matches, a pointer address and every other type are
 // refused, and so is a network id above 1 (the low nibble of the header byte;
-// every Cardano network uses 0 or 1). The other credential of a base address is
-// not looked at: the payment part may be someone else's, and callers must
-// therefore display only the key hash K, never the address bytes (see
-// Statement.Address and AddressPart).
+// every Cardano network uses 0 or 1). The stake credential of a base address is
+// not looked at and may be anyone's, so callers display only the key hash K,
+// never the address bytes (see Statement.Address and AddressPart).
 
 // AddressPart says which part of the protected-header address matched K.
 type AddressPart uint8
@@ -33,8 +38,6 @@ const (
 	PartReward
 	// PartBasePayment is the payment credential of a 57-byte base address.
 	PartBasePayment
-	// PartBaseStake is the stake credential of a 57-byte base address.
-	PartBaseStake
 )
 
 // String names the part.
@@ -48,8 +51,6 @@ func (p AddressPart) String() string {
 		return "reward"
 	case PartBasePayment:
 		return "base-payment"
-	case PartBaseStake:
-		return "base-stake"
 	}
 	return "unknown"
 }
@@ -60,7 +61,6 @@ const (
 	baseAddressSize       = 1 + 2*KeyHashSize
 
 	typeBaseKeyKey     = 0 // payment key hash, stake key hash
-	typeBaseScriptKey  = 1 // payment script hash, stake key hash
 	typeBaseKeyScript  = 2 // payment key hash, stake script hash
 	typeEnterpriseKey  = 6
 	typeRewardKey      = 14
@@ -93,18 +93,15 @@ func matchAddress(addr, k []byte) (AddressPart, error) {
 		return PartEnterprise, nil
 	case baseAddressSize:
 		typ, net := addr[0]>>addressTypeShift, addr[0]&addressNetworkMask
-		if net > maxAcceptedNetwork || typ > typeBaseKeyScript {
+		// Only a base address whose PAYMENT credential is a key hash is a form
+		// a wallet signs for with a key of ours; the stake part is not looked at.
+		if net > maxAcceptedNetwork || (typ != typeBaseKeyKey && typ != typeBaseKeyScript) {
 			return 0, ErrAddressForm
 		}
-		paymentIsKey := typ == typeBaseKeyKey || typ == typeBaseKeyScript
-		stakeIsKey := typ == typeBaseKeyKey || typ == typeBaseScriptKey
-		switch {
-		case paymentIsKey && bytes.Equal(addr[1:1+KeyHashSize], k):
-			return PartBasePayment, nil
-		case stakeIsKey && bytes.Equal(addr[1+KeyHashSize:], k):
-			return PartBaseStake, nil
+		if !bytes.Equal(addr[1:1+KeyHashSize], k) {
+			return 0, ErrWrongKey
 		}
-		return 0, ErrWrongKey
+		return PartBasePayment, nil
 	}
 	return 0, ErrAddressForm
 }
