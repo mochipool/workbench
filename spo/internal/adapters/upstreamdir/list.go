@@ -51,6 +51,8 @@ var notUpstream = map[ports.Kind]bool{
 	ports.MultisigCoordinator: true, ports.MultisigSigner: true, ports.MultisigOutbox: true,
 	ports.MultisigEvents: true, ports.MultisigCollection: true, ports.MultisigSubmitted: true,
 	ports.RelayOwn:              true,
+	ports.RelayList:             true,
+	ports.RelayAddr:             true,
 	ports.UpstreamEncryptedSKey: false,
 }
 

@@ -27,11 +27,77 @@ import (
 var relayPackages = []string{
 	module + "/internal/domain/relaybind",
 	module + "/internal/domain/relayregistry",
+	module + "/internal/domain/relayconf",
 	module + "/internal/adapters/mailboxstore",
 	module + "/internal/adapters/bindingstore",
 	module + "/internal/adapters/relayconfig",
 	module + "/internal/ports/relayport",
 	module + "/internal/app/relay",
+	module + "/internal/app/relayhost",
+	// cmd/spo-relay links the tunnel adapter, whose transport crypto is allowed
+	// below it only: the binary is a root of the tunnel rule
+	// (tunnel_closure_test.go) and of TestTheRelayBinaryLinksNoSignerWalletStoreOrCommandLine.
+}
+
+// relayBinaryBans are what the relay binary must not link beyond relayBanned
+// (SPO-Xmailbox-SEC-078): nothing that signs with a wallet or a party key or
+// holds a wallet, nothing that reads or decrypts the workspace store, no command
+// line of the spo tool and no mailbox client.
+var relayBinaryBans = []string{
+	"/internal/adapters/native",
+	"/internal/adapters/hwcli",
+	"/internal/adapters/fido2cli",
+	"/internal/adapters/gpg",
+	"/internal/adapters/envelope",
+	"/internal/adapters/sqlitestore",
+	"/internal/adapters/partystore",
+	"/internal/adapters/cli",
+	"/internal/adapters/tui",
+	"/internal/adapters/mailbox",
+	"/internal/app/relaybinding",
+	"/internal/app/relayself",
+	"/internal/app/multisig",
+	"/internal/domain/relaywallet",
+	"/internal/domain/unlock",
+	"/internal/platform/seal",
+	"/internal/platform/secret",
+	"/internal/ports", // the workspace ports (they hold secret buffers); relayport is allowed below
+	"github.com/spf13/cobra",
+	"filippo.io/age",
+}
+
+// The relay binary and its assembly link nothing that signs, holds a wallet,
+// opens the workspace or is the spo command line.
+//
+// spec: SPO-Xmailbox-SEC-078
+func TestTheRelayBinaryLinksNoSignerWalletStoreOrCommandLine(t *testing.T) {
+	for _, root := range []string{module + "/cmd/spo-relay", module + "/internal/app/relayhost"} {
+		set := depsOf(t, root)
+		if !set[root] || len(set) < 20 {
+			t.Fatalf("a closure of %d packages is not a listing", len(set))
+		}
+		for dep := range set {
+			for _, b := range relayBinaryBans {
+				hit := strings.Contains(dep, b)
+				if b == "/internal/ports" {
+					hit = dep == module+"/internal/ports"
+				}
+				if b == "/internal/adapters/mailbox" {
+					hit = dep == module+"/internal/adapters/mailbox"
+				}
+				if hit {
+					t.Errorf("%s reaches %s (banned for the relay binary: %s)", root, dep, b)
+				}
+			}
+		}
+	}
+	// the list bites: the spo tool's main reaches several of them
+	set := depsOf(t, module+"/cmd/spo")
+	for _, must := range []string{module + "/internal/adapters/native", module + "/internal/adapters/cli", module + "/internal/ports"} {
+		if !set[must] {
+			t.Errorf("the bite check: cmd/spo does not reach %s", must)
+		}
+	}
 }
 
 // relayBanned are the import-path fragments no one of the packages above

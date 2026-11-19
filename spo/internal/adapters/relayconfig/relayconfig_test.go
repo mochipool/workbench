@@ -1,661 +1,548 @@
 package relayconfig_test
 
 import (
-	"crypto/ed25519"
-	"encoding/base64"
 	"errors"
 	"fmt"
-	"math/rand/v2"
 	"os"
 	"path/filepath"
-	"runtime"
-	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/mochipool/workbench/spo/internal/adapters/envelope"
 	"github.com/mochipool/workbench/spo/internal/adapters/relayconfig"
 	"github.com/mochipool/workbench/spo/internal/domain/mailbox"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
-	"github.com/mochipool/workbench/spo/internal/ports/relayport"
+	"github.com/mochipool/workbench/spo/internal/domain/relaybind"
+	"github.com/mochipool/workbench/spo/internal/domain/relayconf"
+	"github.com/mochipool/workbench/spo/internal/domain/relayregistry"
 )
 
-type member struct {
-	label string
-	doc   []byte
-	id    party.Identity
-	fp    party.Fingerprint
-	node  party.NodeKey
-	b64   string
-}
+const (
+	devA = "aa00000000000000000000000000000000000000000000000000000000000001"
+	devB = "bb00000000000000000000000000000000000000000000000000000000000002"
+	walA = "a1000000000000000000000000000000000000000000000000000001"
+	walB = "b2000000000000000000000000000000000000000000000000000002"
+)
 
-var seed uint64
-
-// newMember makes a real identity and its signed document. node nil: a party
-// with no node key.
-func newMember(t *testing.T, label string, node *party.NodeKey) member {
-	t.Helper()
-	seed++
-	rnd := rand.NewChaCha8([32]byte{byte(seed), byte(seed >> 8), 1})
-	p, err := envelope.Generate(label, node, time.Unix(1_700_000_000, 0), rnd)
-	if err != nil {
-		t.Fatal(err)
+// relayTable is a [relay] table with the required keys and the extra lines.
+func relayTable(admission string, extra ...string) string {
+	s := "[relay]\n"
+	if admission != "" {
+		s += "admission = \"" + admission + "\"\n"
 	}
-	t.Cleanup(p.Destroy)
-	doc, err := envelope.EncodeDocument(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	m := member{label: label, doc: doc, id: p.Identity(), fp: p.Fingerprint(), b64: base64.StdEncoding.EncodeToString(doc)}
-	if node != nil {
-		m.node = *node
-	}
-	return m
-}
-
-func nk(b byte) *party.NodeKey { k := party.NodeKey{b, 0x55}; return &k }
-
-func hexfp(f party.Fingerprint) string { return fmt.Sprintf("%x", f[:]) }
-
-func partyBlock(m member, extra ...string) string {
-	s := "[[party]]\nlabel = \"" + m.label + "\"\ndocument = \"" + m.b64 + "\"\n"
+	s += "key_file = \"/srv/relay/key/relay.key\"\nmailbox_dir = \"/srv/relay/mailbox\"\nregistry_dir = \"/srv/relay/registry\"\n"
 	for _, e := range extra {
 		s += e + "\n"
 	}
 	return s
 }
 
-func parse(t *testing.T, text string) (*relayconfig.Config, error) {
-	t.Helper()
-	return relayconfig.Parse([]byte(text), envelope.ParseDocument)
+func device(label, key string) string {
+	return "[[device]]\nlabel = \"" + label + "\"\nnode_key = \"" + key + "\"\n"
 }
 
-func mustParse(t *testing.T, text string) *relayconfig.Config {
+func wallet(label, key string) string {
+	return "[[wallet]]\nlabel = \"" + label + "\"\nkey = \"" + key + "\"\n"
+}
+
+// minimal is the smallest file that loads: open admission, one device.
+func minimal(extra ...string) string {
+	return relayTable("open") + device("alice laptop", devA) + strings.Join(extra, "\n")
+}
+
+func mustParse(t *testing.T, text string) *relayconf.Config {
 	t.Helper()
-	c, err := parse(t, text)
+	c, err := relayconfig.Parse([]byte(text))
 	if err != nil {
-		t.Fatalf("Parse: %v", err)
+		t.Fatalf("Parse: %v\n%s", err, text)
 	}
 	return c
 }
 
-func wantErr(t *testing.T, text, contains string) {
+func refused(t *testing.T, name, text, want string) {
 	t.Helper()
-	c, err := parse(t, text)
+	_, err := relayconfig.Parse([]byte(text))
 	if err == nil {
-		t.Fatalf("a configuration that must be refused was accepted (%d entries); wanted an error with %q", len(c.Entries), contains)
+		t.Errorf("%s: loaded, want refused (%s)\n%s", name, want, text)
+		return
 	}
-	if !strings.Contains(err.Error(), contains) {
-		t.Fatalf("error %q does not say %q", err, contains)
-	}
-}
-
-// spec: SPO-Xmailbox-OUT-016
-// spec: SPO-Xmailbox-IF-002
-func TestLoadsPartiesAndDerivesTheAllowList(t *testing.T) {
-	a, b := newMember(t, "alice", nk(1)), newMember(t, "bob", nk(2))
-	c := mustParse(t, "[relay]\nretention_seconds = 86400\n\n# parties\n"+partyBlock(a, "send_to = [\""+hexfp(b.fp)+"\"]")+"\n"+partyBlock(b))
-	if len(c.Entries) != 2 || c.RetentionSeconds != 86400 {
-		t.Fatalf("%d entries, retention %d", len(c.Entries), c.RetentionSeconds)
-	}
-	l := c.AccessList()
-	ea, ok := l.Lookup(a.fp)
-	if !ok || ea.Label != "alice" || ea.Node != a.node || ea.Fingerprint != a.fp || ea.Document.Identity.Ed25519 != a.id.Ed25519 {
-		t.Fatalf("alice = %+v, %v", ea, ok)
-	}
-	if !ea.MaySendTo(b.fp) || ea.MaySendTo(a.fp) {
-		t.Fatalf("alice's send_to = %v", ea.SendTo())
-	}
-	if got, ok := l.LookupNode(b.node); !ok || got.Fingerprint != b.fp {
-		t.Fatalf("lookup by node key: %+v %v", got, ok)
-	}
-	if _, ok := l.Lookup(party.Fingerprint{1}); ok {
-		t.Fatal("an unknown fingerprint was found")
-	}
-	if _, ok := l.LookupNode(party.NodeKey{9}); ok {
-		t.Fatal("an unknown node key was found")
-	}
-	// the tunnel allow-list is exactly the node keys of the access list
-	got := l.NodeKeys()
-	want := []party.NodeKey{a.node, b.node}
-	slices.SortFunc(got, func(x, y party.NodeKey) int { return slices.Compare(x[:], y[:]) })
-	slices.SortFunc(want, func(x, y party.NodeKey) int { return slices.Compare(x[:], y[:]) })
-	if !slices.Equal(got, want) {
-		t.Fatalf("NodeKeys = %x, want exactly %x", got, want)
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("%s: %v, want an error that says %q", name, err, want)
 	}
 }
 
-// spec: SPO-Xmailbox-SEC-011
-func TestSendToDefaultsToNothing(t *testing.T) {
-	a, b := newMember(t, "alice", nk(1)), newMember(t, "bob", nk(2))
-	c := mustParse(t, partyBlock(a)+partyBlock(b))
-	for _, e := range c.Entries {
-		if len(e.SendTo()) != 0 || e.MaySendTo(a.fp) || e.MaySendTo(b.fp) {
-			t.Fatalf("%s may send to %v by default", e.Label, e.SendTo())
+// The smallest file loads, and every part is the ADR's default: the registry and
+// the open quota agree on 1024 devices, the policy is the ADR's, the retention is
+// seven days in the limits and for the sweeper, the tunnel admits the one device.
+//
+// spec: SPO-Xmailbox-IF-022, SPO-Xmailbox-PRE-064
+func TestMinimalFileLoadsWithTheDefaults(t *testing.T) {
+	c := mustParse(t, minimal())
+	if c.Admission != relayconf.AdmitOpen || c.Registry.Restricted || len(c.Wallets) != 0 {
+		t.Fatalf("admission %v restricted %v wallets %v", c.Admission, c.Registry.Restricted, c.Wallets)
+	}
+	if c.Registry.MaxBoundDevices != mailbox.DefaultBoundDevices || c.Quota.Quota().MaxBoundDevices != uint64(mailbox.DefaultBoundDevices) {
+		t.Fatalf("bound devices: registry %d, quota %d", c.Registry.MaxBoundDevices, c.Quota.Quota().MaxBoundDevices)
+	}
+	if c.Quota.Quota() != mailbox.DefaultOpenQuota() {
+		t.Fatalf("quota %+v, want the default %+v", c.Quota.Quota(), mailbox.DefaultOpenQuota())
+	}
+	if c.Registry.Policy != relaybind.DefaultPolicy() {
+		t.Fatalf("policy %+v", c.Registry.Policy)
+	}
+	def := relayregistry.DefaultConfig()
+	def.Evictable = nil
+	if c.Registry.MaxTombstones != def.MaxTombstones || c.Registry.IdleDrop != def.IdleDrop || c.Registry.NewBindingsPerHour != def.NewBindingsPerHour {
+		t.Fatalf("registry %+v, want %+v", c.Registry, def)
+	}
+	if c.RetentionSeconds != mailbox.DefaultRetentionSeconds {
+		t.Fatalf("retention %d", c.RetentionSeconds)
+	}
+	if len(c.Limits) != 0 {
+		t.Fatalf("limits %v: no override was given", c.Limits)
+	}
+	if c.Port != 7346 || c.SweepInterval != 5*time.Minute || c.DERPMapURL != "" {
+		t.Fatalf("port %d sweep %v derp %q", c.Port, c.SweepInterval, c.DERPMapURL)
+	}
+	if keys := c.NodeKeys(); len(keys) != 1 || fmt.Sprintf("%x", keys[0][:]) != devA {
+		t.Fatalf("node keys %x", keys)
+	}
+	if c.KeyFile != "/srv/relay/key/relay.key" || c.MailboxDir != "/srv/relay/mailbox" || c.RegistryDir != "/srv/relay/registry" {
+		t.Fatalf("paths %q %q %q", c.KeyFile, c.MailboxDir, c.RegistryDir)
+	}
+	if err := c.Check(); err != nil {
+		t.Fatalf("Check of a loaded file: %v", err)
+	}
+}
+
+// Admission is a required key with two values; the allow-list needs wallet keys
+// and open admission takes none.
+//
+// spec: SPO-Xmailbox-PRE-061
+func TestAdmissionIsRequired(t *testing.T) {
+	refused(t, "missing", relayTable("")+device("a", devA), "admission")
+	refused(t, "other value", relayTable("everyone")+device("a", devA), "admission")
+	refused(t, "allow-list with no wallet", relayTable("allow-list")+device("a", devA), "[[wallet]]")
+	refused(t, "open with a wallet", relayTable("open")+device("a", devA)+wallet("w", walA), "open")
+	refused(t, "repeated wallet key", relayTable("allow-list")+device("a", devA)+wallet("w1", walA)+wallet("w2", walA), "twice")
+	refused(t, "repeated wallet label", relayTable("allow-list")+device("a", devA)+wallet("w", walA)+wallet("w", walB), "label")
+	refused(t, "upper-case wallet key", relayTable("allow-list")+device("a", devA)+wallet("w", strings.ToUpper(walA)), "56 lower-case hex")
+	refused(t, "short wallet key", relayTable("allow-list")+device("a", devA)+wallet("w", walA[:54]), "56 lower-case hex")
+	refused(t, "a wallet without a key", relayTable("allow-list")+device("a", devA)+"[[wallet]]\nlabel = \"w\"\n", "56 lower-case hex")
+
+	c := mustParse(t, relayTable("allow-list")+device("a", devA)+wallet("alice", walA)+wallet("bob", walB))
+	if c.Admission != relayconf.AdmitAllowList || !c.Registry.Restricted || len(c.Registry.Allowed) != 2 {
+		t.Fatalf("admission %v restricted %v allowed %x", c.Admission, c.Registry.Restricted, c.Registry.Allowed)
+	}
+	if fmt.Sprintf("%x", c.Registry.Allowed[0][:]) != walA || c.Wallets[1].Label != "bob" {
+		t.Fatalf("allowed %x wallets %+v", c.Registry.Allowed, c.Wallets)
+	}
+}
+
+// The tunnel admits exactly the listed device node keys; there is no way to open
+// it in this build, and the switch that would is named loudly and refused.
+//
+// spec: SPO-Xmailbox-PRE-062
+func TestTheTunnelIsRestrictedByDefault(t *testing.T) {
+	refused(t, "no device", relayTable("open"), "[[device]]")
+	refused(t, "open tunnel switch of another spelling", relayTable("open", "open_tunnel = true")+device("a", devA), "unknown key")
+	refused(t, "open tunnel switch as text", relayTable("open", "unsafe_open_tunnel = \"yes\"")+device("a", devA), "wrong kind")
+	refused(t, "open tunnel switch", relayTable("open", "unsafe_open_tunnel = true")+device("a", devA), "unsafe_open_tunnel")
+	refused(t, "zero node key", relayTable("open")+device("a", strings.Repeat("0", 64)), "zero")
+	refused(t, "repeated node key", relayTable("open")+device("a", devA)+device("b", devA), "twice")
+	refused(t, "repeated device label", relayTable("open")+device("a", devA)+device("a", devB), "label")
+	refused(t, "upper-case node key", relayTable("open")+device("a", strings.ToUpper(devA)), "64 lower-case hex")
+	refused(t, "node key of 63 digits", relayTable("open")+device("a", devA[:63]), "64 lower-case hex")
+	refused(t, "a device without a key", relayTable("open")+"[[device]]\nlabel = \"a\"\n", "64 lower-case hex")
+
+	c := mustParse(t, relayTable("open", "unsafe_open_tunnel = false")+device("a", devA)+device("b", devB))
+	if len(c.Devices) != 2 || c.Devices[1].Label != "b" || fmt.Sprintf("%x", c.Devices[1].Key[:]) != devB {
+		t.Fatalf("devices %+v", c.Devices)
+	}
+
+	// 4096 tables load; the 4097th is refused at its header
+	var b strings.Builder
+	b.WriteString(relayTable("open"))
+	for i := range relayconfig.MaxArrayTables {
+		fmt.Fprintf(&b, "[[device]]\nlabel = \"d%d\"\nnode_key = \"%064x\"\n", i, i+1)
+	}
+	if _, err := relayconfig.Parse([]byte(b.String())); err != nil {
+		t.Fatalf("%d devices: %v", relayconfig.MaxArrayTables, err)
+	}
+	fmt.Fprintf(&b, "[[device]]\nlabel = \"one more\"\nnode_key = \"%064x\"\n", relayconfig.MaxArrayTables+1)
+	refused(t, "4097 devices", b.String(), "4096")
+}
+
+// The file is the subset of TOML and nothing else: unknown keys and tables, a
+// key outside a table, a value of the wrong kind, a repeated key or table and an
+// over-long line are refused, and so are labels that are empty, only spaces, too
+// long or hold a character a terminal acts on.
+//
+// spec: SPO-Xmailbox-PRE-060, SPO-Xmailbox-SEC-019
+func TestOnlyTheSchemaIsAccepted(t *testing.T) {
+	for _, c := range []struct{ name, text, want string }{
+		{"unknown key in [relay]", relayTable("open", "admision = \"open\"") + device("a", devA), "unknown key"},
+		{"unknown key in [registry]", minimal("[quota]\nmailbox_entries = 256\n", "[registry]\nmax_bound_device = 2\n"), "unknown key"},
+		{"unknown key in [quota]", minimal("[quota]\nmailbox = 256\n"), "unknown key"},
+		{"unknown key in [limits]", minimal("[limits]\nconnection = 8\n"), "unknown key"},
+		{"unknown key in [[device]]", relayTable("open") + device("a", devA) + "send_to = \"x\"\n", "unknown key"},
+		{"unknown key in [[wallet]]", relayTable("allow-list") + device("a", devA) + wallet("w", walA) + "role = \"x\"\n", "unknown key"},
+		{"unknown table", minimal("[party]\nlabel = \"x\"\n"), "not a table"},
+		{"unknown array table", minimal("[[party]]\nlabel = \"x\"\n"), "not a table"},
+		{"device as a plain table", relayTable("open") + device("a", devA) + "[device]\nlabel = \"b\"\n", "not a table"},
+		{"relay as an array table", "[[relay]]\nadmission = \"open\"\n" + device("a", devA), "not a table"},
+		{"key outside a table", "admission = \"open\"\n" + minimal(), "outside a table"},
+		{"string for a number", minimal("[registry]\nmax_bound_devices = \"1024\"\n"), "wrong kind"},
+		{"number for a string", relayTable("open", "derp_map_url = 5") + device("a", devA), "wrong kind"},
+		{"bool for a number", minimal("[limits]\nconnections = true\n"), "wrong kind"},
+		{"list for a string", relayTable("open") + "[[device]]\nlabel = [\"a\"]\nnode_key = \"" + devA + "\"\n", "not supported"},
+		{"repeated key", relayTable("open", "port = 7346", "port = 7347") + device("a", devA), "twice"},
+		{"repeated table", minimal("[quota]\n", "[quota]\n"), "twice"},
+		{"negative number", minimal("[limits]\nconnections = -1\n"), "not a string"},
+		{"leading zero", minimal("[limits]\nconnections = 064\n"), "leading zero"},
+		{"line over 4 KiB", relayTable("open", "derp_map_url = \"https://"+strings.Repeat("a", 5000)+"\"") + device("a", devA), "line"},
+		{"bidi in a label", relayTable("open") + device("a‮b", devA), "U+202E"},
+		{"empty label", relayTable("open") + device("", devA), "label"},
+		{"label of spaces", relayTable("open") + device("   ", devA), "label"},
+		{"label over 64 bytes", relayTable("open") + device(strings.Repeat("x", 65), devA), "label"},
+		{"no label", relayTable("open") + "[[device]]\nnode_key = \"" + devA + "\"\n", "label"},
+		{"no [relay]", device("a", devA), "[relay]"},
+		{"port 0", relayTable("open", "port = 0") + device("a", devA), "port"},
+		{"port 65536", relayTable("open", "port = 65536") + device("a", devA), "port"},
+		{"plain-http DERP map", relayTable("open", "derp_map_url = \"http://derp.example/map.json\"") + device("a", devA), "https"},
+		{"sweep 59 s", relayTable("open", "sweep_seconds = 59") + device("a", devA), "sweep"},
+		{"sweep over a day", relayTable("open", "sweep_seconds = 86401") + device("a", devA), "sweep"},
+		{"not UTF-8", minimal() + "# \xff\n", "UTF-8"},
+	} {
+		refused(t, c.name, c.text, c.want)
+	}
+	c := mustParse(t, relayTable("open", "port = 7400", "sweep_seconds = 60", "derp_map_url = \"https://derp.example/map.json\"")+device("a", devA))
+	if c.Port != 7400 || c.SweepInterval != time.Minute || c.DERPMapURL != "https://derp.example/map.json" {
+		t.Fatalf("port %d sweep %v derp %q", c.Port, c.SweepInterval, c.DERPMapURL)
+	}
+}
+
+// One max_bound_devices is the registry's and the quota's; the global quota must
+// cover that many queues; one policy is the registry's and the session's; one
+// retention is the session's and the sweeper's; every bound is within the
+// protocol tables.
+//
+// spec: SPO-Xmailbox-PRE-064, SPO-Xmailbox-PRE-031
+func TestTheQuotaTheRegistryThePolicyAndTheRetentionAgree(t *testing.T) {
+	// 2048 devices at the 4 MiB queue need 8 GiB: the default 4 GiB is refused
+	refused(t, "2048 devices on 4 GiB", minimal("[registry]\nmax_bound_devices = 2048\n"), "global quota")
+	c := mustParse(t, minimal("[registry]\nmax_bound_devices = 2048\n[quota]\nglobal_bytes = 8589934592\n"))
+	if c.Registry.MaxBoundDevices != 2048 || c.Quota.Quota().MaxBoundDevices != 2048 || c.Registry.MaxTombstones != 16*2048 {
+		t.Fatalf("registry %d quota %d tombstones %d", c.Registry.MaxBoundDevices, c.Quota.Quota().MaxBoundDevices, c.Registry.MaxTombstones)
+	}
+	mustParse(t, minimal("[registry]\nmax_bound_devices = 4096\n[quota]\nglobal_bytes = 17179869184\n"))
+	refused(t, "4097 devices", minimal("[registry]\nmax_bound_devices = 4097\n[quota]\nglobal_bytes = 17179869184\n"), "max bound devices")
+	refused(t, "0 devices", minimal("[registry]\nmax_bound_devices = 0\n"), "max bound devices")
+	// one less byte than the rule needs, at the default 1024
+	refused(t, "global quota a byte short", minimal("[quota]\nglobal_bytes = 4294967295\n"), "global quota")
+	refused(t, "strangers fill the queue", minimal("[quota]\nmailbox_entries = 16\nstranger_entries = 16\n"), "stranger")
+	refused(t, "strangers leave no envelope", minimal("[quota]\nmailbox_bytes = 2097152\nstranger_bytes = 1048577\n"), "stranger")
+	refused(t, "a queue over the ceiling", minimal("[quota]\nmailbox_entries = 257\n"), "")
+
+	refused(t, "retention 0", relayTable("open", "retention_seconds = 0")+device("a", devA), "retention")
+	refused(t, "retention over 30 days", relayTable("open", "retention_seconds = 2592001")+device("a", devA), "retention")
+	c = mustParse(t, relayTable("open", "retention_seconds = 86400")+device("a", devA))
+	if c.RetentionSeconds != 86400 {
+		t.Fatalf("retention %d", c.RetentionSeconds)
+	}
+
+	refused(t, "lifetime 181 days", minimal("[registry]\nmax_binding_days = 181\n"), "binding days")
+	refused(t, "lifetime 0 days", minimal("[registry]\nmax_binding_days = 0\n"), "binding days")
+	refused(t, "skew 301", minimal("[registry]\nskew_seconds = 301\n"), "skew")
+	c = mustParse(t, minimal("[registry]\nmax_binding_days = 30\nskew_seconds = 60\n"))
+	if c.Registry.Policy != (relaybind.Policy{Skew: 60, MaxLifetime: 30 * 86400}) {
+		t.Fatalf("policy %+v", c.Registry.Policy)
+	}
+
+	// the limits are the operator's overrides; their ceilings are the session's
+	// (app/relayhost validates them)
+	c = mustParse(t, minimal("[limits]\nconnections = 8\nconns_per_device = 1\nfetch_wait_seconds = 0\nmax_envelope_bytes = 65536\n"))
+	if len(c.Limits) != 4 || c.Limits["connections"] != 8 || c.Limits["conns_per_device"] != 1 || c.Limits["fetch_wait_seconds"] != 0 || c.Limits["max_envelope_bytes"] != 65536 {
+		t.Fatalf("limits %v", c.Limits)
+	}
+	for _, l := range []string{"max_devices_per_key = 9", "new_bindings_per_hour = 61", "new_binding_burst = 11", "revokes_per_hour = 61",
+		"revoke_burst = 11", "idle_drop_days = 31", "idle_drop_days = 0", "max_tombstones = 65537", "max_tombstones = 1"} {
+		refused(t, l, minimal("[registry]\n"+l+"\n"), "")
+	}
+	c = mustParse(t, minimal("[registry]\nmax_devices_per_key = 2\nidle_drop_days = 1\nmax_tombstones = 100\n"))
+	if c.Registry.MaxDevicesPerKey != 2 || c.Registry.IdleDrop != 24*time.Hour || c.Registry.MaxTombstones != 100 {
+		t.Fatalf("registry %+v", c.Registry)
+	}
+}
+
+// Too many [[device]] and [[wallet]] tables: the refusal says how many there are
+// and the bound (review finding N1).
+//
+// spec: SPO-Xmailbox-PRE-064
+func TestCheckSaysHowManyTablesAndTheBound(t *testing.T) {
+	c := mustParse(t, minimal())
+	c.Devices = make([]relayconf.Device, relayconf.MaxDevices)
+	c.Wallets = []relayconf.Wallet{{Label: "a"}, {Label: "b"}}
+	err := c.Check()
+	want := fmt.Sprintf("%d devices and wallet keys; at most %d", relayconf.MaxDevices+2, relayconf.MaxDevices)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Check: %v, want %q", err, want)
+	}
+}
+
+// Check refuses a configuration whose parts were changed after its load so that
+// they disagree: each disagreement alone.
+//
+// spec: SPO-Xmailbox-PRE-064
+func TestCheckRefusesPartsThatDisagree(t *testing.T) {
+	for name, change := range map[string]func(c *relayconf.Config){
+		"registry devices": func(c *relayconf.Config) { c.Registry.MaxBoundDevices = 512 },
+		"registry policy":  func(c *relayconf.Config) { c.Registry.Policy.MaxLifetime = 10 },
+		"wallets on open":  func(c *relayconf.Config) { c.Wallets = []relayconf.Wallet{{Label: "w"}} },
+		"admission":        func(c *relayconf.Config) { c.Admission = "everyone" },
+		"retention 0":      func(c *relayconf.Config) { c.RetentionSeconds = 0 },
+		"retention 31 d":   func(c *relayconf.Config) { c.RetentionSeconds = mailbox.MaxRetentionSeconds + 1 },
+		"no device":        func(c *relayconf.Config) { c.Devices = nil },
+		"allow-list off":   func(c *relayconf.Config) { c.Registry.Restricted = true },
+		"an evictable":     func(c *relayconf.Config) { c.Registry.Evictable = func(party.Fingerprint) bool { return true } },
+		"no quota":         func(c *relayconf.Config) { c.Quota = mailbox.ValidOpenQuota{} },
+		"a limit key":      func(c *relayconf.Config) { c.Limits = map[string]uint64{"connection": 1} },
+		"sweep interval":   func(c *relayconf.Config) { c.SweepInterval = 0 },
+		"port":             func(c *relayconf.Config) { c.Port = 0 },
+	} {
+		c := mustParse(t, minimal())
+		change(c)
+		if err := c.Check(); err == nil {
+			t.Errorf("%s: Check accepted a configuration whose parts disagree", name)
 		}
 	}
-	c = mustParse(t, partyBlock(a, "send_to = []")+partyBlock(b))
-	if len(c.Entries[0].SendTo()) != 0 {
-		t.Fatal("an empty send_to is not empty")
+	var nilCfg *relayconf.Config
+	if nilCfg.Check() == nil {
+		t.Error("Check of nil")
+	}
+	c := mustParse(t, relayTable("allow-list")+device("a", devA)+wallet("w", walA))
+	c.Registry.Restricted = false
+	if c.Check() == nil {
+		t.Error("an allow-list configuration with the registry's list off passed Check")
 	}
 }
 
-func TestLabelDefaultsToTheDocumentsAndIsChecked(t *testing.T) {
-	a := newMember(t, "from-the-document", nk(1))
-	c := mustParse(t, "[[party]]\ndocument = \""+a.b64+"\"\n")
-	if c.Entries[0].Label != "from-the-document" {
-		t.Fatalf("label = %q", c.Entries[0].Label)
-	}
-	wantErr(t, "[[party]]\nlabel = \""+strings.Repeat("x", 65)+"\"\ndocument = \""+a.b64+"\"\n", "label")
-	// a format character is not a control character but is as bad (a bidi
-	// override): the parser refuses it anywhere in the file
-	wantErr(t, "[[party]]\nlabel = \"evil\u202etxt\"\ndocument = \""+a.b64+"\"\n", "bidirectional")
-	// 64 bytes is the limit and is accepted
-	c = mustParse(t, "[[party]]\nlabel = \""+strings.Repeat("x", 64)+"\"\ndocument = \""+a.b64+"\"\n")
-	if len(c.Entries[0].Label) != 64 {
-		t.Fatal("a label of 64 bytes was not kept")
-	}
-}
-
-// spec: SPO-Xmailbox-SEC-010
-func TestADocumentWithNoNodeKeyIsRefused(t *testing.T) {
-	m := newMember(t, "nonode", nil)
-	wantErr(t, partyBlock(m), "node key")
-}
-
-// spec: SPO-Xmailbox-SEC-010
-func TestASelfSignatureThatFailsIsRefused(t *testing.T) {
-	m := newMember(t, "forged", nk(3))
-	bad := slices.Clone(m.doc)
-	bad[len(bad)-1] ^= 0x01 // the last byte is in the signature
-	wantErr(t, "[[party]]\nlabel = \"forged\"\ndocument = \""+base64.StdEncoding.EncodeToString(bad)+"\"\n", "signature")
-	// another party's signature over this content
-	other := newMember(t, "other", nk(4))
-	spliced := slices.Clone(m.doc)
-	copy(spliced[len(spliced)-64:], other.doc[len(other.doc)-64:])
-	wantErr(t, "[[party]]\ndocument = \""+base64.StdEncoding.EncodeToString(spliced)+"\"\n", "signature")
-}
-
-// spec: SPO-Xmailbox-PRE-012
-func TestDuplicatesAreRefused(t *testing.T) {
-	a := newMember(t, "alice", nk(1))
-	wantErr(t, partyBlock(a)+partyBlock(a), "fingerprint")
-	b := newMember(t, "bob", nk(1)) // another identity on the same node key
-	wantErr(t, partyBlock(a)+partyBlock(b), "node key")
-}
-
-// spec: SPO-Xmailbox-PRE-012
-func TestAnEmptyListIsRefused(t *testing.T) {
-	wantErr(t, "", "part")
-	wantErr(t, "# nothing\n", "part")
-	wantErr(t, "[relay]\nretention_seconds = 1000\n", "part")
-}
-
-// spec: SPO-Xmailbox-PRE-012
-func TestMoreThanTheLimitOfPartiesIsRefusedByCountBeforeDecoding(t *testing.T) {
-	var sb strings.Builder
-	for range mailbox.MaxAccessListParties + 1 {
-		sb.WriteString("[[party]]\ndocument = \"AAAA\"\n")
-	}
-	wantErr(t, sb.String(), fmt.Sprint(mailbox.MaxAccessListParties))
-	// at the limit the refusal is about the document, not the count
-	sb.Reset()
-	for range mailbox.MaxAccessListParties {
-		sb.WriteString("[[party]]\ndocument = \"AAAA\"\n")
-	}
-	if _, err := parse(t, sb.String()); err == nil || strings.Contains(err.Error(), "at most") {
-		t.Fatalf("1024 parties: %v", err)
-	}
-}
-
-// spec: SPO-Xmailbox-PRE-013
-func TestQuotasAreValidated(t *testing.T) {
-	a, b := newMember(t, "alice", nk(1)), newMember(t, "bob", nk(2))
-	parties := partyBlock(a) + partyBlock(b)
-	// two parties at 64 MiB each need 128 MiB
-	wantErr(t, "[relay]\nglobal_bytes = 134217727\n"+parties, "global")
-	if c := mustParse(t, "[relay]\nglobal_bytes = 134217728\n"+parties); c.Quota.GlobalBytes != 134217728 {
-		t.Fatal("the exact cover was refused or not applied")
-	}
-	wantErr(t, "[relay]\nsender_bytes = 67108864\nglobal_bytes = 1000\n"+parties, "global")
-	// a tighter per-sender total lowers what the global quota must cover
-	mustParse(t, "[relay]\nsender_bytes = 1000\nglobal_bytes = 2000\n"+parties)
-	wantErr(t, "[relay]\nsender_bytes = 1000\nglobal_bytes = 1999\n"+parties, "global")
-	// nothing looser than the table, nothing zero
-	wantErr(t, "[relay]\nmailbox_bytes = 99999999999999999999999\n"+parties, "out of range")
-	for _, kv := range []string{"mailbox_entries = 257", "mailbox_bytes = 67108865", "pair_entries = 65", "pair_bytes = 8388609", "sender_bytes = 67108865",
-		"mailbox_entries = 0", "pair_bytes = 0"} {
-		wantErr(t, "[relay]\n"+kv+"\n"+parties, strings.ReplaceAll(strings.Fields(kv)[0], "_", " "))
-	}
-	wantErr(t, "[relay]\nglobal_bytes = 0\n"+parties, "global")
-	// the defaults are the table
-	c := mustParse(t, parties)
-	if c.Quota != mailbox.DefaultQuota() || c.Limits.IsZero() || c.Limits.Quota() != mailbox.DefaultQuota() || c.RetentionSeconds != mailbox.DefaultRetentionSeconds {
-		t.Fatalf("defaults = %+v, %d", c.Quota, c.RetentionSeconds)
-	}
-	// retention: 1 to the maximum
-	wantErr(t, "[relay]\nretention_seconds = 0\n"+parties, "retention")
-	wantErr(t, fmt.Sprintf("[relay]\nretention_seconds = %d\n%s", mailbox.MaxRetentionSeconds+1, parties), "retention")
-	if c := mustParse(t, fmt.Sprintf("[relay]\nretention_seconds = %d\n%s", mailbox.MaxRetentionSeconds, parties)); c.RetentionSeconds != mailbox.MaxRetentionSeconds {
-		t.Fatal("the maximum retention was refused")
-	}
-	// the global default covers 64 parties at 64 MiB: 4 GiB / 64 MiB; 65 would not, but 1024 limit is by count
-}
-
-// spec: SPO-Xmailbox-PRE-012
-func TestUnknownKeysAndTablesAreRefused(t *testing.T) {
-	a := newMember(t, "alice", nk(1))
-	p := "[[party]]\nlabel = \"x\"\ndocument = \"" + a.b64 + "\"\n"
-	for name, text := range map[string]string{
-		"a top-level key":                 "retention_seconds = 5\n" + p,
-		"an unknown relay key":            "[relay]\nretension_seconds = 5\n" + p,
-		"an unknown party key":            strings.Replace(p, "label", "lable", 1),
-		"an unknown table":                "[other]\nx = 1\n" + p,
-		"a plain party table":             strings.Replace(p, "[[party]]", "[party]", 1),
-		"relay twice":                     "[relay]\n[relay]\n" + p,
-		"a repeated key":                  "[relay]\nretention_seconds = 5\nretention_seconds = 6\n" + p,
-		"a repeated party key":            p + "label = \"again\"\n",
-		"a dotted key":                    "[relay]\nx.y = 1\n" + p,
-		"a send_to that is text":          strings.Replace(p, "document", "send_to = \"x\"\ndocument", 1),
-		"a number as a document":          "[[party]]\ndocument = 5\n",
-		"a string as a number":            "[relay]\nretention_seconds = \"5\"\n" + p,
-		"a negative number":               "[relay]\nretention_seconds = -5\n" + p,
-		"a number with an underscore":     "[relay]\nretention_seconds = 1_000\n" + p,
-		"a hex number":                    "[relay]\nretention_seconds = 0x10\n" + p,
-		"a leading zero":                  "[relay]\nretention_seconds = 0100\n" + p,
-		"a number too large":              "[relay]\nmailbox_bytes = 99999999999999999999999\n" + p,
-		"an unclosed string":              strings.Replace(p, "label = \"x\"", "label = \"abc", 1),
-		"a bad escape":                    strings.Replace(p, "label = \"x\"", "label = \"a\\nb\"", 1),
-		"a tab in a string":               strings.Replace(p, "label = \"x\"", "label = \"a\tb\"", 1),
-		"an escape character in a string": strings.Replace(p, "label = \"x\"", "label = \"a\x1bb\"", 1),
-		"a delete character in a string":  strings.Replace(p, "label = \"x\"", "label = \"a\x7fb\"", 1),
-		"text after the value":            "[relay]\nretention_seconds = 5 extra\n" + p,
-		"text after a string":             strings.Replace(p, "label = \"x\"", "label = \"x\" extra", 1),
-		"no equals":                       "[relay]\nretention_seconds\n" + p,
-		"a literal string":                strings.Replace(p, "label = \"x\"", "label = 'x'", 1),
-		"a multi-line array":              strings.Replace(p, "document", "send_to = [\n\"a\"]\ndocument", 1),
-		"an array of numbers":             strings.Replace(p, "document", "send_to = [1]\ndocument", 1),
-		"an unclosed array":               strings.Replace(p, "document", "send_to = [\"a\"\ndocument", 1),
-		"a trailing comma":                strings.Replace(p, "document", "send_to = [\"a\",]\ndocument", 1),
-		"invalid UTF-8":                   strings.Replace(p, "label = \"x\"", "label = \"\xff\"", 1),
-		"text after the party header":     strings.Replace(p, "[[party]]", "[[party]] extra", 1),
-		"text after the relay header":     "[relay] extra\n" + p,
-		"a key with a space":              "[relay]\nretention seconds = 5\n" + p,
-		"a key with a dot":                "[relay]\nretention.seconds = 5\n" + p,
-	} {
-		t.Run(name, func(t *testing.T) {
-			if c, err := parse(t, text); err == nil {
-				t.Fatalf("accepted (%d entries)", len(c.Entries))
-			}
-		})
-	}
-	// a key and comments are fine
-	mustParse(t, "# c\n[relay]   # c\nretention_seconds = 5 # c\n"+p)
-}
-
-// spec: SPO-Xmailbox-PRE-012
-func TestSendToIsChecked(t *testing.T) {
-	a, b := newMember(t, "alice", nk(1)), newMember(t, "bob", nk(2))
-	ok := hexfp(b.fp)
-	for name, send := range map[string]string{
-		"an unknown fingerprint": `["` + strings.Repeat("ab", 20) + `"]`,
-		"upper case":             `["` + strings.ToUpper(ok) + `"]`,
-		"too short":              `["` + ok[:38] + `"]`,
-		"not hex":                `["` + strings.Repeat("zz", 20) + `"]`,
-		"a repeat":               `["` + ok + `", "` + ok + `"]`,
-		"too long":               `["` + ok + `00"]`,
-		"with a prefix":          `["00` + ok + `"]`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			wantErr(t, partyBlock(a, "send_to = "+send)+partyBlock(b), "send_to")
-		})
-	}
-	// more entries than there can be parties
-	many := make([]string, mailbox.MaxAccessListParties+1)
-	for i := range many {
-		many[i] = fmt.Sprintf(`"%040x"`, i)
-	}
-	wantErr(t, partyBlock(a, "send_to = ["+strings.Join(many, ",")+"]")+partyBlock(b), "at most 1024")
-	// 1024 entries pass the count (they are refused for naming unknown parties)
-	if _, err := parse(t, partyBlock(a, "send_to = ["+strings.Join(many[:mailbox.MaxAccessListParties], ",")+"]")+partyBlock(b)); err == nil || strings.Contains(err.Error(), "at most") {
-		t.Fatalf("1024 send_to entries: %v", err)
-	}
-	// a party may name itself and others, in any order in the file
-	mustParse(t, partyBlock(a, `send_to = ["`+hexfp(a.fp)+`", "`+ok+`"]`)+partyBlock(b))
-}
-
-// spec: SPO-Xmailbox-PRE-012
-func TestDocumentsAreBoundedBeforeDecoding(t *testing.T) {
-	// the document parser is a probe: it says which stage a document reached
-	reached := false
-	probe := func([]byte) (party.Document, error) {
-		reached = true
-		return party.Document{}, errors.New("probe: reached the parser")
-	}
-	parseWith := func(doc string) error {
-		reached = false
-		_, err := relayconfig.Parse([]byte("[[party]]\ndocument = \""+doc+"\"\n"), probe)
-		return err
-	}
-	limit := base64.StdEncoding.EncodedLen(relayconfig.MaxDocumentBytes)
-	// exactly the bound reaches the parser; one more character does not
-	if err := parseWith(strings.Repeat("A", limit)); !reached || err == nil || !strings.Contains(err.Error(), "probe") {
-		t.Fatalf("a document of exactly the bound did not reach the parser: %v", err)
-	}
-	if err := parseWith(strings.Repeat("A", limit+4)); reached || err == nil || !strings.Contains(err.Error(), "over 4096 bytes") {
-		t.Fatalf("a document over the bound: reached %v, %v", reached, err)
-	}
-	if err := parseWith(strings.Repeat("A", 20000)); reached || err == nil || !strings.Contains(err.Error(), "over 4096 bytes") {
-		t.Fatalf("a huge document: reached %v, %v", reached, err)
-	}
-	// base64 is strict: non-zero padding bits are refused
-	if err := parseWith("QQ=="); !reached {
-		t.Fatalf("a canonical base64 string did not reach the parser: %v", err)
-	}
-	if err := parseWith("QR=="); reached || err == nil || !strings.Contains(err.Error(), "base64") {
-		t.Fatalf("non-canonical base64: reached %v, %v", reached, err)
-	}
-	if err := parseWith("!!!!"); reached || err == nil || !strings.Contains(err.Error(), "base64") {
-		t.Fatalf("not base64: reached %v, %v", reached, err)
-	}
-	if err := parseWith(""); reached || err == nil || !strings.Contains(err.Error(), "no document") {
-		t.Fatalf("an empty document: reached %v, %v", reached, err)
-	}
-	wantErr(t, "[[party]]\nlabel = \"x\"\n", "no document")
-	wantErr(t, "[[party]]\ndocument = \"AAAA\"\n", "does not parse") // not a document
-	if _, err := relayconfig.Parse([]byte(partyBlock(newMember(t, "x", nk(1)))), nil); err == nil {
-		t.Fatal("a nil document parser was accepted")
-	}
-	boom := errors.New("parser says no")
-	_, err := relayconfig.Parse([]byte(partyBlock(newMember(t, "x", nk(1)))), func([]byte) (party.Document, error) { return party.Document{}, boom })
-	if !errors.Is(err, boom) {
-		t.Fatalf("the parser's error is lost: %v", err)
-	}
-}
-
-// A document whose parse is trusted but that carries a zero node key is refused
-// too: the injected parser is not what enforces that.
+// Paths are absolute, clean, distinct and not inside one another.
 //
-// spec: SPO-Xmailbox-SEC-010
-func TestAZeroNodeKeyFromAnInjectedParserIsRefused(t *testing.T) {
-	pub, priv, _ := ed25519.GenerateKey(nil)
-	content := []byte("an identity")
-	var doc party.Document
-	copy(doc.Identity.Ed25519[:], pub)
-	doc.Identity.X25519 = party.X25519Public{1}
-	doc.Identity.Label = "zero"
-	doc.Content = content
-	copy(doc.Signature[:], ed25519.Sign(priv, party.DocumentMessage(content)))
-	text := "[[party]]\ndocument = \"QQ==\"\n"
-	parse := func(node *party.NodeKey) relayconfig.DocumentParser {
-		return func([]byte) (party.Document, error) { d := doc; d.Identity.Node = node; return d, nil }
+// spec: SPO-Xmailbox-PRE-063
+func TestPathsAreAbsoluteAndDistinct(t *testing.T) {
+	with := func(key, mbox, reg string) string {
+		return "[relay]\nadmission = \"open\"\nkey_file = \"" + key + "\"\nmailbox_dir = \"" + mbox + "\"\nregistry_dir = \"" + reg + "\"\n" + device("a", devA)
 	}
-	zero := party.NodeKey{}
-	if _, err := relayconfig.Parse([]byte(text), parse(&zero)); err == nil || !strings.Contains(err.Error(), "node key") {
-		t.Fatalf("a zero node key: %v", err)
-	}
-	if _, err := relayconfig.Parse([]byte(text), parse(nil)); err == nil || !strings.Contains(err.Error(), "node key") {
-		t.Fatalf("no node key: %v", err)
-	}
-	good := party.NodeKey{7}
-	if c, err := relayconfig.Parse([]byte(text), parse(&good)); err != nil || len(c.Entries) != 1 || c.Entries[0].Node != good {
-		t.Fatalf("a good node key: %v", err)
-	}
+	refused(t, "relative key", with("relay.key", "/m", "/r"), "absolute")
+	refused(t, "relative mailbox", with("/k/relay.key", "m", "/r"), "absolute")
+	refused(t, "not clean", with("/k/../k/relay.key", "/m", "/r"), "clean")
+	refused(t, "same store", with("/k/relay.key", "/s", "/s"), "distinct")
+	refused(t, "registry inside mailbox", with("/k/relay.key", "/s", "/s/reg"), "inside")
+	refused(t, "mailbox inside registry", with("/k/relay.key", "/s/m", "/s"), "inside")
+	refused(t, "key inside a store", with("/s/relay.key", "/s", "/r"), "inside")
+	refused(t, "key is a store", with("/s", "/s", "/r"), "distinct")
+	refused(t, "missing key_file", "[relay]\nadmission = \"open\"\nmailbox_dir = \"/m\"\nregistry_dir = \"/r\"\n"+device("a", devA), "key_file")
+	refused(t, "root as a store", with("/k/relay.key", "/", "/r"), "inside")
+	mustParse(t, with("/k/relay.key", "/s/mailbox", "/s/mailbox2"))
 }
 
-// spec: SPO-Xmailbox-PRE-012
-func TestFileSizeIsBoundedBeforeReading(t *testing.T) {
-	dir := t.TempDir()
+// writeFile writes a configuration file of mode perm.
+func writeFile(t *testing.T, dir, text string, perm os.FileMode) string {
+	t.Helper()
 	p := filepath.Join(dir, "relay.toml")
-	f, _ := os.Create(p)
-	f.Truncate(int64(relayconfig.MaxFileBytes) + 1) // sparse
-	f.Close()
-	os.Chmod(p, 0o600)
-	var m0, m1 runtime.MemStats
-	runtime.ReadMemStats(&m0)
-	_, err := relayconfig.Load(p, envelope.ParseDocument)
-	runtime.ReadMemStats(&m1)
-	if err == nil || !strings.Contains(err.Error(), "bytes; the limit is") {
-		t.Fatalf("Load = %v", err)
-	}
-	if d := m1.TotalAlloc - m0.TotalAlloc; d > 1<<20 {
-		t.Fatalf("an oversize file allocated %d bytes before it was refused", d)
-	}
-	if _, err := relayconfig.Parse(make([]byte, relayconfig.MaxFileBytes+1), envelope.ParseDocument); err == nil || !strings.Contains(err.Error(), "bytes; the limit is") {
-		t.Fatalf("Parse of an oversize input = %v", err)
-	}
-	// exactly the bound is not a size error (it is refused for what it holds)
-	if _, err := relayconfig.Parse(make([]byte, relayconfig.MaxFileBytes), envelope.ParseDocument); err == nil || strings.Contains(err.Error(), "bytes; the limit is") {
-		t.Fatalf("Parse of an input of exactly the bound = %v", err)
-	}
-	g, _ := os.Create(filepath.Join(dir, "exact.toml"))
-	g.Truncate(int64(relayconfig.MaxFileBytes))
-	g.Close()
-	os.Chmod(filepath.Join(dir, "exact.toml"), 0o600)
-	if _, err := relayconfig.Load(filepath.Join(dir, "exact.toml"), envelope.ParseDocument); err == nil || strings.Contains(err.Error(), "bytes; the limit is") {
-		t.Fatalf("Load of a file of exactly the bound = %v", err)
-	}
-	// a file claiming to be small but growing is read only up to the bound
-}
-
-// spec: SPO-Xmailbox-PRE-012
-func TestFileChecks(t *testing.T) {
-	a := newMember(t, "alice", nk(1))
-	dir := t.TempDir()
-	p := filepath.Join(dir, "relay.toml")
-	os.WriteFile(p, []byte(partyBlock(a)), 0o600)
-	if _, err := relayconfig.Load(p, envelope.ParseDocument); err != nil {
+	if err := os.WriteFile(p, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	os.Chmod(p, 0o620)
-	if _, err := relayconfig.Load(p, envelope.ParseDocument); err == nil || !strings.Contains(err.Error(), "writable") {
-		t.Fatalf("a group-writable file: %v", err)
+	if err := os.Chmod(p, perm); err != nil {
+		t.Fatal(err)
 	}
-	os.Chmod(p, 0o602)
-	if _, err := relayconfig.Load(p, envelope.ParseDocument); err == nil {
-		t.Fatal("a world-writable file was accepted")
+	return p
+}
+
+// privateTree makes a key directory and a store parent under a private temp dir
+// and returns a file that names them.
+func privateTree(t *testing.T) (root, text string) {
+	t.Helper()
+	root = t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := relayconfig.Load(dir, envelope.ParseDocument); err == nil || !strings.Contains(err.Error(), "not a regular file") {
-		t.Fatalf("a directory: %v", err)
-	}
-	os.Chmod(p, 0o000)
-	if _, err := relayconfig.Load(p, envelope.ParseDocument); err == nil && os.Geteuid() != 0 {
-		t.Fatal("an unreadable file was accepted")
-	}
-	os.Chmod(p, 0o600)
-	if _, err := relayconfig.Load(filepath.Join(dir, "missing.toml"), envelope.ParseDocument); err == nil {
-		t.Fatal("a missing file was accepted")
-	}
-	// a symbolic link to a good file is followed (a store path is one)
-	os.Chmod(p, 0o600)
-	ln := filepath.Join(dir, "link.toml")
-	os.Symlink(p, ln)
-	if _, err := relayconfig.Load(ln, envelope.ParseDocument); err != nil {
-		t.Fatalf("a link to a good file: %v", err)
-	}
-	fifo := filepath.Join(dir, "fifo.toml")
-	if err := mkfifo(fifo); err == nil {
-		done := make(chan error, 1)
-		go func() { _, err := relayconfig.Load(fifo, envelope.ParseDocument); done <- err }()
-		select {
-		case err := <-done:
-			if err == nil || !strings.Contains(err.Error(), "not a regular file") {
-				t.Fatalf("a FIFO: %v", err)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatal("Load blocked on a FIFO")
+	for _, d := range []string{"key", "state"} {
+		if err := os.Mkdir(filepath.Join(root, d), 0o700); err != nil {
+			t.Fatal(err)
 		}
+	}
+	text = "[relay]\nadmission = \"open\"\nkey_file = \"" + filepath.Join(root, "key", "relay.key") + "\"\nmailbox_dir = \"" +
+		filepath.Join(root, "state", "mailbox") + "\"\nregistry_dir = \"" + filepath.Join(root, "state", "registry") + "\"\n" + device("a", devA)
+	return root, text
+}
+
+// The file is read only when it is a regular file of the user (or root) that no
+// one else can write, and small; the size is checked before it is read.
+//
+// spec: SPO-Xmailbox-PRE-060, SPO-Xmailbox-SEC-018
+func TestTheFileMustBeRegularOwnedAndSmall(t *testing.T) {
+	root, text := privateTree(t)
+	p := writeFile(t, root, text, 0o600)
+	if _, err := relayconfig.Load(p); err != nil {
+		t.Fatalf("a private file: %v", err)
+	}
+	if _, err := relayconfig.Load(writeFile(t, root, text, 0o620)); err == nil || !strings.Contains(err.Error(), "writable") {
+		t.Errorf("a group-writable file: %v", err)
+	}
+	if _, err := relayconfig.Load(writeFile(t, root, text, 0o602)); err == nil || !strings.Contains(err.Error(), "writable") {
+		t.Errorf("a world-writable file: %v", err)
+	}
+	p = writeFile(t, root, text, 0o600)
+	me := os.Geteuid()
+	restore := relayconfig.SetEuid(func() int { return me + 1 })
+	_, err := relayconfig.Load(p)
+	restore()
+	if err == nil || !strings.Contains(err.Error(), p+" is owned by") {
+		t.Errorf("a file of another user: %v", err)
+	}
+	if !relayconfig.OwnerOK(0, 1000) || relayconfig.OwnerOK(1001, 1000) || !relayconfig.OwnerOK(1000, 1000) {
+		t.Error("the owner rule: root and the user, no one else")
+	}
+	big := filepath.Join(root, "big.toml")
+	if err := os.WriteFile(big, []byte(text+"#"+strings.Repeat("x", relayconfig.MaxFileBytes)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := relayconfig.Load(big); err == nil || !strings.Contains(err.Error(), "limit") {
+		t.Errorf("a file over the size bound: %v", err)
+	}
+	fifo := filepath.Join(root, "fifo.toml")
+	if err := mkfifo(fifo); err != nil {
+		t.Skip(err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := relayconfig.Load(fifo); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "regular") {
+			t.Errorf("a FIFO: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Load waited on a FIFO")
 	}
 }
 
-// spec: SPO-Xmailbox-PRE-014
-func TestAFailedReloadKeepsTheOldList(t *testing.T) {
-	a, b := newMember(t, "alice", nk(1)), newMember(t, "bob", nk(2))
-	p := filepath.Join(t.TempDir(), "relay.toml")
-	os.WriteFile(p, []byte(partyBlock(a)), 0o600)
-	r, err := relayconfig.OpenReloadable(p, envelope.ParseDocument)
+// At load the store directories and the key's directory must be private: an
+// existing store directory of another user, or with any group or other bit, is
+// refused, and so is the parent of a store directory that does not exist yet when
+// others can write it, a key directory others can write, and a key file others
+// can read.
+//
+// spec: SPO-Xmailbox-PRE-063, SPO-Xmailbox-SEC-077
+func TestStoreAndKeyPathsMustBePrivate(t *testing.T) {
+	root, text := privateTree(t)
+	p := writeFile(t, root, text, 0o600)
+	mbox := filepath.Join(root, "state", "mailbox")
+	load := func() error { _, err := relayconfig.Load(p); return err }
+	if err := load(); err != nil {
+		t.Fatalf("stores that do not exist yet under a private parent: %v", err)
+	}
+	if err := os.Mkdir(mbox, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := load(); err == nil || !strings.Contains(err.Error(), "permission") {
+		t.Errorf("a mailbox directory of mode 0750: %v", err)
+	}
+	if err := os.Chmod(mbox, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := load(); err != nil {
+		t.Fatalf("a private mailbox directory: %v", err)
+	}
+	if err := os.Remove(mbox); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mbox, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := load(); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Errorf("a file where the mailbox directory belongs: %v", err)
+	}
+	os.Remove(mbox)
+
+	if err := os.Chmod(filepath.Join(root, "state"), 0o770); err != nil {
+		t.Fatal(err)
+	}
+	if err := load(); err == nil || !strings.Contains(err.Error(), "writable") {
+		t.Errorf("a store parent others can write: %v", err)
+	}
+	os.Chmod(filepath.Join(root, "state"), 0o700)
+
+	if err := os.Chmod(filepath.Join(root, "key"), 0o730); err != nil {
+		t.Fatal(err)
+	}
+	if err := load(); err == nil || !strings.Contains(err.Error(), "writable") {
+		t.Errorf("a key directory others can write: %v", err)
+	}
+	os.Chmod(filepath.Join(root, "key"), 0o700)
+
+	key := filepath.Join(root, "key", "relay.key")
+	if err := os.WriteFile(key, []byte("x"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := load(); err == nil || !strings.Contains(err.Error(), "permission") {
+		t.Errorf("a key file its group can read: %v", err)
+	}
+	if err := os.Chmod(key, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := load(); err != nil {
+		t.Fatalf("a private key file (its content is checked by the relay): %v", err)
+	}
+
+	me := os.Geteuid()
+	if err := os.Mkdir(mbox, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	c, err := relayconfig.Load(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := r.Lookup(a.fp); !ok || len(r.NodeKeys()) != 1 {
-		t.Fatal("the first load")
+	restore := relayconfig.SetEuid(func() int { return me + 1 })
+	err = relayconfig.CheckPaths(c)
+	restore()
+	if err == nil || !strings.Contains(err.Error(), "mailbox_dir "+mbox+" is owned by") {
+		t.Errorf("stores of another user: %v", err)
 	}
-	for name, text := range map[string]string{"empty": "", "bad": partyBlock(a) + "nonsense\n", "no node": partyBlock(newMember(t, "n", nil))} {
-		os.WriteFile(p, []byte(text), 0o600)
-		if err := r.Reload(); err == nil {
-			t.Fatalf("%s: Reload succeeded", name)
-		}
-		if _, ok := r.Lookup(a.fp); !ok || len(r.NodeKeys()) != 1 {
-			t.Fatalf("%s: a failed reload lost the old list", name)
-		}
+	if !errors.Is(err, relayconfig.ErrConfig) {
+		t.Errorf("not an ErrConfig: %v", err)
 	}
-	os.WriteFile(p, []byte(partyBlock(b)), 0o600)
-	if err := r.Reload(); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := r.Lookup(a.fp); ok {
-		t.Fatal("alice stayed after she was removed")
-	}
-	if got, ok := r.LookupNode(b.node); !ok || got.Label != "bob" || len(r.NodeKeys()) != 1 {
-		t.Fatal("bob is not there after the reload")
-	}
-	// the list that first loads must be good
-	os.WriteFile(p, []byte(""), 0o600)
-	if _, err := relayconfig.OpenReloadable(p, envelope.ParseDocument); err == nil {
-		t.Fatal("an empty list started")
-	}
-	var _ relayport.AccessList = r
 }
 
-// spec: SPO-Xmailbox-PRE-012
-func TestLinesAndStringsAreBoundedAndChecked(t *testing.T) {
-	a := newMember(t, "l", nk(1))
-	doc := "document = \"" + a.b64 + "\"\n"
-	// a line over the bound; exactly at it, the line is accepted (and refused for its label)
-	wantErr(t, "[[party]]\nlabel = \""+strings.Repeat("x", 70000)+"\"\n"+doc, "line limit")
-	pad := relayconfig.MaxLineBytes - len("label = \"\"")
-	if _, err := parse(t, "[[party]]\nlabel = \""+strings.Repeat("x", pad)+"\"\n"+doc); err == nil || strings.Contains(err.Error(), "line limit") {
-		t.Fatalf("a line of exactly the bound: %v", err)
-	}
-	if _, err := parse(t, "[[party]]\nlabel = \""+strings.Repeat("x", pad+1)+"\"\n"+doc); err == nil || !strings.Contains(err.Error(), "line limit") {
-		t.Fatalf("a line one over the bound: %v", err)
-	}
-	// the parser itself refuses control characters in a string, with its own message
-	wantErr(t, "[[party]]\nlabel = \"a\tb\"\n"+doc, "in a string")
-	for _, c := range []string{"\x1b", "\x7f"} {
-		wantErr(t, "[[party]]\nlabel = \"a"+c+"b\"\n"+doc, "control character")
-	}
-	// and a file that is not UTF-8 anywhere, even in a comment
-	wantErr(t, "# \xff\n[[party]]\n"+doc, "UTF-8")
-}
-
-// A control character in the file is refused wherever it is: a bare carriage
-// return in a comment hides the next key from a reader of the file while the
-// parser reads it as a line of its own.
+// The reload rule: only the device list may differ.
 //
-// spec: SPO-Xmailbox-SEC-019
-func TestControlCharactersAreRefused(t *testing.T) {
-	a := newMember(t, "alice", nk(1))
-	p := partyBlock(a)
+// spec: SPO-Xmailbox-OUT-102
+func TestOnlyTheDeviceListMayDifferForAReload(t *testing.T) {
+	base := mustParse(t, minimal())
+	if !base.SameExceptDevices(mustParse(t, relayTable("open")+device("b", devB))) {
+		t.Error("another device list is a reloadable change")
+	}
 	for name, text := range map[string]string{
-		"a bare CR in a comment":        "[relay]\n# old\rretention_seconds = 60\n" + p,
-		"a bare CR after a value":       "[relay]\nretention_seconds = 5\rmailbox_entries = 1\n" + p,
-		"a bare CR after a header":      "[relay]\r# x\n" + p,
-		"a CR at the end of the file":   p + "# end\r",
-		"a CR followed by a CR":         "# a\r\r\n" + p,
-		"NUL in a comment":              "# a\x00b\n" + p,
-		"ESC in a comment":              "# \x1b[2K\n" + p,
-		"DEL in a comment":              "# a\x7fb\n" + p,
-		"a C1 control character":        "# a\u0085b\n" + p,
-		"a vertical tab":                "# a\vb\n" + p,
-		"a form feed between key and =": "[relay]\nretention_seconds\f= 5\n" + p,
+		"admission":   relayTable("allow-list") + device("a", devA) + wallet("w", walA),
+		"port":        relayTable("open", "port = 7400") + device("a", devA),
+		"retention":   relayTable("open", "retention_seconds = 600") + device("a", devA),
+		"registry":    minimal("[registry]\nmax_devices_per_key = 1\n"),
+		"quota":       minimal("[quota]\npair_entries = 8\n"),
+		"limits":      minimal("[limits]\nconnections = 8\n"),
+		"derp":        relayTable("open", "derp_map_url = \"https://d.example/m\"") + device("a", devA),
+		"sweep":       relayTable("open", "sweep_seconds = 600") + device("a", devA),
+		"mailbox dir": "[relay]\nadmission = \"open\"\nkey_file = \"/srv/relay/key/relay.key\"\nmailbox_dir = \"/srv/relay/mailbox2\"\nregistry_dir = \"/srv/relay/registry\"\n" + device("a", devA),
 	} {
-		t.Run(name, func(t *testing.T) {
-			if _, err := parse(t, text); err == nil {
-				t.Fatal("accepted")
-			}
-		})
-	}
-	// a CRLF file with tabs as whitespace is the same file as its LF form
-	crlf := strings.ReplaceAll("[relay]\nretention_seconds\t=\t5 # c\n"+p, "\n", "\r\n")
-	c := mustParse(t, crlf)
-	if c.RetentionSeconds != 5 || len(c.Entries) != 1 {
-		t.Fatalf("a CRLF file read as %+v", c)
-	}
-}
-
-// Labels are shown to the operator and name a party in every refusal, so an
-// empty label or two parties with one label are refused.
-//
-// spec: SPO-Xmailbox-PRE-019
-func TestLabelsAreNonEmptyAndUnique(t *testing.T) {
-	a, b := newMember(t, "alice", nk(1)), newMember(t, "bob", nk(2))
-	blank := newMember(t, "", nk(3))
-	wantErr(t, "[[party]]\nlabel = \"\"\ndocument = \""+a.b64+"\"\n", "label")
-	wantErr(t, "[[party]]\nlabel = \"   \"\ndocument = \""+a.b64+"\"\n", "label")
-	wantErr(t, "[[party]]\ndocument = \""+blank.b64+"\"\n", "label") // none given and the document's is empty
-	// two parties, one label: given, or taken from the documents
-	wantErr(t, "[[party]]\nlabel = \"same\"\ndocument = \""+a.b64+"\"\n[[party]]\nlabel = \"same\"\ndocument = \""+b.b64+"\"\n", "same")
-	wantErr(t, "[[party]]\nlabel = \"bob\"\ndocument = \""+a.b64+"\"\n[[party]]\ndocument = \""+b.b64+"\"\n", "label")
-	// different labels are fine, and the empty-label document is fine with a given label
-	mustParse(t, "[[party]]\nlabel = \"x\"\ndocument = \""+a.b64+"\"\n[[party]]\nlabel = \"y\"\ndocument = \""+blank.b64+"\"\n")
-}
-
-// The file must belong to the user running the relay or to root: anyone else
-// who owns it can add a party to the access list.
-//
-// spec: SPO-Xmailbox-SEC-018
-func TestTheFileMustBeOwnedByTheEffectiveUserOrRoot(t *testing.T) {
-	a := newMember(t, "alice", nk(1))
-	p := filepath.Join(t.TempDir(), "relay.toml")
-	os.WriteFile(p, []byte(partyBlock(a)), 0o600)
-	owner := os.Getuid()
-	if owner == 0 {
-		t.Skip("a file of root is accepted by every effective uid")
-	}
-	if _, err := relayconfig.Load(p, envelope.ParseDocument); err != nil {
-		t.Fatalf("a file of the running user: %v", err)
-	}
-	defer relayconfig.SetEuid(func() int { return owner + 1 })()
-	if _, err := relayconfig.Load(p, envelope.ParseDocument); err == nil || !strings.Contains(err.Error(), "owned") {
-		t.Fatalf("a file owned by another user than the effective one: %v", err)
-	}
-}
-
-// spec: SPO-Xmailbox-SEC-018
-func TestOwnerRule(t *testing.T) {
-	for _, c := range []struct {
-		uid, euid int
-		ok        bool
-	}{
-		{1000, 1000, true},  // the running user
-		{0, 1000, true},     // root, for a user's relay
-		{0, 0, true},        // root's own
-		{1001, 1000, false}, // someone else
-		{1000, 0, false},    // a user's file for a relay running as root
-		{-1, 1000, false},   // an owner that cannot be read is nobody
-	} {
-		if got := relayconfig.OwnerOK(c.uid, c.euid); got != c.ok {
-			t.Errorf("a file of uid %d for effective uid %d: %v, want %v", c.uid, c.euid, got, c.ok)
+		if base.SameExceptDevices(mustParse(t, text)) {
+			t.Errorf("%s: a change of it is taken as a reload", name)
 		}
 	}
-}
-
-// A caller cannot change the list through an entry it looked up: the send_to of
-// an entry is not a slice shared with the list.
-//
-// spec: SPO-Xmailbox-SEC-011
-func TestALookedUpEntryCannotChangeTheList(t *testing.T) {
-	a, b := newMember(t, "alice", nk(1)), newMember(t, "bob", nk(2))
-	c := mustParse(t, partyBlock(a, "send_to = [\""+hexfp(b.fp)+"\"]")+partyBlock(b))
-	l := c.AccessList()
-	ea, _ := l.Lookup(a.fp)
-	got := ea.SendTo()
-	for i := range got {
-		got[i] = a.fp
+	a := mustParse(t, relayTable("allow-list")+device("a", devA)+wallet("w", walA))
+	if a.SameExceptDevices(mustParse(t, relayTable("allow-list")+device("a", devA)+wallet("w", walB))) {
+		t.Error("a change of the wallet allow-list is taken as a reload")
 	}
-	if again, _ := l.Lookup(a.fp); !again.MaySendTo(b.fp) || again.MaySendTo(a.fp) {
-		t.Fatal("a caller changed the access list through a looked-up entry")
+	if a.SameExceptDevices(mustParse(t, relayTable("allow-list")+device("a", devA)+wallet("x", walA))) {
+		t.Error("a change of a wallet label is taken as a reload")
 	}
 }

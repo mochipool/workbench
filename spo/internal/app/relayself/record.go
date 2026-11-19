@@ -59,6 +59,25 @@ type State struct {
 	// request. Neither is ever encoded.
 	Foreign         *Binding
 	ForeignPrepared bool
+	// RecordedAt is, per pending revoke (by its revokeID), the relays that
+	// recorded it, at most MaxRelays names, the latest last. A revoke is owed to
+	// every listed relay not named here until it ends (SPO-Xmailbox-OUT-111).
+	RecordedAt map[string][]string
+}
+
+// mergeRelays adds the names of more not yet in have, the latest last, and keeps
+// the last MaxRelays: a name pushed out is only owed the revoke again.
+func mergeRelays(have, more []string) []string {
+	out := append([]string(nil), have...)
+	for _, n := range more {
+		if !slices.Contains(out, n) {
+			out = append(out, n)
+		}
+	}
+	if len(out) > MaxRelays {
+		out = out[len(out)-MaxRelays:]
+	}
+	return out
 }
 
 type recordJSON struct {
@@ -95,6 +114,8 @@ type revokeJSON struct {
 	// wallet-signed
 	Statement string `json:"statement,omitempty"`
 	COSEKey   string `json:"cose_key,omitempty"`
+	// the relays that recorded it
+	RecordedAt []string `json:"recorded_at,omitempty"`
 }
 
 type notBeforeRec struct {
@@ -140,12 +161,16 @@ func Encode(s State) ([]byte, error) {
 		return nil, fmt.Errorf("relayself: %d revokes or %d not-befores over the bound", len(s.Revokes), len(s.NotBefore))
 	}
 	for _, r := range s.Revokes {
+		at := s.RecordedAt[revokeID(r)]
+		if err := checkRecordedAt(at); err != nil {
+			return nil, err
+		}
 		switch r.Kind {
 		case relayport.RevokeByDeviceKey:
 			j.Revokes = append(j.Revokes, revokeJSON{Kind: "device", Until: r.Until, Ed25519: hx(r.Keys.Ed25519[:]), X25519: hx(r.Keys.X25519[:]),
-				NotBefore: r.NotBefore, Signature: hx(r.Signature[:])})
+				NotBefore: r.NotBefore, Signature: hx(r.Signature[:]), RecordedAt: at})
 		case relayport.RevokeByWalletKey:
-			j.Revokes = append(j.Revokes, revokeJSON{Kind: "wallet", Until: r.Until, Statement: hx(r.Sign1), COSEKey: hx(r.Key)})
+			j.Revokes = append(j.Revokes, revokeJSON{Kind: "wallet", Until: r.Until, Statement: hx(r.Sign1), COSEKey: hx(r.Key), RecordedAt: at})
 		default:
 			return nil, fmt.Errorf("relayself: a revoke of kind %d", r.Kind)
 		}
@@ -223,7 +248,16 @@ func Decode(b []byte, self party.Fingerprint) (State, error) {
 		if err != nil {
 			return State{}, err
 		}
+		if err := checkRecordedAt(jr.RecordedAt); err != nil {
+			return State{}, fmt.Errorf("%w: %v", ErrCorrupt, err)
+		}
 		s.Revokes = append(s.Revokes, r)
+		if len(jr.RecordedAt) > 0 {
+			if s.RecordedAt == nil {
+				s.RecordedAt = map[string][]string{}
+			}
+			s.RecordedAt[revokeID(r)] = jr.RecordedAt
+		}
 	}
 	if len(j.NotBefore) > 0 {
 		s.NotBefore = make(map[party.Fingerprint]int64, len(j.NotBefore))
@@ -239,6 +273,20 @@ func Decode(b []byte, self party.Fingerprint) (State, error) {
 		s.NotBefore[d] = n.At
 	}
 	return s, nil
+}
+
+// checkRecordedAt checks the relays that recorded a revoke: at most MaxRelays
+// valid relay names, none twice.
+func checkRecordedAt(at []string) error {
+	if len(at) > MaxRelays {
+		return fmt.Errorf("relayself: a revoke recorded at %d relays, at most %d", len(at), MaxRelays)
+	}
+	for i, n := range at {
+		if !relayNameRE.MatchString(n) || slices.Contains(at[:i], n) {
+			return fmt.Errorf("relayself: a relay name %q that a revoke was recorded at", n)
+		}
+	}
+	return nil
 }
 
 // bindingOf verifies a binding for self at its own from (the stored binding may
@@ -382,6 +430,9 @@ type RevokeView struct {
 	WalletKey party.WalletKey   // the key of a wallet-signed revoke
 	NotBefore int64
 	Until     int64
+	// RecordedAt names the relays that recorded it; OwedTo the listed relays
+	// that have not (Status fills both).
+	RecordedAt, OwedTo []string
 }
 
 // viewOf reads what a pending revoke says. The revokes in a state verified when

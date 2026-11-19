@@ -43,8 +43,10 @@ var relayRoots = []string{
 	module + "/internal/ports/relayport",
 	module + "/internal/domain/mailbox",
 	module + "/internal/domain/relayregistry",
+	module + "/internal/domain/relayconf",
+	module + "/internal/app/relayhost",
 	tunnelPkg,
-	// module + "/cmd/spo-relay",
+	module + "/cmd/spo-relay",
 }
 
 // relayHardBans are the import-path fragments that nothing in the closure of a

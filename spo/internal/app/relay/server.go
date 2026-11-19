@@ -458,6 +458,29 @@ func (s *Server) CloseDevice(device party.Fingerprint) int {
 	return s.closeWhere(func(x *session) bool { return x.fp == device }, ReasonRevoked)
 }
 
+// CloseNode ends the live sessions that came over the tunnel from a node key,
+// with the "shutting down" code (the device may dial again, and its tunnel
+// refuses it): what a reload that removes the key from the device list calls,
+// so that a removed device does not keep a session the tunnel would no longer
+// admit (SPO-Xmailbox-SEC-079). A session that has not logged in is bound by its
+// own login budget.
+//
+// spec: SPO-Xmailbox-SEC-079
+func (s *Server) CloseNode(node party.NodeKey) int {
+	s.mu.Lock()
+	var hit []*session
+	for sess := range s.sessions {
+		if sess.peer == node {
+			hit = append(hit, sess)
+		}
+	}
+	s.mu.Unlock()
+	for _, sess := range hit {
+		sess.revoke(mailbox.CodeShuttingDown, ReasonDelisted)
+	}
+	return len(hit)
+}
+
 // CloseKey ends the live sessions of every device bound to a wallet key.
 func (s *Server) CloseKey(key relaybind.KeyHash) int {
 	return s.closeWhere(func(x *session) bool { return x.key == key }, ReasonRevoked)

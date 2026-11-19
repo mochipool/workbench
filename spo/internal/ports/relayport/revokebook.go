@@ -79,3 +79,16 @@ type RevokeBook interface {
 	// Result reports the outcome of one revoke.
 	Result(r Revoke, o RevokeOutcome)
 }
+
+// RelayRevokeBook is a RevokeBook shared by the clients of several relays that
+// learns which relay answered: a device with several relays owes each revoke to
+// each relay until that relay recorded it (ADR 0014 work package 10). A client
+// built with a relay's name reports to ResultAt instead of Result
+// (mailbox.ForRelay); the same rules hold.
+//
+// spec: SPO-Xmailbox-IF-026
+type RelayRevokeBook interface {
+	RevokeBook
+	// ResultAt reports the outcome of one revoke at the named relay.
+	ResultAt(relay string, r Revoke, o RevokeOutcome)
+}

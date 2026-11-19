@@ -217,7 +217,7 @@ func IsWorkspaceKind(k Kind) bool {
 	switch k {
 	case PartyKeys, PartyIdentity, PartyRecords, PartyReplay, TailcatNodeKey, TailcatPSK, TailcatAddr,
 		MultisigCoordinator, MultisigSigner, MultisigOutbox, MultisigEvents, MultisigCollection, MultisigSubmitted, ProviderToken, CheckpointKey,
-		WorkspaceAuditLog, RelayOwn:
+		WorkspaceAuditLog, RelayOwn, RelayList, RelayAddr:
 		return false
 	}
 	return k.Known()

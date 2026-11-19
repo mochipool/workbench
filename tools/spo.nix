@@ -223,6 +223,34 @@ let
     };
   };
 
+  # The relay mailbox (ADR 0013, ADR 0014): its own binary, which links no store,
+  # no age and no signer (internal/archtest). Not built or checked here yet: Nix
+  # was not run when this was added.
+  relay = buildGoModule {
+    pname = "spo-relay";
+    inherit version;
+    src = lib.cleanSource ../spo;
+    vendorHash = "sha256-PsMNy89IZaot0kUXmL3PASHiR5RG1iaewM23uMSzX6Q=";
+    env.CGO_ENABLED = 0;
+    subPackages = [ "cmd/spo-relay" ];
+    ldflags = [ "-s" "-w" ];
+    doCheck = false; # `unwrapped` runs every test of the module
+    doInstallCheck = true;
+    installCheckPhase = ''
+      runHook preInstallCheck
+      [ -x "$out/bin/spo-relay" ] || { echo "spo-relay is not installed"; exit 1; }
+      [ ! -e "$out/bin/spo" ] || { echo "the relay package holds spo"; exit 1; }
+      relay_usage=$("$out/bin/spo-relay" 2>&1 || true)
+      echo "$relay_usage" | grep -q 'spo-relay serve --config FILE' || { echo "spo-relay has no usage text"; exit 1; }
+      runHook postInstallCheck
+    '';
+    meta = {
+      description = "Relay mailbox for sealed multi-party signing envelopes (holds no party secret)";
+      license = lib.licenses.gpl3Only;
+      mainProgram = "spo-relay";
+    };
+  };
+
   # Differential tests against the pinned upstream scripts (concern C4). They
   # need the whole Cardano toolchain, so they are a separate check from the
   # unit tests.
@@ -310,7 +338,7 @@ let
   package = pkgs.runCommand "spo-${version}"
     {
       nativeBuildInputs = [ pkgs.makeWrapper ];
-      passthru = { inherit toolchain unwrapped parity taggedNoBinary nodeKeys; tests = unwrapped; };
+      passthru = { inherit toolchain unwrapped parity taggedNoBinary nodeKeys relay; tests = unwrapped; };
       meta = unwrapped.meta // {
         description = "Stake pool operations from one binary, with sealed keys and multi-party signing";
         platforms = lib.platforms.unix;

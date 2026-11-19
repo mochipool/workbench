@@ -64,12 +64,13 @@ func (r *partyRun) openSecret(ctx context.Context, ref ports.NamedRef) (*secret.
 
 func (a *app) partyServeCommand() *cobra.Command {
 	var (
-		invites []string
-		outbox  string
-		cf      chainFlags
+		invites   []string
+		outbox    string
+		cf        chainFlags
+		transport string
 	)
 	cmd := &cobra.Command{
-		Use:   "serve [--invite NAME]... [--outbox DIR]",
+		Use:   "serve [--invite NAME]... [--outbox DIR] [--transport tailcat|mailbox]",
 		Short: "Coordinator: serve signing requests to signers over tailcat",
 		Long: `Listen on the tailcat port, admit only enrolled signers (an empty allow-list is
 refused: tailcat would admit everyone), send each connected signer its open
@@ -87,13 +88,39 @@ the port or relay settings change.
 A response that completes a collection does not submit anything: finish it
 with spo pool register POOL PAYER. A party revoked while this runs (here, or in
 another process) is refused within seconds and its connections are closed.
-Needs the identity made with --tailcat. Not available in offline mode.`,
+Needs the identity made with --tailcat. Not available in offline mode.
+
+With --transport mailbox the coordinator does not serve: it sends its requests
+to every relay of spo party relay list and fetches the responses from all of
+them (ADR 0014), with this device's relay binding (spo party relay bind).
+Stopping the command logs out of the relays. --invite is for tailcat only.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			needs := append([]Need{CapTxID, needNetwork{}}, signerNeeds...)
+			switch transport {
+			case "tailcat":
+			case "mailbox":
+				if len(invites) > 0 {
+					return errors.New("--invite writes a tailcat invitation; it does not go with --transport mailbox")
+				}
+				return a.party(cmd, &cf, needs, func(ctx context.Context, r *partyRun) error {
+					co, err := r.coordinator()
+					if err != nil {
+						return err
+					}
+					return r.relayExchange(ctx, co.Handle, func(h multisig.Handled) {
+						if h.Effect != "hello" && h.Effect != "acknowledged" {
+							printHandled(a.d.Out, h)
+						}
+					})
+				})
+			default:
+				return fmt.Errorf("--transport is tailcat or mailbox, not %q", transport)
+			}
 			return a.party(cmd, &cf, needs, func(ctx context.Context, r *partyRun) error { return r.serve(ctx, invites, outbox) })
 		},
 	}
+	cmd.Flags().StringVar(&transport, "transport", "tailcat", "tailcat (serve signers directly) or mailbox (exchange through the listed relays)")
 	cmd.Flags().StringArrayVar(&invites, "invite", nil, "write an invitation (the sealed tailcat address) for this enrolled signer (repeatable)")
 	cmd.Flags().StringVar(&outbox, "outbox", "", "where invitations are written (default: [party] outbox, else party/outbox in the workspace)")
 	addChainFlags(cmd, &cf, false)
@@ -297,8 +324,9 @@ func followRegistry(srv TailcatServer, known, now map[party.NodeKey]party.Finger
 func (a *app) partyConnectCommand() *cobra.Command {
 	var f signerFlags
 	var interactive bool
+	var transport string
 	cmd := &cobra.Command{
-		Use:   "connect COORDINATOR [--interactive]",
+		Use:   "connect [COORDINATOR] [--interactive] [--transport tailcat|mailbox]",
 		Short: "Signer: stay connected to a coordinator over tailcat and receive its requests",
 		Long: `Dial the coordinator named COORDINATOR (an enrolled coordinator whose invitation
 you imported), say Hello, send your queued responses and receive its requests
@@ -315,13 +343,30 @@ A request that arrives over tailcat is refused automatically and in silence
 unless this signer has a chain view of its own that resolves EVERY input: the
 provider of light mode, or --own-snapshot PATH. A network peer must not be able
 to make a signer sign blind (SPO-Xparty-PRE-007). A request for the pool cold
-key never travels over tailcat. Not available in offline mode.`,
-		Args: cobra.ExactArgs(1),
+key never travels over tailcat. Not available in offline mode.
+
+With --transport mailbox and no COORDINATOR, the signer fetches requests from
+every relay of spo party relay list and sends its responses to all of them
+(ADR 0014), with this device's relay binding. The same rules hold: nothing is
+signed on arrival, and a request for the pool cold key never travels over a
+relay. Stopping the command logs out of the relays.`,
+		Args: cobra.RangeArgs(0, 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			needs := append([]Need{needNetwork{}}, signerNeeds...)
+			switch {
+			case transport == "mailbox" && len(args) == 0:
+				return a.party(cmd, &f.chain, needs, func(ctx context.Context, r *partyRun) error { return r.connectRelays(ctx, &f, interactive) })
+			case transport == "mailbox":
+				return errors.New("--transport mailbox takes no COORDINATOR: requests come from every relay of spo party relay list")
+			case transport != "tailcat":
+				return fmt.Errorf("--transport is tailcat or mailbox, not %q", transport)
+			case len(args) != 1:
+				return errors.New("name the COORDINATOR to connect to over tailcat")
+			}
 			return a.party(cmd, &f.chain, needs, func(ctx context.Context, r *partyRun) error { return r.connect(ctx, args[0], &f, interactive) })
 		},
 	}
+	cmd.Flags().StringVar(&transport, "transport", "tailcat", "tailcat (dial the coordinator directly) or mailbox (exchange through the listed relays)")
 	cmd.Flags().BoolVar(&interactive, "interactive", false, "review and ask for approval here, as each request arrives (the same prompts as spo party approve)")
 	f.add(cmd)
 	f.addFull(cmd)

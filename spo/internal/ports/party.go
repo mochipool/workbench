@@ -382,10 +382,20 @@ const (
 // record, so a change commits atomically. Nothing secret is in it.
 const RelayOwn Kind = "relay.own"
 
+// RelayList is the relays this device uses (ADR 0014 work package 10,
+// SPO-Xmailbox-IF-025): the name, the pinned relay node key and the port of
+// each, in one strict JSON record. RelayAddr is the address of one relay (it
+// holds the relay's pre-shared key), a secret record named after the relay.
+const (
+	RelayList Kind = "relay.list"
+	RelayAddr Kind = "relay.addr"
+)
+
 func init() {
-	for _, k := range []Kind{MultisigCoordinator, MultisigSigner, MultisigOutbox, MultisigEvents, MultisigCollection, MultisigSubmitted, RelayOwn} {
+	for _, k := range []Kind{MultisigCoordinator, MultisigSigner, MultisigOutbox, MultisigEvents, MultisigCollection, MultisigSubmitted, RelayOwn, RelayList} {
 		kinds[k] = kindInfo{}
 	}
+	kinds[RelayAddr] = kindInfo{secret: true}
 }
 
 // ApprovalGate asks the operator to authenticate again before a key signs
