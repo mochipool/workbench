@@ -333,6 +333,16 @@ func (f *field) entries() []string {
 	return out
 }
 
+// sets reports that the operator gave the flag a value in the form.
+func (fm *form) sets(flag string) bool {
+	for _, f := range fm.fields {
+		if f.flag == flag && f.kind != kindSecret && f.kind != kindBool && (!f.text.empty() || len(f.values) > 0) {
+			return true
+		}
+	}
+	return false
+}
+
 // problem returns what is missing before the command can run, "" when
 // nothing. It only checks what the form itself requires; the command
 // validates the rest and its refusal is shown as it is.

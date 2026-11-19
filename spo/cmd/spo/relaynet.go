@@ -8,6 +8,7 @@ import (
 
 	"github.com/mochipool/workbench/spo/internal/adapters/cli"
 	"github.com/mochipool/workbench/spo/internal/adapters/mailbox"
+	"github.com/mochipool/workbench/spo/internal/adapters/relaylock"
 	"github.com/mochipool/workbench/spo/internal/adapters/tailcat/stream"
 	mbw "github.com/mochipool/workbench/spo/internal/domain/mailbox"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
@@ -19,6 +20,19 @@ import (
 // stream dialer per listed relay, a mailbox.Client per relay over it, and
 // mailbox.Multi over them. The logic is in adapters/mailbox (Connect,
 // SendRevokesTo); this only builds the dialers.
+
+// relayLock is cli.Deps.RelayLock: the workspace's relay-login lock
+// (adapters/relaylock), its refusal named for the command tree.
+func relayLock(path string) (func() error, error) {
+	l, err := relaylock.Acquire(path)
+	if errors.Is(err, relaylock.ErrHeld) {
+		return nil, fmt.Errorf("%w (%v)", cli.ErrRelayLockHeld, err)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return l.Release, nil
+}
 
 // relayDialers makes one dialer per relay. The buffers are read here and stay
 // the caller's. On an error the dialers made so far are closed.
@@ -121,10 +135,11 @@ func connectOver(eps []mailbox.Endpoint, nodePub party.NodeKey, c cli.RelayConne
 // noteOf is the command's note of one event of the composite: the relay, the
 // class and, for a refused identity, the refusal.
 func noteOf(e mailbox.MultiEvent) cli.RelayNote {
-	n := cli.RelayNote{Relay: e.Relay, Kind: string(e.Kind), Outcome: string(e.Outcome)}
+	n := cli.RelayNote{Relay: e.Relay, Kind: string(e.Kind), Outcome: string(e.Outcome), Backoff: e.Backoff}
 	if e.Outcome == mailbox.OutcomeIdentity || (e.Err != nil && (errors.Is(e.Err, mailbox.ErrBindingRefused) || errors.Is(e.Err, mailbox.ErrNotAllowed))) {
 		n.Identity = e.Err
 	}
+	n.Pinned = errors.Is(e.Err, mailbox.ErrRelayKey) || errors.Is(e.Err, stream.ErrPinnedKeyMismatch)
 	return n
 }
 
@@ -151,7 +166,7 @@ func sendRevokesOver(ctx context.Context, eps []mailbox.Endpoint, c cli.RelaySen
 	var stuck error
 	for _, e := range eps {
 		if err := e.Dialer.CloseWithin(10 * time.Second); err != nil {
-			stuck = errors.Join(stuck, fmt.Errorf("tunnel did not stop (relay %s): %w", e.Name, err))
+			stuck = errors.Join(stuck, fmt.Errorf("%w (relay %s): %w", cli.ErrTunnelDidNotStop, e.Name, err))
 		}
 	}
 	return relayErrs(reps), stuck

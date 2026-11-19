@@ -112,7 +112,7 @@ Stopping the command logs out of the relays. --invite is for tailcat only.`,
 						if h.Effect != "hello" && h.Effect != "acknowledged" {
 							printHandled(a.d.Out, h)
 						}
-					})
+					}, exchangeOpts{})
 				})
 			default:
 				return fmt.Errorf("--transport is tailcat or mailbox, not %q", transport)

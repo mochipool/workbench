@@ -8,11 +8,13 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/unix"
 
+	"github.com/mochipool/workbench/spo/internal/app/relayloop"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/platform/uihint"
 )
@@ -54,6 +56,14 @@ type Options struct {
 	// Input and Output replace the terminal (tests).
 	Input  io.Reader
 	Output io.Writer
+	// Now is the clock of the relay session's logout bound (default time.Now,
+	// whose differences are monotonic); LogoutBound is that bound (default
+	// DefaultLogoutBound). Tests give both.
+	Now         func() time.Time
+	LogoutBound time.Duration
+	// Notice is where the end of the program says what it waits for, after the
+	// screen is restored (default standard error).
+	Notice io.Writer
 }
 
 type screen int
@@ -63,6 +73,7 @@ const (
 	scForm
 	scRun
 	scImport
+	scSession
 )
 
 type segKind int
@@ -112,6 +123,12 @@ type runState struct {
 	quiet   bool
 	onDone  func(*model, *runState)
 	onLeave func(*model)
+	// detached: the run is the relay session and went on in the background.
+	// waiting: the run has not started; start starts it (it waits for a
+	// session job, or for the logout before a forget).
+	detached bool
+	waiting  bool
+	start    func()
 }
 
 type (
@@ -158,6 +175,28 @@ type model struct {
 	// winSize is w and h as the commands' goroutines may read them
 	// (w<<32 | h): a Terminal reports it, and the model alone writes it.
 	winSize atomic.Uint64
+
+	// The relay session (session.go): its state, the executor of its store
+	// steps, a foreground run that waits for a job, whether it is logged in as
+	// the commands' goroutines may read it, the login command of the tree, and
+	// the channel that closes when the program ends.
+	sess session
+	exec struct {
+		queue   []*job
+		running *job
+	}
+	pending    *runState
+	live       atomic.Bool
+	busy       atomic.Bool                       // a session is in any phase but logged out
+	revokes    atomic.Pointer[relayloop.Revokes] // what a logged-in session lends
+	loginNode  *node
+	hostClosed chan struct{}
+	exitErr    error
+	quitted    bool // the program was asked to end
+	// inUpdate is set while Update runs; offUpdate counts changes of the
+	// session made outside it (there must be none).
+	inUpdate  atomic.Int32
+	offUpdate atomic.Int64
 }
 
 func newModel(o Options, send func(tea.Msg)) (*model, error) {
@@ -165,7 +204,8 @@ func newModel(o Options, send func(tea.Msg)) (*model, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &model{opts: o, send: send, top: buildTree(root), cursors: map[string]int{}, w: 80, h: 24}
+	m := &model{opts: o, send: send, top: buildTree(root), cursors: map[string]int{}, w: 80, h: 24, hostClosed: make(chan struct{})}
+	m.loginNode = findLogin(m.top)
 	m.refreshStatus()
 	return m, nil
 }
@@ -237,6 +277,27 @@ type entry struct {
 	short string
 	n     *node
 	run   bool // run n itself (a command that also has subcommands)
+	// act is an entry of the TUI's own: the relay session's (ADR 0014
+	// decision 9). n is nil.
+	act func(*model) tea.Cmd
+}
+
+// sessionEntries are the relay session's entries of the root menu: its state,
+// and "Log out of relays" while a session runs (SPO-Xmailbox-IF-029).
+func (m *model) sessionEntries() []entry {
+	if m.loginNode == nil {
+		return nil
+	}
+	out := []entry{{label: "Relay session", short: m.summary(), act: func(m *model) tea.Cmd { m.screen = scSession; return nil }}}
+	switch {
+	case m.sess.live():
+		out = append(out, entry{label: "Log out of relays", short: "End the relay session; the TUI stays open", act: func(m *model) tea.Cmd { return m.logout() }})
+	case m.sess.phase == sessLoggingOut || m.sess.phase == sessStuck:
+		// the logout runs already, or did not end: the entry shows where it
+		// stands and what to do (SPO-Xmailbox-IF-029)
+		out = append(out, entry{label: "Log out of relays", short: "The logout runs or did not end: see where it stands", act: func(m *model) tea.Cmd { m.screen = scSession; return nil }})
+	}
+	return out
 }
 
 func (m *model) entries() []entry {
@@ -264,6 +325,9 @@ func (m *model) entries() []entry {
 		}
 		out = append(out, entry{label: label, short: c.cmd.Short, n: c, run: len(c.children) == 0})
 	}
+	if len(m.group) == 0 {
+		out = append(out, m.sessionEntries()...)
+	}
 	return out
 }
 
@@ -287,24 +351,37 @@ func (m *model) cursor() int {
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	m.inUpdate.Add(1)
+	defer m.inUpdate.Add(-1)
+	defer m.publish()
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
 		m.winSize.Store(uint64(uint32(msg.Width))<<32 | uint64(uint32(msg.Height)))
 	case outMsg:
-		if r := m.run; r != nil && r.id == msg.run {
+		session := m.sess.phase != sessNone && msg.run == m.sess.run
+		if session {
+			m.sessionLog(msg.data)
+		}
+		if r := m.run; r != nil && r.id == msg.run && !(session && r.detached) {
 			r.segs = append(r.segs, seg{msg.kind, msg.data})
 			r.follow = true
 		} else {
 			wipe(msg.data)
 		}
 	case promptMsg:
+		if m.sess.phase != sessNone && msg.run == m.sess.run && m.sess.detached {
+			// the background session asks nothing (SPO-Xmailbox-SEC-083)
+			msg.state.reply <- promptReply{err: errBackgroundPrompt}
+			break
+		}
 		if r := m.run; r != nil && r.id == msg.run && !r.cancelling {
 			r.prompt = msg.state
 			r.segs = append(r.segs, seg{segPrompt, []byte(msg.state.text)})
 			r.follow = true
 		}
 	case doneMsg:
+		var cmd tea.Cmd
 		if r := m.run; r != nil && r.id == msg.run {
 			r.done, r.err, r.prompt = true, msg.err, nil
 			r.cancel()
@@ -313,7 +390,31 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if r.onDone != nil {
 				r.onDone(m, r)
 			}
+			if sessionKind(r.node) == uihint.RelayOutbox && msg.err == nil && m.loginNode != nil {
+				r.segs = append(r.segs, seg{segOut, []byte(m.outboxNote())})
+			}
 		}
+		if m.sess.phase != sessNone && msg.run == m.sess.run {
+			cmd = m.ended(msg.err)
+		}
+		m.dispatch()
+		return m, cmd
+	case jobMsg:
+		m.exec.queue = append(m.exec.queue, msg.j)
+		m.dispatch()
+	case jobDoneMsg:
+		if m.exec.running == msg.j {
+			m.exec.running = nil
+		}
+		m.dispatch()
+	case reportMsg:
+		return m, m.report(msg)
+	case stuckMsg:
+		m.foregroundStuck(msg.why)
+	case tickMsg:
+		return m, m.tick()
+	case logoutMsg:
+		return m, m.logout()
 	case namesMsg:
 		m.namesDone(msg)
 	case tea.KeyPressMsg:
@@ -324,9 +425,23 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// quit ends the program. A relay session is logged out first, within the
+// bound; a second quit while it logs out does not wait (SPO-Xmailbox-OUT-118).
 func (m *model) quit() (tea.Model, tea.Cmd) {
-	m.Wipe()
-	return m, tea.Quit
+	s := &m.sess
+	switch {
+	case s.busy() && !s.quitting:
+		m.mark()
+		s.quitting = true
+		m.notice = "Logging out of the relays before quitting…"
+		if s.phase == sessLoggingOut {
+			return m, m.tickCmd()
+		}
+		return m, m.logout()
+	case s.busy(), s.phase == sessStuck:
+		m.exitErr = ErrSessionStuck
+	}
+	return m, m.quitNow()
 }
 
 // Wipe clears everything secret the model holds: typed secrets, the output
@@ -366,6 +481,8 @@ func (m *model) key(k keyInput) (tea.Model, tea.Cmd) {
 		return m.importKey(k)
 	case scRun:
 		return m.runKey(k)
+	case scSession:
+		return m.sessionKey(k)
 	}
 	return m.menuKey(k)
 }
@@ -417,7 +534,7 @@ func (m *model) menuKey(k keyInput) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if len(es) > 0 {
-			m.open(es[cur])
+			return m, m.open(es[cur])
 		}
 		return m, nil
 	case "backspace":
@@ -448,7 +565,7 @@ func (m *model) menuKey(k keyInput) (tea.Model, tea.Cmd) {
 		m.up()
 	case "l":
 		if len(es) > 0 {
-			m.open(es[cur])
+			return m, m.open(es[cur])
 		}
 	case "g":
 		set(0)
@@ -468,17 +585,21 @@ func (m *model) up() {
 	}
 }
 
-func (m *model) open(e entry) {
+func (m *model) open(e entry) tea.Cmd {
 	m.notice = ""
+	if e.act != nil {
+		return e.act(m)
+	}
 	if !e.run {
 		m.group = append(m.group, e.n)
 		m.filtering = false
 		m.filter.reset()
-		return
+		return nil
 	}
 	m.form = newForm(e.n)
 	m.screen = scForm
 	m.loadNames()
+	return nil
 }
 
 func (m *model) formKey(k keyInput) (tea.Model, tea.Cmd) {
@@ -552,6 +673,20 @@ func (m *model) startRun() (tea.Model, tea.Cmd) {
 		m.notice = p
 		return m, nil
 	}
+	kind := sessionKind(fm.node)
+	if kind == uihint.RelayForget && fm.sets("lost") {
+		// forget --lost revokes another device and sends the revoke: through the
+		// logged-in session, so the session need not log out (SPO-Xmailbox-OUT-119)
+		kind = ""
+	}
+	switch {
+	case kind == uihint.RelayLogin && m.loginRefusal() != "":
+		m.notice = m.loginRefusal()
+		return m, nil
+	case kind == uihint.RelayForget && (m.sess.phase == sessStuck || m.sess.phase == sessLoggingOut):
+		m.notice = "tunnel did not stop, or the relay session is still logging out: forget cannot run until it has ended"
+		return m, nil
+	}
 	m.names.reset() // the command may change the workspace's names
 	flags, pos, secrets := fm.build()
 	var fds []int
@@ -585,12 +720,19 @@ func (m *model) startRun() (tea.Model, tea.Cmd) {
 		args = append(append(args, "--"), pos...)
 	}
 
-	m.launch(fm.node, cmdline, args, fds)
+	r := m.launch(fm.node, kind, cmdline, args, fds)
+	if kind == uihint.RelayForget && m.sess.live() && r.waiting {
+		// forget this device: the session logs out first, then the command runs
+		// (SPO-Xmailbox-OUT-119)
+		return m, m.logout()
+	}
 	return m, nil
 }
 
 // launch runs a command of the tree in its own goroutine and shows the run.
-func (m *model) launch(n *node, cmdline string, args []string, fds []int) *runState {
+// The login command becomes the relay session; a command waits while a store
+// step of the session runs, and forget waits for the session's logout.
+func (m *model) launch(n *node, kind, cmdline string, args []string, fds []int) *runState {
 	m.runSeq++
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &runState{id: m.runSeq, node: n, cmdline: cmdline, cancel: cancel, follow: true, fds: fds,
@@ -598,7 +740,41 @@ func (m *model) launch(n *node, cmdline string, args []string, fds []int) *runSt
 	m.run = r
 	m.screen = scRun
 	m.notice = ""
-	go m.execute(ctx, r.id, args)
+	var done chan struct{}
+	var reported *atomic.Value
+	if kind == uihint.RelayLogin {
+		done, reported = make(chan struct{}), new(atomic.Value)
+		m.startSession(r, cancel, done, reported)
+	}
+	id := r.id
+	r.start = func() { go m.execute(ctx, id, args, done, reported) }
+	switch {
+	case kind == uihint.RelayForget && m.sess.live():
+		r.waiting = true
+		r.segs = append(r.segs, seg{segOut, []byte("Logging out of the relays first…\n")})
+		m.sess.after = func(m *model) {
+			if m.run == r && r.waiting {
+				r.waiting = false
+				if m.exec.running != nil {
+					r.waiting, m.pending = true, r
+					return
+				}
+				r.start()
+			}
+		}
+		m.sess.refused = func(m *model, why string) {
+			if m.run == r && r.waiting {
+				r.waiting, r.done, r.err = false, true, errors.New(why+" Forget was not run.")
+				m.closeFDs(r)
+			}
+		}
+	case m.exec.running != nil:
+		r.waiting = true
+		m.pending = r
+		r.segs = append(r.segs, seg{segOut, []byte("Waiting for a step of the relay session to finish…\n")})
+	default:
+		r.start()
+	}
 	return r
 }
 
@@ -651,15 +827,28 @@ func (m *model) closeFDs(r *runState) {
 
 // execute runs the command in its own goroutine. Everything it shows the
 // operator goes back to the program as a message.
-func (m *model) execute(ctx context.Context, id int, args []string) {
+func (m *model) execute(ctx context.Context, id int, args []string, done chan struct{}, reported *atomic.Value) {
 	var err error
 	defer func() {
 		if p := recover(); p != nil {
 			err = fmt.Errorf("internal error: %v", p)
 		}
+		if done != nil {
+			close(done)
+		}
 		m.send(doneMsg{run: id, err: err})
 	}()
-	t := &guiTerminal{send: m.send, run: id, size: m.outputArea}
+	g := &guiTerminal{send: m.send, run: id, size: m.outputArea, live: m.live.Load, busy: m.busy.Load,
+		revokes: func() relayloop.Revokes {
+			if p := m.revokes.Load(); p != nil {
+				return *p
+			}
+			return nil
+		}}
+	var t Terminal = g
+	if reported != nil { // the login: the TUI's relay session
+		t = sessTerminal{guiTerminal: g, h: host{send: m.send, run: id, closed: m.hostClosed, reported: reported, lent: &m.revokes}}
+	}
 	root, ferr := m.opts.Factory(t, writer{m.send, id, segOut}, writer{m.send, id, segErr})
 	if ferr != nil {
 		err = ferr
@@ -683,9 +872,12 @@ func (w writer) Write(p []byte) (int, error) {
 // guiTerminal turns a command's prompts into modals. Every prompt carries
 // the command's own text, verbatim.
 type guiTerminal struct {
-	send func(tea.Msg)
-	run  int
-	size func() (cols, rows int, ok bool)
+	send    func(tea.Msg)
+	run     int
+	size    func() (cols, rows int, ok bool)
+	live    func() bool              // a relay session is logged in
+	busy    func() bool              // a relay session is in any phase but logged out
+	revokes func() relayloop.Revokes // what the logged-in session lends
 }
 
 // Size is the area a command's output and its question are drawn in, which
@@ -753,13 +945,26 @@ func (m *model) runKey(k keyInput) (tea.Model, tea.Cmd) {
 	if r.prompt != nil {
 		return m.promptKey(k)
 	}
-	if !r.done {
+	if !r.done && !r.detached {
 		switch k.name {
 		case "ctrl+c", "esc":
+			if r.waiting {
+				// it never started: nothing to cancel but the wait
+				if m.pending == r {
+					m.pending = nil
+				}
+				r.waiting, r.done, r.err = false, true, context.Canceled
+				r.cancel()
+				m.closeFDs(r)
+				return m, nil
+			}
 			if r.cancelling {
 				return m.quit()
 			}
 			r.cancelling = true
+			if m.sess.live() && r.id == m.sess.run {
+				return m, m.logout() // a login cancelled: the bounded logout
+			}
 			r.cancel()
 			return m, nil
 		}

@@ -32,6 +32,8 @@ func newDeps(out, errw io.Writer, term cli.Terminal) cli.Deps {
 	return cli.Deps{
 		Version: version, Release: "none", Out: out, Err: errw, Terminal: term,
 		Toolchain: noToolchain{},
+		StoreGone: storeGone,
+		RelayLock: relayLock,
 		Config: cli.ConfigOps{
 			Load:     loadConfig,
 			Create:   func(dir string, c cli.WorkspaceConfig) error { return config.Create(dir, toConfig(c)) },
@@ -235,6 +237,12 @@ func mapRecoveryErr(err error) error {
 	return mapStoreErr(err)
 }
 
+// storeGone is cli.Deps.StoreGone: the errors of a handle that can no longer be
+// used (SPO-Xmailbox-OUT-118).
+func storeGone(err error) bool {
+	return errors.Is(err, sqlitestore.ErrStaleHandle) || errors.Is(err, sqlitestore.ErrLockLost)
+}
+
 func loadConfig(dir string) (cli.WorkspaceConfig, error) {
 	c, err := config.Load(dir)
 	if err != nil {
@@ -262,7 +270,14 @@ func loadConfig(dir string) (cli.WorkspaceConfig, error) {
 		out.Registry = &cli.RegistryConfig{URL: c.Registry.URL}
 	}
 	if c.Party != nil {
-		out.Party = &cli.PartyConfig{Inbox: c.Party.Inbox, Outbox: c.Party.Outbox}
+		max, err := config.ParseRelayLoginMax(c.Party.RelayLoginMax)
+		if err != nil {
+			return cli.WorkspaceConfig{}, err
+		}
+		if c.Party.RelayLoginMax == "" {
+			max = 0
+		}
+		out.Party = &cli.PartyConfig{Inbox: c.Party.Inbox, Outbox: c.Party.Outbox, RelayLoginMax: max}
 	}
 	if c.Tailcat != nil {
 		out.Tailcat = &cli.TailcatConfig{Port: c.Tailcat.Port, DERPMapURL: c.Tailcat.DERPMapURL}
@@ -294,6 +309,9 @@ func toConfig(c cli.WorkspaceConfig) config.Config {
 	}
 	if c.Party != nil {
 		out.Party = &config.Party{Inbox: c.Party.Inbox, Outbox: c.Party.Outbox}
+		if c.Party.RelayLoginMax != 0 {
+			out.Party.RelayLoginMax = c.Party.RelayLoginMax.String()
+		}
 	}
 	if c.Tailcat != nil {
 		out.Tailcat = &config.Tailcat{Port: c.Tailcat.Port, DERPMapURL: c.Tailcat.DERPMapURL}

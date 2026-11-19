@@ -25,6 +25,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/relaywallet"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
+	"github.com/mochipool/workbench/spo/internal/platform/uihint"
 	"github.com/mochipool/workbench/spo/internal/ports"
 	"github.com/mochipool/workbench/spo/internal/ports/labels"
 	"github.com/mochipool/workbench/spo/internal/ports/relayport"
@@ -458,13 +459,15 @@ The binding grants no authority: envelopes are still sealed to the device, and
 a peer still enrolls you by the typed fingerprint groups.
 
 The relays this device uses are listed with add, list and remove; spo party
-serve and spo party connect exchange over all of them with --transport mailbox
-(logging out is the end of that command). A revoke made here is stored, sent to
+relay login, spo party serve and spo party connect exchange over all of them
+(the last two with --transport mailbox; logging out is the end of the command,
+and in spo tui "Log out of relays" ends the login without closing the TUI). A revoke made here is stored, sent to
 every listed relay at once when it can be, and sent again at every connection.`,
 	}
 	c.AddCommand(a.partyRelayBindCommand(), a.partyRelayStatusCommand(), a.partyRelayRevokeCommand(),
 		a.partyRelayForgetCommand(), a.partyRelayPeerCommand(), a.partyRelayDropRevokeCommand(),
-		a.partyRelayAddCommand(), a.partyRelayListCommand(), a.partyRelayRemoveCommand(), a.partyRelaySendRevokesCommand())
+		a.partyRelayAddCommand(), a.partyRelayListCommand(), a.partyRelayRemoveCommand(), a.partyRelaySendRevokesCommand(),
+		a.partyRelayLoginCommand())
 	return c
 }
 
@@ -808,6 +811,11 @@ func (a *app) walletRevoke(ctx context.Context, r *partyRun, wf *walletFlags, mo
 	if lost != nil && *lost == svc.Device {
 		return relayself.ErrSelf
 	}
+	if lost != nil && mode != "print" && a.relaySessionBusy() && !a.relaySessionLive() {
+		// its revoke is sent at once: not while the TUI's session is logging in,
+		// logging out or stuck, and nothing is stored then (SPO-Xmailbox-OUT-120)
+		return errSessionBusy
+	}
 	w := a.d.Out
 	var got relayport.Revoke
 	switch mode {
@@ -861,7 +869,14 @@ func (a *app) walletRevoke(ctx context.Context, r *partyRun, wf *walletFlags, mo
 			return bindErr(err)
 		}
 	}
-	fmt.Fprintf(w, "Stored the revoke; it is sent to every relay on every connection until %s.\n", time.Unix(got.Until, 0).UTC().Format(time.DateTime+" MST"))
+	until := time.Unix(got.Until, 0).UTC().Format(time.DateTime + " MST")
+	if a.relaySessionLive() {
+		fmt.Fprintf(w, "Stored the revoke. The relay session sends it within seconds, and again on every connection until %s.\n", until)
+		return nil
+	}
+	// a running login or serve of this workspace follows the store and sends a
+	// new revoke at once (SPO-Xmailbox-OUT-111); nothing else dials here
+	fmt.Fprintf(w, "Stored the revoke. A relay login or serve running for this workspace sends it within seconds; otherwise it goes at the next relay connection, or now with spo party relay send-revokes. It is sent again on every connection until %s.\n", until)
 	return nil
 }
 
@@ -888,8 +903,9 @@ func (a *app) partyRelayForgetCommand() *cobra.Command {
 		as   string
 	)
 	cmd := &cobra.Command{
-		Use:   "forget [--yes] [--as coordinator|signer] | forget --lost DEVICE (--key NAME [--role R] | --print --wallet HEX | --import --sign1 HEX --cose-key HEX)",
-		Short: "Revoke this device at relays and delete its binding, or revoke a lost device with the wallet key",
+		Use:         "forget [--yes] [--as coordinator|signer] | forget --lost DEVICE (--key NAME [--role R] | --print --wallet HEX | --import --sign1 HEX --cose-key HEX)",
+		Annotations: map[string]string{uihint.RelaySession: uihint.RelayForget},
+		Short:       "Revoke this device at relays and delete its binding, or revoke a lost device with the wallet key",
 		Long: `Without --lost: revoke THIS device with its own key (dated now), keep the revoke
 to send to every relay, and delete this device's binding, so a new login needs
 a new binding. A relay deletes the queue of a revoked device, so when relays
@@ -906,6 +922,12 @@ one) with the wallet key, and send it from this device without logging in.`,
 					return errors.New("--key, --print and --import go with --lost DEVICE; this device revokes itself with its own key")
 				}
 				return a.party(cmd, nil, []Need{CapClock}, func(ctx context.Context, r *partyRun) error {
+					// it logs in, or dials revoke-only connections: refused before
+					// anything is stored while the TUI's session is busy
+					// (SPO-Xmailbox-OUT-120; the TUI logs a logged-in session out first)
+					if err := a.refuseBusy(); err != nil {
+						return err
+					}
 					ok, err := a.confirm(ctx, "Revoke this device at relays and delete its binding?", yes)
 					if err != nil {
 						return err

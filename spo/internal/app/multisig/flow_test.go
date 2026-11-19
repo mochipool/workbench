@@ -735,9 +735,10 @@ func TestOfflineModeHasNoNetworkTransport(t *testing.T) {
 // The cold-key rule is keyed on the roles recorded for the key identity, not on
 // the role the slot names: a stake-role slot whose key identity was ever a pool
 // cold key is not requested over a network (and is over a file), where without
-// that history it is.
+// that history it is. The request sealed for a file that was down carries the
+// cold-key flag of the same rule, and a network flush sends nothing of it.
 //
-// spec: SPO-Xidentity-PRE-004
+// spec: SPO-Xidentity-PRE-004, SPO-Xmailbox-SEC-084
 func TestARequestForAKeyWithAColdHistoryIsNotCreatedForANetwork(t *testing.T) {
 	s := newScene(t, sceneOpt{kind: ports.ViaNetwork})
 	c := s.C.Coordinator()
@@ -766,6 +767,18 @@ func TestARequestForAKeyWithAColdHistoryIsNotCreatedForANetwork(t *testing.T) {
 	file.Down = true
 	if res, err := c.RequestSignatures(ctx, multisig.RequestInput{Ref: s.ref, Purpose: "x"}, file.Transport()); err != nil || res[0].Status != multisig.SlotRequested {
 		t.Fatalf("by file: %+v %v", res, err)
+	}
+	// The file flush failed, so the request waits in the outbox. It carries the
+	// cold-key flag of the same rule that refused it over a network (the slot
+	// names a stake role; the history is cold), so a relay session's flush
+	// sends nothing of it (review of work package 9, L6).
+	items, err := s.C.Outbox().Pending(ctx)
+	if err != nil || len(items) != 1 || !items[0].ColdKey {
+		t.Fatalf("the outbox item of a cold-history slot: %+v %v", items, err)
+	}
+	net := partyrig.NewPipe(ports.ViaNetwork)
+	if n, err := s.C.Outbox().Flush(ctx, net.Transport()); err != nil || n != 0 || len(net.Take()) != 0 {
+		t.Fatalf("the cold-history request left over a network: %d %v", n, err)
 	}
 	// With no such history the same slot goes over the network.
 	s2 := newScene(t, sceneOpt{kind: ports.ViaNetwork})

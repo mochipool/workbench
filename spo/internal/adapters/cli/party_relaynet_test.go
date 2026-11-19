@@ -35,6 +35,7 @@ type fakeRelays struct {
 	recvErr    error
 	logoutErr  error
 	revokesErr error
+	stuckErr   error              // the error of a revoke-only send whose tunnel did not stop
 	sticky     bool               // an envelope not acknowledged is served again
 	unacked    *ports.Received    // the last envelope served and not acknowledged
 	down       map[string]bool    // relays not reached by a revoke send
@@ -162,7 +163,7 @@ func (f *fakeRelays) ops(base RelayOps) RelayOps {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.sends = append(f.sends, c)
-		return f.answer(c.Relays, c.Book), nil
+		return f.answer(c.Relays, c.Book), f.stuckErr
 	}
 	return base
 }

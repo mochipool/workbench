@@ -1321,10 +1321,11 @@ func TestDialerClearsItsNodeKeyOnClose(t *testing.T) {
 	l := startListener(t, reg, n.pub)
 	d := dialerFor(t, l, n)
 	d.mu.Lock()
-	held := !d.priv.IsZero()
+	held := !d.priv.IsZero() && !d.tcc.c.Key.IsZero() && d.addr != "" && d.tcc.c.Server != ""
+	tun := d.tcc
 	d.mu.Unlock()
 	if !held {
-		t.Fatal("the dialer holds no key before Close: the test does not test anything")
+		t.Fatal("the dialer holds no key or address before Close: the test does not test anything")
 	}
 	if err := d.CloseWithin(10 * time.Second); err != nil {
 		t.Fatal(err)
@@ -1334,6 +1335,13 @@ func TestDialerClearsItsNodeKeyOnClose(t *testing.T) {
 	d.mu.Unlock()
 	if !zero {
 		t.Fatal("the dialer still holds the node private key after Close")
+	}
+	// the copies this package made for the tunnel library: the client's key (a
+	// value it can clear once the engine is closed) and the address string
+	// (dropped, not wiped: a Go string cannot be); the library's own copies are
+	// out of reach (SPO-Xmailbox-SEC-083)
+	if !tun.c.Key.IsZero() || tun.c.Server != "" || d.addr != "" {
+		t.Fatal("the tunnel client's key or the relay address is still held after Close")
 	}
 }
 

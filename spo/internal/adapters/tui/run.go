@@ -10,8 +10,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/mochipool/workbench/spo/internal/app/relayloop"
 )
 
 // ErrNoFactory is returned when Run has no way to build the command tree.
@@ -51,8 +55,67 @@ func Run(ctx context.Context, o Options) (err error) {
 			err = fmt.Errorf("tui: %v", p)
 		}
 	}()
-	if _, err := prog.Run(); err != nil && !errors.Is(err, tea.ErrProgramKilled) && !errors.Is(err, context.Canceled) {
+	_, perr := prog.Run()
+	if err := m.endSession(); err != nil {
 		return err
 	}
+	if perr != nil && !errors.Is(perr, tea.ErrProgramKilled) && !errors.Is(perr, context.Canceled) {
+		return perr
+	}
 	return nil
+}
+
+// endSession runs when the program has ended (its update no longer runs): the
+// host takes no more jobs, and a relay session still running (the program was
+// killed, or a second quit did not wait) is ended and waited for within the
+// bound. It returns ErrSessionStuck when the session did not end cleanly
+// (SPO-Xmailbox-OUT-118).
+//
+// It says on Notice what it waits for. A session already stuck past the bound
+// in the UI is not waited for a second time: only a session that had not
+// reached its bound is waited for, for what is left of it.
+func (m *model) endSession() error {
+	close(m.hostClosed)
+	s := &m.sess
+	if s.phase == sessNone {
+		return m.exitErr
+	}
+	note := m.opts.Notice
+	if note == nil {
+		note = os.Stderr
+	}
+	if s.done == nil {
+		fmt.Fprintln(note, "spo: "+ErrSessionStuck.Error())
+		return ErrSessionStuck
+	}
+	s.cancel()
+	wait := m.logoutBound()
+	switch {
+	case s.phase == sessStuck:
+		wait = 0 // the bound passed already, or the close failed
+	case s.phase == sessLoggingOut:
+		wait = max(wait-m.now().Sub(s.logoutAt), 0)
+	}
+	select {
+	case <-s.done:
+	default:
+		if wait == 0 {
+			fmt.Fprintln(note, "spo: "+ErrSessionStuck.Error())
+			return ErrSessionStuck
+		}
+		fmt.Fprintf(note, "spo: waiting up to %v for the relay session to log out of the relays…\n", wait.Round(time.Second))
+		select {
+		case <-s.done:
+		case <-time.After(wait):
+			fmt.Fprintln(note, "spo: "+ErrSessionStuck.Error())
+			return ErrSessionStuck
+		}
+	}
+	// the update no longer runs, so the last phase is read from the host's
+	// cell: a clean close is reported before the command returns
+	if p, _ := s.reported.Load().(relayloop.Phase); (p != "" && p != relayloop.PhaseLoggedOut) || s.permanent {
+		fmt.Fprintln(note, "spo: "+ErrSessionStuck.Error())
+		return ErrSessionStuck
+	}
+	return m.exitErr
 }

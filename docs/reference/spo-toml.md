@@ -40,6 +40,7 @@ url = "https://tokens.cardano.org/metadata"  # token-registry server root
 [party]                 # optional; multi-party signing, file transport
 inbox = "party/inbox"   # default; relative to the workspace directory
 outbox = "party/outbox" # default
+relay_login_max = "12h" # default; the longest relay login (spo party relay login, the TUI's session)
 
 [tailcat]               # optional; multi-party signing, tailcat transport
 port = 7345             # the one TCP port a coordinator serves and a signer dials
@@ -63,6 +64,7 @@ derp_map_url = "https://controlplane.tailscale.com/derpmap/default"   # relay ma
 | `[party]` | section | Where the file transport keeps its directories. |
 | `[party] inbox` | string | The inbox directory, relative to the workspace directory unless absolute. Default `party/inbox`. It must be a local directory only the operator can write to (not a link, not group- or other-writable, not a network or FUSE file system) and **never a synced folder**. `spo party inbox import` refuses it otherwise. |
 | `[party] outbox` | string | Where `party request export` and the invitations of `party serve` write by default. Default `party/outbox`. |
+| `[party] relay_login_max` | string | How long a relay login lasts at most (`spo party relay login`, and the relay session of `spo tui`): a duration such as `"12h"` or `"90m"`, from `1m` to `168h`. Default 12 hours, counted from the login on the monotonic clock and on the wall clock, whichever reaches it first (time the machine was suspended counts). At the limit the login logs out by itself, even while a foreground command of the TUI waits at a prompt; there is no idle logout. Anything else refuses the file. |
 | `[tailcat]` | section | The tailcat transport. |
 | `[tailcat] port` | integer | The TCP port a coordinator serves and a signer dials, 1 to 65535. Default 7345. |
 | `[tailcat] derp_map_url` | string | Where tailcat fetches its relay (DERP) map from. Default: tailcat's own. |

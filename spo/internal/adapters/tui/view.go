@@ -97,6 +97,8 @@ func (m *model) render() string {
 		body, help = m.formView()
 	case m.screen == scRun:
 		body, help = m.runView()
+	case m.screen == scSession:
+		body, help = m.sessionView()
 	default:
 		body, help = m.menuView()
 	}
@@ -115,6 +117,10 @@ func (m *model) render() string {
 func (m *model) header() string {
 	s := m.status
 	parts := []string{"spo"}
+	// first after the name, so a narrow terminal cuts something else
+	if r := m.reviewsLine(); r != "" {
+		parts = append(parts, r)
+	}
 	if s.Workspace != "" {
 		parts = append(parts, "workspace "+s.Workspace)
 	}
@@ -126,6 +132,9 @@ func (m *model) header() string {
 	}
 	if s.State != "" {
 		parts = append(parts, s.State)
+	}
+	if m.loginNode != nil && (m.sess.phase != sessNone || m.sess.message != "") {
+		parts = append(parts, m.summary())
 	}
 	return titleStyle.Render(fit(CleanLine(strings.Join(parts, "  ·  ")), m.w-1))
 }
@@ -144,6 +153,11 @@ func (m *model) menuView() ([]string, string) {
 	}
 	lines = append(lines, titleStyle.Render(fit(CleanLine(title), m.w-1)))
 	h := m.bodyHeight() - 1
+	if m.notice != "" {
+		// the relay session's outcome (logged out, tunnel did not stop)
+		lines = append(lines, errStyle.Render(fit(CleanLine(m.notice), m.w-1)))
+		h--
+	}
 	start := 0
 	if cur >= h {
 		start = cur - h + 1

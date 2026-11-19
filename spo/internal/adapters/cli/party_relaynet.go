@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/app/relayself"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
+	"github.com/mochipool/workbench/spo/internal/platform/uihint"
 	"github.com/mochipool/workbench/spo/internal/ports"
 	"github.com/mochipool/workbench/spo/internal/ports/relayport"
 )
@@ -30,6 +32,20 @@ import (
 // over every listed relay at once, and the order of "forget this device" over
 // them. This package builds no tunnel and no mailbox client: the composition
 // root gives RelayOps.Connect, CheckAddress and SendRevokes.
+
+var (
+	// ErrRelayLockHeld is Deps.RelayLock's refusal: another process holds the
+	// relay-login lock of this workspace (SPO-Xmailbox-PRE-067).
+	ErrRelayLockHeld = errors.New("another spo process holds the relay login of this workspace")
+	// ErrTunnelDidNotStop marks the error of a close or of a revoke-only send
+	// whose tunnel did not stop (relayloop.ErrTunnelDidNotStop): the composition
+	// root wraps it, the command says "tunnel did not stop" and a TUI is stuck.
+	ErrTunnelDidNotStop = relayloop.ErrTunnelDidNotStop
+	// errSessionBusy: the TUI's relay session is logging in, logging out or
+	// stuck, and a command that would dial the relays refuses.
+	errSessionBusy = errors.New("the relay session of the TUI is logging in, logging out or stuck (tunnel did not stop): " +
+		"wait until it has logged in or ended (Relay session shows where it stands), or quit spo and start it again")
+)
 
 // RelayEndpoint is one listed relay with its address opened. The callee copies
 // what it needs; the caller destroys the buffer.
@@ -47,6 +63,42 @@ type RelayNote struct {
 	Kind     string
 	Outcome  string
 	Identity error
+	// Pinned: the relay's key is not the pinned one (the tunnel or the client
+	// said so). Backoff: the pause of a relay whose receive failed.
+	Pinned  bool
+	Backoff time.Duration
+}
+
+// relayClass is the class of a relay that a note shows, and whether the note
+// changes it (SPO-Xmailbox-OUT-115).
+func relayClass(n RelayNote) (relayloop.RelayClass, bool) {
+	switch {
+	case n.Identity != nil:
+		return relayloop.RelayIdentity, true
+	case n.Pinned:
+		return relayloop.RelayPinned, true
+	case n.Backoff > 0:
+		return relayloop.RelayBackingOff, true
+	case n.Outcome == "stored" || n.Outcome == "acked" || n.Outcome == "duplicate":
+		// an exchange with the relay succeeded: until the first one it is
+		// shown waiting (SPO-Xmailbox-OUT-115)
+		return relayloop.RelayConnected, true
+	}
+	return "", false
+}
+
+// sessionClient is the composite as a session's steps may use it: it has no
+// Send. The one way an envelope leaves a session is the outbox's flush over the
+// transport taken once at the opening, so the cold-key rule of the outbox
+// covers everything a session sends (SPO-Xmailbox-SEC-082; an architecture
+// test holds this file to it).
+type sessionClient interface {
+	Receive(ctx context.Context) (ports.Received, error)
+	AckContext(ctx context.Context) error
+	SetBinding(statement, key []byte) error
+	SetSenders([]party.WalletKey)
+	SendRevokes(ctx context.Context) map[string]error
+	Logout(within time.Duration) error
 }
 
 // RelayConnectConfig is what RelayOps.Connect needs.
@@ -143,24 +195,94 @@ func (r *partyRun) openRelays(ctx context.Context) ([]RelayEndpoint, *secret.Buf
 }
 
 // relaySender is relayself's Send: the pending revokes to every listed relay on
-// revoke-only connections. Nil when the build sends none.
+// revoke-only connections. Nil when the build sends none. In the TUI, while
+// its relay session is logged in, the revokes go over the session's own
+// connections (no second dial with the same node key); while the session is
+// logging in, logging out or stuck the send is refused; a revoke-only tunnel
+// that does not stop makes the TUI stuck (SPO-Xmailbox-OUT-120, OUT-117). The
+// relay-login lock is held while it dials (SPO-Xmailbox-PRE-067).
 func (r *partyRun) relaySender() func(ctx context.Context, book relayport.RevokeBook) (map[string]error, error) {
 	ops := r.kit().Relay
 	if ops.SendRevokes == nil {
 		return nil
 	}
 	return func(ctx context.Context, book relayport.RevokeBook) (map[string]error, error) {
+		if send := r.a.sessionRevokes(); send != nil {
+			return send(ctx, book)
+		}
+		if r.a.relaySessionBusy() {
+			return nil, errSessionBusy
+		}
+		release, err := r.holdRelays()
+		if err != nil {
+			return nil, err
+		}
 		eps, nk, done, err := r.openRelays(ctx)
 		if err != nil {
+			release(false)
 			return nil, err
 		}
 		defer done()
 		if len(eps) == 0 {
+			release(false)
 			return nil, relayself.ErrNoSender
 		}
 		_, derp := r.tailcatSettings()
-		return ops.SendRevokes(ctx, RelaySendConfig{Relays: eps, NodeKey: nk, DERPMapURL: derp, Clock: r.env.Clock, Book: book})
+		errs, err := ops.SendRevokes(ctx, RelaySendConfig{Relays: eps, NodeKey: nk, DERPMapURL: derp, Clock: r.env.Clock, Book: book})
+		stuck := errors.Is(err, ErrTunnelDidNotStop)
+		release(stuck)
+		if stuck {
+			r.a.tunnelStuck(err)
+		}
+		return errs, err
 	}
+}
+
+// holdRelays takes the workspace's relay-login lock for this command, or
+// counts one more use when it holds it already (a login that sends the owed
+// revokes first). The release keeps the lock held when stuck: a tunnel that did
+// not stop may still be online, and the kernel drops the lock when the process
+// ends (SPO-Xmailbox-PRE-067).
+func (r *partyRun) holdRelays() (func(stuck bool), error) {
+	if r.relayHeld > 0 || r.a.d.RelayLock == nil {
+		r.relayHeld++
+		return func(bool) { r.relayHeld-- }, nil
+	}
+	path := r.a.workspaceFile() + relayLockSuffix
+	rel, err := r.a.d.RelayLock(path)
+	if errors.Is(err, ErrRelayLockHeld) {
+		return nil, fmt.Errorf("%w: end it first (Ctrl-C in that process, or Log out of relays in its TUI), then run this again. "+
+			"The lock (%s) is the kernel's and ends with that process", err, path)
+	}
+	if err != nil {
+		return nil, err
+	}
+	r.relayHeld++
+	return func(stuck bool) {
+		r.relayHeld--
+		if stuck {
+			keepHeld(rel)
+			return
+		}
+		rel() //nolint:errcheck // closing the descriptor drops the lock
+	}, nil
+}
+
+// relayLockSuffix names the relay-login lock file beside the workspace file.
+const relayLockSuffix = ".relay.lock"
+
+// stuckLocks keeps the release of every lock left held by a stuck teardown
+// reachable, so that no finalizer closes its descriptor (which would drop the
+// lock) before the process ends.
+var stuckLocks struct {
+	mu   sync.Mutex
+	held []func() error
+}
+
+func keepHeld(rel func() error) {
+	stuckLocks.mu.Lock()
+	stuckLocks.held = append(stuckLocks.held, rel)
+	stuckLocks.mu.Unlock()
 }
 
 // liveBook is the book an exchange gives its clients: it can be replaced by a
@@ -184,21 +306,118 @@ func (l *liveBook) ResultAt(relay string, rv relayport.Revoke, o relayport.Revok
 
 // relaySession is one exchange over every listed relay.
 type relaySession struct {
-	r       *partyRun
-	svc     relayself.Service
-	client  RelayClient
-	local   ports.LocalIdentity
-	routes  *relayroutes.Table
-	book    *liveBook
-	tell    *relayloop.Teller // the error output and the binding in use, shared with the client's callback
-	from    int64
-	names   []string
-	savedAt int // the book's changes at the last save
+	r      *partyRun
+	svc    relayself.Service
+	client sessionClient // no Send: see sessionClient
+	// transport is the composite as the outbox's flush sends over it, taken
+	// once at the opening: the only path by which an envelope leaves.
+	transport ports.Transport
+	local     ports.LocalIdentity
+	routes    *relayroutes.Table
+	book      *liveBook
+	tell      *relayloop.Teller // the error output and the binding in use, shared with the client's callback
+	status    *relayloop.Status // what the session shows (nil: nothing)
+	from      int64
+	until     atomic.Int64 // the end of the binding in use
+	names     []string
+	reviews   func(ctx context.Context) ([]string, error) // the requests waiting for review (nil: not this role)
+	savedAt   int                                         // the book's changes at the last save
+	due       atomic.Bool                                 // a revoke stored since the book was loaded is to be sent now
+	closed    atomic.Bool                                 // the close has begun: nothing more is lent
+}
+
+// swapBook makes b the book the clients use and the one saved (savedAt -1:
+// saved at the next sync).
+func (s *relaySession) swapBook(b *relayself.Book, saved int) {
+	s.book.set(b)
+	s.savedAt = saved
+}
+
+// relayRemind is how long before the end of the binding a login reminds the
+// operator to renew it (ADR 0014 decision 3, "Lifetime").
+const relayRemind = 14 * 24 * time.Hour
+
+// sessionHost is the host of the relay session when this command runs as the
+// TUI's background session: its terminal offers one (SPO-Xmailbox-IF-029).
+func (a *app) sessionHost() relayloop.Host {
+	if h, ok := a.term.(interface{ SessionHost() relayloop.Host }); ok {
+		return h.SessionHost()
+	}
+	return nil
+}
+
+// relaySessionLive reports that the TUI this command runs in has a relay
+// session logged in (SPO-Xmailbox-OUT-120).
+func (a *app) relaySessionLive() bool {
+	l, ok := a.term.(interface{ RelaySessionLive() bool })
+	return ok && l.RelaySessionLive()
+}
+
+// relaySessionBusy reports that the TUI this command runs in has a relay
+// session in any phase but logged out: logging in, logged in, logging out or
+// stuck. Every command that would dial the relays refuses then, unless it goes
+// through the logged-in session (SPO-Xmailbox-OUT-120).
+func (a *app) relaySessionBusy() bool {
+	b, ok := a.term.(interface{ RelaySessionBusy() bool })
+	return ok && b.RelaySessionBusy()
+}
+
+// inTUI reports that this command runs in the TUI.
+func (a *app) inTUI() bool {
+	_, ok := a.term.(interface{ RelaySessionBusy() bool })
+	return ok
+}
+
+// sessionRevokes is the revoke sending the TUI's logged-in session lends, or
+// nil.
+func (a *app) sessionRevokes() func(ctx context.Context, book relayport.RevokeBook) (map[string]error, error) {
+	l, ok := a.term.(interface{ RelaySessionRevokes() relayloop.Revokes })
+	if !ok {
+		return nil
+	}
+	send := l.RelaySessionRevokes()
+	if send == nil {
+		return nil
+	}
+	return func(ctx context.Context, book relayport.RevokeBook) (map[string]error, error) { return send(ctx, book) }
+}
+
+// tunnelStuck tells the TUI this command runs in that a tunnel it dialled did
+// not stop (SPO-Xmailbox-OUT-117).
+func (a *app) tunnelStuck(err error) {
+	if s, ok := a.term.(interface{ RelayTunnelStuck(string) }); ok {
+		s.RelayTunnelStuck(err.Error())
+	}
+}
+
+// explainOwnSession: a command that needs the workspace alone (a rekey, a
+// restore) is refused with ErrLocked while this TUI's own relay session holds
+// the workspace open; it is told to log out of the relays, not to wait for
+// "another spo process".
+func (a *app) explainOwnSession(err error) error {
+	if err == nil || !errors.Is(err, ErrLocked) || !a.relaySessionBusy() {
+		return err
+	}
+	return Explain(err, "the relay session of this TUI holds the workspace open: log out of the relays first (Log out of relays), then run the command again")
+}
+
+// refuseBusy is the refusal of a command that would log this device in, or
+// dial the relays, while the TUI's session is logged in or busy.
+func (a *app) refuseBusy() error {
+	switch {
+	case a.relaySessionLive():
+		// one login of this device at a time (SPO-Xmailbox-OUT-120)
+		return errors.New("the relay session of the TUI is logged in and already exchanges over the relays: log out of the relays first, or let the session do it")
+	case a.relaySessionBusy():
+		return errSessionBusy
+	}
+	return nil
 }
 
 // openRelaySession connects this device to every listed relay with its stored
-// binding, its routes and expected senders and its revoke book.
-func (r *partyRun) openRelaySession(ctx context.Context) (*relaySession, error) {
+// binding, its routes and expected senders and its revoke book. status, when
+// set, is given each relay's class and the binding's end.
+func (r *partyRun) openRelaySession(ctx context.Context, status *relayloop.Status) (*relaySession, error) {
 	ops := r.kit().Relay
 	if ops.Connect == nil {
 		return nil, errors.New("this build has no relay transport")
@@ -213,9 +432,14 @@ func (r *partyRun) openRelaySession(ctx context.Context) (*relaySession, error) 
 	}
 	if st.Binding == nil {
 		// a revoke still owed to a relay needs no binding: it goes first
-		// (SPO-Xmailbox-OUT-111), then the refusal
-		r.sendOwedRevokes(ctx, svc)
-		return nil, errors.New("this device has no relay binding: bind it first with spo party relay bind")
+		// (SPO-Xmailbox-OUT-111), then the refusal; a revoke-only tunnel that
+		// did not stop goes with the refusal, so the session is stuck, not
+		// logged out (SPO-Xmailbox-OUT-117)
+		refusal := errors.New("this device has no relay binding: bind it first with spo party relay bind")
+		if stuck := r.sendOwedRevokes(ctx, svc); stuck != nil {
+			return nil, errors.Join(refusal, stuck)
+		}
+		return nil, refusal
 	}
 	eps, nk, done, err := r.openRelays(ctx)
 	if err != nil {
@@ -241,10 +465,12 @@ func (r *partyRun) openRelaySession(ctx context.Context) (*relaySession, error) 
 		return nil, partyIdentityErr(err)
 	}
 	s := &relaySession{r: r, svc: svc, local: local, routes: routes, book: &liveBook{b: b}, from: st.Binding.From,
-		tell: relayloop.New(r.a.d.Err, st.Binding.Statement, relayRemedy)}
+		tell: relayloop.New(r.a.d.Err, st.Binding.Statement, relayRemedy), status: status}
+	s.until.Store(st.Binding.Until)
 	for _, e := range eps {
 		s.names = append(s.names, e.Name)
 	}
+	r.remind(st.Binding.Until, status)
 	_, derp := r.tailcatSettings()
 	tell := s.tell
 	c, err := ops.Connect(RelayConnectConfig{
@@ -255,10 +481,15 @@ func (r *partyRun) openRelaySession(ctx context.Context) (*relaySession, error) 
 			return rt.WalletKey, rt.Device, ok
 		},
 		Book: s.book, Clock: r.env.Clock,
-		// called on the composite's member goroutines: only the teller is used
+		// called on the composite's member goroutines: only the teller and the
+		// status are used, both under their own locks
 		Note: func(n RelayNote) {
-			if n.Identity != nil {
-				tell.Remedy(n.Identity)
+			if n.Identity != nil && tell.Remedy(n.Identity) {
+				text := tell.LastRemedy()
+				status.Update(func(st *relayloop.State) { st.Remedy = text })
+			}
+			if class, ok := relayClass(n); ok {
+				status.Relay(n.Relay, class, n.Backoff)
 			}
 		},
 	})
@@ -266,25 +497,110 @@ func (r *partyRun) openRelaySession(ctx context.Context) (*relaySession, error) 
 		local.Destroy()
 		return nil, err
 	}
-	s.client = c
+	s.client, s.transport = c, c.Transport()
+	for _, n := range s.names {
+		// Connect dials nothing: a relay is waiting until its first exchange
+		// (SPO-Xmailbox-OUT-115)
+		status.Relay(n, relayloop.RelayWaiting, 0)
+	}
+	s.noteOwed(ctx)
 	return s, nil
+}
+
+// remind says when the binding ends and, within 14 days of its end, to renew it
+// (SPO-Xmailbox-OUT-115).
+func (r *partyRun) remind(until int64, status *relayloop.Status) {
+	left := time.Unix(until, 0).Sub(r.env.Clock.Now())
+	text := ""
+	if left <= relayRemind {
+		text = fmt.Sprintf("the binding of this device ends on %s (in %d day(s)): renew it with spo party relay bind",
+			time.Unix(until, 0).UTC().Format(time.DateTime+" MST"), max(int64(left/(24*time.Hour)), 0))
+		fmt.Fprintf(r.a.d.Out, "relay: %s.\n", text)
+	}
+	status.Update(func(st *relayloop.State) { st.BindingUntil, st.Reminder = until, text })
+}
+
+// noteOwed gives the status the number of revokes a listed relay still owes.
+func (s *relaySession) noteOwed(ctx context.Context) {
+	if s.status == nil {
+		return
+	}
+	if st, err := s.svc.Status(ctx); err == nil {
+		s.status.Update(func(x *relayloop.State) { x.Owed = len(st.Owed) })
+	}
 }
 
 // sync follows the store: the routes and the expected senders (SetSenders when
 // they changed), a binding renewed by another command (SetBinding), and the
-// revoke book (saved when the clients learnt something).
-func (s *relaySession) sync(ctx context.Context) {
-	if changed, err := s.routes.Refresh(ctx); err == nil && changed {
+// revoke book (saved when the clients learnt something). It returns the error
+// of reading the store, so that a handle that can no longer be used ends a
+// login (SPO-Xmailbox-OUT-118).
+func (s *relaySession) sync(ctx context.Context) error {
+	changed, rerr := s.routes.Refresh(ctx)
+	if rerr == nil && changed {
 		s.client.SetSenders(s.routes.Senders())
 	}
-	if st, err := s.svc.Load(ctx); err == nil && st.Binding != nil && st.Binding.From > s.from {
+	st, err := s.svc.Load(ctx)
+	if err == nil && st.Binding != nil && st.Binding.From > s.from {
 		if err := s.client.SetBinding(st.Binding.Statement, st.Binding.Key); err == nil {
 			s.tell.SetStatement(st.Binding.Statement)
 			s.from = st.Binding.From
+			s.until.Store(st.Binding.Until)
+			s.status.Update(func(x *relayloop.State) { x.BindingUntil = st.Binding.Until })
 			fmt.Fprintln(s.r.a.d.Out, "relay: the new binding is used from the next connection")
 		}
 	}
 	s.saveBook(ctx)
+	s.followBook(ctx)
+	s.noteOwed(ctx)
+	if s.reviews != nil {
+		if ids, err := s.reviews(ctx); err == nil {
+			s.status.Update(func(x *relayloop.State) { x.Reviews, x.ReviewsKnown = ids, true })
+		}
+	}
+	return errors.Join(rerr, err)
+}
+
+// followBook loads the revoke book again when the stored revokes changed since
+// it was loaded (another command stored a revoke, or dropped one): the clients
+// use the new book at once, and a revoke that is new is sent now, on the loop's
+// goroutine (sendDue), not at the next connection. The book was saved just
+// before, so nothing it learnt is lost (SPO-Xmailbox-OUT-111).
+func (s *relaySession) followBook(ctx context.Context) {
+	fresh, err := s.svc.Book(ctx)
+	if err != nil {
+		return
+	}
+	had := map[string]bool{}
+	for _, rv := range s.book.get().Pending() {
+		had[relayself.ShortID(rv)] = true
+	}
+	added, changed := false, len(fresh.Pending()) != len(had)
+	for _, rv := range fresh.Pending() {
+		if !had[relayself.ShortID(rv)] {
+			added, changed = true, true
+		}
+	}
+	if !changed {
+		return
+	}
+	s.swapBook(fresh, fresh.Changes())
+	if added {
+		s.due.Store(true)
+	}
+}
+
+// sendDue sends the book's revokes on revoke-only connections when the sync
+// found a new one (Exchange.Between): what it learns is saved at the next sync.
+func (s *relaySession) sendDue(ctx context.Context) {
+	if !s.due.Swap(false) {
+		return
+	}
+	for name, err := range s.client.SendRevokes(ctx) {
+		if err != nil && ctx.Err() == nil {
+			s.tell.Failure("sending the revokes to "+name, err)
+		}
+	}
 }
 
 // saveBook saves the revoke book when it learnt something since the last save.
@@ -301,15 +617,29 @@ func (s *relaySession) saveBook(ctx context.Context) {
 	s.savedAt = n
 }
 
-// close logs out: the clients, then every tunnel; the local identity is
-// destroyed. A tunnel that did not stop is an error that says so.
-func (s *relaySession) close(ctx context.Context) error {
-	s.saveBook(ctx)
+// relayBookSave bounds the save of the revoke book at logout, which waits for
+// the host's executor (SPO-Xmailbox-OUT-116).
+var relayBookSave = 2 * time.Second
+
+// close logs out: the revoke book is saved through the host (bounded), then the
+// clients and every tunnel are closed, and the local identity is destroyed. A
+// tunnel that did not stop is an error that says so (SPO-Xmailbox-OUT-116,
+// OUT-117).
+func (s *relaySession) close(ctx context.Context, host relayloop.Host) error {
+	if host == nil {
+		host = relayloop.Inline
+	}
+	s.closed.Store(true)
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), relayBookSave)
+	if err := host.Post(sctx, func(jctx context.Context) error { s.saveBook(jctx); return nil }); err != nil {
+		s.tell.Printf("relay: the revoke book was not saved at logout (%v); its revokes stay owed and are sent again\n", err)
+	}
+	cancel()
 	err := s.client.Logout(relayLogout)
 	s.local.Destroy()
 	if err != nil {
 		s.tell.Printf("tunnel did not stop: %v. The device may still be registered at the relay; exit this process.\n", err)
-		return fmt.Errorf("tunnel did not stop: %w", err)
+		return fmt.Errorf("%w: %w", ErrTunnelDidNotStop, err)
 	}
 	return nil
 }
@@ -373,14 +703,15 @@ func (r *partyRun) reportOwed(ctx context.Context, svc relayself.Service, id str
 
 // sendOwedRevokes sends the pending revokes on revoke-only connections when a
 // listed relay still owes one, and reports it: what serve and connect do before
-// they refuse a device with no binding (SPO-Xmailbox-OUT-111).
-func (r *partyRun) sendOwedRevokes(ctx context.Context, svc relayself.Service) {
+// they refuse a device with no binding (SPO-Xmailbox-OUT-111). It returns the
+// error of a revoke-only tunnel that did not stop, nil otherwise.
+func (r *partyRun) sendOwedRevokes(ctx context.Context, svc relayself.Service) error {
 	if svc.Send == nil {
-		return
+		return nil
 	}
 	st, err := svc.Status(ctx)
 	if err != nil || len(st.Owed) == 0 {
-		return
+		return nil
 	}
 	fmt.Fprintln(r.a.d.Out, "Sending the revokes still owed to the relays (no binding is needed for that):")
 	rep, err := svc.SendPending(ctx)
@@ -390,84 +721,216 @@ func (r *partyRun) sendOwedRevokes(ctx context.Context, svc relayself.Service) {
 	if err := r.reportOwed(ctx, svc, "", rep.Relays); err != nil && !errors.Is(err, errRevokeOwed) {
 		fmt.Fprintf(r.a.d.Err, "%v\n", err)
 	}
+	if errors.Is(err, ErrTunnelDidNotStop) {
+		return err
+	}
+	return nil
 }
 
 // relayExchange is serve and connect over the relays (SPO-Xmailbox-OUT-108):
 // flush the outbox, receive and handle, acknowledge, follow the store, until the
 // command is stopped.
-func (r *partyRun) relayExchange(ctx context.Context, handle multisig.Handler, after func(multisig.Handled)) error {
-	s, err := r.openRelaySession(ctx)
+//
+// The loop is relayloop.Exchange, run by relayloop.Serve (SPO-Xmailbox-IF-027).
+// The store steps go through the host: at once on the command line, on the
+// TUI's executor for its background session. A login (o.login) also ends at
+// its limit, at the end of the binding in use and when the store handle can no
+// longer be used (SPO-Xmailbox-OUT-118).
+func (r *partyRun) relayExchange(ctx context.Context, handle multisig.Handler, after func(multisig.Handled), o exchangeOpts) (err error) {
+	a := r.a
+	host := o.host
+	if host == nil {
+		if err := a.refuseBusy(); err != nil {
+			return err
+		}
+		host = relayloop.Inline
+	}
+	// one login of this device at a time, across processes too
+	// (SPO-Xmailbox-PRE-067); kept when the teardown is stuck
+	release, err := r.holdRelays()
 	if err != nil {
 		return err
 	}
-	a := r.a
-	ob := r.node().Outbox()
-	if err := ob.Rearm(ctx); err != nil {
-		s.close(ctx)
+	defer func() { release(errors.Is(err, ErrTunnelDidNotStop)) }()
+	status := relayloop.NewStatus(host)
+	end, err := relayloop.Serve(ctx, status, func() (*relayloop.Exchange, func() error, error) {
+		s, err := r.openRelaySession(ctx, status)
+		if err != nil {
+			return nil, nil, err
+		}
+		s.reviews = o.reviews
+		lender, _ := host.(relayloop.Lender)
+		closeFn := func() error {
+			if lender != nil {
+				lender.Lend(nil)
+			}
+			return s.close(ctx, host)
+		}
+		ob := r.node().Outbox()
+		if err := ob.Rearm(ctx); err != nil {
+			return nil, closeFn, err
+		}
+		fmt.Fprintf(a.d.Out, "Exchanging over %d relay(s): %s. Stop with Ctrl-C (that logs out).\n", len(s.names), strings.Join(s.names, ", "))
+		e := sessionExchange(s, host, status, ob.Flush, ob.Rearm, handle, after)
+		if o.login {
+			e.Limit = o.limit
+			e.Expired = func() bool { return r.env.Clock.Now().Unix() > s.until.Load() }
+			e.Gone = a.d.StoreGone
+		}
+		if lender != nil {
+			// foreground commands of the TUI send revokes over this session's
+			// connections while it is logged in (SPO-Xmailbox-OUT-120)
+			lender.Lend(s.lendRevokes)
+		}
+		return e, closeFn, nil
+	})
+	if err != nil {
+		if errors.Is(err, ErrTunnelDidNotStop) {
+			a.tunnelStuck(err)
+		}
 		return err
 	}
-	fmt.Fprintf(a.d.Out, "Exchanging over %d relay(s): %s. Stop with Ctrl-C (that logs out).\n", len(s.names), strings.Join(s.names, ", "))
-	synced, rearmed := time.Now(), time.Now()
-	var junk relayloop.Pacer
-	for ctx.Err() == nil {
-		switch _, err := ob.Flush(ctx, s.client.Transport()); {
-		case err == nil:
-			s.tell.Clear("sending")
-		case ctx.Err() != nil:
-		case errors.Is(err, ports.ErrIdentityRefused):
-			s.tell.Remedy(err)
-		default:
-			s.tell.Failure("sending", err)
-		}
-		rctx, cancel := context.WithTimeout(ctx, connectReceiveWindow)
-		rcv, err := s.client.Receive(rctx)
-		cancel()
-		switch {
-		case err == nil:
-			s.tell.Clear("receiving")
-			h, herr := handle(ctx, rcv)
-			if herr != nil {
-				s.tell.Printf("handling an envelope: %v\n", herr)
-				break
-			}
-			if err := s.client.AckContext(ctx); err != nil && ctx.Err() == nil {
-				s.tell.Printf("acknowledging: %v\n", err)
-			}
-			if after != nil {
-				after(h)
-			}
-			if h.Refused && !h.HasSender {
-				// junk anyone on the path can make: its work is paced (SPO-Xmailbox-OUT-112)
-				sleepCtx(ctx, junk.Junk())
-			}
-		case ctx.Err() != nil, errors.Is(err, context.DeadlineExceeded):
-		case errors.Is(err, ports.ErrIdentityRefused):
-			s.tell.Remedy(err)
-			sleepCtx(ctx, connectReceiveWindow)
-		default:
-			// a failure that persists is told once, and again when it changes
-			s.tell.Failure("receiving", err)
-			sleepCtx(ctx, connectReceiveWindow)
-		}
-		if time.Since(synced) > serveSyncEvery {
-			synced = time.Now()
-			s.sync(ctx)
-		}
-		if time.Since(rearmed) > relayRearmEvery {
-			// no Hello arrives over a relay: the unanswered requests are put again
-			// on a timer, so a lost response is recovered while this runs
-			// (SPO-Xparty-INV-017, SPO-Xmailbox-OUT-110)
-			rearmed = time.Now()
-			if err := ob.Rearm(ctx); err != nil && ctx.Err() == nil {
-				s.tell.Failure("re-arming the outbox", err)
-			}
-		}
-	}
-	if err := s.close(ctx); err != nil {
-		return err
+	switch end {
+	case relayloop.EndLimit:
+		fmt.Fprintf(a.d.Out, "The login limit of %v (relay_login_max) was reached.\n", o.limit)
+	case relayloop.EndExpired:
+		fmt.Fprintln(a.d.Out, "The binding of this device ended: renew it with spo party relay bind, then log in again.")
+	case relayloop.EndStoreGone:
+		fmt.Fprintln(a.d.Out, "The workspace can no longer be used by this session (it was locked or changed elsewhere): open it again and log in again.")
 	}
 	fmt.Fprintln(a.d.Out, "Logged out of the relays.")
 	return nil
+}
+
+// sessionExchange is the loop of one session over its relays. Its steps are
+// given the session's narrow client (no Send) and the transport only through
+// flush, the outbox's own Flush: no step can put an envelope that the outbox's
+// cold-key rule has not seen (SPO-Xmailbox-SEC-082).
+func sessionExchange(s *relaySession, host relayloop.Host, status *relayloop.Status,
+	flush func(ctx context.Context, tr ports.Transport) (int, error), rearm func(ctx context.Context) error,
+	handle multisig.Handler, after func(multisig.Handled)) *relayloop.Exchange {
+	var last multisig.Handled
+	tr := s.transport
+	return &relayloop.Exchange{
+		Client: s.client, Host: host, Tell: s.tell, Status: status,
+		Flush: func(ctx context.Context) (int, error) { return flush(ctx, tr) },
+		Handle: func(ctx context.Context, rcv ports.Received) (relayloop.Handled, error) {
+			h, err := handle(ctx, rcv)
+			last = h
+			return relayloop.Handled{Refused: h.Refused, HasSender: h.HasSender}, err
+		},
+		After: func(relayloop.Handled) {
+			if after != nil {
+				after(last)
+			}
+			line := handledLine(last)
+			status.Update(func(st *relayloop.State) { st.Last = line })
+		},
+		Sync:    s.sync,
+		Between: s.sendDue,
+		Rearm:   rearm,
+		Window:  connectReceiveWindow, SyncEvery: serveSyncEvery, RearmEvery: relayRearmEvery,
+		Now: relayNow, Wall: relayWall, Sleep: sleepCtx, WatchEvery: relayWatchEvery,
+	}
+}
+
+// lendRevokes is the session's revoke sending as it is lent to the TUI's
+// foreground commands: the book the command loaded (with the revoke it stored)
+// becomes the book of the session's clients, and its revokes go on revoke-only
+// connections of the session's own tunnels. The command saves the book; the
+// session saves it again at its next sync.
+func (s *relaySession) lendRevokes(ctx context.Context, book any) (map[string]error, error) {
+	if s.closed.Load() {
+		return nil, errSessionBusy
+	}
+	b, ok := book.(*relayself.Book)
+	if !ok {
+		return nil, errors.New("the relay session sends only the workspace's own revoke book")
+	}
+	s.swapBook(b, -1)
+	return s.client.SendRevokes(ctx), nil
+}
+
+// exchangeOpts is what a relay login adds to an exchange: the host of the TUI's
+// session (nil: the command line), the end of a login, and the count of the
+// requests waiting for review.
+type exchangeOpts struct {
+	host    relayloop.Host
+	limit   time.Duration
+	login   bool
+	reviews func(ctx context.Context) ([]string, error)
+}
+
+// relayWall is the wall clock of the login limit, without its monotonic
+// reading (a test's seam); relayWatchEvery is how often the limit and the
+// binding's end are looked at.
+var (
+	relayWall       = func() time.Time { return time.Now().Round(0) }
+	relayWatchEvery = time.Second
+)
+
+// relayNow is the clock of the exchange's intervals and of the login limit (a
+// test's seam): time.Now, whose differences are monotonic.
+var relayNow = time.Now
+
+// handledLine is printHandled's line of one envelope, for the session's state.
+func handledLine(h multisig.Handled) string {
+	var b strings.Builder
+	printHandled(&b, h)
+	return strings.TrimSpace(b.String())
+}
+
+// loginMax is the limit of a relay login: relay_login_max, or 12 hours.
+func (r *partyRun) loginMax() time.Duration {
+	if p := r.o.Config.Party; p != nil && p.RelayLoginMax > 0 {
+		return p.RelayLoginMax
+	}
+	return defaultRelayLoginMax
+}
+
+// defaultRelayLoginMax is the default of relay_login_max (ADR 0014 decision 9).
+const defaultRelayLoginMax = 12 * time.Hour
+
+// partyRelayLoginCommand is spo party relay login (SPO-Xmailbox-IF-028): the
+// exchange of this device's role over every listed relay until it is stopped.
+// The TUI runs it as its background relay session (SPO-Xmailbox-IF-029).
+func (a *app) partyRelayLoginCommand() *cobra.Command {
+	var as string
+	cmd := &cobra.Command{
+		Use:   "login [--as coordinator|signer]",
+		Short: "Log in to the listed relays and receive until stopped (stopping logs out)",
+		Long: `Log this device in to every listed relay with its binding and exchange: send
+what waits in the outbox, fetch what waits at the relays and hand it to this
+machine's coordinator or signer (--as when it is both), acknowledge it. Nothing
+is approved here: a signing request waits for spo party review and approve.
+
+On the command line logging out is the end of this command: Ctrl-C (SIGINT) or
+SIGTERM closes the connections and the tunnels and destroys the identity in
+memory. There is no logout command. In spo tui the login runs in the background
+and "Log out of relays" ends it without closing the TUI.
+
+The login ends itself after relay_login_max ([party] in spo.toml, default 12h),
+when the binding ends, and when the workspace can no longer be used. A device
+with no binding is told to bind first; revokes still owed to a relay are sent
+before that.`,
+		Annotations: map[string]string{uihint.RelaySession: uihint.RelayLogin},
+		Args:        cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return a.party(cmd, nil, []Need{CapClock}, func(ctx context.Context, r *partyRun) error {
+				handle, reviews, err := r.roleHandler(ctx, as)
+				if err != nil {
+					return err
+				}
+				return r.relayExchange(ctx, handle, func(h multisig.Handled) {
+					if h.Effect != "duplicate" {
+						printHandled(a.d.Out, h)
+					}
+				}, exchangeOpts{host: a.sessionHost(), limit: r.loginMax(), login: true, reviews: reviews})
+			})
+		},
+	}
+	cmd.Flags().StringVar(&as, "as", "", "which role handles what arrives, when this machine is both: coordinator or signer")
+	return cmd
 }
 
 // connectRelays is connect --transport mailbox: the signer over every listed
@@ -496,7 +959,7 @@ func (r *partyRun) connectRelays(ctx context.Context, f *signerFlags, interactiv
 				fmt.Fprintf(a.d.Err, "not approved: %v\n", err)
 			}
 		}
-	})
+	}, exchangeOpts{})
 }
 
 // relayForget is "forget this device" over the relays, in the order of ADR 0014
@@ -511,9 +974,23 @@ func (r *partyRun) connectRelays(ctx context.Context, f *signerFlags, interactiv
 // binding (spo party relay send-revokes, and serve and connect before they
 // refuse), so keeping the binding would buy nothing but a device that can still
 // log in, which the operator asked to end.
-func (r *partyRun) relayForget(ctx context.Context, handle multisig.Handler) (relayport.Revoke, map[string]error, error) {
+func (r *partyRun) relayForget(ctx context.Context, handle multisig.Handler) (got relayport.Revoke, errs map[string]error, err error) {
 	a := r.a
-	s, err := r.openRelaySession(ctx)
+	if err := a.refuseBusy(); err != nil {
+		return relayport.Revoke{}, nil, err
+	}
+	release, err := r.holdRelays()
+	if err != nil {
+		return relayport.Revoke{}, nil, err
+	}
+	defer func() {
+		stuck := errors.Is(err, ErrTunnelDidNotStop)
+		release(stuck)
+		if stuck {
+			a.tunnelStuck(err)
+		}
+	}()
+	s, err := r.openRelaySession(ctx, nil)
 	if err != nil {
 		return relayport.Revoke{}, nil, err
 	}
@@ -563,10 +1040,9 @@ func (r *partyRun) relayForget(ctx context.Context, handle multisig.Handler) (re
 			len(failed), skipped)
 	}
 	// (2) the revoke, stored with the binding kept
-	got, err := s.svc.ForgetRevoke(ctx)
+	got, err = s.svc.ForgetRevoke(ctx)
 	if err != nil {
-		s.close(ctx)
-		return relayport.Revoke{}, nil, err
+		return relayport.Revoke{}, nil, errors.Join(err, s.close(ctx, nil))
 	}
 	// (3) sent to every relay on revoke-only connections of the same tunnels;
 	// the book learns which relay recorded it
@@ -574,9 +1050,9 @@ func (r *partyRun) relayForget(ctx context.Context, handle multisig.Handler) (re
 		s.book.set(b)
 		s.savedAt = 0
 	}
-	errs := s.client.SendRevokes(ctx)
+	errs = s.client.SendRevokes(ctx)
 	// (4) log out (the book is saved first)
-	if err := s.close(ctx); err != nil {
+	if err := s.close(ctx, nil); err != nil {
 		return got, errs, err
 	}
 	// (5) only then the binding
@@ -597,25 +1073,44 @@ var (
 
 // forgetHandler is the handler of this device's role for the queue of forget.
 func (r *partyRun) forgetHandler(ctx context.Context, as string) (multisig.Handler, error) {
+	h, _, err := r.roleHandler(ctx, as)
+	return h, err
+}
+
+// roleHandler is the handler of this device's role and, for a signer, the
+// short ids of the requests waiting for its review, read from the store (the
+// TUI shows them; never text a peer chose).
+func (r *partyRun) roleHandler(ctx context.Context, as string) (multisig.Handler, func(context.Context) ([]string, error), error) {
 	role, err := r.inboxRole(ctx, as)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if role == "signer" {
 		sg, _, err := r.signer(ctx, "", r.dirs("", ""))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
+		}
+		reviews := func(ctx context.Context) ([]string, error) {
+			pending, err := sg.Pending(ctx)
+			if err != nil {
+				return nil, err
+			}
+			ids := make([]string, 0, len(pending))
+			for _, p := range pending {
+				ids = append(ids, hex.EncodeToString(p.ID[:]))
+			}
+			return ids, nil
 		}
 		return func(ctx context.Context, rcv ports.Received) (multisig.Handled, error) {
 			out, err := sg.Handle(ctx, rcv)
 			return out, mapSignerErr(err)
-		}, nil
+		}, reviews, nil
 	}
 	co, err := r.coordinator()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return co.Handle, nil
+	return co.Handle, nil, nil
 }
 
 // ---- the relay list ----
