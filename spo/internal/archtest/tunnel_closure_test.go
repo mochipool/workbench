@@ -38,9 +38,11 @@ const tunnelPkg = module + "/internal/adapters/tailcat/stream"
 var relayRoots = []string{
 	module + "/internal/app/relay",
 	module + "/internal/adapters/mailboxstore",
+	module + "/internal/adapters/bindingstore",
 	module + "/internal/adapters/relayconfig",
 	module + "/internal/ports/relayport",
 	module + "/internal/domain/mailbox",
+	module + "/internal/domain/relayregistry",
 	tunnelPkg,
 	// module + "/cmd/spo-relay",
 }

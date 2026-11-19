@@ -62,6 +62,10 @@ var (
 	// ErrRange means a value outside the bounds of a statement, or a Policy
 	// outside the ADR's.
 	ErrRange = errors.New("relaybind: value out of range")
+	// ErrReservedPayload means a generic message-signing path was given a payload
+	// that starts with `spo-` or `spo/` (IsReserved). Only the typed binding and
+	// revoke methods of the signers produce such a payload (ADR 0014 decision 3).
+	ErrReservedPayload = errors.New("relaybind: a payload that starts with spo- or spo/ is reserved for relay statements and cannot be signed as a message")
 )
 
 // The reasons of ErrBadEncoding. Each strictness rule has its own, so a test

@@ -16,6 +16,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/app/catalyst"
 	domcat "github.com/mochipool/workbench/spo/internal/domain/catalyst"
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
+	"github.com/mochipool/workbench/spo/internal/domain/relaybind"
 	"github.com/mochipool/workbench/spo/internal/ports"
 	"github.com/mochipool/workbench/spo/test/plainstore"
 )
@@ -133,6 +134,32 @@ func TestCalidusAndCatalystStateTheirNeedsFirst(t *testing.T) {
 	}
 	if g.has("c.calidus.vkey") {
 		t.Error("a key was written")
+	}
+}
+
+// `pool calidus sign` refuses non-text data and the signing input of a relay
+// statement in the command itself: before the capabilities are checked and
+// before anything is asked of the operator.
+//
+// spec: SPO-Xidentity-SEC-008, SPO-Xrelaybind-SEC-018
+func TestCalidusSignRefusesRawStatementInputInTheCommand(t *testing.T) {
+	f := newStakeFix(t) // no signing capability: only the command's own guard can answer first
+	for name, tc := range map[string]struct {
+		text string
+		want error
+	}{
+		"Sig_structure": {"\x84\x6aSignature1\x58\x1c", ports.ErrNotText},
+		"not utf-8":     {"a\xffb", ports.ErrNotText},
+		"reserved":      {"spo-relay-binding-v1 device x", relaybind.ErrRawStatementInput},
+	} {
+		term := &scriptTerm{t: t}
+		err := f.run(t, term, "pool", "calidus", "sign", "c", tc.text)
+		if !errors.Is(err, tc.want) {
+			t.Errorf("%s: %v, want %v", name, err, tc.want)
+		}
+		if term.asked != 0 {
+			t.Errorf("%s asked a question", name)
+		}
 	}
 }
 

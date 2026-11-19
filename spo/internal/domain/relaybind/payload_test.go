@@ -367,6 +367,19 @@ func TestVerifyDeviceRevoke(t *testing.T) {
 	if err != nil || got != dev {
 		t.Fatalf("good revoke: %x, %v", got, err)
 	}
+	// VerifyDeviceRevoke returns the verified type: the device and the not-before
+	// signed; a refusal returns the zero value, which says it was not verified
+	// (SPO-Xmailbox-SEC-062)
+	v, err := relaybind.VerifyDeviceRevoke(ed, x, nb, sig, nowT, relaybind.DefaultPolicy())
+	if err != nil || v.IsZero() || v.Device() != dev || v.NotBefore() != nb {
+		t.Fatalf("verified device revoke: %+v, %v", v, err)
+	}
+	if bad, err := relaybind.VerifyDeviceRevoke(ed, x, nb+1, sig, nowT, relaybind.DefaultPolicy()); err == nil || !bad.IsZero() {
+		t.Fatalf("a refused revoke returned %+v, %v", bad, err)
+	}
+	if !(relaybind.VerifiedDeviceRevoke{}).IsZero() {
+		t.Fatal("the zero VerifiedDeviceRevoke is not zero")
+	}
 	// The relay recomputes the fingerprint from the two keys; another X25519
 	// key is another device and the signature no longer fits.
 	x2 := x

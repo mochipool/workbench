@@ -168,6 +168,11 @@ var _ ports.VotingKeyQRSource = VotingKeyQR{}
 // --data-text`, SPO-15-EXT-006). The key is a payment-type extended key.
 func (v VaultSignatures) SignText(ctx context.Context, key custody.Key[custody.Calidus], text []byte) (ports.TextSignature, error) {
 	var out ports.TextSignature
+	// A Calidus key is payment key 0/0 of its mnemonic: raw bytes that are the
+	// signing input of a relay statement are refused before any key is opened.
+	if err := ports.CheckSignableText(text); err != nil {
+		return out, err
+	}
 	if v.Vault == nil {
 		return out, errors.New("the store cannot release signing keys")
 	}

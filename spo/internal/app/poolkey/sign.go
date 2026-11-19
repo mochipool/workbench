@@ -41,6 +41,11 @@ func (uc SignWithCalidusKey) Run(ctx context.Context, calidus string, text []byt
 	if uc.Store == nil || uc.Signers == nil {
 		return res, ErrNotConfigured
 	}
+	// Raw signing over caller-chosen bytes: text only, never a statement's
+	// signing input (SPO-Xidentity-SEC-008). Checked before the store is read.
+	if err := ports.CheckSignableText(text); err != nil {
+		return res, err
+	}
 	cal, err := calidusName(calidus)
 	if err != nil {
 		return res, err

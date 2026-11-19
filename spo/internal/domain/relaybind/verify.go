@@ -78,6 +78,27 @@ func (v VerifiedRevoke) Scope() Scope {
 	return ScopePair
 }
 
+// VerifiedDeviceRevoke is what a successful VerifyDeviceRevoke says: a device
+// whose own key signed a revoke, and the not-before. Its fields are unexported and
+// only VerifyDeviceRevoke fills them, so a value that is not the zero value was
+// produced by a verification: the registry accepts a device-signed revoke only as
+// this type, and cannot be handed a fingerprint nobody proved (an archtest holds
+// that no other function returns the type).
+type VerifiedDeviceRevoke struct {
+	ok        bool
+	device    party.Fingerprint
+	notBefore int64
+}
+
+// Device is the revoked device: the fingerprint recomputed from the two keys.
+func (v VerifiedDeviceRevoke) Device() party.Fingerprint { return v.device }
+
+// NotBefore is the signed not-before, 0 to MaxTime.
+func (v VerifiedDeviceRevoke) NotBefore() int64 { return v.notBefore }
+
+// IsZero reports whether v is the zero value, which no verification made.
+func (v VerifiedDeviceRevoke) IsZero() bool { return !v.ok }
+
 // Validate refuses a Policy looser than the ADR's: a relay may tighten the
 // skew (0 to SkewSeconds) and the maximum lifetime (MinLifetimeSeconds to
 // MaxLifetimeSeconds), never raise either.
