@@ -105,7 +105,7 @@ func (c *scripted) recv() mailbox.Message {
 
 func (c *scripted) handshake() {
 	c.t.Helper()
-	c.stage = mailbox.StageUnversioned
+	c.stage = mailbox.StageV2PreAuth // the Challenge is the first frame of the connection
 	ch, ok := c.recv().(mailbox.Challenge)
 	if !ok {
 		c.t.Fatal("no challenge")

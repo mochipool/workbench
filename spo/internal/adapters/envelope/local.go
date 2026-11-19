@@ -8,6 +8,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/mochipool/workbench/spo/internal/domain/mailbox"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/domain/relaybind"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -56,6 +57,27 @@ func (l *Local) SignRelayDeviceRevoke(notBefore, notBeforeBound int64) ([64]byte
 }
 
 var _ relayport.DeviceRevokeSigner = (*Local)(nil)
+
+// SignMailboxAuth implements relayport.AuthSigner: the device signs the proof of
+// its login at a relay (ADR 0014 decision 7, protocol version 2). The signed
+// bytes are built here by mailbox.AuthBytesV2 from the caller's fixed-length
+// values and this identity's OWN fingerprint, so the identity cannot be made to
+// sign another device's login or any other bytes; a relay time outside the
+// protocol's range is refused and nothing is signed.
+//
+// spec: SPO-Xmailbox-IF-017, SPO-Xmailbox-SEC-071
+func (l *Local) SignMailboxAuth(relayKey, clientNodeKey party.NodeKey, nonce [32]byte, relayTime int64, bindingHash, sendersHash [32]byte) ([64]byte, error) {
+	msg, err := mailbox.AuthBytesV2(mailbox.AuthV2Params{
+		RelayKey: relayKey, ClientNodeKey: clientNodeKey, Nonce: nonce, RelayTime: relayTime,
+		Fingerprint: l.p.Fingerprint(), BindingHash: bindingHash, SendersHash: sendersHash,
+	})
+	if err != nil {
+		return [64]byte{}, err
+	}
+	return l.p.sign(msg)
+}
+
+var _ relayport.AuthSigner = (*Local)(nil)
 
 // Seal implements ports.EnvelopeSealer.
 func (l *Local) Seal(to party.Identity, body party.Body, now, expires time.Time) ([]byte, party.MessageID, error) {

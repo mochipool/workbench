@@ -28,6 +28,22 @@ var (
 	// code is in the event). The codes "limit" and "shutting down" also satisfy
 	// ErrUnreachable: the relay is not available now.
 	ErrRelayError = errors.New("mailbox: the relay sent an error code")
+	// ErrBindingRefused: the relay refused the binding the client presented (the
+	// Error code `binding`: invalid, expired or revoked), or the binding the client
+	// holds has expired by its own clock, so it did not dial. A new binding must be
+	// signed and given to SetBinding. The client backs off and does not retry in a
+	// loop. It is an ErrRelayError when the relay said it.
+	ErrBindingRefused = errors.New("mailbox: the binding is refused: a new one must be signed")
+	// ErrNotAllowed: the relay answered the login with the Error code
+	// `not_allowed`: the operator's allow-list does not hold this wallet key. Only
+	// the operator can change that. Backed off like ErrBindingRefused; also an
+	// ErrRelayError.
+	ErrNotAllowed = errors.New("mailbox: the relay's operator does not allow this wallet key")
+	// ErrBindingInvalid: a binding given to New or SetBinding did not pass the
+	// client's own check (it does not parse or verify, it is for another device,
+	// it has expired or is not valid yet, or it is older than the one held). Nothing
+	// was changed.
+	ErrBindingInvalid = errors.New("mailbox: the binding is not valid for this device now")
 )
 
 // errRotate is not a failure: a reply cannot be read on this connection without
@@ -84,8 +100,17 @@ func codeOf(err error) (wire.Code, bool) {
 // relayError is the failure for an Error frame.
 func relayError(code wire.Code) error {
 	e := newErr(ReasonRelayError, nil, ErrRelayError)
-	if code == wire.CodeLimit || code == wire.CodeShuttingDown {
+	switch code {
+	case wire.CodeLimit, wire.CodeShuttingDown:
 		e.bases = append(e.bases, ErrUnreachable)
+	case wire.CodeBinding:
+		// the binding is invalid, expired or revoked: a new one must be signed
+		e.reason = ReasonBinding
+		e.bases = append(e.bases, ErrBindingRefused)
+	case wire.CodeNotAllowed:
+		// the operator's allow-list does not hold this wallet key
+		e.reason = ReasonNotAllowed
+		e.bases = append(e.bases, ErrNotAllowed)
 	}
 	e.code, e.hasCode = code, true
 	return e
@@ -122,6 +147,16 @@ func reasonText(r Reason) string {
 		return "the relay is busy"
 	case ReasonStorage:
 		return "the relay's storage failed"
+	case ReasonUnbound:
+		return "the recipient has no binding at this relay yet"
+	case ReasonNoWalletKey:
+		return "the recipient has no wallet key; it is reachable by file or direct connection only"
+	case ReasonBinding:
+		return "the relay refuses the binding; a new one must be signed"
+	case ReasonBindingExpired:
+		return "the binding has expired or is not valid yet; a new one must be signed"
+	case ReasonNotAllowed:
+		return "the relay's operator does not allow this wallet key"
 	}
 	return "the relay is not available"
 }

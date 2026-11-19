@@ -138,7 +138,7 @@ func TestTheClientDialsAtMostSixTimesAMinute(t *testing.T) {
 func TestStaleRetriesAreCountedWithinAWindow(t *testing.T) {
 	h := newHostile(t, func(s *sconn) {
 		s.serve(hs{}, func(m wire.Message) bool {
-			if p, ok := m.(wire.Put); ok {
+			if p, ok := m.(wire.PutV2); ok {
 				s.send(wire.PutResult{RequestID: p.RequestID, Status: wire.StatusStored})
 				return false // closes after its first reply
 			}

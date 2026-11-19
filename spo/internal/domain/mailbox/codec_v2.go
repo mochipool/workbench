@@ -11,46 +11,6 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 )
 
-// v2Message is a message that exists in version 2. The shapes of version 1 that
-// changed (Auth, Put, AuthOK) do not implement it, and the shapes that exist
-// only in version 2 return an error from fields, so that Encode, which writes
-// version 1, refuses them.
-type v2Message interface {
-	Message
-	fieldsV2() ([]any, error)
-}
-
-func notV1(m Message) error { return bad(ErrVersion, "%T exists only in version 2", m) }
-
-func (m AuthV2) fields() ([]any, error)         { return nil, notV1(m) }
-func (m AuthOKV2) fields() ([]any, error)       { return nil, notV1(m) }
-func (m PutV2) fields() ([]any, error)          { return nil, notV1(m) }
-func (m RevokeByDevice) fields() ([]any, error) { return nil, notV1(m) }
-func (m RevokeByWallet) fields() ([]any, error) { return nil, notV1(m) }
-func (m RevokeResult) fields() ([]any, error)   { return nil, notV1(m) }
-
-// The messages that are the same in both versions.
-func (m Challenge) fieldsV2() ([]any, error) { return m.fields() }
-func (m Fetch) fieldsV2() ([]any, error)     { return m.fields() }
-func (m Items) fieldsV2() ([]any, error)     { return m.fields() }
-func (m Ack) fieldsV2() ([]any, error)       { return m.fields() }
-func (m AckResult) fieldsV2() ([]any, error) { return m.fields() }
-
-// PutResult and Error have the same shape and a wider range in version 2.
-func (m PutResult) fieldsV2() ([]any, error) {
-	if !m.Status.ValidIn(Version2) {
-		return nil, bad(ErrRange, "status %d", m.Status)
-	}
-	return []any{uint64(m.RequestID), uint64(m.Status)}, nil
-}
-
-func (m Error) fieldsV2() ([]any, error) {
-	if !m.Code.ValidIn(Version2) {
-		return nil, bad(ErrRange, "error code %d", m.Code)
-	}
-	return []any{uint64(m.Code)}, nil
-}
-
 // checkBlob requires 1 to max bytes (a statement is never empty).
 func checkBlob(b []byte, max int, what string) error {
 	if len(b) < 1 || len(b) > max {
@@ -73,7 +33,7 @@ func checkSenders(senders []WalletKey) error {
 	return nil
 }
 
-func (m AuthV2) fieldsV2() ([]any, error) {
+func (m AuthV2) fields() ([]any, error) {
 	if err := checkBlob(m.Sign1, MaxSign1Bytes, "sign1"); err != nil {
 		return nil, err
 	}
@@ -103,7 +63,7 @@ func checkUntil(until int64) error {
 	return nil
 }
 
-func (m AuthOKV2) fieldsV2() ([]any, error) {
+func (m AuthOKV2) fields() ([]any, error) {
 	if err := checkAuthOKLimits(m.MaxEnvelope, m.MaxEntries, m.MaxBytes, m.RetentionSeconds); err != nil {
 		return nil, err
 	}
@@ -113,7 +73,7 @@ func (m AuthOKV2) fieldsV2() ([]any, error) {
 	return []any{uint64(Version2), m.MaxEnvelope, m.MaxEntries, m.MaxBytes, m.RetentionSeconds, uint64(m.Until)}, nil
 }
 
-func (m PutV2) fieldsV2() ([]any, error) {
+func (m PutV2) fields() ([]any, error) {
 	if err := checkSize(uint64(m.Size)); err != nil {
 		return nil, err
 	}
@@ -126,14 +86,14 @@ const (
 	revokeKindWallet = 1
 )
 
-func (m RevokeByDevice) fieldsV2() ([]any, error) {
+func (m RevokeByDevice) fields() ([]any, error) {
 	if m.NotBefore < 0 || m.NotBefore > MaxTime {
 		return nil, bad(ErrRange, "not-before %d is not 0 to %d", m.NotBefore, int64(MaxTime))
 	}
 	return []any{uint64(m.RequestID), uint64(revokeKindDevice), m.Keys.Ed25519[:], m.Keys.X25519[:], uint64(m.NotBefore), m.Signature[:]}, nil
 }
 
-func (m RevokeByWallet) fieldsV2() ([]any, error) {
+func (m RevokeByWallet) fields() ([]any, error) {
 	if err := checkBlob(m.Sign1, MaxSign1Bytes, "sign1"); err != nil {
 		return nil, err
 	}
@@ -143,7 +103,7 @@ func (m RevokeByWallet) fieldsV2() ([]any, error) {
 	return []any{uint64(m.RequestID), uint64(revokeKindWallet), m.Sign1, m.Key}, nil
 }
 
-func (m RevokeResult) fieldsV2() ([]any, error) {
+func (m RevokeResult) fields() ([]any, error) {
 	if !m.Status.Valid() {
 		return nil, bad(ErrRange, "revoke status %d", m.Status)
 	}
@@ -170,37 +130,15 @@ func NewPutV2Of(requestID uint32, key WalletKey, to party.Fingerprint, envelope 
 	return PutV2{RequestID: requestID, WalletKey: key, To: to, Mid: HashOf(envelope), Size: uint32(len(envelope))}, nil
 }
 
-// senderOf says who sends type t at the stage, and whether the type exists
-// there. Types 10 and 11 exist in every stage but StageV1, where they never
-// did.
-func senderOf(stage Stage, t uint64) (client, known bool) {
-	if stage != StageV1 {
-		switch MsgType(t) {
-		case MsgRevoke:
-			return true, true
-		case MsgRevokeResult:
-			return false, true
-		}
-	}
-	return fromClient(t)
-}
-
 // stageAllows is the table of the spec (OUT-051): which type each side may send
-// at each stage. StageV1 is version 1's own rule (every type of the sender).
+// at each stage.
 func stageAllows(stage Stage, client bool, t MsgType) bool {
 	switch stage {
-	case StageV1:
-		return true
-	case StageUnversioned:
-		if client {
-			return t == MsgAuth || t == MsgRevoke
-		}
-		return t == MsgChallenge || t == MsgError
 	case StageV2PreAuth:
 		if client {
 			return t == MsgAuth || t == MsgRevoke
 		}
-		return t == MsgAuthOK || t == MsgError || t == MsgRevokeResult
+		return t == MsgChallenge || t == MsgAuthOK || t == MsgError || t == MsgRevokeResult
 	case StageV2Authed:
 		if client {
 			return t == MsgPut || t == MsgFetch || t == MsgAck
@@ -211,41 +149,19 @@ func stageAllows(stage Stage, client bool, t MsgType) bool {
 }
 
 // DecodeFromClientIn parses a header frame body that arrived from a client
-// (the relay's side), at the given stage of the connection. At StageV1 it is
-// DecodeFromClient. Before a version is chosen the relay reads an Auth of
-// either version, told apart by the version number it carries, or a Revoke;
-// after it has chosen version 2 only the frames of that version's stage.
-// Whatever the stage does not allow is refused by its type alone, as ErrStage,
-// before any field is read.
+// (the relay's side), at the given stage of the connection: before Auth, an Auth
+// or a Revoke; after it, a Put, a Fetch or an Ack. Whatever the stage does not
+// allow is refused by its type alone, as ErrStage, before any field is read.
 func DecodeFromClientIn(stage Stage, frame []byte) (Message, error) {
 	return decodeIn(stage, frame, true)
 }
 
 // DecodeFromRelayIn parses a header frame body that arrived from the relay (the
-// client's side), at the given stage of the connection. At StageV1 it is
-// DecodeFromRelay.
+// client's side), at the given stage of the connection: before Auth, the
+// Challenge, the answers to Revokes and the AuthOK; after it, the answers to
+// requests.
 func DecodeFromRelayIn(stage Stage, frame []byte) (Message, error) {
 	return decodeIn(stage, frame, false)
-}
-
-// decodeAuthIn reads the version of an Auth and decodes it in that version's
-// shape. Before a version is chosen both are possible; once version 2 is chosen
-// an Auth of another version is ErrVersion.
-func decodeAuthIn(stage Stage, a []any, arity func(int) error) (Message, error) {
-	if len(a) < 2 {
-		return nil, bad(ErrMalformed, "an Auth carries its version")
-	}
-	v, ok := a[1].(uint64)
-	if !ok {
-		return nil, bad(ErrMalformed, "version is not a non-negative integer")
-	}
-	switch {
-	case stage == StageUnversioned && v == Version1:
-		return decodeAuth(a, arity)
-	case v == Version2:
-		return decodeAuthV2(a, arity)
-	}
-	return nil, bad(ErrVersion, "an Auth of version %d at the stage %v", v, stage)
 }
 
 // asBlob reads a byte string of 1 to max bytes and returns a copy.
@@ -261,6 +177,16 @@ func asBlob(v any, max int, what string) ([]byte, error) {
 }
 
 func decodeAuthV2(a []any, arity func(int) error) (Message, error) {
+	if len(a) < 2 {
+		return nil, bad(ErrMalformed, "an Auth carries its version")
+	}
+	v, ok := a[1].(uint64)
+	if !ok {
+		return nil, bad(ErrMalformed, "version is not a non-negative integer")
+	}
+	if v != Version2 {
+		return nil, bad(ErrVersion, "an Auth of version %d: there is one version, %d", v, Version2)
+	}
 	if err := arity(5); err != nil {
 		return nil, err
 	}

@@ -83,6 +83,12 @@ type Event struct {
 	Skew int64
 	// Backoff is the wait before the next dial, on a failure.
 	Backoff time.Duration
+	// Until is the end of the binding, on a renewal event (unix seconds).
+	Until int64
+	// Count is how many expected senders were dropped, on a senders event.
+	Count int
+	// Revoke is the outcome of one pending revoke, on a revoke event.
+	Revoke RevokeOutcome
 }
 
 // EventSink receives events. It is called on the goroutine that has the event,

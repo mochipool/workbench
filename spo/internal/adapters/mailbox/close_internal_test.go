@@ -9,6 +9,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/ports"
 	"github.com/mochipool/workbench/spo/internal/ports/relayport"
+	"github.com/mochipool/workbench/spo/internal/ports/relayport/relayporttest"
 )
 
 type idleDialer struct{}
@@ -19,13 +20,13 @@ func (idleDialer) Dial(ctx context.Context) (relayport.Stream, party.NodeKey, er
 
 type idleSigner struct{}
 
-func (idleSigner) SignMailboxAuth(party.NodeKey, party.NodeKey, [32]byte, int64, uint) ([64]byte, error) {
+func (idleSigner) SignMailboxAuth(party.NodeKey, party.NodeKey, [32]byte, int64, [32]byte, [32]byte) ([64]byte, error) {
 	return [64]byte{}, nil
 }
 
 type wallClock struct{}
 
-func (wallClock) Now() time.Time { return time.Now() }
+func (wallClock) Now() time.Time { return time.Unix(1_700_000_000, 0) }
 
 // Close drops what the client holds of the mailbox: the envelopes fetched and
 // not yet delivered (zeroed, not only unreferenced), the delivered-but-unacked
@@ -34,8 +35,14 @@ func (wallClock) Now() time.Time { return time.Now() }
 //
 // spec: SPO-Xmailbox-INV-019
 func TestCloseDropsTheQueuedCiphertextAndTheCursor(t *testing.T) {
-	c, err := New(Config{Dialer: idleDialer{}, RelayKey: party.NodeKey{1}, NodeKey: party.NodeKey{2}, Self: party.Fingerprint{3},
-		Signer: idleSigner{}, Clock: wallClock{}})
+	dev := relayporttest.Device(5)
+	w := relayporttest.NewWallet(5)
+	st := w.BindingStatement(dev, 1_700_000_000-60, 1_700_000_000+30*24*3600, false)
+	c, err := New(Config{Dialer: idleDialer{}, RelayKey: party.NodeKey{1}, NodeKey: party.NodeKey{2}, Self: dev,
+		Device:  relayporttest.DeviceKeysOf(5),
+		Binding: Binding{Statement: st.Sign1, Key: st.COSEKey},
+		Resolve: func(party.Fingerprint) (Route, bool) { return Route{}, false },
+		Signer:  idleSigner{}, Clock: wallClock{}})
 	if err != nil {
 		t.Fatal(err)
 	}

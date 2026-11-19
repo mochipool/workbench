@@ -52,8 +52,8 @@ func TestAuthBytesV2AreTheLabelledArray(t *testing.T) {
 	if got[0] != 0x89 || !bytes.HasPrefix(got[1:], append([]byte{0x73}, mailbox.AuthLabelV2...)) {
 		t.Error("the label is not the first element of the array")
 	}
-	if mailbox.AuthLabelV2 != "spo/mailbox-auth/v2" || mailbox.AuthLabel != "spo/mailbox-auth/v1" {
-		t.Errorf("labels %q %q", mailbox.AuthLabelV2, mailbox.AuthLabel)
+	if mailbox.AuthLabelV2 != "spo/mailbox-auth/v2" {
+		t.Errorf("label %q", mailbox.AuthLabelV2)
 	}
 }
 
@@ -147,11 +147,7 @@ func TestAuthBytesV2AreSeparatedFromEverythingTheDeviceKeySigns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v1p := params()
-	v1, err := mailbox.AuthBytes(v1p)
-	if err != nil {
-		t.Fatal(err)
-	}
+	v1 := retiredAuthBytes(t, 1, paramsV2())
 	rev, err := relaybind.DeviceRevokeBytes(fp(40), 1700000000)
 	if err != nil {
 		t.Fatal(err)
@@ -168,15 +164,15 @@ func TestAuthBytesV2AreSeparatedFromEverythingTheDeviceKeySigns(t *testing.T) {
 		return string(b[2 : 2+n])
 	}
 	labels := map[string]string{
-		"mailbox auth v1":   labelOf(v1),
-		"mailbox auth v2":   labelOf(v2),
-		"device revoke":     labelOf(rev),
-		"envelope":          "spo/envelope/v1",
-		"identity document": party.DocumentDomain,
-		"rotation, old key": party.RotationOldDomain,
-		"rotation, new key": party.RotationNewDomain,
+		"mailbox auth v1 (retired)": labelOf(v1),
+		"mailbox auth v2":           labelOf(v2),
+		"device revoke":             labelOf(rev),
+		"envelope":                  "spo/envelope/v1",
+		"identity document":         party.DocumentDomain,
+		"rotation, old key":         party.RotationOldDomain,
+		"rotation, new key":         party.RotationNewDomain,
 	}
-	if labels["mailbox auth v1"] != mailbox.AuthLabel || labels["mailbox auth v2"] != mailbox.AuthLabelV2 || labels["device revoke"] != relaybind.DeviceRevokeLabel {
+	if labels["mailbox auth v1 (retired)"] != "spo/mailbox-auth/v1" || labels["mailbox auth v2"] != mailbox.AuthLabelV2 || labels["device revoke"] != relaybind.DeviceRevokeLabel {
 		t.Fatalf("labels %v", labels)
 	}
 	seen := map[string]string{}
@@ -188,7 +184,7 @@ func TestAuthBytesV2AreSeparatedFromEverythingTheDeviceKeySigns(t *testing.T) {
 	}
 	// Each array's bytes start with its head and its own label and carry no
 	// other label.
-	arrays := map[string][]byte{"mailbox auth v1": v1, "mailbox auth v2": v2, "device revoke": rev}
+	arrays := map[string][]byte{"mailbox auth v1 (retired)": v1, "mailbox auth v2": v2, "device revoke": rev}
 	for name, b := range arrays {
 		for what, l := range labels {
 			has := bytes.Contains(b, []byte(l))
@@ -200,7 +196,7 @@ func TestAuthBytesV2AreSeparatedFromEverythingTheDeviceKeySigns(t *testing.T) {
 	// The ASCII-label messages start with a byte below 0x80; the arrays start
 	// with 0x80 or more, and the three arrays start differently.
 	for what, l := range labels {
-		if what == "mailbox auth v1" || what == "mailbox auth v2" || what == "device revoke" {
+		if what == "mailbox auth v1 (retired)" || what == "mailbox auth v2" || what == "device revoke" {
 			continue
 		}
 		if l == "" || l[0] >= 0x80 {
@@ -291,14 +287,11 @@ func TestVerifyAuthV2BindsTheDevice(t *testing.T) {
 	}
 	// There is no check against an identity's node key: a client whose node key
 	// is not the one in any document authenticates, because the relay has no
-	// document. The version 1 reason does not exist in version 2.
+	// document.
 	q = p
 	q.ClientNodeKey = nk(98)
 	if err := mailbox.VerifyAuthV2(keys, q.ClientNodeKey, signV2(t, priv, q), q); err != nil {
 		t.Errorf("a client at another node key: %v", err)
-	}
-	if errors.Is(mailbox.ErrAuthIdentityNode, mailbox.ErrAuth) {
-		t.Log("(the version 1 reasons are still defined)")
 	}
 	// The reasons are different errors.
 	reasons := []error{mailbox.ErrAuthFingerprint, mailbox.ErrAuthTunnelKey, mailbox.ErrAuthWeakKey}
@@ -463,92 +456,87 @@ func TestVerifyAuthV2ChecksTheSignature(t *testing.T) {
 	}
 }
 
-// What protects against a downgrade from 2 to 1. The version is inside the
-// signed bytes of both versions, under different labels and array lengths, so
-// a signature made for one is no signature for the other: an attacker who
-// rewrites the offered versions or the Auth frame cannot make both sides
-// complete a version 1 session unless the client itself signs version 1 bytes,
-// and a client signs version 1 bytes only if it chose version 1. Rewriting the
-// Challenge's range is the one thing that makes a client without a floor
-// choose version 1; a client with a floor refuses.
+// retiredAuthBytes is the signed array of the retired version 1, built by hand
+// from its definition (ADR 0013 decision 3): seven elements under the label
+// "spo/mailbox-auth/v1". The code that made it is deleted; this is what a client
+// that still spoke version 1 would have signed.
+func retiredAuthBytes(t testing.TB, version uint64, p mailbox.AuthV2Params) []byte {
+	t.Helper()
+	return cbor(t, "spo/mailbox-auth/v1", version, p.RelayKey[:], p.ClientNodeKey[:], p.Nonce[:], uint64(p.RelayTime), p.Fingerprint[:])
+}
+
+// There is no downgrade because there is one version. The label and the array
+// length of version 1 differ from version 2's, so a signature made over the
+// retired array (the version 1 array, or the one that says version 2) is no
+// signature of version 2; a version 1 Auth frame is refused by the decoder of
+// every stage with ErrVersion; the encoder writes nothing but version 2; and a
+// client that speaks version 2 only refuses a Challenge that offers version 1 only.
+// The relay's offered range is signed in neither array, so only the relay, which
+// the tunnel authenticates to the pinned key, can rewrite it, and a client of
+// version 2 does not accept the result (the removal of version 1 is the
+// protection).
 //
 // spec: SPO-Xmailbox-SEC-036
-func TestDowngradeNeedsTheClientsOwnSignatureOverVersion1(t *testing.T) {
-	priv, id, p1 := listed(1)
-	keys := mailbox.DeviceKeys{Ed25519: id.Ed25519, X25519: id.X25519}
-	p2 := paramsV2()
-	p2.ClientNodeKey = p1.ClientNodeKey
-	p2.RelayKey = p1.RelayKey
-	p2.Nonce = p1.Nonce
-	p2.RelayTime = p1.RelayTime
-	p2.Fingerprint = p1.Fingerprint
-	peer := p1.ClientNodeKey
+func TestThereIsNoDowngrade(t *testing.T) {
+	priv, keys := deviceKeyPair(1)
+	p := paramsV2()
+	p.Fingerprint = keys.Fingerprint()
+	peer := p.ClientNodeKey
 
-	// 1. The client signs version 2. The attacker turns the Auth into a
-	// version 1 Auth carrying the same signature: version 1 verification
-	// refuses it, and so does a signature over the version 1 bytes presented as
-	// version 2.
-	s2 := signV2(t, priv, p2)
-	if err := mailbox.VerifyAuthV2(keys, peer, s2, p2); err != nil {
+	s2 := signV2(t, priv, p)
+	if err := mailbox.VerifyAuthV2(keys, peer, s2, p); err != nil {
 		t.Fatalf("version 2: %v", err)
 	}
-	if err := mailbox.VerifyAuth(id, peer, s2, p1); !errors.Is(err, mailbox.ErrAuth) {
-		t.Errorf("a version 2 signature as a version 1 signature: %v", err)
-	}
-	s1 := sign(t, priv, p1)
-	if err := mailbox.VerifyAuth(id, peer, s1, p1); err != nil {
-		t.Fatalf("version 1: %v", err)
-	}
-	if err := mailbox.VerifyAuthV2(keys, peer, s1, p2); !errors.Is(err, mailbox.ErrAuth) {
+	// a signature over the retired version 1 array is not a version 2 signature
+	var s1, sv [64]byte
+	copy(s1[:], ed25519.Sign(priv, retiredAuthBytes(t, 1, p)))
+	if err := mailbox.VerifyAuthV2(keys, peer, s1, p); !errors.Is(err, mailbox.ErrAuth) {
 		t.Errorf("a version 1 signature as a version 2 signature: %v", err)
 	}
-	// Even the version 1 array that says version 2 is not the version 2 array.
-	pv := p1
-	pv.Version = 2
-	if err := mailbox.VerifyAuthV2(keys, peer, sign(t, priv, pv), p2); !errors.Is(err, mailbox.ErrAuth) {
+	// even the retired array that says version 2 is not the version 2 array
+	copy(sv[:], ed25519.Sign(priv, retiredAuthBytes(t, 2, p)))
+	if err := mailbox.VerifyAuthV2(keys, peer, sv, p); !errors.Is(err, mailbox.ErrAuth) {
 		t.Errorf("a version 1 array with version 2: %v", err)
 	}
-	// 2. The Auth frame cannot be rewritten into the other version's: the
-	// shapes differ, so a version 2 Auth with its version field set to 1 is not
-	// a version 1 Auth.
-	a2 := mustEncodeV(t, 2, mailbox.AuthV2{Fingerprint: p2.Fingerprint, Signature: s2, Keys: keys, Sign1: bs(10, 1), Key: bs(10, 2)})
-	rewritten := cbor(t, 1, 1, fpb(40), s2[:], []any{keys.Ed25519[:], keys.X25519[:], bs(10, 1), bs(10, 2)}, []any{})
-	if bytes.Equal(a2, rewritten) {
-		t.Fatal("test bug")
+	// the version 2 signature does not verify over the retired array either
+	if ed25519.Verify(keys.Ed25519[:], retiredAuthBytes(t, 1, p), s2[:]) || ed25519.Verify(keys.Ed25519[:], retiredAuthBytes(t, 2, p), s2[:]) {
+		t.Error("a version 2 signature verifies over the retired array")
 	}
-	for _, st := range []mailbox.Stage{mailbox.StageUnversioned, mailbox.StageV1, mailbox.StageV2PreAuth} {
+	// the frame of a version 1 Auth, `[1, fingerprint, signature]`, and the Auth
+	// frame of version 2 with its version field set to 1, are refused at every stage
+	retired := cbor(t, 1, 1, fpb(40), s2[:])
+	rewritten := cbor(t, 1, 1, fpb(40), s2[:], []any{keys.Ed25519[:], keys.X25519[:], bs(10, 1), bs(10, 2)}, []any{})
+	for _, st := range []mailbox.Stage{mailbox.StageV2PreAuth, mailbox.StageV2Authed} {
+		if m, err := mailbox.DecodeFromClientIn(st, retired); err == nil {
+			t.Errorf("a version 1 Auth decoded at %v as %T", st, m)
+		}
 		if m, err := mailbox.DecodeFromClientIn(st, rewritten); err == nil {
-			t.Errorf("a version 1 Auth with a version 2 body decoded at %v as %T", st, m)
+			t.Errorf("an Auth with its version set to 1 decoded at %v as %T", st, m)
 		}
 	}
-	// 3. The relay's Challenge range is not signed in either version. A client
-	// that supports both and is shown 1..1 chooses version 1 and signs it. A
-	// client that speaks version 2 only refuses. This is the whole of the
-	// protection against a rewrite of the Challenge: the tunnel authenticates
-	// the relay, so only the relay can make it, a version 1 signature obtained
-	// that way binds that relay's key (the signed array holds the relay key the
-	// client pinned) and verifies nowhere else, and clients speak version 2 only.
-	both := mailbox.BothVersions
-	if v, err := both.Choose(1, 1); err != nil || v != 1 {
-		t.Fatalf("a client of both versions: %d, %v", v, err)
-	}
-	if _, err := mailbox.V2.Choose(1, 1); !errors.Is(err, mailbox.ErrVersion) {
-		t.Errorf("a client of version 2: %v", err)
-	}
-	// The version 1 signature binds the relay key: against another relay's key
-	// it does not verify.
-	other := p1
-	other.RelayKey = nk(77)
-	if err := mailbox.VerifyAuth(id, peer, s1, other); !errors.Is(err, mailbox.ErrAuth) {
-		t.Errorf("a version 1 signature at another relay: %v", err)
-	}
-	// The relay that offered only 2 refuses a version 1 Auth at the decoder.
+	// a relay that offered only 2 refuses a version 1 Auth at the decoder
 	st, err := mailbox.StageForOffer(mailbox.V2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := mailbox.DecodeFromClientIn(st, mustEncodeV(t, 1, mailbox.Auth{Version: 1, Fingerprint: p1.Fingerprint, Signature: s1})); !errors.Is(err, mailbox.ErrVersion) {
+	if _, err := mailbox.DecodeFromClientIn(st, rewritten); !errors.Is(err, mailbox.ErrVersion) {
 		t.Errorf("a version 1 Auth at a relay that offers only 2: %v", err)
+	}
+	// the encoder writes version 2 only
+	if _, err := mailbox.EncodeV(1, mailbox.AuthV2{Fingerprint: p.Fingerprint, Signature: s2, Keys: keys, Sign1: bs(10, 1), Key: bs(10, 2)}); !errors.Is(err, mailbox.ErrVersion) {
+		t.Errorf("EncodeV(1) = %v", err)
+	}
+	// a client of version 2 refuses a relay that offers only version 1
+	for _, r := range [][2]uint{{1, 1}} {
+		if _, err := mailbox.V2.Choose(r[0], r[1]); !errors.Is(err, mailbox.ErrVersion) {
+			t.Errorf("a client of version 2 given %v: %v", r, err)
+		}
+	}
+	// the retired signature binds the relay key anyway: at another relay it fails
+	other := p
+	other.RelayKey = nk(77)
+	if err := mailbox.VerifyAuthV2(keys, peer, s1, other); !errors.Is(err, mailbox.ErrAuth) {
+		t.Errorf("a version 1 signature at another relay: %v", err)
 	}
 }
 

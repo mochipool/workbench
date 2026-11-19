@@ -2,6 +2,7 @@ package mailbox_test
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"testing"
 
 	"github.com/mochipool/workbench/spo/internal/domain/mailbox"
@@ -52,9 +53,9 @@ func samplesV2() []struct {
 		m mailbox.Message
 		w where
 	}
-	pre, authed, none := mailbox.StageV2PreAuth, mailbox.StageV2Authed, mailbox.StageUnversioned
+	pre, authed := mailbox.StageV2PreAuth, mailbox.StageV2Authed
 	return []s{
-		{mailbox.Challenge{Min: 1, Max: 2, Nonce: nonce(1), RelayKey: nk(2), RelayTime: 1700000000}, where{none, false}},
+		{mailbox.Challenge{Min: 2, Max: 2, Nonce: nonce(1), RelayKey: nk(2), RelayTime: 1700000000}, where{pre, false}},
 		{mailbox.AuthV2{Fingerprint: fp(3), Signature: sig(4), Keys: mailbox.DeviceKeys{Ed25519: edk(5), X25519: xk(6)}, Sign1: bs(150, 7), Key: bs(40, 8), Senders: []mailbox.WalletKey{wk(1), wk(2), wk(9)}}, where{pre, true}},
 		{mailbox.AuthV2{Fingerprint: fp(3), Signature: sig(4), Keys: mailbox.DeviceKeys{Ed25519: edk(5), X25519: xk(6)}, Sign1: bs(1, 7), Key: bs(1, 8)}, where{pre, true}},
 		{mailbox.AuthOKV2{MaxEnvelope: mailbox.MaxEnvelopeBytes, MaxEntries: 256, MaxBytes: 64 << 20, RetentionSeconds: mailbox.DefaultRetentionSeconds, Until: 1707776000}, where{pre, false}},
@@ -75,6 +76,14 @@ func samplesV2() []struct {
 	}
 }
 
+// keypair is a deterministic Ed25519 key pair for a test device.
+func keypair(seed byte) (ed25519.PrivateKey, party.Ed25519Public) {
+	priv := ed25519.NewKeyFromSeed(bs(32, seed))
+	var pub party.Ed25519Public
+	copy(pub[:], priv.Public().(ed25519.PublicKey))
+	return priv, pub
+}
+
 func mustEncodeV(t testing.TB, version uint, m mailbox.Message) []byte {
 	t.Helper()
 	b, err := mailbox.EncodeV(version, m)
@@ -92,15 +101,8 @@ func decodeIn(w where, frame []byte) (mailbox.Message, error) {
 	return mailbox.DecodeFromRelayIn(w.stage, frame)
 }
 
-// reencode encodes a decoded message again in the version that its type is
-// written in: a version 1 message (the Auth, Put and AuthOK of version 1) in
-// version 1, every other in version 2.
-func reencode(m mailbox.Message) ([]byte, error) {
-	if b, err := mailbox.EncodeV(2, m); err == nil {
-		return b, nil
-	}
-	return mailbox.EncodeV(1, m)
-}
+// reencode encodes a decoded message again, in the one version.
+func reencode(m mailbox.Message) ([]byte, error) { return mailbox.EncodeV(mailbox.Version2, m) }
 
 func sameBytes(a, b []byte) bool { return bytes.Equal(a, b) }
 

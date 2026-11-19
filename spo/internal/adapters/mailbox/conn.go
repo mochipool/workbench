@@ -44,6 +44,12 @@ type conn struct {
 	written  uint64
 	maxEnv   uint32 // the envelope limit: ours, tightened by AuthOK
 
+	// stage is the stage of the connection the relay's frames are decoded at.
+	stage wire.Stage
+	// sendersHash is the hash of the expected-sender list this connection logged in
+	// with: when the client's list changes, the connection is replaced.
+	sendersHash [wire.HashSize]byte
+
 	// retire, when set by a request that went well, makes do drop the connection
 	// after it: the relay closes it (too_large) or it holds replies that were
 	// not read (a page cut at the read bound).
@@ -119,7 +125,7 @@ func (cn *conn) write(b []byte, d time.Duration) error {
 
 // send writes one header frame.
 func (cn *conn) send(m wire.Message) error {
-	b, err := wire.Encode(m)
+	b, err := wire.EncodeV(wire.Version2, m)
 	if err != nil {
 		return err // a bug of ours, not the relay's
 	}
@@ -131,8 +137,9 @@ func (cn *conn) send(m wire.Message) error {
 }
 
 // header reads one header frame from the relay under the deadline t and
-// decodes it with the relay's direction: a type only a client sends is a
-// violation. An Error frame is returned as the failure it is.
+// decodes it at the stage of the connection, in the relay's direction: a type
+// only a client sends, and a frame the stage does not allow, is a violation. An
+// Error frame is returned as the failure it is.
 func (cn *conn) header(t time.Time) (wire.Message, error) {
 	cn.setRead(t)
 	body, err := wire.ReadHeaderFrame(cn.rd)
@@ -142,7 +149,7 @@ func (cn *conn) header(t time.Time) (wire.Message, error) {
 	if cn.rd.n > cn.c.lim.MaxBytesRead {
 		return nil, newErr(ReasonLimit, nil, ErrProtocol)
 	}
-	m, err := wire.DecodeFromRelay(body)
+	m, err := wire.DecodeFromRelayIn(cn.stage, body)
 	if err != nil {
 		return nil, newErr(ReasonProtocol, err, ErrProtocol)
 	}
@@ -154,12 +161,25 @@ func (cn *conn) header(t time.Time) (wire.Message, error) {
 
 func (cn *conn) violation() error { return newErr(ReasonProtocol, nil, ErrProtocol) }
 
-// connect dials the relay and runs the handshake (ADR 0013 decision 3). The
-// order matters: the key the dialer reports must be the pinned key, then the
-// Challenge must name the pinned key, and only then is anything signed. The
-// signer is given the pinned relay key and our own node key, never a value from
-// the Challenge; only the nonce and the relay's time come from it.
-func (c *Client) connect(ctx context.Context) (*conn, error) {
+// connect dials the relay and runs the handshake (ADR 0013 decision 3, ADR 0014
+// decision 7). The order matters: the binding the client holds must be one the
+// relay would take (it is not dialled with otherwise), the key the dialer reports
+// must be the pinned key, then the Challenge must name the pinned key and offer
+// version 2, and only then is anything sent or signed. The signer is given the
+// pinned relay key and our own node key, never a value from the Challenge; only
+// the nonce and the relay's time come from it. With revokeOnly, and always for the
+// client of a RevokeSender, the handshake ends after the pending revokes: no Auth
+// is signed or sent.
+//
+// spec: SPO-Xmailbox-OUT-089
+func (c *Client) connect(ctx context.Context, revokeOnly bool) (*conn, error) {
+	revokeOnly = revokeOnly || c.revokeOnly // a RevokeSender's connection never goes past the revokes
+	cr := c.snapshot()
+	if !revokeOnly {
+		if err := c.bindingUsable(cr); err != nil {
+			return nil, err
+		}
+	}
 	dctx, cancel := context.WithTimeout(ctx, c.lim.DialTimeout)
 	c.setDialCancel(cancel) // Close ends a dial in progress
 	st, key, err := c.cfg.Dialer.Dial(dctx)
@@ -183,11 +203,12 @@ func (c *Client) connect(ctx context.Context) (*conn, error) {
 		return nil, newErr(ReasonRelayKey, nil, ErrRelayKey)
 	}
 	now := time.Now()
-	cn := &conn{c: c, st: st, rd: &countReader{r: st}, ctx: ctx, start: now, end: now.Add(c.lim.ConnLifetime), lastUse: now}
+	cn := &conn{c: c, st: st, rd: &countReader{r: st}, ctx: ctx, start: now, end: now.Add(c.lim.ConnLifetime), lastUse: now,
+		stage: wire.StageV2PreAuth, sendersHash: cr.sendersHash}
 	cn.usableUntil = cn.end.Add(-min(c.lim.IdleTimeout, c.lim.ConnLifetime/4))
 	c.setCur(st)
 	stop := context.AfterFunc(ctx, func() { st.SetDeadline(past) })
-	err = c.handshake(cn, now.Add(c.lim.HandshakeTimeout))
+	err = c.handshake(cn, cr, revokeOnly, now.Add(c.lim.HandshakeTimeout))
 	if !stop() && err == nil {
 		err = ctx.Err()
 	}
@@ -203,7 +224,10 @@ func (c *Client) connect(ctx context.Context) (*conn, error) {
 	return cn, nil
 }
 
-func (c *Client) handshake(cn *conn, hsEnd time.Time) error {
+// handshake runs the login (ADR 0014 decision 7): the Challenge, its checks, the
+// pending revokes, the signature, the Auth with the binding and the sender list,
+// and the AuthOK. The failures are in the spec (OUT-089, PRE-058).
+func (c *Client) handshake(cn *conn, cr *creds, revokeOnly bool, hsEnd time.Time) error {
 	m, err := cn.header(hsEnd)
 	if err != nil {
 		return err
@@ -213,31 +237,64 @@ func (c *Client) handshake(cn *conn, hsEnd time.Time) error {
 		return cn.violation()
 	}
 	if ch.RelayKey != c.cfg.RelayKey {
-		return newErr(ReasonRelayKey, nil, ErrRelayKey) // close without signing anything
+		return newErr(ReasonRelayKey, nil, ErrRelayKey) // close without signing or sending anything
 	}
-	version, err := wire.ChooseVersion(ch.Min, ch.Max)
+	version, err := wire.V2.Choose(ch.Min, ch.Max) // version 2 only: a relay that offers only version 1 is refused
 	if err != nil {
+		return newErr(ReasonVersion, err, ErrProtocol)
+	}
+	if cn.stage, err = wire.StageAfterChoice(version); err != nil {
 		return newErr(ReasonVersion, err, ErrProtocol)
 	}
 	if skew := wire.Skew(ch.RelayTime, c.cfg.Clock.Now().Unix()); skew > wire.ClockSkewWarningSeconds {
 		c.emit(Event{Kind: EventSkew, Reason: ReasonSkew, Skew: skew})
 	}
-	sig, err := c.cfg.Signer.SignMailboxAuth(c.cfg.RelayKey, c.cfg.NodeKey, ch.Nonce, ch.RelayTime, version)
+	// the pending revokes go first, before the Auth, and the signer is asked only
+	// after the last answer
+	if err := c.sendRevokes(cn, hsEnd); err != nil {
+		return err
+	}
+	if revokeOnly {
+		return nil
+	}
+	sig, err := c.cfg.Signer.SignMailboxAuth(c.cfg.RelayKey, c.cfg.NodeKey, ch.Nonce, ch.RelayTime, cr.bindingHash, cr.sendersHash)
 	if err != nil {
 		return newErr(ReasonSigner, err, ErrSigner)
 	}
-	if err := cn.send(wire.Auth{Version: version, Fingerprint: c.cfg.Self, Signature: sig}); err != nil {
+	if err := cn.send(wire.AuthV2{Fingerprint: c.cfg.Self, Signature: sig, Keys: c.cfg.Device,
+		Sign1: cr.binding.Statement, Key: cr.binding.Key, Senders: cr.senders}); err != nil {
 		return err
 	}
 	m, err = cn.header(hsEnd)
 	if err != nil {
 		return err
 	}
-	ok2, isOK := m.(wire.AuthOK)
-	if !isOK || ok2.Version != version {
+	ok2, isOK := m.(wire.AuthOKV2)
+	if !isOK {
 		return cn.violation()
+	}
+	if cn.stage, err = cn.stage.AfterAuthOK(ok2); err != nil {
+		return newErr(ReasonProtocol, err, ErrProtocol)
+	}
+	// the relay records the binding's end: never beyond what was presented, and not
+	// already past; a connection does not outlive it (the relay closes it then)
+	left := ok2.Until - c.cfg.Clock.Now().Unix()
+	if ok2.Until > cr.until || left < 0 {
+		return newErr(ReasonProtocol, nil, ErrProtocol)
+	}
+	if left < int64(c.lim.ConnLifetime/time.Second)+1 {
+		cn.end = minTime(cn.end, time.Now().Add(time.Duration(left)*time.Second))
+		cn.usableUntil = cn.end.Add(-min(c.lim.IdleTimeout, c.lim.ConnLifetime/4))
 	}
 	// what the relay announces can tighten our envelope limit and never loosen it
 	cn.maxEnv = min(c.lim.MaxEnvelope, uint32(min(ok2.MaxEnvelope, wire.MaxEnvelopeBytes)))
+	c.noteRenewal(cr)
 	return nil
+}
+
+func minTime(a, b time.Time) time.Time {
+	if b.Before(a) {
+		return b
+	}
+	return a
 }

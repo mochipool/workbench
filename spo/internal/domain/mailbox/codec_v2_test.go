@@ -69,63 +69,20 @@ func TestV2FrameShapes(t *testing.T) {
 	}
 }
 
-// Version 1 encoding refuses every frame that only exists in version 2, and
-// version 2 encoding refuses the version 1 shapes: a message is written in one
-// version only.
+// Every frame of the protocol encodes in version 2 and in no other: EncodeV
+// refuses every other version number, including the retired 1. (The round trips
+// and the shapes are above; TestOnlyVersionTwoIsWritten has the numbers.)
 //
-// spec: SPO-Xmailbox-OUT-052, SPO-Xmailbox-PRE-029
-func TestEncodingIsPerVersion(t *testing.T) {
-	v2only := []mailbox.Message{
-		mailbox.AuthV2{Fingerprint: fp(3), Sign1: bs(1, 1), Key: bs(1, 1)},
-		mailbox.AuthOKV2{MaxEnvelope: 1, MaxEntries: 1, MaxBytes: 1, RetentionSeconds: 1},
-		mailbox.PutV2{Size: 1},
-		mailbox.RevokeByDevice{},
-		mailbox.RevokeByWallet{Sign1: bs(1, 1), Key: bs(1, 1)},
-		mailbox.RevokeResult{},
-		mailbox.PutResult{Status: mailbox.StatusUnbound},
-		mailbox.Error{Code: mailbox.CodeNotAllowed},
-		mailbox.Error{Code: mailbox.CodeBinding},
-	}
-	for _, m := range v2only {
-		if _, err := mailbox.Encode(m); err == nil {
-			t.Errorf("%T %+v encoded in version 1", m, m)
+// spec: SPO-Xmailbox-OUT-052
+func TestEveryFrameEncodesInVersionTwoOnly(t *testing.T) {
+	for _, m := range samples() {
+		if _, err := mailbox.EncodeV(2, m); err != nil {
+			t.Errorf("%T in version 2: %v", m, err)
 		}
-		if _, err := mailbox.EncodeV(1, m); err == nil {
-			t.Errorf("%T %+v encoded by EncodeV(1)", m, m)
-		}
-	}
-	v1only := []mailbox.Message{
-		mailbox.Auth{Version: 1, Fingerprint: fp(3), Signature: sig(4)},
-		mailbox.AuthOK{Version: 1, MaxEnvelope: 1, MaxEntries: 1, MaxBytes: 1, RetentionSeconds: 1},
-		mailbox.Put{Size: 1},
-	}
-	for _, m := range v1only {
-		if _, err := mailbox.EncodeV(2, m); err == nil {
-			t.Errorf("%T encoded in version 2", m)
-		}
-		if _, err := mailbox.EncodeV(1, m); err != nil {
-			t.Errorf("%T in version 1: %v", m, err)
-		}
-	}
-	// The shared frames encode in both versions, to the same bytes.
-	for _, m := range []mailbox.Message{
-		mailbox.Challenge{Min: 1, Max: 2, RelayTime: 5},
-		mailbox.Fetch{RequestID: 1, MaxItems: 1},
-		mailbox.Items{RequestID: 1},
-		mailbox.Ack{RequestID: 1, Mids: []mailbox.Hash{hash(1)}},
-		mailbox.AckResult{RequestID: 1},
-		mailbox.PutResult{RequestID: 1, Status: mailbox.StatusUnavailable},
-		mailbox.Error{Code: mailbox.CodeShuttingDown},
-	} {
-		a, errA := mailbox.EncodeV(1, m)
-		b, errB := mailbox.EncodeV(2, m)
-		if errA != nil || errB != nil || !bytes.Equal(a, b) {
-			t.Errorf("%T: %v, %v", m, errA, errB)
-		}
-	}
-	for _, v := range []uint{0, 3, 65535} {
-		if _, err := mailbox.EncodeV(v, mailbox.Fetch{RequestID: 1, MaxItems: 1}); !errors.Is(err, mailbox.ErrVersion) {
-			t.Errorf("EncodeV(%d): %v", v, err)
+		for _, v := range []uint{0, 1, 3, 65535} {
+			if _, err := mailbox.EncodeV(v, m); !errors.Is(err, mailbox.ErrVersion) {
+				t.Errorf("%T: EncodeV(%d): %v", m, v, err)
+			}
 		}
 	}
 	if _, err := mailbox.EncodeV(2, nil); err == nil {
@@ -158,7 +115,7 @@ func TestV2DecodeRefusesEveryTruncationAndExtension(t *testing.T) {
 //
 // spec: SPO-Xmailbox-INV-029, SPO-Xmailbox-PRE-003
 func TestV2BitFlipsAreRefusedOrCanonical(t *testing.T) {
-	stages := []mailbox.Stage{mailbox.StageUnversioned, mailbox.StageV1, mailbox.StageV2PreAuth, mailbox.StageV2Authed}
+	stages := []mailbox.Stage{mailbox.StageV2PreAuth, mailbox.StageV2Authed}
 	for _, s := range samplesV2() {
 		b := mustEncodeV(t, 2, s.m)
 		for i := range b {
@@ -599,39 +556,34 @@ func TestPutV2Constructors(t *testing.T) {
 	}
 }
 
-// The status and code ranges of each version.
+// The status and code ranges of the one version.
 //
 // spec: SPO-Xmailbox-OUT-055
-func TestStatusAndCodeRangesPerVersion(t *testing.T) {
-	for s := mailbox.Status(0); s <= 7; s++ {
-		if !s.Valid() || !s.ValidIn(1) || !s.ValidIn(2) {
+func TestStatusAndCodeRanges(t *testing.T) {
+	for s := mailbox.Status(0); s <= 8; s++ {
+		if !s.Valid() || !s.ValidIn(2) || s.ValidIn(1) {
 			t.Errorf("status %d", s)
 		}
 	}
-	if mailbox.StatusUnbound.Valid() || mailbox.StatusUnbound.ValidIn(1) || !mailbox.StatusUnbound.ValidIn(2) {
-		t.Error("status 8 is a version 2 status only")
+	if mailbox.StatusUnbound != 8 {
+		t.Error("status 8 is unbound")
 	}
 	for _, s := range []mailbox.Status{9, 100, 1 << 40} {
-		if s.ValidIn(1) || s.ValidIn(2) {
+		if s.Valid() || s.ValidIn(2) {
 			t.Errorf("status %d is valid", s)
 		}
 	}
-	for c := mailbox.Code(0); c <= 5; c++ {
-		if !c.Valid() || !c.ValidIn(1) || !c.ValidIn(2) {
+	for c := mailbox.Code(0); c <= 7; c++ {
+		if !c.Valid() || !c.ValidIn(2) || c.ValidIn(1) {
 			t.Errorf("code %d", c)
 		}
 	}
-	for _, c := range []mailbox.Code{mailbox.CodeNotAllowed, mailbox.CodeBinding} {
-		if c.Valid() || c.ValidIn(1) || !c.ValidIn(2) {
-			t.Errorf("code %d is a version 2 code only", c)
-		}
-	}
 	for _, c := range []mailbox.Code{8, 100, 1 << 40} {
-		if c.ValidIn(1) || c.ValidIn(2) {
+		if c.Valid() || c.ValidIn(2) {
 			t.Errorf("code %d is valid", c)
 		}
 	}
-	for _, v := range []uint{0, 3} {
+	for _, v := range []uint{0, 1, 3} {
 		if mailbox.Status(0).ValidIn(v) || mailbox.Code(0).ValidIn(v) {
 			t.Errorf("version %d knows a status or code", v)
 		}
@@ -639,17 +591,19 @@ func TestStatusAndCodeRangesPerVersion(t *testing.T) {
 	if !mailbox.RevokeRecorded.Valid() || !mailbox.RevokeRefused.Valid() || mailbox.RevokeStatus(1).Valid() || mailbox.RevokeStatus(3).Valid() {
 		t.Error("revoke statuses are 0 and 2")
 	}
-	// PutResult and Error carry the version's range through the decoders.
-	if _, err := mailbox.DecodeFromRelayIn(mailbox.StageV1, cbor(t, 4, 7, 8)); !errors.Is(err, mailbox.ErrRange) {
-		t.Errorf("status 8 in version 1: %v", err)
+	// PutResult and Error carry the range through the decoders, at both stages.
+	for _, st := range []mailbox.Stage{mailbox.StageV2PreAuth, mailbox.StageV2Authed} {
+		if _, err := mailbox.DecodeFromRelayIn(st, cbor(t, 9, 8)); !errors.Is(err, mailbox.ErrRange) {
+			t.Errorf("code 8 at %v: %v", st, err)
+		}
+		if _, err := mailbox.DecodeFromRelayIn(st, cbor(t, 9, 6)); err != nil {
+			t.Errorf("code 6 at %v: %v", st, err)
+		}
 	}
-	if _, err := mailbox.DecodeFromRelayIn(mailbox.StageV1, cbor(t, 9, 6)); !errors.Is(err, mailbox.ErrRange) {
-		t.Errorf("code 6 in version 1: %v", err)
+	if _, err := mailbox.DecodeFromRelayIn(mailbox.StageV2Authed, cbor(t, 4, 7, 9)); !errors.Is(err, mailbox.ErrRange) {
+		t.Errorf("status 9: %v", err)
 	}
-	if _, err := mailbox.DecodeFromRelayIn(mailbox.StageUnversioned, cbor(t, 9, 6)); !errors.Is(err, mailbox.ErrRange) {
-		t.Errorf("code 6 before a version is chosen: %v", err)
-	}
-	if _, err := mailbox.DecodeFromRelayIn(mailbox.StageUnversioned, cbor(t, 9, 5)); err != nil {
-		t.Errorf("code 5 before a version is chosen: %v", err)
+	if _, err := mailbox.DecodeFromRelayIn(mailbox.StageV2Authed, cbor(t, 4, 7, 8)); err != nil {
+		t.Errorf("status 8: %v", err)
 	}
 }

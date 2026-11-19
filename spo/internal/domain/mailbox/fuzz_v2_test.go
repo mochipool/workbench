@@ -16,14 +16,14 @@ func FuzzDecodeIn(f *testing.F) {
 	for _, s := range samplesV2() {
 		f.Add(mustEncodeV(f, 2, s.m), uint8(s.w.stage), s.w.client)
 	}
-	for _, m := range samples() {
-		f.Add(mustEncode(f, m), uint8(mailbox.StageV1), true)
-		f.Add(mustEncode(f, m), uint8(mailbox.StageV1), false)
+	for _, m := range samples() { // every sample at both stages and from both sides
+		f.Add(mustEncode(f, m), uint8(mailbox.StageV2PreAuth), true)
+		f.Add(mustEncode(f, m), uint8(mailbox.StageV2Authed), false)
 	}
 	f.Add([]byte{}, uint8(0), true)
-	f.Add([]byte{0x9f, 0xff}, uint8(3), false)
-	f.Add([]byte{0x86, 0x01, 0x02, 0x5a, 0xff, 0xff, 0xff, 0xff}, uint8(3), true)
-	f.Add([]byte{0x85, 0x0a, 0x01, 0x01, 0x5a, 0xff, 0xff, 0xff, 0xff}, uint8(3), true)
+	f.Add([]byte{0x9f, 0xff}, uint8(1), false)
+	f.Add([]byte{0x86, 0x01, 0x02, 0x5a, 0xff, 0xff, 0xff, 0xff}, uint8(1), true)
+	f.Add([]byte{0x85, 0x0a, 0x01, 0x01, 0x5a, 0xff, 0xff, 0xff, 0xff}, uint8(1), true)
 	f.Fuzz(func(t *testing.T, data []byte, stage uint8, client bool) {
 		if len(data) > fuzzCap {
 			t.Skip()

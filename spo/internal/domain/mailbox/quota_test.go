@@ -308,7 +308,7 @@ func TestListLimitsFitTheCBORArray(t *testing.T) {
 		mids[i] = hash(byte(i))
 		mids[i][31] = byte(i)
 	}
-	if _, err := mailbox.DecodeFromClient(mustEncode(t, mailbox.Ack{RequestID: 1, Mids: mids})); err != nil {
+	if _, err := mailbox.DecodeFromClientIn(mailbox.StageV2Authed, mustEncode(t, mailbox.Ack{RequestID: 1, Mids: mids})); err != nil {
 		t.Errorf("the largest Ack: %v", err)
 	}
 	entries := make([]mailbox.Item, mailbox.MaxItemsPerFetch)
@@ -316,7 +316,7 @@ func TestListLimitsFitTheCBORArray(t *testing.T) {
 		entries[i] = mailbox.Item{Mid: hash(byte(i)), Size: 1}
 		entries[i].Mid[31] = byte(i)
 	}
-	if _, err := mailbox.DecodeFromRelay(mustEncode(t, mailbox.Items{RequestID: 1, Entries: entries})); err != nil {
+	if _, err := mailbox.DecodeFromRelayIn(mailbox.StageV2Authed, mustEncode(t, mailbox.Items{RequestID: 1, Entries: entries})); err != nil {
 		t.Errorf("the largest Items: %v", err)
 	}
 }

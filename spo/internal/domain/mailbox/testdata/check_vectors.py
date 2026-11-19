@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Independent check of vectors.json and vectors_v2.json, with a hand-written
 canonical CBOR encoder and the standard library only: the envelope hash
-(hashlib's BLAKE2b with a 32-byte digest); the signed auth arrays of both
-versions; the hash of each expected-sender list (version 2); and every frame,
+(hashlib's BLAKE2b with a 32-byte digest); the signed auth array (version 2, the
+only version); the hash of each expected-sender list; and every frame,
 which is encoded again from its `fields` (in the order of the message's shape)
 and compared byte for byte with `cbor_hex`, with its length prefix and message
 type checked. The Ed25519 signatures are not checked here (the standard library
@@ -43,9 +43,6 @@ def enc(v):
 # [mid hex, size], mids a list of hex byte strings.
 SHAPES = {
     0: [("min", "u"), ("max", "u"), ("nonce", "b"), ("relay_key", "b"), ("relay_time", "u")],
-    1: [("version", "u"), ("fingerprint", "b"), ("signature", "b")],
-    2: [("version", "u"), ("max_envelope", "u"), ("max_entries", "u"), ("max_bytes", "u"), ("retention_seconds", "u")],
-    3: [("request_id", "u"), ("to", "b"), ("mid", "b"), ("size", "u")],
     4: [("request_id", "u"), ("status", "u")],
     5: [("request_id", "u"), ("after", "b"), ("max_items", "u"), ("wait_seconds", "u")],
     6: [("request_id", "u"), ("entries", "entries"), ("more", "bool")],
@@ -78,12 +75,6 @@ for v in vf["hash"]:
     got = hashlib.blake2b(bytes.fromhex(v["envelope_hex"]), digest_size=32).hexdigest()
     if got != v["mid"]:
         print("hash mismatch", v["envelope_hex"][:16]); bad += 1
-for v in vf["auth"]:
-    arr = ["spo/mailbox-auth/v1", v["version"], bytes.fromhex(v["relay_key"]),
-           bytes.fromhex(v["client_node_key"]), bytes.fromhex(v["nonce"]),
-           v["relay_time"], bytes.fromhex(v["fingerprint"])]
-    if enc(arr).hex() != v["bytes_hex"]:
-        print("auth bytes mismatch", v["name"]); bad += 1
 for v in vf["frames"]:
     c, f = bytes.fromhex(v["cbor_hex"]), bytes.fromhex(v["frame_hex"])
     if struct.unpack(">I", f[:4])[0] != len(c) or f[4:] != c or c[0] >> 5 != 4:
@@ -187,6 +178,6 @@ for v in vf2["frames"]:
             print("auth v2 frame fingerprint is not that of its device keys", v["name"]); bad += 1
         if not any(senders == [bytes.fromhex(k) for k in s["keys"]] for s in vf2["senders"]):
             print("auth v2 frame senders are in no sender-list vector", v["name"]); bad += 1
-print("ok" if not bad else "FAILED", len(vf["hash"]), "hashes,", len(vf["auth"]), "auth,", len(vf["frames"]), "frames;",
+print("ok" if not bad else "FAILED", len(vf["hash"]), "hashes,", len(vf["frames"]), "shared frames;",
       len(vf2["auth_v2"]), "auth v2,", len(vf2["senders"]), "sender lists,", len(vf2["frames"]), "v2 frames")
 sys.exit(1 if bad else 0)

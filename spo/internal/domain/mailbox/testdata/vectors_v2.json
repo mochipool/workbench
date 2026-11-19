@@ -150,10 +150,10 @@
   ],
   "frames": [
     {
-      "name": "challenge_both_versions",
+      "name": "challenge_range_1_2",
       "shape": "challenge",
       "type": 0,
-      "stage": "unversioned",
+      "stage": "v2_preauth",
       "side": "relay",
       "fields": {
         "max": 2,
@@ -169,7 +169,7 @@
       "name": "challenge_v2_only",
       "shape": "challenge",
       "type": 0,
-      "stage": "unversioned",
+      "stage": "v2_preauth",
       "side": "relay",
       "fields": {
         "max": 2,

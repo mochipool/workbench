@@ -1,25 +1,26 @@
 package mailbox_test
 
-// testdata/vectors.json pins the wire format: the envelope hash, the auth
-// bytes with a signature of a fixed test key, and every frame. A later
-// independent implementation can check its own output against it
-// (testdata/check_vectors.py does so for the hash and the auth bytes).
-// TestVectors regenerates the file in memory and compares it byte for byte
-// with the committed one; a difference is a format change. Rewrite
-// deliberately with:
+// testdata/vectors.json pins the wire format of what protocol version 2 shares
+// with the framing and the envelope id: the envelope hash and the frames whose
+// shape does not carry the identity (the Challenge, the PutResult, the Fetch, the
+// Items, the Ack, the AckResult and the Error). The frames that are new in
+// version 2 and the auth bytes are in testdata/vectors_v2.json. A later
+// independent implementation can check its own output against them
+// (testdata/check_vectors.py does so for the hash, the auth bytes and every
+// frame). TestVectors regenerates the file in memory and compares it byte for byte
+// with the committed one; a difference is a format change. Rewrite deliberately
+// with:
 //
 //	go test ./internal/domain/mailbox -run TestVectors -update
 
 import (
 	"bytes"
-	"crypto/ed25519"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"os"
 	"os/exec"
-	"reflect"
 	"testing"
 
 	"github.com/mochipool/workbench/spo/internal/domain/mailbox"
@@ -35,20 +36,6 @@ type frameVector struct {
 	FrameHex string         `json:"frame_hex"` // with the 4-byte length prefix
 }
 
-type authVector struct {
-	Name         string `json:"name"`
-	Version      uint   `json:"version"`
-	RelayKey     string `json:"relay_key"`
-	ClientKey    string `json:"client_node_key"`
-	Nonce        string `json:"nonce"`
-	RelayTime    int64  `json:"relay_time"`
-	Fingerprint  string `json:"fingerprint"`
-	BytesHex     string `json:"bytes_hex"`
-	SeedHex      string `json:"ed25519_seed"`
-	PublicHex    string `json:"ed25519_public"`
-	SignatureHex string `json:"signature_hex"`
-}
-
 type hashVector struct {
 	EnvelopeHex string `json:"envelope_hex"`
 	Mid         string `json:"mid"`
@@ -57,7 +44,6 @@ type hashVector struct {
 type vectorFile struct {
 	Note   string        `json:"note"`
 	Hash   []hashVector  `json:"hash"`
-	Auth   []authVector  `json:"auth"`
 	Frames []frameVector `json:"frames"`
 }
 
@@ -65,26 +51,9 @@ func x(b []byte) string { return hex.EncodeToString(b) }
 
 func buildVectors(t *testing.T) []byte {
 	t.Helper()
-	vf := vectorFile{Note: "ADR 0013 work package 1; hex fields are lower-case; numbers are decimal"}
+	vf := vectorFile{Note: "ADR 0013 work package 1, kept under protocol version 2 (ADR 0014 work package 7); hex fields are lower-case; numbers are decimal"}
 	for _, env := range [][]byte{{}, []byte("abc"), bs(100, 0xA5)} {
 		vf.Hash = append(vf.Hash, hashVector{x(env), mailbox.HashOf(env).String()})
-	}
-	priv := ed25519.NewKeyFromSeed(bs(32, 1))
-	for i, p := range []mailbox.AuthParams{
-		params(),
-		{Version: 1, RelayKey: nk(0), ClientNodeKey: nk(0), Nonce: nonce(0), RelayTime: 0, Fingerprint: fp(0)},
-		{Version: 300, RelayKey: nk(200), ClientNodeKey: nk(100), Nonce: nonce(255), RelayTime: mailbox.MaxTime, Fingerprint: fp(250)},
-	} {
-		b, err := mailbox.AuthBytes(p)
-		if err != nil {
-			t.Fatal(err)
-		}
-		vf.Auth = append(vf.Auth, authVector{
-			Name: []string{"typical", "zeros", "large values"}[i], Version: p.Version,
-			RelayKey: x(p.RelayKey[:]), ClientKey: x(p.ClientNodeKey[:]), Nonce: x(p.Nonce[:]),
-			RelayTime: p.RelayTime, Fingerprint: x(p.Fingerprint[:]), BytesHex: x(b),
-			SeedHex: x(bs(32, 1)), PublicHex: x(priv.Public().(ed25519.PublicKey)), SignatureHex: x(ed25519.Sign(priv, b)),
-		})
 	}
 	h := hash(9)
 	named := []struct {
@@ -92,19 +61,18 @@ func buildVectors(t *testing.T) []byte {
 		m      mailbox.Message
 		fields map[string]any
 	}{
-		{"challenge", samples()[0], map[string]any{"min": 1, "max": 1, "nonce": x(nonceb(1)), "relay_key": x(func() []byte { k := nk(2); return k[:] }()), "relay_time": 1700000000}},
-		{"auth", samples()[1], map[string]any{"version": 1, "fingerprint": x(fpb(3)), "signature": x(sigb(4))}},
-		{"auth_ok", samples()[2], map[string]any{"version": 1, "max_envelope": 1 << 20, "max_entries": 256, "max_bytes": 64 << 20, "retention_seconds": 7 * 86400}},
-		{"put", samples()[3], map[string]any{"request_id": 7, "to": x(fpb(4)), "mid": x(mid(5)), "size": 1234}},
-		{"put_result_stored", samples()[4], map[string]any{"request_id": 7, "status": 0}},
+		{"challenge", mailbox.Challenge{Min: 2, Max: 2, Nonce: nonce(1), RelayKey: nk(2), RelayTime: 1700000000},
+			map[string]any{"min": 2, "max": 2, "nonce": x(nonceb(1)), "relay_key": x(func() []byte { k := nk(2); return k[:] }()), "relay_time": 1700000000}},
+		{"put_result_stored", mailbox.PutResult{RequestID: 7, Status: mailbox.StatusStored}, map[string]any{"request_id": 7, "status": 0}},
 		{"put_result_unavailable", mailbox.PutResult{RequestID: 1<<32 - 1, Status: mailbox.StatusUnavailable}, map[string]any{"request_id": uint64(1<<32 - 1), "status": 7}},
-		{"fetch_from_start", samples()[5], map[string]any{"request_id": 8, "after": "", "max_items": 16, "wait_seconds": 20}},
-		{"fetch_after", samples()[6], map[string]any{"request_id": 9, "after": x(h[:]), "max_items": 1, "wait_seconds": 0}},
-		{"items", samples()[7], map[string]any{"request_id": 8, "entries": []any{[]any{x(mid(1)), 10}, []any{x(mid(2)), 20}}, "more": true}},
-		{"items_empty", samples()[8], map[string]any{"request_id": 8, "entries": []any{}, "more": false}},
-		{"ack", samples()[9], map[string]any{"request_id": 9, "mids": []any{x(mid(1)), x(mid(2))}}},
-		{"ack_result", samples()[10], map[string]any{"request_id": 9, "deleted": 2}},
-		{"error_auth", samples()[11], map[string]any{"code": 1}},
+		{"fetch_from_start", mailbox.Fetch{RequestID: 8, MaxItems: 16, WaitSeconds: 20}, map[string]any{"request_id": 8, "after": "", "max_items": 16, "wait_seconds": 20}},
+		{"fetch_after", mailbox.Fetch{RequestID: 9, After: &h, MaxItems: 1, WaitSeconds: 0}, map[string]any{"request_id": 9, "after": x(h[:]), "max_items": 1, "wait_seconds": 0}},
+		{"items", mailbox.Items{RequestID: 8, Entries: []mailbox.Item{{Mid: hash(1), Size: 10}, {Mid: hash(2), Size: 20}}, More: true},
+			map[string]any{"request_id": 8, "entries": []any{[]any{x(mid(1)), 10}, []any{x(mid(2)), 20}}, "more": true}},
+		{"items_empty", mailbox.Items{RequestID: 8}, map[string]any{"request_id": 8, "entries": []any{}, "more": false}},
+		{"ack", mailbox.Ack{RequestID: 9, Mids: []mailbox.Hash{hash(1), hash(2)}}, map[string]any{"request_id": 9, "mids": []any{x(mid(1)), x(mid(2))}}},
+		{"ack_result", mailbox.AckResult{RequestID: 9, Deleted: 2}, map[string]any{"request_id": 9, "deleted": 2}},
+		{"error_auth", mailbox.Error{Code: mailbox.CodeAuth}, map[string]any{"code": 1}},
 	}
 	for _, n := range named {
 		b := mustEncode(t, n.m)
@@ -150,8 +118,8 @@ func TestVectors(t *testing.T) {
 	}
 }
 
-// The committed file is checked on its own: hashes recompute, auth bytes
-// rebuild and verify, and every frame decodes and re-encodes to itself.
+// The committed file is checked on its own: hashes recompute and every frame
+// decodes (at one of the stages and sides of version 2) and re-encodes to itself.
 //
 // spec: SPO-Xmailbox-OUT-011, SPO-Xmailbox-INV-002
 func TestCommittedVectorsStandAlone(t *testing.T) {
@@ -163,29 +131,12 @@ func TestCommittedVectorsStandAlone(t *testing.T) {
 	if err := json.Unmarshal(raw, &vf); err != nil {
 		t.Fatal(err)
 	}
-	if len(vf.Hash) < 3 || len(vf.Auth) < 3 || len(vf.Frames) < 13 {
-		t.Fatalf("too few vectors: %d, %d, %d", len(vf.Hash), len(vf.Auth), len(vf.Frames))
+	if len(vf.Hash) < 3 || len(vf.Frames) != 10 {
+		t.Fatalf("too few vectors: %d hashes, %d frames", len(vf.Hash), len(vf.Frames))
 	}
 	for _, v := range vf.Hash {
 		if got := mailbox.HashOf(unhex(t, v.EnvelopeHex)).String(); got != v.Mid {
 			t.Errorf("hash %s", v.EnvelopeHex)
-		}
-	}
-	for _, v := range vf.Auth {
-		var p mailbox.AuthParams
-		p.Version, p.RelayTime = v.Version, v.RelayTime
-		copy(p.RelayKey[:], unhex(t, v.RelayKey))
-		copy(p.ClientNodeKey[:], unhex(t, v.ClientKey))
-		copy(p.Nonce[:], unhex(t, v.Nonce))
-		copy(p.Fingerprint[:], unhex(t, v.Fingerprint))
-		b, err := mailbox.AuthBytes(p)
-		if err != nil || x(b) != v.BytesHex {
-			t.Errorf("%s: bytes %x, %v", v.Name, b, err)
-		}
-		// No bare-key verifier is exported; the signature is checked with the
-		// standard library over the bytes just rebuilt.
-		if !ed25519.Verify(unhex(t, v.PublicHex), b, unhex(t, v.SignatureHex)) {
-			t.Errorf("%s: the signature does not verify", v.Name)
 		}
 	}
 	for _, v := range vf.Frames {
@@ -208,9 +159,6 @@ func TestCommittedVectorsStandAlone(t *testing.T) {
 		if body, err := mailbox.ReadHeaderFrame(bytes.NewReader(fr)); err != nil || !bytes.Equal(body, c) {
 			t.Errorf("%s: ReadHeaderFrame: %v", v.Name, err)
 		}
-	}
-	if !reflect.DeepEqual(len(vf.Frames), 13) {
-		t.Error("frame count")
 	}
 }
 

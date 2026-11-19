@@ -142,8 +142,8 @@ func checkSigned(st Statement, vkey [32]byte) (KeyHash, AddressPart, error) {
 //
 // THE DEVICE ARGUMENT. device must be party.FingerprintOf of the Ed25519 and
 // X25519 keys the client presented, and those keys must be the ones whose
-// signature authenticated this session (domain/mailbox VerifyAuth, which
-// signs the fingerprint). The caller computes it from the presented keys; it
+// signature authenticated this session (domain/mailbox VerifyAuthV2, which
+// checks that the fingerprint is that of the presented keys and is signed over). The caller computes it from the presented keys; it
 // never takes a fingerprint from a frame field or from the payload of the
 // statement it is verifying. ADR 0014 rule 6 is "the payload's device equals
 // the fingerprint of the presented keys and of the session", and with one

@@ -35,15 +35,14 @@ func TestFrameShapes(t *testing.T) {
 		m    mailbox.Message
 		want []byte
 	}{
-		{mailbox.Challenge{Min: 1, Max: 2, Nonce: nonce(1), RelayKey: nk(2), RelayTime: 5},
-			cbor(t, 0, 1, 2, bs32(nonce(1)), bs32(nk(2)), 5)},
-		{mailbox.Auth{Version: 1, Fingerprint: fp(3), Signature: sig(4)},
-			cbor(t, 1, 1, fpb(3), sigb(4))},
-		{mailbox.AuthOK{Version: 1, MaxEnvelope: 10, MaxEntries: 11, MaxBytes: 12, RetentionSeconds: 13},
-			cbor(t, 2, 1, 10, 11, 12, 13)},
-		{mailbox.Put{RequestID: 7, To: fp(4), Mid: h1, Size: 99},
-			cbor(t, 3, 7, fpb(4), h1[:], 99)},
+		{mailbox.Challenge{Min: 2, Max: 2, Nonce: nonce(1), RelayKey: nk(2), RelayTime: 5},
+			cbor(t, 0, 2, 2, bs32(nonce(1)), bs32(nk(2)), 5)},
+		{mailbox.AuthOKV2{MaxEnvelope: 10, MaxEntries: 11, MaxBytes: 12, RetentionSeconds: 13, Until: 14},
+			cbor(t, 2, 2, 10, 11, 12, 13, 14)},
+		{mailbox.PutV2{RequestID: 7, WalletKey: wk(1), To: fp(4), Mid: h1, Size: 99},
+			cbor(t, 3, 7, wkb(1), fpb(4), h1[:], 99)},
 		{mailbox.PutResult{RequestID: 7, Status: mailbox.StatusFull}, cbor(t, 4, 7, 3)},
+		{mailbox.PutResult{RequestID: 7, Status: mailbox.StatusUnbound}, cbor(t, 4, 7, 8)},
 		{mailbox.Fetch{RequestID: 1, MaxItems: 16, WaitSeconds: 20}, cbor(t, 5, 1, []byte{}, 16, 20)},
 		{mailbox.Fetch{RequestID: 1, After: &h2, MaxItems: 1}, cbor(t, 5, 1, h2[:], 1, 0)},
 		{mailbox.Items{RequestID: 2, Entries: []mailbox.Item{{Mid: h1, Size: 3}}, More: true},
@@ -51,6 +50,8 @@ func TestFrameShapes(t *testing.T) {
 		{mailbox.Ack{RequestID: 3, Mids: []mailbox.Hash{h1, h2}}, cbor(t, 7, 3, []any{h1[:], h2[:]})},
 		{mailbox.AckResult{RequestID: 3, Deleted: 2}, cbor(t, 8, 3, 2)},
 		{mailbox.Error{Code: mailbox.CodeShuttingDown}, cbor(t, 9, 5)},
+		{mailbox.Error{Code: mailbox.CodeBinding}, cbor(t, 9, 7)},
+		{mailbox.RevokeResult{RequestID: 3, Status: mailbox.RevokeRefused}, cbor(t, 11, 3, 2)},
 	}
 	for _, c := range cases {
 		if got := mustEncode(t, c.m); !bytes.Equal(got, c.want) {
@@ -125,16 +126,19 @@ func TestBitFlipsAreRefusedOrCanonical(t *testing.T) {
 func TestDecodeRefusesUnknownFieldsAndMissingFields(t *testing.T) {
 	h := hash(1)
 	valid := [][]any{
-		{0, 1, 1, nonceb(1), nkb(2), 5},
-		{1, 1, fpb(3), sigb(4)},
-		{2, 1, 10, 11, 12, 13},
-		{3, 7, fpb(4), h[:], 99},
+		{0, 2, 2, nonceb(1), nkb(2), 5},
+		{1, 2, fpb(3), sigb(4), []any{edb(5), xkb(6), bs(10, 1), bs(10, 2)}, []any{}},
+		{2, 2, 10, 11, 12, 13, 14},
+		{3, 7, wkb(1), fpb(4), h[:], 99},
 		{4, 7, 0},
 		{5, 1, []byte{}, 16, 20},
 		{6, 2, []any{}, false},
 		{7, 3, []any{h[:]}},
 		{8, 3, 2},
 		{9, 5},
+		{10, 3, 0, edb(5), xkb(6), 5, sigb(4)},
+		{10, 3, 1, bs(10, 1), bs(10, 2)},
+		{11, 3, 0},
 	}
 	for _, v := range valid {
 		if _, err := mailbox.DecodeAny(cbor(t, v...)); err != nil {
@@ -153,12 +157,12 @@ func TestDecodeRefusesUnknownFieldsAndMissingFields(t *testing.T) {
 func TestDecodeRefusesWrongKinds(t *testing.T) {
 	h := hash(1)
 	cases := map[string][]any{
-		"type as text":        {"0", 1, 1, nonceb(1), nkb(2), 5},
+		"type as text":        {"0", 2, 2, nonceb(1), nkb(2), 5},
 		"type negative":       {-1},
-		"type 10":             {10},
+		"type 12":             {12},
 		"type 99":             {99},
-		"version as bytes":    {1, []byte{1}, fpb(3), sigb(4)},
-		"fingerprint as text": {1, 1, "xxxxxxxxxxxxxxxxxxxx", sigb(4)},
+		"version as bytes":    {1, []byte{2}, fpb(3), sigb(4), []any{}, []any{}},
+		"fingerprint as text": {1, 2, "xxxxxxxxxxxxxxxxxxxx", sigb(4), []any{edb(5), xkb(6), bs(1, 1), bs(1, 2)}, []any{}},
 		"id negative":         {4, -1, 0},
 		"after as text":       {5, 1, "", 16, 20},
 		"more as integer":     {6, 2, []any{}, 1},
@@ -183,8 +187,8 @@ func TestDecodeRefusesWrongKinds(t *testing.T) {
 	if _, err := mailbox.DecodeAny([]byte{0x80}); !errors.Is(err, mailbox.ErrMalformed) {
 		t.Errorf("an empty array: %v", err)
 	}
-	if _, err := mailbox.DecodeAny(cbor(t, 10)); !errors.Is(err, mailbox.ErrUnknownType) {
-		t.Errorf("type 10: %v", err)
+	if _, err := mailbox.DecodeAny(cbor(t, 12)); !errors.Is(err, mailbox.ErrUnknownType) {
+		t.Errorf("type 12: %v", err)
 	}
 }
 
@@ -192,13 +196,13 @@ func TestDecodeRefusesWrongKinds(t *testing.T) {
 func TestDecodeRefusesWrongLengths(t *testing.T) {
 	h := hash(1)
 	for _, n := range []int{0, 31, 33} {
-		if _, err := mailbox.DecodeAny(cbor(t, 0, 1, 1, bs(n, 1), nkb(2), 5)); !errors.Is(err, mailbox.ErrMalformed) {
+		if _, err := mailbox.DecodeAny(cbor(t, 0, 2, 2, bs(n, 1), nkb(2), 5)); !errors.Is(err, mailbox.ErrMalformed) {
 			t.Errorf("nonce of %d bytes: %v", n, err)
 		}
-		if _, err := mailbox.DecodeAny(cbor(t, 0, 1, 1, nonceb(1), bs(n, 1), 5)); !errors.Is(err, mailbox.ErrMalformed) {
+		if _, err := mailbox.DecodeAny(cbor(t, 0, 2, 2, nonceb(1), bs(n, 1), 5)); !errors.Is(err, mailbox.ErrMalformed) {
 			t.Errorf("relay key of %d bytes: %v", n, err)
 		}
-		if _, err := mailbox.DecodeAny(cbor(t, 3, 7, fpb(4), bs(n, 1), 99)); !errors.Is(err, mailbox.ErrMalformed) {
+		if _, err := mailbox.DecodeAny(cbor(t, 3, 7, wkb(1), fpb(4), bs(n, 1), 99)); !errors.Is(err, mailbox.ErrMalformed) {
 			t.Errorf("mid of %d bytes: %v", n, err)
 		}
 		if _, err := mailbox.DecodeAny(cbor(t, 7, 3, []any{bs(n, 1)})); !errors.Is(err, mailbox.ErrMalformed) {
@@ -206,16 +210,13 @@ func TestDecodeRefusesWrongLengths(t *testing.T) {
 		}
 	}
 	for _, n := range []int{0, 19, 21} {
-		if _, err := mailbox.DecodeAny(cbor(t, 1, 1, bs(n, 1), sigb(4))); !errors.Is(err, mailbox.ErrMalformed) {
-			t.Errorf("fingerprint of %d bytes: %v", n, err)
-		}
-		if _, err := mailbox.DecodeAny(cbor(t, 3, 7, bs(n, 1), h[:], 99)); !errors.Is(err, mailbox.ErrMalformed) {
+		if _, err := mailbox.DecodeAny(cbor(t, 3, 7, wkb(1), bs(n, 1), h[:], 99)); !errors.Is(err, mailbox.ErrMalformed) {
 			t.Errorf("to of %d bytes: %v", n, err)
 		}
 	}
-	for _, n := range []int{0, 63, 65} {
-		if _, err := mailbox.DecodeAny(cbor(t, 1, 1, fpb(3), bs(n, 1))); !errors.Is(err, mailbox.ErrMalformed) {
-			t.Errorf("signature of %d bytes: %v", n, err)
+	for _, n := range []int{0, 27, 29} {
+		if _, err := mailbox.DecodeAny(cbor(t, 3, 7, bs(n, 1), fpb(4), h[:], 99)); !errors.Is(err, mailbox.ErrMalformed) {
+			t.Errorf("wallet key of %d bytes: %v", n, err)
 		}
 	}
 	for _, n := range []int{1, 31, 33} {
@@ -235,28 +236,25 @@ func TestDecodeRefusesOutOfRangeValues(t *testing.T) {
 		seventeen = append(seventeen, []any{x[:], 1})
 	}
 	cases := map[string][]any{
-		"challenge min 0":         {0, 0, 1, nonceb(1), nkb(2), 5},
-		"challenge min above max": {0, 2, 1, nonceb(1), nkb(2), 5},
+		"challenge min 0":         {0, 0, 2, nonceb(1), nkb(2), 5},
+		"challenge min above max": {0, 3, 2, nonceb(1), nkb(2), 5},
 		"challenge max 65536":     {0, 1, 65536, nonceb(1), nkb(2), 5},
-		"challenge time over i64": {0, 1, 1, nonceb(1), nkb(2), uint64(1) << 63},
-		"challenge time i64 max":  {0, 1, 1, nonceb(1), nkb(2), uint64(1)<<63 - 1},
-		"challenge time bound+1":  {0, 1, 1, nonceb(1), nkb(2), uint64(mailbox.MaxTime) + 1},
-		"auth version 0":          {1, 0, fpb(3), sigb(4)},
-		"auth version 65536":      {1, 65536, fpb(3), sigb(4)},
-		"authok version 0":        {2, 0, 10, 11, 12, 13},
-		"authok max envelope 0":   {2, 1, 0, 11, 12, 13},
-		"authok envelope 1MiB+1":  {2, 1, mailbox.MaxEnvelopeBytes + 1, 11, 12, 13},
-		"authok entries 0":        {2, 1, 10, 0, 12, 13},
-		"authok entries 257":      {2, 1, 10, 257, 12, 13},
-		"authok bytes 0":          {2, 1, 10, 11, 0, 13},
-		"authok bytes 64MiB+1":    {2, 1, 10, 11, mailbox.MaxMailboxBytes + 1, 13},
-		"authok retention 0":      {2, 1, 10, 11, 12, 0},
-		"authok retention 30d+1":  {2, 1, 10, 11, 12, mailbox.MaxRetentionSeconds + 1},
-		"put id 2^32":             {3, big, fpb(4), h[:], 99},
-		"put size 0":              {3, 7, fpb(4), h[:], 0},
-		"put size 1MiB+1":         {3, 7, fpb(4), h[:], mailbox.MaxEnvelopeBytes + 1},
-		"put size 2^32":           {3, 7, fpb(4), h[:], big},
-		"put result status 8":     {4, 7, 8},
+		"challenge time over i64": {0, 2, 2, nonceb(1), nkb(2), uint64(1) << 63},
+		"challenge time i64 max":  {0, 2, 2, nonceb(1), nkb(2), uint64(1)<<63 - 1},
+		"challenge time bound+1":  {0, 2, 2, nonceb(1), nkb(2), uint64(mailbox.MaxTime) + 1},
+		"authok max envelope 0":   {2, 2, 0, 11, 12, 13, 14},
+		"authok envelope 1MiB+1":  {2, 2, mailbox.MaxEnvelopeBytes + 1, 11, 12, 13, 14},
+		"authok entries 0":        {2, 2, 10, 0, 12, 13, 14},
+		"authok entries 257":      {2, 2, 10, 257, 12, 13, 14},
+		"authok bytes 0":          {2, 2, 10, 11, 0, 13, 14},
+		"authok bytes 64MiB+1":    {2, 2, 10, 11, mailbox.MaxMailboxBytes + 1, 13, 14},
+		"authok retention 0":      {2, 2, 10, 11, 12, 0, 14},
+		"authok retention 30d+1":  {2, 2, 10, 11, 12, mailbox.MaxRetentionSeconds + 1, 14},
+		"put id 2^32":             {3, big, wkb(1), fpb(4), h[:], 99},
+		"put size 0":              {3, 7, wkb(1), fpb(4), h[:], 0},
+		"put size 1MiB+1":         {3, 7, wkb(1), fpb(4), h[:], mailbox.MaxEnvelopeBytes + 1},
+		"put size 2^32":           {3, 7, wkb(1), fpb(4), h[:], big},
+		"put result status 9":     {4, 7, 9},
 		"fetch max items 0":       {5, 1, []byte{}, 0, 20},
 		"fetch max items 17":      {5, 1, []byte{}, 17, 20},
 		"fetch wait 21":           {5, 1, []byte{}, 16, 21},
@@ -267,7 +265,7 @@ func TestDecodeRefusesOutOfRangeValues(t *testing.T) {
 		"items 17 entries":        {6, 2, seventeen, true},
 		"ack duplicate":           {7, 3, []any{h[:], h[:]}},
 		"ackresult 65":            {8, 3, 65},
-		"error code 6":            {9, 6},
+		"error code 8":            {9, 8},
 	}
 	for name, v := range cases {
 		if _, err := mailbox.DecodeAny(cbor(t, v...)); err == nil {
@@ -292,16 +290,15 @@ func TestDecodeRefusesOutOfRangeValues(t *testing.T) {
 	}
 	// Values at their limits are accepted.
 	for name, v := range map[string][]any{
-		"put size 1":    {3, 7, fpb(4), h[:], 1},
-		"put size 1MiB": {3, 7, fpb(4), h[:], mailbox.MaxEnvelopeBytes},
-		"put id max":    {3, uint64(1)<<32 - 1, fpb(4), h[:], 1},
-		"version max":   {1, 65535, fpb(3), sigb(4)},
+		"put size 1":    {3, 7, wkb(1), fpb(4), h[:], 1},
+		"put size 1MiB": {3, 7, wkb(1), fpb(4), h[:], mailbox.MaxEnvelopeBytes},
+		"put id max":    {3, uint64(1)<<32 - 1, wkb(1), fpb(4), h[:], 1},
 		"wait 20":       {5, 1, []byte{}, 16, 20},
-		"status 7":      {4, 7, 7},
-		"code 5":        {9, 5},
+		"status 8":      {4, 7, 8},
+		"code 7":        {9, 7},
 		"ackresult 64":  {8, 3, 64},
-		"time bound":    {0, 1, 1, nonceb(1), nkb(2), uint64(mailbox.MaxTime)},
-		"time 0":        {0, 1, 1, nonceb(1), nkb(2), 0},
+		"time bound":    {0, 2, 2, nonceb(1), nkb(2), uint64(mailbox.MaxTime)},
+		"time 0":        {0, 2, 2, nonceb(1), nkb(2), 0},
 	} {
 		if _, err := mailbox.DecodeAny(cbor(t, v...)); err != nil {
 			t.Errorf("%s: %v", name, err)
@@ -405,9 +402,7 @@ func TestDecodeAllocatesNothingForClaimedLengths(t *testing.T) {
 	if !errors.Is(err, mailbox.ErrShape) || n > 8<<10 {
 		t.Errorf("a tower of %d arrays: %v, %d bytes allocated", len(deep), err, n)
 	}
-	// 4095 one-pair maps likewise, and an array of 64 empty arrays inside a
-	// message of the wrong shape is built (it is within the bound), not refused
-	// by the pre-scan.
+	// 4095 one-pair maps likewise.
 	deepMap := append(bs(mailbox.MaxHeaderFrame-1, 0xa1), 0x00)
 	n = allocated(func() { _, err = mailbox.DecodeAny(deepMap) })
 	if !errors.Is(err, mailbox.ErrShape) || n > 8<<10 {
@@ -442,32 +437,32 @@ func TestScanShapeLengthChecks(t *testing.T) {
 		w    int
 	}{{24, 1}, {25, 2}, {26, 4}, {27, 8}} {
 		for have := 0; have < c.w; have++ {
-			b := append([]byte{0x82, 0x01, 0x00<<5 | c.info}, bs(have, 0)...)
+			b := append([]byte{0x82, 0x04, 0x00<<5 | c.info}, bs(have, 0)...)
 			refused("truncated head width "+string(rune('0'+c.w)), b, mailbox.ErrNotCanonical)
 		}
 	}
 	// A head at the very end with exactly its bytes is not a truncation: the
-	// frame is then refused for what it is (a Challenge with 1 field).
-	for _, b := range [][]byte{{0x82, 0x01, 0x18, 0x18}, {0x82, 0x01, 0x19, 0x01, 0x00}, {0x82, 0x01, 0x1a, 0, 1, 0, 0}, {0x82, 0x01, 0x1b, 0, 0, 0, 1, 0, 0, 0, 0}} {
+	// frame is then refused for what it is (a PutResult with 1 field).
+	for _, b := range [][]byte{{0x82, 0x04, 0x18, 0x18}, {0x82, 0x04, 0x19, 0x01, 0x00}, {0x82, 0x04, 0x1a, 0, 1, 0, 0}, {0x82, 0x04, 0x1b, 0, 0, 0, 1, 0, 0, 0, 0}} {
 		refused("a complete head", b, mailbox.ErrMalformed)
 	}
 	// The input of the review: a byte string whose length is 0x8000000000000001
 	// with the input ending after 1 byte. Its position would wrap negative.
-	refused("negative position", []byte{0x83, 0x01, 0x5b, 0x80, 0, 0, 0, 0, 0, 0, 0x01}, mailbox.ErrNotCanonical)
-	refused("review input, one byte follows", []byte{0x83, 0x01, 0x5b, 0x80, 0, 0, 0, 0, 0, 0, 0x01, 0x00}, mailbox.ErrNotCanonical)
+	refused("negative position", []byte{0x83, 0x04, 0x5b, 0x80, 0, 0, 0, 0, 0, 0, 0x01}, mailbox.ErrNotCanonical)
+	refused("review input, one byte follows", []byte{0x83, 0x04, 0x5b, 0x80, 0, 0, 0, 0, 0, 0, 0x01, 0x00}, mailbox.ErrNotCanonical)
 	// A string longer than what is left: by one, for bytes and for text, and
 	// with the length in each width.
 	for _, major := range []byte{0x40, 0x60} {
-		refused("string longer by one", []byte{0x82, 0x01, major | 3, 'a', 'b'}, mailbox.ErrNotCanonical)
-		refused("string 24 longer by one", append([]byte{0x82, 0x01, major | 24, 24}, bs(23, 'a')...), mailbox.ErrNotCanonical)
-		refused("string, 4 byte length", append([]byte{0x82, 0x01, major | 26, 0, 0, 1, 0}, bs(255, 'a')...), mailbox.ErrNotCanonical)
+		refused("string longer by one", []byte{0x82, 0x04, major | 3, 'a', 'b'}, mailbox.ErrNotCanonical)
+		refused("string 24 longer by one", append([]byte{0x82, 0x04, major | 24, 24}, bs(23, 'a')...), mailbox.ErrNotCanonical)
+		refused("string, 4 byte length", append([]byte{0x82, 0x04, major | 26, 0, 0, 1, 0}, bs(255, 'a')...), mailbox.ErrNotCanonical)
 	}
 	// A string that is exactly what is left passes the pre-scan: the frame is
-	// then refused as a message (an unknown type here), not as a truncation.
+	// then refused as a message (a PutResult with a string), not as a truncation.
 	for _, major := range []byte{0x40, 0x60} {
-		refused("string exactly fits", []byte{0x82, 0x01, major | 2, 'a', 'b'}, mailbox.ErrMalformed)
+		refused("string exactly fits", []byte{0x82, 0x04, major | 2, 'a', 'b'}, mailbox.ErrMalformed)
 	}
-	refused("empty string at the end", []byte{0x82, 0x01, 0x40}, mailbox.ErrMalformed)
+	refused("empty string at the end", []byte{0x82, 0x04, 0x40}, mailbox.ErrMalformed)
 }
 
 // spec: SPO-Xmailbox-PRE-005
@@ -481,15 +476,13 @@ func TestEncodeRefusesInvalidMessages(t *testing.T) {
 		items = append(items, mailbox.Item{Mid: hash(byte(i)), Size: 1})
 	}
 	bad := map[string]mailbox.Message{
-		"challenge min 0":    mailbox.Challenge{Min: 0, Max: 1},
-		"challenge min>max":  mailbox.Challenge{Min: 2, Max: 1},
-		"challenge negative": mailbox.Challenge{Min: 1, Max: 1, RelayTime: -1},
-		"auth version 0":     mailbox.Auth{Version: 0},
-		"auth version 65536": mailbox.Auth{Version: 65536},
-		"authok zero":        mailbox.AuthOK{Version: 1},
-		"put size 0":         mailbox.Put{Size: 0},
-		"put size 1MiB+1":    mailbox.Put{Size: mailbox.MaxEnvelopeBytes + 1},
-		"status 8":           mailbox.PutResult{Status: 8},
+		"challenge min 0":    mailbox.Challenge{Min: 0, Max: 2},
+		"challenge min>max":  mailbox.Challenge{Min: 3, Max: 2},
+		"challenge negative": mailbox.Challenge{Min: 2, Max: 2, RelayTime: -1},
+		"authok zero":        mailbox.AuthOKV2{},
+		"put size 0":         mailbox.PutV2{Size: 0},
+		"put size 1MiB+1":    mailbox.PutV2{Size: mailbox.MaxEnvelopeBytes + 1},
+		"status 9":           mailbox.PutResult{Status: 9},
 		"fetch 0 items":      mailbox.Fetch{MaxItems: 0},
 		"fetch 17 items":     mailbox.Fetch{MaxItems: 17},
 		"fetch wait 21":      mailbox.Fetch{MaxItems: 1, WaitSeconds: 21},
@@ -500,58 +493,64 @@ func TestEncodeRefusesInvalidMessages(t *testing.T) {
 		"ack 65":             mailbox.Ack{Mids: many},
 		"ack duplicate":      mailbox.Ack{Mids: []mailbox.Hash{hash(1), hash(1)}},
 		"ackresult 65":       mailbox.AckResult{Deleted: 65},
-		"error code 6":       mailbox.Error{Code: 6},
-		"authok retention":   mailbox.AuthOK{Version: 1, MaxEnvelope: 1, MaxEntries: 1, MaxBytes: 1, RetentionSeconds: mailbox.MaxRetentionSeconds + 1},
-		"authok entries 257": mailbox.AuthOK{Version: 1, MaxEnvelope: 1, MaxEntries: 257, MaxBytes: 1, RetentionSeconds: 1},
-		"authok bytes":       mailbox.AuthOK{Version: 1, MaxEnvelope: 1, MaxEntries: 1, MaxBytes: mailbox.MaxMailboxBytes + 1, RetentionSeconds: 1},
-		"authok envelope":    mailbox.AuthOK{Version: 1, MaxEnvelope: mailbox.MaxEnvelopeBytes + 1, MaxEntries: 1, MaxBytes: 1, RetentionSeconds: 1},
+		"error code 8":       mailbox.Error{Code: 8},
+		"authok retention":   mailbox.AuthOKV2{MaxEnvelope: 1, MaxEntries: 1, MaxBytes: 1, RetentionSeconds: mailbox.MaxRetentionSeconds + 1, Until: 1},
+		"authok entries 257": mailbox.AuthOKV2{MaxEnvelope: 1, MaxEntries: 257, MaxBytes: 1, RetentionSeconds: 1, Until: 1},
+		"authok bytes":       mailbox.AuthOKV2{MaxEnvelope: 1, MaxEntries: 1, MaxBytes: mailbox.MaxMailboxBytes + 1, RetentionSeconds: 1, Until: 1},
+		"authok envelope":    mailbox.AuthOKV2{MaxEnvelope: mailbox.MaxEnvelopeBytes + 1, MaxEntries: 1, MaxBytes: 1, RetentionSeconds: 1, Until: 1},
+		"authok no until":    mailbox.AuthOKV2{MaxEnvelope: 1, MaxEntries: 1, MaxBytes: 1, RetentionSeconds: 1},
 	}
 	for name, m := range bad {
 		if _, err := mailbox.Encode(m); err == nil {
 			t.Errorf("%s encoded", name)
 		}
 	}
+	if _, err := mailbox.Encode(nil); !errors.Is(err, mailbox.ErrMalformed) {
+		t.Errorf("no message: %v", err)
+	}
 }
 
-// spec: SPO-Xmailbox-OUT-006, SPO-Xmailbox-PRE-007
-func TestChooseVersion(t *testing.T) {
-	ok := [][2]uint{{1, 1}, {1, 5}}
-	for _, r := range ok {
-		if v, err := mailbox.ChooseVersion(r[0], r[1]); err != nil || v != 1 {
-			t.Errorf("%v: %d, %v", r, v, err)
-		}
+// There is one version: EncodeV writes version 2 and refuses every other number,
+// and Encode is EncodeV(2).
+//
+// spec: SPO-Xmailbox-OUT-052, SPO-Xmailbox-PRE-029
+func TestOnlyVersionTwoIsWritten(t *testing.T) {
+	m := mailbox.Fetch{RequestID: 1, MaxItems: 1}
+	want, err := mailbox.EncodeV(mailbox.Version2, m)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, r := range [][2]uint{{2, 3}, {0, 1}, {3, 2}, {0, 0}, {2, 65535}} {
-		if _, err := mailbox.ChooseVersion(r[0], r[1]); err == nil {
-			t.Errorf("%v chose a version", r)
-		}
+	if got, err := mailbox.Encode(m); err != nil || !bytes.Equal(got, want) {
+		t.Errorf("Encode = %x, %v; want EncodeV(2) = %x", got, err, want)
 	}
-	if _, err := mailbox.ChooseVersion(2, 3); !errors.Is(err, mailbox.ErrVersion) {
-		t.Errorf("2..3: %v", err)
+	for _, v := range []uint{0, 1, 3, 65535, 1 << 20} {
+		if b, err := mailbox.EncodeV(v, m); !errors.Is(err, mailbox.ErrVersion) || b != nil {
+			t.Errorf("EncodeV(%d) = %x, %v; want ErrVersion", v, b, err)
+		}
 	}
 }
 
 // spec: SPO-Xmailbox-OUT-005
 func TestStatusAndCodeValues(t *testing.T) {
-	st := []mailbox.Status{mailbox.StatusStored, mailbox.StatusDuplicate, mailbox.StatusRefused, mailbox.StatusFull, mailbox.StatusTooLarge, mailbox.StatusBadHash, mailbox.StatusBusy, mailbox.StatusUnavailable}
+	st := []mailbox.Status{mailbox.StatusStored, mailbox.StatusDuplicate, mailbox.StatusRefused, mailbox.StatusFull, mailbox.StatusTooLarge, mailbox.StatusBadHash, mailbox.StatusBusy, mailbox.StatusUnavailable, mailbox.StatusUnbound}
 	for i, s := range st {
 		if uint(s) != uint(i) || !s.Valid() {
 			t.Errorf("status %d is %d", i, s)
 		}
 	}
-	if mailbox.Status(8).Valid() {
-		t.Error("status 8 is valid")
+	if mailbox.Status(9).Valid() {
+		t.Error("status 9 is valid")
 	}
-	cs := []mailbox.Code{mailbox.CodeVersion, mailbox.CodeAuth, mailbox.CodeProtocol, mailbox.CodeLimit, mailbox.CodeRevoked, mailbox.CodeShuttingDown}
+	cs := []mailbox.Code{mailbox.CodeVersion, mailbox.CodeAuth, mailbox.CodeProtocol, mailbox.CodeLimit, mailbox.CodeRevoked, mailbox.CodeShuttingDown, mailbox.CodeNotAllowed, mailbox.CodeBinding}
 	for i, c := range cs {
 		if uint(c) != uint(i) || !c.Valid() {
 			t.Errorf("code %d is %d", i, c)
 		}
 	}
-	if mailbox.Code(6).Valid() {
-		t.Error("code 6 is valid")
+	if mailbox.Code(8).Valid() {
+		t.Error("code 8 is valid")
 	}
-	mt := []mailbox.MsgType{mailbox.MsgChallenge, mailbox.MsgAuth, mailbox.MsgAuthOK, mailbox.MsgPut, mailbox.MsgPutResult, mailbox.MsgFetch, mailbox.MsgItems, mailbox.MsgAck, mailbox.MsgAckResult, mailbox.MsgError}
+	mt := []mailbox.MsgType{mailbox.MsgChallenge, mailbox.MsgAuth, mailbox.MsgAuthOK, mailbox.MsgPut, mailbox.MsgPutResult, mailbox.MsgFetch, mailbox.MsgItems, mailbox.MsgAck, mailbox.MsgAckResult, mailbox.MsgError, mailbox.MsgRevoke, mailbox.MsgRevokeResult}
 	for i, m := range mt {
 		if uint(m) != uint(i) {
 			t.Errorf("type %d is %d", i, m)
@@ -564,12 +563,12 @@ func TestStatusAndCodeValues(t *testing.T) {
 // spec: SPO-Xmailbox-PRE-016
 func TestEncodeRefusesRelayTimeOutOfRange(t *testing.T) {
 	for _, rt := range []int64{-1, mailbox.MaxTime + 1, 1<<63 - 1, -1 << 63} {
-		if _, err := mailbox.Encode(mailbox.Challenge{Min: 1, Max: 1, RelayTime: rt}); !errors.Is(err, mailbox.ErrRange) {
+		if _, err := mailbox.Encode(mailbox.Challenge{Min: 2, Max: 2, RelayTime: rt}); !errors.Is(err, mailbox.ErrRange) {
 			t.Errorf("relay time %d: %v", rt, err)
 		}
 	}
 	for _, rt := range []int64{0, mailbox.MaxTime} {
-		if _, err := mailbox.Encode(mailbox.Challenge{Min: 1, Max: 1, RelayTime: rt}); err != nil {
+		if _, err := mailbox.Encode(mailbox.Challenge{Min: 2, Max: 2, RelayTime: rt}); err != nil {
 			t.Errorf("relay time %d: %v", rt, err)
 		}
 	}

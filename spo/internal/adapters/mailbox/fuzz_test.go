@@ -25,15 +25,17 @@ import (
 // spec: SPO-Xmailbox-INV-018
 func FuzzClientAgainstArbitraryRelayBytes(f *testing.F) {
 	env := newEnv(40, 9)
-	items, _ := wire.Encode(wire.Items{RequestID: 1, Entries: []wire.Item{{Mid: wire.HashOf(env), Size: uint32(len(env))}}})
+	items, _ := wire.EncodeV(wire.Version2, wire.Items{RequestID: 1, Entries: []wire.Item{{Mid: wire.HashOf(env), Size: uint32(len(env))}}})
 	itemsFrame, _ := wire.AppendFrame(nil, items)
 	rawFrame := append([]byte{0, 0, 0, byte(len(env))}, env...)
-	okPut, _ := wire.Encode(wire.PutResult{RequestID: 1, Status: wire.StatusStored})
+	okPut, _ := wire.EncodeV(wire.Version2, wire.PutResult{RequestID: 1, Status: wire.StatusStored})
 	okPutFrame, _ := wire.AppendFrame(nil, okPut)
-	ch, _ := wire.Encode(wire.Challenge{Min: 1, Max: 1, RelayKey: party.NodeKey{}, RelayTime: 1_700_000_000})
+	ch, _ := wire.EncodeV(wire.Version2, wire.Challenge{Min: 2, Max: 2, RelayKey: party.NodeKey{}, RelayTime: 1_700_000_000})
 	chFrame, _ := wire.AppendFrame(nil, ch)
-	auth, _ := wire.Encode(wire.AuthOK{Version: 1, MaxEnvelope: 1 << 20, MaxEntries: 256, MaxBytes: 64 << 20, RetentionSeconds: 86400})
+	auth, _ := wire.EncodeV(wire.Version2, wire.AuthOKV2{MaxEnvelope: 1 << 20, MaxEntries: 256, MaxBytes: 64 << 20, RetentionSeconds: 86400, Until: startTime + 30*24*3600})
 	authFrame, _ := wire.AppendFrame(nil, auth)
+	revokeRes, _ := wire.EncodeV(wire.Version2, wire.RevokeResult{RequestID: 1, Status: wire.RevokeRecorded})
+	revokeFrame, _ := wire.AppendFrame(nil, revokeRes)
 	errFrame, _ := wire.AppendFrame(nil, []byte{0x82, 0x09, 0x04})
 
 	f.Add(append([]byte{0}, chFrame...))                                                         // Receive, from the first byte
@@ -41,6 +43,7 @@ func FuzzClientAgainstArbitraryRelayBytes(f *testing.F) {
 	f.Add(append([]byte{0x82}, okPutFrame...))                                                   // Send, stored
 	f.Add(append(append([]byte{1}, authFrame...), itemsFrame...))                                // Receive, after Challenge
 	f.Add(append([]byte{2}, errFrame...))                                                        // Receive, an Error frame
+	f.Add(append([]byte{1}, append(append([]byte{}, revokeFrame...), authFrame...)...))          // Receive, a RevokeResult then AuthOK
 	f.Add([]byte{0, 0xff, 0xff, 0xff, 0xff})                                                     // an absurd length
 	f.Add([]byte{2, 0, 0, 0, 3, 0x9f, 0x00, 0xff})                                               // an indefinite array
 	f.Add(append(append([]byte{2}, itemsFrame...), append([]byte{0, 0, 0, 40}, env[:10]...)...)) // a short body
@@ -75,6 +78,9 @@ func FuzzClientAgainstArbitraryRelayBytes(f *testing.F) {
 				}
 			}
 		})
+		// a pending revoke, so that the bytes also meet the client's revoke exchange
+		rs := h.me.wallet.RevokeStatement(party.Fingerprint{9}, false, startTime-10)
+		h.book = &testBook{pending: []mailbox.Revoke{{Kind: mailbox.RevokeByWalletKey, Until: h.me.until, Sign1: rs.Sign1, Key: rs.COSEKey}}}
 		c := h.client(func(cfg *mailbox.Config) {
 			l := &cfg.Limits
 			l.HandshakeTimeout, l.IdleTimeout, l.BodyTimeout, l.WriteTimeout, l.DialTimeout = 60*time.Millisecond, 60*time.Millisecond, 60*time.Millisecond, 60*time.Millisecond, 60*time.Millisecond

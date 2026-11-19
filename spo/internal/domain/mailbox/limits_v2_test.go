@@ -46,7 +46,7 @@ func TestV2BoundsAreTheStatementBounds(t *testing.T) {
 	if mailbox.MaxHeaderFrame != 4096 {
 		t.Errorf("the header bound moved to %d; the largest Auth needs 2726", mailbox.MaxHeaderFrame)
 	}
-	if mailbox.Version1 != 1 || mailbox.Version2 != 2 {
+	if mailbox.Version2 != 2 {
 		t.Error("versions")
 	}
 }
