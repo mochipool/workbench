@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	wire "github.com/mochipool/workbench/spo/internal/domain/mailbox"
+	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
 // Errors. A failure of the connection wraps one of the first five, so a caller
@@ -106,11 +107,11 @@ func relayError(code wire.Code) error {
 	case wire.CodeBinding:
 		// the binding is invalid, expired or revoked: a new one must be signed
 		e.reason = ReasonBinding
-		e.bases = append(e.bases, ErrBindingRefused)
+		e.bases = append(e.bases, ErrBindingRefused, ports.ErrIdentityRefused)
 	case wire.CodeNotAllowed:
 		// the operator's allow-list does not hold this wallet key
 		e.reason = ReasonNotAllowed
-		e.bases = append(e.bases, ErrNotAllowed)
+		e.bases = append(e.bases, ErrNotAllowed, ports.ErrIdentityRefused)
 	}
 	e.code, e.hasCode = code, true
 	return e

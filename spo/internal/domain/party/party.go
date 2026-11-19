@@ -42,6 +42,68 @@ type Party struct {
 	Scope      Scope
 	State      State
 	EnrolledAt time.Time
+	// Relay is the party's relay identity (SPO-Xparty-OUT-007, ADR 0014
+	// decision 2), nil when it has none: it is then reachable by file or a direct
+	// connection only. It is the address of a put at a relay and grants nothing.
+	Relay *RelayIdentity
+}
+
+// WalletKeySize is the size of a wallet key hash (Blake2b-224).
+const WalletKeySize = 28
+
+// WalletKey is the key hash K of the payment or stake key a party's device is
+// bound to at relays (ADR 0014 decision 2).
+type WalletKey [WalletKeySize]byte
+
+// RelayIdentity is a party's relay identity: the wallet key, the device it is
+// bound to (the party's own fingerprint, so one party has one wallet key) and
+// the binding it came from, kept as evidence exactly as given. The caller
+// verified the binding (domain/relaypeer); this package only holds it.
+type RelayIdentity struct {
+	WalletKey WalletKey
+	Device    Fingerprint
+	// From and Until are the binding's window, unix seconds.
+	From, Until int64
+	// Statement and Key are the COSE_Sign1 and the COSE_Key of the binding.
+	Statement, Key []byte
+	// Unverified is why the stored evidence no longer verifies under the current
+	// policy (empty when it does). It is set by the registry at load, never
+	// stored: such a relay identity is kept, bytes and all, until the operator
+	// replaces or clears it, and it is no route (SPO-Xparty-OUT-007).
+	Unverified string
+}
+
+// ErrRelayIdentity: a relay identity that cannot belong to the party.
+var ErrRelayIdentity = errors.New("party: the relay identity is not this party's")
+
+// CheckRelay reports whether r can be the relay identity of the identity with
+// fingerprint fp: the device it names is fp, the window is ordered and the
+// evidence is present (SPO-Xparty-OUT-007). nil is no relay identity and passes.
+func CheckRelay(r *RelayIdentity, fp Fingerprint) error {
+	switch {
+	case r == nil:
+		return nil
+	case r.Device != fp:
+		return fmt.Errorf("%w: it names another device", ErrRelayIdentity)
+	case r.WalletKey == WalletKey{}:
+		return fmt.Errorf("%w: no wallet key", ErrRelayIdentity)
+	case r.From < 0 || r.Until <= r.From:
+		return fmt.Errorf("%w: its window is not ordered", ErrRelayIdentity)
+	case len(r.Statement) == 0 || len(r.Key) == 0:
+		return fmt.Errorf("%w: no evidence", ErrRelayIdentity)
+	}
+	return nil
+}
+
+// Clone is a deep copy (nil stays nil).
+func (r *RelayIdentity) Clone() *RelayIdentity {
+	if r == nil {
+		return nil
+	}
+	c := *r
+	c.Statement = slices.Clone(r.Statement)
+	c.Key = slices.Clone(r.Key)
+	return &c
 }
 
 // Active reports whether the party's envelopes may be accepted
@@ -80,6 +142,11 @@ type Enrollment struct {
 	// limited by it.
 	Scope        Scope
 	Confirmation string // the first four fingerprint groups, as typed (PR-001)
+	// Relay is the party's relay identity from the binding it gave, already
+	// verified by the caller (domain/relaypeer); nil for none. It must name the
+	// document's fingerprint (SPO-Xparty-PRE-008). It never replaces the typed
+	// check (SPO-Xparty-PR-007).
+	Relay *RelayIdentity
 }
 
 // Enroll builds the party record for an enrollment, or refuses. The checks
@@ -119,6 +186,9 @@ func Enroll(e Enrollment, existing []Party, now time.Time) (Party, error) {
 	if !ConfirmPrefix(fp, e.Confirmation) {
 		return Party{}, ErrConfirmation
 	}
+	if err := CheckRelay(e.Relay, fp); err != nil {
+		return Party{}, err
+	}
 	for _, q := range existing {
 		if q.Fingerprint == fp {
 			return Party{}, ErrAlreadyEnrolled
@@ -131,7 +201,7 @@ func Enroll(e Enrollment, existing []Party, now time.Time) (Party, error) {
 		}
 	}
 	return Party{Identity: id, Fingerprint: fp, Name: e.Name, Roles: roles, Scope: scope,
-		State: StateActive, EnrolledAt: now.UTC().Truncate(time.Second)}, nil
+		State: StateActive, EnrolledAt: now.UTC().Truncate(time.Second), Relay: e.Relay.Clone()}, nil
 }
 
 // Revoke returns p revoked (SPO-Xparty-IF-003). From the moment the revoked

@@ -18,17 +18,17 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 | `ConvertKeptKey` | [`Xcustody`](../extensions/Xcustody.md) | 100 |
 | `DiscoverSources` | [`Xmulti`](../extensions/Xmulti.md) | 55 |
 | `EnrolFactor` | [`Xunlock`](../extensions/Xunlock.md) | 81 |
-| `EnrollParty` | [`Xparty`](../extensions/Xparty.md) | 71 |
+| `EnrollParty` | [`Xparty`](../extensions/Xparty.md) | 76 |
 | `ExportNodeKeys` | [`Xcustody`](../extensions/Xcustody.md) | 100 |
 | `ExportWorkspace` | [`Xcustody`](../extensions/Xcustody.md) | 100 |
-| `ImportSigningResponse` | [`Xparty`](../extensions/Xparty.md) | 71 |
+| `ImportSigningResponse` | [`Xparty`](../extensions/Xparty.md) | 76 |
 | `ImportWorkspace` | [`Pfiles`](../upstream/patterns/Pfiles.md), [`Xmulti`](../extensions/Xmulti.md) | 106 |
 | `ProtectSigningKey` | [`01protectKey`](../upstream/scripts/01_protectKey.md) | 29 |
-| `RequestSignatures` | [`Xparty`](../extensions/Xparty.md) | 71 |
+| `RequestSignatures` | [`Xparty`](../extensions/Xparty.md) | 76 |
 | `RestoreFromSink` | [`Xbackup`](../extensions/Xbackup.md) | 67 |
-| `ReviewSigningRequest` | [`Xparty`](../extensions/Xparty.md) | 71 |
-| `RevokeParty` | [`Xparty`](../extensions/Xparty.md) | 71 |
-| `RotateParty` | [`Xparty`](../extensions/Xparty.md) | 71 |
+| `ReviewSigningRequest` | [`Xparty`](../extensions/Xparty.md) | 76 |
+| `RevokeParty` | [`Xparty`](../extensions/Xparty.md) | 76 |
+| `RotateParty` | [`Xparty`](../extensions/Xparty.md) | 76 |
 | `SealKey` | [`Pfiles`](../upstream/patterns/Pfiles.md) | 51 |
 | `SnapshotWorkspace` | [`Xsnapshot`](../extensions/Xsnapshot.md) | 18 |
 | `StoreArtefact` | [`Pfiles`](../upstream/patterns/Pfiles.md) | 51 |
@@ -232,4 +232,4 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 | [`25a_genAction`](../upstream/scripts/25a_genAction.md) | Generate a governance action file | governance | 75 | draft |
 | [`25b_regAction`](../upstream/scripts/25b_regAction.md) | Submit governance actions | governance, transaction-construction | 71 | draft |
 
-Totals: 78 specs, 3201 requirements, 96 use cases.
+Totals: 78 specs, 3217 requirements, 96 use cases.

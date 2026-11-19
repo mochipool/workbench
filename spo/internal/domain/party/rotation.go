@@ -132,6 +132,10 @@ type RotationAcceptance struct {
 	// CarryScope: the scope recorded for the old identity applies to the new
 	// one. Without it the new identity has the scope that allows nothing.
 	CarryScope bool
+	// Relay is the relay identity of the NEW identity from the binding given
+	// with the acceptance, already verified by the caller; nil leaves the new
+	// identity with none (SPO-Xparty-INV-042).
+	Relay *RelayIdentity
 }
 
 // ApplyRotation is the whole of SPO-Xparty-INV-032 as a pure function: from the
@@ -170,13 +174,16 @@ func ApplyRotation(r Rotation, a RotationAcceptance, existing []Party, now time.
 	if !ConfirmPrefix(fp, a.Confirmation) {
 		return Party{}, Party{}, ErrConfirmation
 	}
+	if err := CheckRelay(a.Relay, fp); err != nil {
+		return Party{}, Party{}, err
+	}
 	retired, err = Revoke(old)
 	if err != nil {
 		return Party{}, Party{}, err
 	}
 	retired.Name = RetiredName(old.Name, old.Fingerprint)
 	next = Party{Identity: id, Fingerprint: fp, Name: old.Name, Roles: slices.Clone(old.Roles), State: StateActive,
-		EnrolledAt: now.UTC().Truncate(time.Second)}
+		EnrolledAt: now.UTC().Truncate(time.Second), Relay: a.Relay.Clone()}
 	if a.CarryScope {
 		next.Scope = old.Scope
 	}

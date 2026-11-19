@@ -22,6 +22,9 @@ import (
 
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
+	"github.com/mochipool/workbench/spo/internal/domain/relaybind"
+	"github.com/mochipool/workbench/spo/internal/domain/relaypeer"
+	"github.com/mochipool/workbench/spo/internal/platform/strictjson"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -54,6 +57,23 @@ type partyJSON struct {
 	Scope      *scopeJSON `json:"scope,omitempty"`
 	State      string     `json:"state"`
 	EnrolledAt int64      `json:"enrolled_at"`
+	// Relay is the party's relay identity (SPO-Xparty-OUT-007); absent for none,
+	// and in every record written before relay identities existed.
+	Relay *relayJSON `json:"relay,omitempty"`
+	// Pools is the list of the records before scopes. It is known so that such a
+	// record is not refused as unknown, and it is never read or written.
+	Pools json.RawMessage `json:"pools,omitempty"`
+}
+
+// relayJSON is the stored relay identity: hex in lower case, the times in unix
+// seconds. Every field is required.
+type relayJSON struct {
+	WalletKey string `json:"wallet_key"`
+	Device    string `json:"device"`
+	From      int64  `json:"from"`
+	Until     int64  `json:"until"`
+	Statement string `json:"statement"`
+	COSEKey   string `json:"cose_key"`
 }
 
 type scopeJSON struct {
@@ -77,6 +97,10 @@ func toJSON(p party.Party) partyJSON {
 		sc.KeyRoles = append(sc.KeyRoles, string(r))
 	}
 	j.Scope = sc
+	if r := p.Relay; r != nil {
+		j.Relay = &relayJSON{WalletKey: hex.EncodeToString(r.WalletKey[:]), Device: hex.EncodeToString(r.Device[:]), From: r.From, Until: r.Until,
+			Statement: hex.EncodeToString(r.Statement), COSEKey: hex.EncodeToString(r.Key)}
+	}
 	return j
 }
 
@@ -84,6 +108,58 @@ func unhex(dst []byte, s string) error {
 	b, err := hex.DecodeString(s)
 	if err != nil || len(b) != len(dst) {
 		return ErrCorrupt
+	}
+	copy(dst, b)
+	return nil
+}
+
+// canonHex decodes lower-case, even-length hex of 1 to max bytes; the length is
+// checked before anything is decoded.
+func canonHex(s string, max int) ([]byte, error) {
+	if len(s) == 0 || len(s) > 2*max || len(s)%2 != 0 {
+		return nil, ErrCorrupt
+	}
+	b, err := hex.DecodeString(s)
+	if err != nil || hex.EncodeToString(b) != s {
+		return nil, ErrCorrupt
+	}
+	return b, nil
+}
+
+// relayOf reads the stored relay identity of the party with fingerprint fp and
+// verifies it again: the evidence must say what the record says, for fp
+// (SPO-Xparty-OUT-007).
+func relayOf(j *relayJSON, fp party.Fingerprint) (*party.RelayIdentity, error) {
+	r := &party.RelayIdentity{From: j.From, Until: j.Until}
+	if err := errors.Join(unhexCanon(r.WalletKey[:], j.WalletKey), unhexCanon(r.Device[:], j.Device)); err != nil {
+		return nil, fmt.Errorf("%w: relay identity", ErrCorrupt)
+	}
+	var err error
+	if r.Statement, err = canonHex(j.Statement, relaybind.MaxSign1Bytes); err != nil {
+		return nil, fmt.Errorf("%w: relay statement", ErrCorrupt)
+	}
+	if r.Key, err = canonHex(j.COSEKey, relaybind.MaxKeyBytes); err != nil {
+		return nil, fmt.Errorf("%w: relay key", ErrCorrupt)
+	}
+	why, err := relaypeer.Recheck(*r, fp)
+	if err != nil {
+		return nil, fmt.Errorf("%w: relay identity: %v", ErrCorrupt, err)
+	}
+	// Evidence that is intact as a record but no longer verifies does not lock
+	// the registry: the party loads without a route, the bytes stay as they are
+	// (toJSON writes them back unchanged) until the operator replaces or clears
+	// them, and every command that shows the party says so.
+	r.Unverified = why
+	return r, nil
+}
+
+func unhexCanon(dst []byte, s string) error {
+	if len(s) != 2*len(dst) {
+		return ErrCorrupt
+	}
+	b, err := canonHex(s, len(dst))
+	if err != nil {
+		return err
 	}
 	copy(dst, b)
 	return nil
@@ -119,6 +195,13 @@ func fromJSON(j partyJSON) (party.Party, error) {
 	if p.State != party.StateActive && p.State != party.StateRevoked {
 		return party.Party{}, fmt.Errorf("%w: state %q", ErrCorrupt, j.State)
 	}
+	if j.Relay != nil {
+		r, err := relayOf(j.Relay, fp)
+		if err != nil {
+			return party.Party{}, err
+		}
+		p.Relay = r
+	}
 	return p, nil
 }
 
@@ -131,8 +214,10 @@ func load(r ports.NamedReader) ([]party.Party, error) {
 		return nil, err
 	}
 	var js []partyJSON
-	if err := json.Unmarshal(b, &js); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrCorrupt, err)
+	if err := strictjson.Unmarshal(b, &js); err != nil {
+		// an unknown key is most likely a record written by a newer version: it
+		// is refused, never loaded with the key dropped (SPO-Xparty-OUT-007)
+		return nil, fmt.Errorf("%w (written by a newer version, or damaged): %v", ErrCorrupt, err)
 	}
 	out := make([]party.Party, 0, len(js))
 	for _, j := range js {
@@ -229,6 +314,28 @@ func (Registry) SetScope(w ports.NamedWriter, name string, scope party.Scope) (p
 			continue
 		}
 		ps[i].Scope = scope
+		return ps[i], store(w, ps)
+	}
+	return party.Party{}, ports.ErrNotFound
+}
+
+// SetRelay replaces the relay identity of the named party (nil clears it) and
+// returns the party. The caller checked the evidence (domain/relaypeer); a relay
+// identity that names another device than the party is refused here too
+// (SPO-Xparty-OUT-007).
+func (Registry) SetRelay(w ports.NamedWriter, name string, r *party.RelayIdentity) (party.Party, error) {
+	ps, err := load(w)
+	if err != nil {
+		return party.Party{}, err
+	}
+	for i, p := range ps {
+		if p.Name != name {
+			continue
+		}
+		if err := party.CheckRelay(r, p.Fingerprint); err != nil {
+			return p, err
+		}
+		ps[i].Relay = r.Clone()
 		return ps[i], store(w, ps)
 	}
 	return party.Party{}, ports.ErrNotFound

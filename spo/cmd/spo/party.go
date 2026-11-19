@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"errors"
+
 	"tailscale.com/tailcfg"
 
 	"github.com/mochipool/workbench/spo/internal/adapters/cli"
@@ -10,8 +13,12 @@ import (
 	"github.com/mochipool/workbench/spo/internal/adapters/partystore"
 	"github.com/mochipool/workbench/spo/internal/adapters/tailcat"
 	"github.com/mochipool/workbench/spo/internal/adapters/transferfile"
+	"github.com/mochipool/workbench/spo/internal/app/relaybinding"
+	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/identity"
 	"github.com/mochipool/workbench/spo/internal/ports"
 	"github.com/mochipool/workbench/spo/internal/ports/labels"
+	"github.com/mochipool/workbench/spo/internal/ports/relayport"
 )
 
 // derpRegion is a self-hosted relay region for the tailcat server. It is nil in
@@ -44,6 +51,27 @@ func openBag(open func(string) (*filebag.Bag, error)) func(string) (cli.FileBag,
 // always (ADR 0005, obligation 1). It is not read from the environment.
 func partyAddresses() ports.AddressInspector { return native.Ledger{} }
 
+// relayOps is the relay-identity stack (ADR 0014 work package 8): the vault's
+// relay statement signer (the only implementation of
+// ports.RelayStatementSigner) inside relaybinding, and the device-signed revoke
+// through the typed method of the local identity. No relay is wired yet (work
+// packages 9 and 10), so revokes are stored and not sent.
+func relayOps(vault ports.Vault) cli.RelayOps {
+	var signer ports.RelayStatementSigner = native.VaultSignatures{VaultSigner: native.VaultSigner{Vault: vault}}
+	return cli.RelayOps{
+		Signing: func(clock ports.Clock, history func(context.Context, identity.Ref) (custody.RoleHistory, bool, error)) relaybinding.Service {
+			return relaybinding.Service{Signer: signer, Clock: clock, History: history}
+		},
+		SignDeviceRevoke: func(ctx context.Context, svc relaybinding.Service, local ports.LocalIdentity, nb int64) (relaybinding.DeviceRevokeResult, error) {
+			dev, ok := local.(relayport.DeviceRevokeSigner)
+			if !ok {
+				return relaybinding.DeviceRevokeResult{}, errors.New("the local identity cannot sign a device revoke")
+			}
+			return svc.SignDeviceRevoke(ctx, dev, nb)
+		},
+	}
+}
+
 // wireParty gives the Env the multi-party stack over the workspace's store
 // (nil in the probe that only inspects what a command needs).
 func wireParty(env *cli.Env, store ports.Store) {
@@ -57,10 +85,16 @@ func wireParty(env *cli.Env, store ports.Store) {
 		}
 	}
 	reg := partystore.Registry{}
+	var keys ports.Vault
+	if store != nil {
+		keys, _ = store.(ports.Vault)
+	}
 	env.Party = &cli.PartyKit{
 		Kit:            envelope.Kit{Store: named, Vault: vault},
 		Registry:       reg,
 		SetScope:       reg.SetScope,
+		SetRelay:       reg.SetRelay,
+		Relay:          relayOps(keys),
 		Replay:         partystore.Replay{},
 		Addresses:      partyAddresses(),
 		CheckAncestors: filebag.CheckAncestors,

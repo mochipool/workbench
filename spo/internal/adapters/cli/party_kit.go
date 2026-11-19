@@ -20,7 +20,13 @@ type PartyKit struct {
 	// SetScope changes the scope recorded for a party inside the Update the
 	// caller runs (partystore.Registry.SetScope).
 	SetScope func(w ports.NamedWriter, name string, scope party.Scope) (party.Party, error)
-	Replay   ports.ReplayLog
+	// SetRelay changes the relay identity recorded for a party inside the
+	// caller's Update (partystore.Registry.SetRelay). Nil refuses `party relay
+	// peer`.
+	SetRelay func(w ports.NamedWriter, name string, r *party.RelayIdentity) (party.Party, error)
+	// Relay is this device's relay-identity stack (ADR 0014 work package 8).
+	Relay  RelayOps
+	Replay ports.ReplayLog
 	// Addresses is the ledger's address inspector, always: a signer's
 	// classification of inputs and outputs by credential depends on it. It is
 	// NOT taken from Env.AddressInspector, so a build that leaves the

@@ -226,9 +226,10 @@ func (r *partyRun) serve(ctx context.Context, invites []string, outboxDir string
 	tr := srv.Transport()
 	synced := time.Now()
 	r.sweepNotices(ctx)
+	told := false
 	for ctx.Err() == nil {
 		if _, err := ob.Flush(ctx, tr); err != nil && ctx.Err() == nil {
-			fmt.Fprintf(a.d.Err, "sending: %v\n", err)
+			flushNote(a.d.Err, "sending", err, &told)
 		}
 		rctx, cancelR := context.WithTimeout(ctx, 700*time.Millisecond)
 		rcv, err := srv.Receive(rctx)
@@ -397,6 +398,7 @@ func (r *partyRun) connect(ctx context.Context, coordName string, f *signerFlags
 	up := false
 	var seenHellos int64
 	var framesOnConn, silent int
+	toldRefused := false
 	for ctx.Err() == nil {
 		if err := client.Connect(ctx); err != nil {
 			up = false
@@ -425,7 +427,7 @@ func (r *partyRun) connect(ctx context.Context, coordName string, f *signerFlags
 			fmt.Fprintf(w, "Connected to %s.\n", coord.Name)
 		}
 		if _, err := ob.Flush(ctx, client.Transport()); err != nil && ctx.Err() == nil {
-			fmt.Fprintf(a.d.Err, "sending: %v; reconnecting\n", err)
+			flushNote(a.d.Err, "sending (reconnecting)", err, &toldRefused)
 			client.Disconnect()
 			up = false
 			sleepCtx(ctx, backoff)

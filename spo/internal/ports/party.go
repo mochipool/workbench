@@ -132,6 +132,15 @@ var (
 	// of the other kind at once), goes on with the other items and does not
 	// return it (SPO-Xparty-INV-040).
 	ErrRefusedByTransport = errors.New("the transport refused the envelope")
+	// ErrIdentityRefused: the transport refuses THIS device's identity, whatever
+	// the envelope: the relay answered `binding` (the binding is invalid, expired
+	// or revoked: a new one must be signed) or `not_allowed` (the relay's
+	// operator does not allow the wallet key), or the binding the client holds
+	// has ended by its own clock. Every other item would get the same answer, so
+	// Outbox.Flush tries no further item in that run and returns it, and the
+	// caller tells the operator the remedy (SPO-Xmailbox-OUT-099). The mailbox
+	// client backs off on its own until it is given a new binding.
+	ErrIdentityRefused = errors.New("the transport refuses this device's identity")
 )
 
 // EnvelopeSender sends one sealed envelope to a party. It sees ciphertext
@@ -367,8 +376,14 @@ const (
 	MultisigCollection Kind = "multisig.collection"
 )
 
+// RelayOwn is this device's relay state (ADR 0014 work package 8,
+// SPO-Xmailbox-OUT-097): its binding, a prepared request of an external wallet,
+// its pending revokes and the latest revoke not-before per device. One JSON
+// record, so a change commits atomically. Nothing secret is in it.
+const RelayOwn Kind = "relay.own"
+
 func init() {
-	for _, k := range []Kind{MultisigCoordinator, MultisigSigner, MultisigOutbox, MultisigEvents, MultisigCollection, MultisigSubmitted} {
+	for _, k := range []Kind{MultisigCoordinator, MultisigSigner, MultisigOutbox, MultisigEvents, MultisigCollection, MultisigSubmitted, RelayOwn} {
 		kinds[k] = kindInfo{}
 	}
 }

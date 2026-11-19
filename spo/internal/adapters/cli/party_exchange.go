@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mochipool/workbench/spo/internal/app/multisig"
+	"github.com/mochipool/workbench/spo/internal/app/parties"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/ports"
@@ -369,15 +371,87 @@ spo party request export POOL --out DIR.`,
 				bag.SetNamer(outboxNamer(ctx, ob))
 				n, err := ob.Flush(ctx, bag.Transport())
 				fmt.Fprintf(w, "%d envelope(s) of %d waiting written to %s.\n", n, len(items), args[0])
-				return err
+				return relayRemedy(err)
 			})
 		},
 	}
 	cmd.Flags().BoolVar(&yes, "yes", false, "write the envelopes of several recipients to one directory without asking")
 	cmd.Flags().BoolVar(&again, "resend-rotation", false, "write the rotation announcements that were already written again (valid for 7 days after the rotation)")
 	addChainFlags(cmd, &cf, false)
-	c.AddCommand(cmd)
+	c.AddCommand(cmd, a.partyOutboxStatusCommand(), a.partyOutboxRetryCommand())
 	return c
+}
+
+// partyOutboxStatusCommand lists what waits, and what a transport refused, with
+// when, by which kind of transport and why (SPO-Xmailbox-IF-021).
+func (a *app) partyOutboxStatusCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "What waits in the outbox, and what a transport refused and why",
+		Long: `List every envelope that waits to be carried: its type, its recipient (the local
+name) and its expiry. An envelope a transport refused (the relay said refused,
+too large or bad hash) is offered to that kind of transport again after an hour,
+or at once after spo party outbox retry; a transport of the other kind (a file)
+is offered it at once.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return a.party(cmd, nil, []Need{CapClock}, func(ctx context.Context, r *partyRun) error {
+				items, err := r.node().Outbox().Pending(ctx)
+				if err != nil {
+					return err
+				}
+				w := a.d.Out
+				if len(items) == 0 {
+					fmt.Fprintln(w, "Nothing waits in the outbox.")
+					return nil
+				}
+				names := map[string]string{}
+				if ps, err := (parties.List{Store: r.s.Store, Registry: r.kit().Registry}).Run(ctx); err == nil {
+					for _, p := range ps {
+						names[hex.EncodeToString(p.Fingerprint[:])] = p.Name
+					}
+				}
+				refused := 0
+				for _, it := range items {
+					to := names[it.To]
+					if to == "" {
+						to = it.To
+					}
+					fmt.Fprintf(w, "%-18s to %s  expires %s", safeText(it.Type), safeText(to), time.Unix(it.Expires, 0).UTC().Format(time.DateTime+" MST"))
+					if it.Sent {
+						fmt.Fprint(w, "  (sent, waiting for the answer)")
+					}
+					fmt.Fprintln(w)
+					if rf := it.Refused; rf != nil {
+						refused++
+						fmt.Fprintf(w, "  REFUSED by a %s transport at %s: %s\n", rf.Via, time.Unix(rf.At, 0).UTC().Format(time.DateTime+" MST"), strconv.Quote(rf.Reason))
+					}
+				}
+				if refused > 0 {
+					fmt.Fprintf(w, "%d refused envelope(s) are offered again after an hour; to offer them now: spo party outbox retry\n", refused)
+				}
+				return nil
+			})
+		},
+	}
+}
+
+func (a *app) partyOutboxRetryCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "retry",
+		Short: "Offer the envelopes a transport refused again at the next send",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return a.party(cmd, nil, []Need{CapClock}, func(ctx context.Context, r *partyRun) error {
+				n, err := r.node().Outbox().RetryRefused(ctx)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(a.d.Out, "%d refused envelope(s) will be offered again at the next send.\n", n)
+				return nil
+			})
+		},
+	}
 }
 
 // sweepNotices announces to the signers that were asked the collections that

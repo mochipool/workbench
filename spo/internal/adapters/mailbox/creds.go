@@ -179,9 +179,9 @@ func (c *Client) bindingUsable(cr *creds) error {
 	now := c.cfg.Clock.Now().Unix()
 	switch {
 	case now > cr.until:
-		return newErr(ReasonBindingExpired, errors.New("the binding has ended"), ErrBindingRefused)
+		return newErr(ReasonBindingExpired, errors.New("the binding has ended"), ErrBindingRefused, ports.ErrIdentityRefused)
 	case now < cr.from-c.policy().Skew:
-		return newErr(ReasonBinding, errors.New("the binding is not valid yet by this clock"), ErrBindingRefused)
+		return newErr(ReasonBinding, errors.New("the binding is not valid yet by this clock"), ErrBindingRefused, ports.ErrIdentityRefused)
 	}
 	return nil
 }

@@ -175,6 +175,7 @@ func (o Outbox) Flush(ctx context.Context, tr ports.Transport) (int, error) {
 	done := map[string]bool{}          // message id -> delivered, not only sent
 	refused := map[string]OutRefusal{} // message id -> the refusal
 	var first error
+items:
 	for _, it := range items {
 		if it.Sent || (it.ColdKey && tr.Kind() != ports.ViaFile) {
 			continue
@@ -189,6 +190,12 @@ func (o Outbox) Flush(ctx context.Context, tr ports.Transport) (int, error) {
 		switch err := tr.Sender().Send(ctx, to, it.Envelope); {
 		case err == nil:
 			done[it.ID] = tr.Kind() == ports.ViaFile || it.Type != string(party.TypeSigningRequest)
+		case errors.Is(err, ports.ErrIdentityRefused):
+			// this device's identity is refused (the mailbox client says so inside
+			// a no route): every other item would get the same answer, so the run
+			// stops here and the caller names the remedy (SPO-Xmailbox-OUT-099)
+			first = err
+			break items
 		case errors.Is(err, ports.ErrNoRoute):
 		case errors.Is(err, ports.ErrRefusedByTransport):
 			refused[it.ID] = OutRefusal{At: now.Unix(), Via: via, Reason: refusalText(err)}
@@ -199,7 +206,10 @@ func (o Outbox) Flush(ctx context.Context, tr ports.Transport) (int, error) {
 		}
 	}
 	if len(done) > 0 || len(refused) > 0 {
-		err := o.Store.Update(ctx, func(w ports.NamedWriter) error {
+		// What the transport took is recorded even when the caller's context ended
+		// after the send: a response or a refusal is sent once (SPO-Xparty-INV-017),
+		// and an unrecorded send would go out again at the next run.
+		err := o.Store.Update(context.WithoutCancel(ctx), func(w ports.NamedWriter) error {
 			all, err := readOutbox(w)
 			if err != nil {
 				return err

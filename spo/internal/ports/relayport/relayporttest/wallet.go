@@ -94,20 +94,44 @@ func head(major byte, n uint64) []byte {
 func bstr(b []byte) []byte { return append(head(2, uint64(len(b))), b...) }
 
 // protectedFlipped is the protected header with its two keys in the other order.
-func (w *Wallet) protected(flip bool) []byte {
+func (w *Wallet) protected(flip bool) []byte { return w.protectedAt(w.Key[:], flip) }
+
+func (w *Wallet) protectedAt(addr []byte, flip bool) []byte {
 	alg := []byte{0x01, 0x27}
-	adr := append(append([]byte{0x67}, "address"...), bstr(w.Key[:])...)
+	adr := append(append([]byte{0x67}, "address"...), bstr(addr)...)
 	if flip {
 		return append([]byte{0xa2}, append(adr, alg...)...)
 	}
 	return append([]byte{0xa2}, append(alg, adr...)...)
 }
 
+// EnterpriseAddress is the 29-byte enterprise address of the wallet key on the
+// network id given (0 for a test network, 1 for mainnet).
+func (w *Wallet) EnterpriseAddress(network byte) []byte {
+	return append([]byte{0x60 | network&0x0f}, w.Key[:]...)
+}
+
+// BindingStatementAt signs a binding of device from..until whose protected
+// header carries addr (a form an external CIP-30 wallet writes) instead of the
+// bare key hash.
+func (w *Wallet) BindingStatementAt(addr []byte, device party.Fingerprint, from, until int64) Statements {
+	p := []byte(fmt.Sprintf("spo-relay-binding-v1 device %x from %s until %s", device[:], strconv.FormatInt(from, 10), strconv.FormatInt(until, 10)))
+	return Statements{Sign1: w.sign1(w.protectedAt(addr, false), p), COSEKey: w.COSEKey()}
+}
+
 // Sign1 signs payload and returns the COSE_Sign1 bytes. With flip the protected
 // header has its keys in the other order: another valid signature over the same
 // statement (the same StatementID, another full hash).
 func (w *Wallet) Sign1(payload []byte, flip bool) []byte {
-	prot := w.protected(flip)
+	return w.sign1(w.protected(flip), payload)
+}
+
+// Sign1At is Sign1 with addr in the protected header.
+func (w *Wallet) Sign1At(addr, payload []byte) []byte {
+	return w.sign1(w.protectedAt(addr, false), payload)
+}
+
+func (w *Wallet) sign1(prot, payload []byte) []byte {
 	sigStruct := []byte{0x84, 0x6a}
 	sigStruct = append(sigStruct, "Signature1"...)
 	sigStruct = append(sigStruct, bstr(prot)...)
@@ -216,6 +240,20 @@ func (w *Wallet) revoke(t testing.TB, device party.Fingerprint, all bool, notBef
 		t.Fatal(err)
 	}
 	return rec
+}
+
+// DeviceRevokeSignature is the signature of the device Device(n) over its own
+// device-signed revoke with the not-before given.
+func DeviceRevokeSignature(t testing.TB, n byte, notBefore int64) [64]byte {
+	t.Helper()
+	k := deviceOf(n)
+	msg, err := relaybind.DeviceRevokeBytes(k.fp, notBefore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sig [64]byte
+	copy(sig[:], ed25519.Sign(k.priv, msg))
+	return sig
 }
 
 // DeviceRevoke is the record of a revoke signed by the device Device(n) made, and

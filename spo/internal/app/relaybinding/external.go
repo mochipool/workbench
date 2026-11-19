@@ -160,6 +160,15 @@ func (s Service) checkExternalKey(ctx context.Context, k relaybind.KeyHash) (kno
 	return known, wk.CheckHistoryAllowingUnknown(h, known, herr)
 }
 
+// CheckExternalKey is the role-history rule of an external wallet's key, as the
+// print and import paths apply it: refused when known with a role outside
+// payment and stake or unreadable; allowed when unknown, and known says which.
+//
+// spec: SPO-Xrelaybind-IF-004
+func (s Service) CheckExternalKey(ctx context.Context, k relaybind.KeyHash) (known bool, err error) {
+	return s.checkExternalKey(ctx, k)
+}
+
 // PrepareBinding builds the binding of an external wallet's key to the device and
 // returns what the wallet must be given (SPO-Xrelaybind-IF-004). The planning is
 // SignBinding's: the zero device, the lifetime, the tombstone, the clock and the
