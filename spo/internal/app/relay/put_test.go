@@ -15,17 +15,6 @@ import (
 	"github.com/mochipool/workbench/spo/internal/ports/relayport"
 )
 
-// eventually waits up to two seconds for cond.
-func eventually(t *testing.T, what string, cond func() bool) {
-	t.Helper()
-	for end := time.Now().Add(2 * time.Second); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
-		if cond() {
-			return
-		}
-	}
-	t.Fatalf("%s did not happen within 2 s", what)
-}
-
 // The whole path for two parties: A puts to B while B long-polls, B receives
 // the exact bytes, acks, and the usage returns to zero.
 //
@@ -127,10 +116,10 @@ func TestPutIsIdempotentUntilAcked(t *testing.T) {
 	}
 }
 
-// The sender the store is given is the authenticated one, the recipient the
-// header's, and the quota is the validated one.
+// The sender the store is given is the authenticated device, the recipient the
+// header's device, and the quota is the validated one.
 //
-// spec: SPO-Xmailbox-OUT-026, SPO-Xmailbox-SEC-020
+// spec: SPO-Xmailbox-OUT-026, SPO-Xmailbox-SEC-020, SPO-Xmailbox-OUT-084
 func TestSenderIdentityIsTheAuthenticatedOne(t *testing.T) {
 	r := newRig(t)
 	a, _ := r.login(r.a)
@@ -150,17 +139,22 @@ func TestSenderIdentityIsTheAuthenticatedOne(t *testing.T) {
 	}
 }
 
-// A put to a party that is not in send_to is refused, and so is a put to an
-// unknown party, with the same bytes on the wire; the store is not touched and
-// the connection goes on.
+// A put to a device that is bound under another wallet key and a put to a device
+// that is not bound at all are answered with the same bytes (unbound), so a prober
+// learns nothing of which devices exist; the store is not touched and the
+// connection goes on. (Version 1: a party that is not in send_to against an
+// unknown party, both refused.)
 //
-// spec: SPO-Xmailbox-PRE-022, SPO-Xmailbox-SEC-011
-func TestRefusedIsIdenticalForUnknownAndForbidden(t *testing.T) {
+// spec: SPO-Xmailbox-PRE-022, SPO-Xmailbox-SEC-011, SPO-Xmailbox-OUT-084
+func TestUnboundIsIdenticalForUnknownAndForWrongKey(t *testing.T) {
 	r := newRig(t)
 	a, _ := r.login(r.a)
-	reply := func(id uint32, to party.Fingerprint) []byte {
+	reply := func(id uint32, key mailbox.WalletKey, to party.Fingerprint) []byte {
 		env := envelope(120, byte(id))
-		h, _ := mailbox.NewPutOf(id, to, env)
+		h, err := mailbox.NewPutV2Of(id, key, to, env)
+		if err != nil {
+			t.Fatal(err)
+		}
 		a.write(append(frame(t, h), rawFrame(t, env)...))
 		a.s.SetReadDeadline(time.Now().Add(wait))
 		b, err := mailbox.ReadHeaderFrame(a.s)
@@ -169,12 +163,12 @@ func TestRefusedIsIdenticalForUnknownAndForbidden(t *testing.T) {
 		}
 		return b
 	}
-	forbidden := reply(1, r.c.fp) // listed, but not in alice's send_to
-	unknown := reply(2, party.Fingerprint{0xde, 0xad})
-	want1, _ := mailbox.Encode(mailbox.PutResult{RequestID: 1, Status: mailbox.StatusRefused})
-	want2, _ := mailbox.Encode(mailbox.PutResult{RequestID: 2, Status: mailbox.StatusRefused})
-	if !bytes.Equal(forbidden, want1) || !bytes.Equal(unknown, want2) {
-		t.Fatalf("forbidden %x, unknown %x, want %x and %x", forbidden, unknown, want1, want2)
+	wrongKey := reply(1, r.a.wkey(), r.c.fp)                                          // C is bound, under another key
+	unknown := reply(2, mailbox.WalletKey{0xbe, 0xef}, party.Fingerprint{0xde, 0xad}) // nobody
+	want1, _ := mailbox.EncodeV(mailbox.Version2, mailbox.PutResult{RequestID: 1, Status: mailbox.StatusUnbound})
+	want2, _ := mailbox.EncodeV(mailbox.Version2, mailbox.PutResult{RequestID: 2, Status: mailbox.StatusUnbound})
+	if !bytes.Equal(wrongKey, want1) || !bytes.Equal(unknown, want2) {
+		t.Fatalf("wrong key %x, unknown %x, want %x and %x", wrongKey, unknown, want1, want2)
 	}
 	if n := len(r.store.putCalls()); n != 0 {
 		t.Fatalf("%d store puts for refused puts", n)
@@ -187,20 +181,19 @@ func TestRefusedIsIdenticalForUnknownAndForbidden(t *testing.T) {
 // A refused put whose bytes are also wrong is still refused: the hash check
 // must not tell a prober which recipients exist.
 //
-// spec: SPO-Xmailbox-PRE-022, SPO-Xmailbox-SEC-023
+// spec: SPO-Xmailbox-PRE-022, SPO-Xmailbox-SEC-023, SPO-Xmailbox-OUT-084
 func TestBadHashIsNotVisibleOnTheRefusedPath(t *testing.T) {
 	r := newRig(t)
 	a, _ := r.login(r.a)
 	env := envelope(120, 1)
-	h, _ := mailbox.NewPutOf(1, r.c.fp, env) // forbidden recipient
+	h, _ := mailbox.NewPutV2Of(1, r.a.wkey(), r.c.fp, env) // C is not bound under this key
 	bad := envelope(120, 2)
 	a.write(append(frame(t, h), rawFrame(t, bad)...))
-	if m, ok := a.recv().(mailbox.PutResult); !ok || m.Status != mailbox.StatusRefused {
-		t.Fatalf("got %#v, want refused", m)
+	if m, ok := a.recv().(mailbox.PutResult); !ok || m.Status != mailbox.StatusUnbound {
+		t.Fatalf("got %#v, want unbound", m)
 	}
-	// an allowed recipient with the same bad bytes is bad_hash
-	h2, _ := mailbox.NewPutOf(2, r.b.fp, env)
-	a.write(append(frame(t, h2), rawFrame(t, bad)...))
+	// a bound recipient with the same bad bytes is bad_hash
+	a.write(append(a.putHeader(2, r.b.fp, env), rawFrame(t, bad)...))
 	if m, ok := a.recv().(mailbox.PutResult); !ok || m.Status != mailbox.StatusBadHash {
 		t.Fatalf("got %#v, want bad_hash", m)
 	}
@@ -220,8 +213,7 @@ func TestEnvelopeAboveTheAuthOKLimitIsTooLarge(t *testing.T) {
 		t.Fatalf("512 bytes: status %d, want stored", got)
 	}
 	env := envelope(513, 2)
-	h, _ := mailbox.NewPutOf(2, r.b.fp, env)
-	hf := frame(t, h)
+	hf := a.putHeader(2, r.b.fp, env)
 	before := r.read.Load()
 	a.write(append(append([]byte(nil), hf...), rawFrame(t, env)...))
 	if m, ok := a.recv().(mailbox.PutResult); !ok || m.Status != mailbox.StatusTooLarge {
@@ -243,8 +235,7 @@ func TestEnvelopeAboveTheAuthOKLimitIsTooLarge(t *testing.T) {
 func TestBadHashStoresNothing(t *testing.T) {
 	r := newRig(t)
 	a, _ := r.login(r.a)
-	h, _ := mailbox.NewPutOf(1, r.b.fp, envelope(400, 1))
-	a.write(append(frame(t, h), rawFrame(t, envelope(400, 2))...))
+	a.write(append(a.putHeader(1, r.b.fp, envelope(400, 1)), rawFrame(t, envelope(400, 2))...))
 	if m, ok := a.recv().(mailbox.PutResult); !ok || m.Status != mailbox.StatusBadHash {
 		t.Fatalf("got %#v, want bad_hash", m)
 	}
@@ -267,8 +258,7 @@ func TestShortBodyClosesTheConnectionAndStoresNothing(t *testing.T) {
 	r := newRig(t)
 	a, _ := r.login(r.a)
 	env := envelope(100, 1)
-	h, _ := mailbox.NewPutOf(1, r.b.fp, env)
-	a.write(append(frame(t, h), rawFrame(t, env)[:4+50]...))
+	a.write(append(a.putHeader(1, r.b.fp, env), rawFrame(t, env)[:4+50]...))
 	a.s.Close()
 	eventually(t, "the reservation to be released", func() bool { return r.usage(r.b.fp, r.a.fp) == mailbox.Usage{} })
 	eventually(t, "the session to end", func() bool { return len(r.ev.of(relay.EventClose)) == 1 })
@@ -285,9 +275,8 @@ func TestRawPrefixThatDiffersFromTheHeaderIsAProtocolError(t *testing.T) {
 	r := newRig(t)
 	a, _ := r.login(r.a)
 	env := envelope(100, 1)
-	h, _ := mailbox.NewPutOf(1, r.b.fp, env)
 	raw := rawFrame(t, env[:99]) // prefix says 99
-	a.write(append(frame(t, h), raw...))
+	a.write(append(a.putHeader(1, r.b.fp, env), raw...))
 	if code := a.expectError(); code != mailbox.CodeProtocol {
 		t.Fatalf("code %d, want protocol", code)
 	}
@@ -328,8 +317,7 @@ func TestAFailedBodyIsDiscardedEvenByATrustingStore(t *testing.T) {
 		a, _ := r.login(r.a)
 		r.store.arm(func(f *faultStore) { f.Trusting = true })
 		env := envelope(100, 1)
-		h, _ := mailbox.NewPutOf(1, r.b.fp, env)
-		a.write(append(frame(t, h), rawFrame(t, env)[:4+60]...))
+		a.write(append(a.putHeader(1, r.b.fp, env), rawFrame(t, env)[:4+60]...))
 		a.s.Close()
 		eventually(t, "the put to reach the store", func() bool { return len(r.store.putCalls()) == 1 })
 		// the session ends only after the store's Put has returned
@@ -344,8 +332,7 @@ func TestAFailedBodyIsDiscardedEvenByATrustingStore(t *testing.T) {
 		r := newRig(t)
 		a, _ := r.login(r.a)
 		r.store.arm(func(f *faultStore) { f.Trusting = true })
-		h, _ := mailbox.NewPutOf(1, r.b.fp, envelope(100, 1))
-		a.write(append(frame(t, h), rawFrame(t, envelope(100, 2))...))
+		a.write(append(a.putHeader(1, r.b.fp, envelope(100, 1)), rawFrame(t, envelope(100, 2))...))
 		if m, ok := a.recv().(mailbox.PutResult); !ok || m.Status != mailbox.StatusBadHash {
 			t.Fatalf("got %#v, want bad_hash", m)
 		}
@@ -375,51 +362,70 @@ func TestAFailedBodyIsDiscardedEvenByATrustingStore(t *testing.T) {
 	})
 }
 
-// Access is checked again immediately next to the store's Put: a recipient
-// that leaves the access list after the request's first check is refused
-// before the store is called.
+// revokeAt revokes the device of p in the registry (its wallet's revoke of that
+// device, not before the start): a change of the access decision. It is safe to
+// call from the relay's goroutines (the record is made first, by the test).
+func revokeAt(t *testing.T, r *rig, p *peer) func() {
+	rec := p.wallet.WalletRevoke(t, p.fp, startTime, startTime)
+	return func() {
+		if _, err := r.reg.Revoke(context.Background(), rec); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+// The access decision is made again immediately next to the store's Put: a
+// recipient whose binding is revoked after the request's first check is answered
+// unbound before the store is called. (Version 1: a recipient that left the
+// access list.)
 //
-// spec: SPO-Xmailbox-SEC-021
+// spec: SPO-Xmailbox-SEC-021, SPO-Xmailbox-OUT-084
 func TestAccessIsCheckedAgainNextToThePut(t *testing.T) {
 	r := newRig(t)
 	a, _ := r.login(r.a)
 	// the next reading of the clock is the rate window of the put, which comes
 	// after the first access check and before the store call
-	r.hook.once(func() { r.acc.remove(r.b.fp) })
-	if got := a.put(1, r.b.fp, envelope(100, 1)).Status; got != mailbox.StatusRefused {
-		t.Fatalf("status %d, want refused", got)
+	r.hook.once(revokeAt(t, r, r.b))
+	if got := a.put(1, r.b.fp, envelope(100, 1)).Status; got != mailbox.StatusUnbound {
+		t.Fatalf("status %d, want unbound", got)
 	}
 	if n := len(r.store.putCalls()); n != 0 {
 		t.Fatalf("the store was called %d times after the recipient left", n)
 	}
 }
 
-// The same for a send_to that is withdrawn.
+// The same for the sender's own binding withdrawn after the first check (version 1:
+// a send_to that is withdrawn): the put is refused, the connection is closed with
+// the binding code, and the store is not called.
 //
-// spec: SPO-Xmailbox-SEC-021
-func TestSendToWithdrawnNextToThePutIsRefused(t *testing.T) {
+// spec: SPO-Xmailbox-SEC-021, SPO-Xmailbox-OUT-084
+func TestSenderBindingWithdrawnNextToThePutIsRefused(t *testing.T) {
 	r := newRig(t)
 	a, _ := r.login(r.a)
-	r.hook.once(func() { r.acc.put(r.a.entry()) }) // alice may send to nobody now
+	r.hook.once(revokeAt(t, r, r.a))
 	if got := a.put(1, r.b.fp, envelope(100, 1)).Status; got != mailbox.StatusRefused {
 		t.Fatalf("status %d, want refused", got)
+	}
+	if code := a.expectError(); code != mailbox.CodeBinding {
+		t.Fatalf("code %d, want binding", code)
 	}
 	if n := len(r.store.putCalls()); n != 0 {
 		t.Fatalf("the store was called %d times", n)
 	}
 }
 
-// A reload that removes the recipient and its mailbox after the re-check and
-// before the store reserves is not undone by the put: the stored entry is
+// A revoke that removes the recipient's binding and its mailbox after the re-check
+// and before the store reserves is not undone by the put: the stored entry is
 // removed again and the sender is told refused.
 //
-// spec: SPO-Xmailbox-SEC-021
+// spec: SPO-Xmailbox-SEC-021, SPO-Xmailbox-OUT-084
 func TestRecipientRemovedBetweenTheRecheckAndThePutIsCompensated(t *testing.T) {
 	r := newRig(t)
 	a, _ := r.login(r.a)
+	revoke := revokeAt(t, r, r.b)
 	r.store.arm(func(f *faultStore) {
 		f.BeforePut = func(p relayport.MailboxPut) {
-			r.acc.remove(r.b.fp) // the reload: the list first, then the mailbox
+			revoke() // the revoke: the binding first, then the mailbox
 			if _, err := r.real.RemoveMailbox(context.Background(), r.b.fp); err != nil {
 				t.Error(err)
 			}
@@ -448,19 +454,19 @@ func TestRecipientRemovedBetweenTheRecheckAndThePutIsCompensated(t *testing.T) {
 	}
 }
 
-// A sender that leaves the access list between authentication and the put is
-// refused and the connection is closed as revoked; nothing is stored.
+// A sender whose binding is revoked between authentication and the put is refused
+// and the connection is closed with the binding code; nothing is stored.
 //
-// spec: SPO-Xmailbox-SEC-024
+// spec: SPO-Xmailbox-SEC-024, SPO-Xmailbox-OUT-084
 func TestSenderRevokedBetweenAuthAndPutIsRefusedAndClosed(t *testing.T) {
 	r := newRig(t)
 	a, _ := r.login(r.a)
-	r.acc.remove(r.a.fp)
+	revokeAt(t, r, r.a)()
 	if got := a.put(1, r.b.fp, envelope(100, 1)).Status; got != mailbox.StatusRefused {
 		t.Fatalf("status %d, want refused", got)
 	}
-	if code := a.expectError(); code != mailbox.CodeRevoked {
-		t.Fatalf("code %d, want revoked", code)
+	if code := a.expectError(); code != mailbox.CodeBinding {
+		t.Fatalf("code %d, want binding", code)
 	}
 	a.expectClosed()
 	if n := len(r.store.putCalls()); n != 0 {
@@ -468,16 +474,16 @@ func TestSenderRevokedBetweenAuthAndPutIsRefusedAndClosed(t *testing.T) {
 	}
 }
 
-// A recipient that leaves the list between authentication and the put is
-// refused; the sender's connection stays.
+// A recipient whose binding is revoked between authentication and the put is
+// answered unbound; the sender's connection stays.
 //
-// spec: SPO-Xmailbox-SEC-024
-func TestRecipientRemovedBetweenAuthAndPutIsRefused(t *testing.T) {
+// spec: SPO-Xmailbox-SEC-024, SPO-Xmailbox-OUT-084
+func TestRecipientRevokedBetweenAuthAndPutIsUnbound(t *testing.T) {
 	r := newRig(t)
 	a, _ := r.login(r.a)
-	r.acc.remove(r.b.fp)
-	if got := a.put(1, r.b.fp, envelope(100, 1)).Status; got != mailbox.StatusRefused {
-		t.Fatalf("status %d, want refused", got)
+	revokeAt(t, r, r.b)()
+	if got := a.put(1, r.b.fp, envelope(100, 1)).Status; got != mailbox.StatusUnbound {
+		t.Fatalf("status %d, want unbound", got)
 	}
 	if n := len(r.store.putCalls()); n != 0 {
 		t.Fatalf("the store was called %d times for a recipient that had left", n)
@@ -485,27 +491,10 @@ func TestRecipientRemovedBetweenAuthAndPutIsRefused(t *testing.T) {
 	if es := r.list(r.b.fp); len(es) != 0 {
 		t.Fatalf("the recipient's listing holds %d entries", len(es))
 	}
-	// the sender's connection stays and may put to a party that is still listed
-	// (nothing here is addressed to alice, so its own mailbox is empty too)
+	// the sender's connection stays (nothing is addressed to alice, so its own
+	// mailbox is empty)
 	if items, _ := a.fetch(2, nil, 1, 0); len(items.Entries) != 0 {
 		t.Fatal("entries")
-	}
-}
-
-// A node key that changes in the entry after authentication ends the session.
-//
-// spec: SPO-Xmailbox-SEC-024
-func TestEntryWithAnotherNodeKeyEndsTheSession(t *testing.T) {
-	r := newRig(t)
-	a, _ := r.login(r.a)
-	e := r.a.entry(r.b.fp)
-	e.Node = party.NodeKey{0x55}
-	r.acc.put(e)
-	if got := a.put(1, r.b.fp, envelope(100, 1)).Status; got != mailbox.StatusRefused {
-		t.Fatalf("status %d, want refused", got)
-	}
-	if code := a.expectError(); code != mailbox.CodeRevoked {
-		t.Fatalf("code %d, want revoked", code)
 	}
 }
 
@@ -526,7 +515,7 @@ func TestEventsCarryMetadataAndNoEnvelopeBytes(t *testing.T) {
 		t.Fatalf("events %+v", r.ev.all())
 	}
 	p := puts[0]
-	if p.Party != r.a.fp || p.Recipient != r.b.fp || p.Mid != mailbox.HashOf(env) || p.Size != uint32(len(env)) ||
+	if p.Party != r.a.fp || p.Key != r.a.key() || p.Recipient != r.b.fp || p.RcptKey != r.b.wkey() || p.Mid != mailbox.HashOf(env) || p.Size != uint32(len(env)) ||
 		p.Status != mailbox.StatusStored || p.Node != r.a.node.Key || !p.HasUsage || p.Usage.MailboxEntries != 1 || p.Time.Unix() != r.clock.Now().Unix() {
 		t.Fatalf("put event %+v", p)
 	}

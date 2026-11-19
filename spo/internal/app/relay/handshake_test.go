@@ -1,6 +1,7 @@
 package relay_test
 
 import (
+	"context"
 	"runtime"
 	"testing"
 	"time"
@@ -10,26 +11,24 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 )
 
-// recvChallenge reads the Challenge a relay opens a connection with.
+// recvChallenge reads the Challenge a relay opens a connection with and moves the
+// client's stage as a version 2 client does. It fails unless the relay offers
+// version 2 and nothing else.
 func recvChallenge(t *testing.T, c *conn) mailbox.Challenge {
 	t.Helper()
-	ch, ok := c.recv().(mailbox.Challenge)
-	if !ok {
-		t.Fatal("the relay did not open with a Challenge")
-	}
-	return ch
+	return c.challenge()
 }
 
-// The Challenge carries what the ADR says: the versions the relay speaks, a
-// 32-byte nonce, the relay's own node key and the relay's clock.
+// The Challenge carries what the ADR says: the versions the relay speaks (2 and
+// nothing else), a 32-byte nonce, the relay's own node key and the relay's clock.
 //
-// spec: SPO-Xmailbox-OUT-025
+// spec: SPO-Xmailbox-OUT-025, SPO-Xmailbox-OUT-082
 func TestChallengeCarriesTheRelaysFacts(t *testing.T) {
 	r := newRig(t)
 	c := r.dial(r.a)
 	ch := recvChallenge(t, c)
-	if ch.Min != 1 || ch.Max != 1 {
-		t.Errorf("versions [%d, %d], want [1, 1]", ch.Min, ch.Max)
+	if ch.Min != 2 || ch.Max != 2 {
+		t.Errorf("versions [%d, %d], want [2, 2]", ch.Min, ch.Max)
 	}
 	if ch.RelayKey != r.relay.Key {
 		t.Errorf("relay key %x, want the relay's own", ch.RelayKey)
@@ -57,97 +56,134 @@ func TestEveryConnectionGetsAFreshNonce(t *testing.T) {
 	}
 }
 
-// A good handshake ends in AuthOK with the limits that apply.
+// A good handshake ends in AuthOK with the limits that apply and the end of the
+// device's binding. (The queue bound of open mode keeps a full envelope of room
+// beyond the stranger allowance, so the byte bound here is 2 MiB, not 1 MiB.)
 //
-// spec: SPO-Xmailbox-OUT-025
+// spec: SPO-Xmailbox-OUT-025, SPO-Xmailbox-OUT-082
 func TestAuthOKCarriesTheLimits(t *testing.T) {
 	r := newRig(t, withLimits(func(l *relay.Limits) { l.MaxEnvelope = 4096; l.RetentionSeconds = 3600 }),
-		withQuota(func(q *mailbox.Quota) { q.MailboxEntries = 10; q.MailboxBytes = 1 << 20 }))
+		withQuota(func(q *mailbox.OpenQuota) {
+			q.Quota.MailboxEntries = 10
+			q.Quota.MailboxBytes = 2 << 20
+			q.StrangerEntries = 4
+		}))
 	_, ok := r.login(r.a)
-	want := mailbox.AuthOK{Version: 1, MaxEnvelope: 4096, MaxEntries: 10, MaxBytes: 1 << 20, RetentionSeconds: 3600}
+	want := mailbox.AuthOKV2{MaxEnvelope: 4096, MaxEntries: 10, MaxBytes: 2 << 20, RetentionSeconds: 3600, Until: defaultUntil}
 	if ok != want {
 		t.Fatalf("AuthOK %+v, want %+v", ok, want)
 	}
 }
 
-// A tunnel peer whose node key is not in the access list (a revoked key that
-// the tunnel still admits) gets one bounded reply and nothing else: no nonce is
-// drawn and no challenge is made.
+// A connection refused at accept (here: a second live connection of one tunnel
+// node key under a bound of one) gets one bounded reply and nothing else: no nonce
+// is drawn and no challenge is made. (Version 1 closed the connection of a node
+// key that was not on the access list in this way; in version 2 the tunnel admits
+// or refuses a node key, and what the relay refuses at accept is a bound.)
 //
-// spec: SPO-Xmailbox-PRE-021
-func TestUnlistedNodeIsClosedBeforeAnyChallenge(t *testing.T) {
-	r := newRig(t)
-	c := r.dialNode(r.a, r.stranger, zeroFault)
-	if code := c.expectError(); code != mailbox.CodeRevoked {
-		t.Fatalf("code %d, want revoked (%d)", code, mailbox.CodeRevoked)
+// spec: SPO-Xmailbox-PRE-021, SPO-Xmailbox-OUT-034
+func TestRefusedConnectionIsClosedBeforeAnyChallenge(t *testing.T) {
+	r := newRig(t, withLimits(func(l *relay.Limits) { l.MaxConnsPerKey = 1 }))
+	_, _ = r.login(r.a)
+	draws := r.rnd.n.Load()
+	c := r.dial(r.a)
+	if code := c.expectError(); code != mailbox.CodeLimit {
+		t.Fatalf("code %d, want limit (%d)", code, mailbox.CodeLimit)
 	}
 	c.expectClosed()
-	if n := r.rnd.n.Load(); n != 0 {
-		t.Fatalf("the random source was read %d times for an unlisted node", n)
+	if n := r.rnd.n.Load(); n != draws {
+		t.Fatalf("the random source was read %d times for a refused connection", n-draws)
 	}
-	if got := r.ev.of(relay.EventRejected); len(got) != 1 || got[0].Reason != relay.ReasonUnlisted || got[0].Node != r.stranger.Key {
+	if got := r.ev.of(relay.EventRejected); len(got) != 1 || got[0].Reason != relay.ReasonLimit || got[0].Node != r.a.node.Key {
 		t.Fatalf("events %+v", got)
 	}
 }
 
-// The party is found by the tunnel node key. A tunnel peer that is listed (as
-// bob) and claims the fingerprint of another listed party (alice), even with
-// alice's valid signature over its own node key, is refused: the entry used is
-// bob's, and the fingerprint in Auth must be the entry's.
+// A device whose binding was revoked in the registry is refused at login with the
+// binding code, and the revoked statement is not served again. (Version 1: a node
+// key that the tunnel still admitted after the operator removed it from the access
+// list.)
 //
-// spec: SPO-Xmailbox-SEC-020, SPO-Xmailbox-SEC-012
-func TestClaimedFingerprintMustBeTheTunnelKeysEntry(t *testing.T) {
+// spec: SPO-Xmailbox-OUT-082, SPO-Xmailbox-PRE-053
+func TestRevokedDeviceIsRefusedAtLogin(t *testing.T) {
 	r := newRig(t)
-	c := r.dialNode(r.a, r.b.node, zeroFault) // alice's keys over bob's tunnel
-	ch := recvChallenge(t, c)
-	// alice signs for her own fingerprint and bob's node key, so every signed
-	// field is consistent; only the tunnel binding is wrong.
-	c.sendAuth(ch, r.a.fp, c.signAuth(ch, r.a.fp, r.b.node.Key, r.relay.Key))
-	if code := c.expectError(); code != mailbox.CodeAuth {
+	if _, err := r.reg.Revoke(context.Background(), r.a.wallet.WalletRevoke(t, r.a.fp, startTime, startTime)); err != nil {
+		t.Fatal(err)
+	}
+	c := r.dial(r.a)
+	if code := c.loginFails(authOpt{}); code != mailbox.CodeBinding {
+		t.Fatalf("code %d, want binding", code)
+	}
+	if got := r.ev.of(relay.EventAuthFail); len(got) != 1 || got[0].Reason != relay.ReasonBinding {
+		t.Fatalf("events %+v", got)
+	}
+}
+
+// A device is not tied to a tunnel node key (version 1 found the party by it): its
+// keys from another admitted node log in when the signature names that node, and
+// are refused, with the auth code, when the signature names the node the device
+// does not connect from.
+//
+// spec: SPO-Xmailbox-SEC-020, SPO-Xmailbox-SEC-012, SPO-Xmailbox-OUT-082
+func TestDeviceMayComeFromAnyAdmittedNodeButMustSignForIt(t *testing.T) {
+	r := newRig(t)
+	// alice's keys over bob's tunnel node, signed for bob's node: honest
+	c := r.dialNode(r.a, r.b.node, zeroFault)
+	c.handshakeWith(authOpt{clientNode: nodeKeyPtr(r.b.node.Key)})
+	// the same keys over bob's node, signed for alice's own node: every signed
+	// field is consistent except the tunnel binding
+	c2 := r.dialNode(r.a, r.b.node, zeroFault)
+	if code := c2.loginFails(authOpt{clientNode: nodeKeyPtr(r.a.node.Key)}); code != mailbox.CodeAuth {
 		t.Fatalf("code %d, want auth", code)
 	}
-	c.expectClosed()
 	got := r.ev.of(relay.EventAuthFail)
-	if len(got) != 1 || got[0].Reason != relay.ReasonFingerprint {
+	if len(got) != 1 || got[0].Reason != relay.ReasonSignature {
 		t.Fatalf("events %+v", got)
 	}
 }
 
-// A party that leaves the access list between the admission of its connection
-// and its Auth is refused as revoked, whatever it signs.
+// A device whose binding is revoked between the Challenge and its Auth is refused
+// with the binding code, whatever it signs, and no auth_ok is logged.
 //
-// spec: SPO-Xmailbox-SEC-020, SPO-Xmailbox-SEC-024
-func TestPartyRemovedBetweenChallengeAndAuthIsRevoked(t *testing.T) {
+// spec: SPO-Xmailbox-SEC-020, SPO-Xmailbox-SEC-024, SPO-Xmailbox-PRE-053
+func TestDeviceRevokedBetweenChallengeAndAuthIsRefused(t *testing.T) {
 	r := newRig(t)
 	c := r.dial(r.a)
 	ch := recvChallenge(t, c)
-	r.acc.remove(r.a.fp)
-	c.sendAuth(ch, r.a.fp, c.signAuth(ch, r.a.fp, r.a.node.Key, r.relay.Key))
-	if code := c.expectError(); code != mailbox.CodeRevoked {
-		t.Fatalf("code %d, want revoked", code)
+	if _, err := r.reg.Revoke(context.Background(), r.a.wallet.WalletRevoke(t, r.a.fp, startTime, startTime)); err != nil {
+		t.Fatal(err)
+	}
+	c.send(c.authFrame(ch, authOpt{}))
+	if code := c.expectError(); code != mailbox.CodeBinding {
+		t.Fatalf("code %d, want binding", code)
 	}
 	c.expectClosed()
 	if len(r.ev.of(relay.EventAuthOK)) != 0 {
-		t.Fatal("an auth_ok for a removed party")
+		t.Fatal("an auth_ok for a revoked device")
 	}
 }
 
-// The fingerprint of an unlisted party is no better.
+// A device with no binding of its own that claims the fingerprint of a bound device
+// and presents that device's binding is refused: the fingerprint is that of the
+// presented keys and nothing else.
 //
-// spec: SPO-Xmailbox-SEC-020
-func TestUnknownFingerprintIsRefused(t *testing.T) {
+// spec: SPO-Xmailbox-SEC-020, SPO-Xmailbox-PRE-053
+func TestUnknownDeviceClaimingABoundFingerprintIsRefused(t *testing.T) {
 	r := newRig(t)
+	mallory := newDevKeys("mallory")
 	c := r.dial(r.a)
 	ch := recvChallenge(t, c)
-	other := newPeer(r.net, "mallory")
-	c.sendAuth(ch, other.fp, c.signAuth(ch, other.fp, r.a.node.Key, r.relay.Key))
+	c.send(c.authFrame(ch, authOpt{present: &mallory, sign: &mallory, claimFP: &r.a.fp, signedFP: &r.a.fp}))
 	if code := c.expectError(); code != mailbox.CodeAuth {
 		t.Fatalf("code %d, want auth", code)
 	}
 	c.expectClosed()
+	if got := r.ev.of(relay.EventAuthFail); len(got) != 1 || got[0].Reason != relay.ReasonFingerprint {
+		t.Fatalf("events %+v", got)
+	}
 }
 
-// A signature by another party's key is refused: alice's node and fingerprint,
+// A signature by another device's key is refused: alice's node and fingerprint,
 // bob's key.
 //
 // spec: SPO-Xmailbox-SEC-020, SPO-Xmailbox-SEC-002
@@ -155,13 +191,7 @@ func TestSignatureByAnotherKeyIsRefused(t *testing.T) {
 	r := newRig(t)
 	c := r.dial(r.a)
 	ch := recvChallenge(t, c)
-	b, err := mailbox.AuthBytes(mailbox.AuthParams{Version: 1, RelayKey: r.relay.Key, ClientNodeKey: r.a.node.Key, Nonce: ch.Nonce, RelayTime: ch.RelayTime, Fingerprint: r.a.fp})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var sig [64]byte
-	copy(sig[:], signWith(r.b, b))
-	c.sendAuth(ch, r.a.fp, sig)
+	c.send(c.authFrame(ch, authOpt{sign: &r.b.dev}))
 	if code := c.expectError(); code != mailbox.CodeAuth {
 		t.Fatalf("code %d, want auth", code)
 	}
@@ -179,9 +209,9 @@ func TestChallengeReplayOnASecondConnectionFails(t *testing.T) {
 	r := newRig(t)
 	c1 := r.dial(r.a)
 	ch1 := recvChallenge(t, c1)
-	captured := frame(t, mailbox.Auth{Version: 1, Fingerprint: r.a.fp, Signature: c1.signAuth(ch1, r.a.fp, r.a.node.Key, r.relay.Key)})
+	captured := frame(t, c1.authFrame(ch1, authOpt{}))
 	c1.write(captured)
-	if _, ok := c1.recv().(mailbox.AuthOK); !ok {
+	if _, ok := c1.recv().(mailbox.AuthOKV2); !ok {
 		t.Fatal("the honest handshake failed")
 	}
 	c2 := r.dial(r.a)
@@ -201,7 +231,7 @@ func TestSignatureForAnotherRelayKeyIsRefused(t *testing.T) {
 	r := newRig(t)
 	c := r.dial(r.a)
 	ch := recvChallenge(t, c)
-	c.sendAuth(ch, r.a.fp, c.signAuth(ch, r.a.fp, r.a.node.Key, party.NodeKey{9}))
+	c.send(c.authFrame(ch, authOpt{relayKey: nodeKeyPtr(party.NodeKey{9})}))
 	if code := c.expectError(); code != mailbox.CodeAuth {
 		t.Fatalf("code %d, want auth", code)
 	}
@@ -214,7 +244,7 @@ func TestSignatureNamingAnotherClientNodeIsRefused(t *testing.T) {
 	r := newRig(t)
 	c := r.dial(r.a)
 	ch := recvChallenge(t, c)
-	c.sendAuth(ch, r.a.fp, c.signAuth(ch, r.a.fp, party.NodeKey{7}, r.relay.Key))
+	c.send(c.authFrame(ch, authOpt{clientNode: nodeKeyPtr(party.NodeKey{7})}))
 	if code := c.expectError(); code != mailbox.CodeAuth {
 		t.Fatalf("code %d, want auth", code)
 	}
@@ -222,31 +252,31 @@ func TestSignatureNamingAnotherClientNodeIsRefused(t *testing.T) {
 
 // One failed auth closes the connection: there is no second try.
 //
-// spec: SPO-Xmailbox-PRE-020
+// spec: SPO-Xmailbox-PRE-020, SPO-Xmailbox-PRE-053
 func TestOneFailedAuthClosesTheConnection(t *testing.T) {
 	r := newRig(t)
 	c := r.dial(r.a)
 	ch := recvChallenge(t, c)
-	c.sendAuth(ch, r.a.fp, [64]byte{1})
+	c.send(c.authFrame(ch, authOpt{edit: func(a *mailbox.AuthV2) { a.Signature = [64]byte{1} }}))
 	if code := c.expectError(); code != mailbox.CodeAuth {
 		t.Fatalf("code %d, want auth", code)
 	}
 	c.expectClosed()
 	// a second, honest Auth on the same stream reaches nobody
-	_ = c.tryWrite(frame(t, mailbox.Auth{Version: 1, Fingerprint: r.a.fp, Signature: c.signAuth(ch, r.a.fp, r.a.node.Key, r.relay.Key)}))
+	_ = c.tryWrite(frame(t, c.authFrame(ch, authOpt{})))
 	c.expectClosed()
 	if len(r.ev.of(relay.EventAuthOK)) != 0 {
 		t.Fatal("an auth_ok after a failed auth")
 	}
 }
 
-// No frame but Auth is accepted before authentication, and nothing is stored
-// or read for it.
+// No frame but Auth (and the revokes of version 2) is accepted before
+// authentication, and nothing is stored or read for it.
 //
-// spec: SPO-Xmailbox-PRE-020
+// spec: SPO-Xmailbox-PRE-020, SPO-Xmailbox-OUT-082
 func TestFrameBeforeAuthIsRefused(t *testing.T) {
 	env := envelope(100, 1)
-	put, err := mailbox.NewPutOf(1, party.Fingerprint{1}, env)
+	put, err := mailbox.NewPutV2Of(1, mailbox.WalletKey{1}, party.Fingerprint{1}, env)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,11 +307,12 @@ func TestFrameBeforeAuthIsRefused(t *testing.T) {
 // spec: SPO-Xmailbox-PRE-020, SPO-Xmailbox-OUT-018
 func TestRelayOnlyFramesFromAClientAreRefused(t *testing.T) {
 	relayOnly := []mailbox.Message{
-		mailbox.Challenge{Min: 1, Max: 1, RelayKey: party.NodeKey{1}},
-		mailbox.AuthOK{Version: 1, MaxEnvelope: 1, MaxEntries: 1, MaxBytes: 1, RetentionSeconds: 1},
+		mailbox.Challenge{Min: 2, Max: 2, RelayKey: party.NodeKey{1}},
+		mailbox.AuthOKV2{MaxEnvelope: 1, MaxEntries: 1, MaxBytes: 1, RetentionSeconds: 1, Until: 1},
 		mailbox.PutResult{RequestID: 1},
 		mailbox.Items{RequestID: 1},
 		mailbox.AckResult{RequestID: 1},
+		mailbox.RevokeResult{RequestID: 1},
 		mailbox.Error{Code: mailbox.CodeAuth},
 	}
 	for _, m := range relayOnly {
@@ -304,14 +335,22 @@ func TestRelayOnlyFramesFromAClientAreRefused(t *testing.T) {
 	}
 }
 
-// A version the relay does not speak is the version error.
+// A version the relay does not speak is the version error: a version 1 Auth.
 //
-// spec: SPO-Xmailbox-OUT-025
+// spec: SPO-Xmailbox-OUT-025, SPO-Xmailbox-OUT-082
 func TestUnspokenVersionIsRefused(t *testing.T) {
 	r := newRig(t)
 	c := r.dial(r.a)
 	recvChallenge(t, c)
-	c.send(mailbox.Auth{Version: 2, Fingerprint: r.a.fp})
+	b, err := mailbox.Encode(mailbox.Auth{Version: 1, Fingerprint: r.a.fp})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := mailbox.AppendFrame(nil, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.write(f)
 	if code := c.expectError(); code != mailbox.CodeVersion {
 		t.Fatalf("code %d, want version", code)
 	}
@@ -361,11 +400,12 @@ func TestHeaderOverTheBoundIsRefusedAfterThePrefix(t *testing.T) {
 	}
 }
 
-// A peer that does not answer the challenge is closed at the handshake bound.
+// A peer that does not answer the challenge is closed at the unauthenticated
+// budget.
 //
-// spec: SPO-Xmailbox-INV-012, SPO-Xmailbox-INV-013
+// spec: SPO-Xmailbox-INV-012, SPO-Xmailbox-INV-013, SPO-Xmailbox-PRE-054
 func TestSilentPeerIsClosedAtTheHandshakeTimeout(t *testing.T) {
-	r := newRig(t, withLimits(func(l *relay.Limits) { l.HandshakeTimeout = 150 * time.Millisecond; l.IdleTimeout = 5 * time.Second }))
+	r := newRig(t, withLimits(func(l *relay.Limits) { l.UnauthBudget = 150 * time.Millisecond; l.IdleTimeout = 5 * time.Second }))
 	c := r.dial(r.a)
 	recvChallenge(t, c)
 	start := time.Now()

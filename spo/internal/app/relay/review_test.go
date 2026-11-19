@@ -10,7 +10,6 @@ import (
 
 	"github.com/mochipool/workbench/spo/internal/app/relay"
 	"github.com/mochipool/workbench/spo/internal/domain/mailbox"
-	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/ports/relayport"
 	"github.com/mochipool/workbench/spo/test/fakenet"
 )
@@ -21,55 +20,68 @@ import (
 
 // ---- M1: the decision after a stored put (SEC-021) ----
 
-// An access-list change that lands while the store commits the put (here: on
-// the last byte of the body, which is when a reload that calls CloseParty is
+// A change of the access decision that lands while the store commits the put (here:
+// on the last byte of the body, which is when a revoke that calls CloseDevice is
 // most likely to hit) must not leave the entry in the recipient's mailbox. The
-// whole decision is made again after the put: the sender still listed with the
-// node key of the connection, the recipient listed and the sender's send_to.
+// whole decision is made again after the put: the sender's binding still served
+// under the key it logged in with and the recipient still bound to the wallet key
+// the put names.
 //
-// spec: SPO-Xmailbox-SEC-021, SPO-Xmailbox-SEC-024, SPO-Xmailbox-OUT-031
+// spec: SPO-Xmailbox-SEC-021, SPO-Xmailbox-SEC-024, SPO-Xmailbox-OUT-031, SPO-Xmailbox-OUT-084
 func TestAccessChangeInTheCommitPhaseOfAPutIsCompensated(t *testing.T) {
-	otherKey := party.NodeKey{0x66}
 	for _, tc := range []struct {
 		name string
-		act  func(r *rig)
-		// revoked: the sender is answered refused and the revoked code; closeParty:
-		// the reload also called CloseParty, so the answer cannot be written and
-		// only the revoked code arrives; otherwise the connection stays.
-		revoked, closeParty bool
+		// act prepares what the change needs and returns it as a function that is safe
+		// to call from the store's goroutine.
+		act func(t *testing.T, r *rig) func()
+		// revoked: the sender is answered refused and the binding code; closeDevice:
+		// the revoke also called CloseDevice, so the answer cannot be written and
+		// only the binding code arrives; otherwise the connection stays.
+		revoked, closeDevice bool
 	}{
-		{"sender removed and CloseParty", func(r *rig) { r.acc.remove(r.a.fp); r.srv.CloseParty(r.a.fp) }, true, true},
-		{"sender removed, no CloseParty", func(r *rig) { r.acc.remove(r.a.fp) }, true, false},
-		{"sender has another node key", func(r *rig) {
-			e := r.a.entry(r.b.fp)
-			e.Node = otherKey
-			r.acc.put(e)
+		{"sender revoked and CloseDevice", func(t *testing.T, r *rig) func() {
+			f := revokeAt(t, r, r.a)
+			return func() { f(); r.srv.CloseDevice(r.a.fp) }
+		}, true, true},
+		{"sender revoked, no CloseDevice", func(t *testing.T, r *rig) func() { return revokeAt(t, r, r.a) }, true, false},
+		{"sender rebound under another wallet key", func(t *testing.T, r *rig) func() {
+			bb := *r.a
+			bb.wallet = r.c.wallet
+			bb.stmt = r.c.wallet.BindingStatement(r.a.fp, startTime-30, startTime+10*24*3600, false)
+			pr, err := bb.present(startTime)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return func() {
+				if _, err := r.reg.Register(context.Background(), pr); err != nil {
+					t.Error(err)
+				}
+			}
 		}, true, false},
-		{"send_to withdrawn", func(r *rig) { r.acc.put(r.a.entry()) }, false, false},
-		{"recipient removed", func(r *rig) { r.acc.remove(r.b.fp) }, false, false},
+		{"recipient revoked", func(t *testing.T, r *rig) func() { return revokeAt(t, r, r.b) }, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newRig(t)
 			a, _ := r.login(r.a)
 			env := envelope(300, 1)
+			act := tc.act(t, r)
 			r.store.arm(func(f *faultStore) {
 				f.StrictCtx = true // a store that refuses a cancelled context: the compensation must not use the session's
-				f.OnBodyEnd = func(relayport.MailboxPut) { tc.act(r) }
+				f.OnBodyEnd = func(relayport.MailboxPut) { act() }
 			})
-			h, _ := mailbox.NewPutOf(1, r.b.fp, env)
-			a.write(append(frame(t, h), rawFrame(t, env)...))
+			a.write(append(a.putHeader(1, r.b.fp, env), rawFrame(t, env)...))
 			var results []mailbox.PutResult
 			if tc.revoked {
 				got, code, ok := a.readUntilError()
-				if !ok || code != mailbox.CodeRevoked {
-					t.Fatalf("saw %v, code %d, ok %v; want the revoked code", got, code, ok)
+				if !ok || code != mailbox.CodeBinding {
+					t.Fatalf("saw %v, code %d, ok %v; want the binding code", got, code, ok)
 				}
 				for _, m := range got {
 					if pr, isPR := m.(mailbox.PutResult); isPR {
 						results = append(results, pr)
 					}
 				}
-				if !tc.closeParty && (len(results) != 1 || results[0].Status != mailbox.StatusRefused) {
+				if !tc.closeDevice && (len(results) != 1 || results[0].Status != mailbox.StatusRefused) {
 					t.Fatalf("results %+v, want one refused", results)
 				}
 			} else {
@@ -117,20 +129,19 @@ func TestAccessChangeInTheCommitPhaseOfAPutIsCompensated(t *testing.T) {
 // spec: SPO-Xmailbox-SEC-021, SPO-Xmailbox-OUT-031
 func TestCompensationLeavesAnotherSendersCopyOfTheSameMid(t *testing.T) {
 	r := newRig(t)
-	r.acc.put(r.c.entry(r.b.fp)) // carol may send to bob as well
-	c, _ := r.login(r.c)
+	c, _ := r.login(r.c) // carol puts to bob as a stranger (bob lists only alice)
 	a, _ := r.login(r.a)
 	env := envelope(300, 2)
 	mid := mailbox.HashOf(env)
 	if got := c.put(1, r.b.fp, env).Status; got != mailbox.StatusStored {
 		t.Fatalf("carol's put: %d", got)
 	}
+	revoke := revokeAt(t, r, r.a)
 	r.store.arm(func(f *faultStore) {
-		f.OnBodyEnd = func(relayport.MailboxPut) { r.acc.remove(r.a.fp) }
+		f.OnBodyEnd = func(relayport.MailboxPut) { revoke() }
 	})
-	h, _ := mailbox.NewPutOf(1, r.b.fp, env)
-	a.write(append(frame(t, h), rawFrame(t, env)...))
-	if _, code, ok := a.readUntilError(); !ok || code != mailbox.CodeRevoked {
+	a.write(append(a.putHeader(1, r.b.fp, env), rawFrame(t, env)...))
+	if _, code, ok := a.readUntilError(); !ok || code != mailbox.CodeBinding {
 		t.Fatalf("code %d, ok %v", code, ok)
 	}
 	es := r.list(r.b.fp)
@@ -159,9 +170,10 @@ func TestCompensationLeavesAnotherSendersCopyOfTheSameMid(t *testing.T) {
 func TestFailedCompensationIsLoggedAsAStoreFailure(t *testing.T) {
 	r := newRig(t)
 	a, _ := r.login(r.a)
+	revoke := revokeAt(t, r, r.b)
 	r.store.arm(func(f *faultStore) {
 		f.RetractErr = errors.New("disk on fire")
-		f.OnBodyEnd = func(relayport.MailboxPut) { r.acc.remove(r.b.fp) }
+		f.OnBodyEnd = func(relayport.MailboxPut) { revoke() }
 	})
 	if got := a.put(1, r.b.fp, envelope(100, 3)).Status; got != mailbox.StatusRefused {
 		t.Fatalf("status %d, want refused", got)
@@ -171,29 +183,37 @@ func TestFailedCompensationIsLoggedAsAStoreFailure(t *testing.T) {
 	}
 }
 
-// ---- M2: the long-poll looks the party up again (SEC-024) ----
+// ---- M2: the long-poll looks the device up again (SEC-024) ----
 
-// A reload that gave the party another node key without CloseParty must not be
-// served by a connection that was already parked: the wake ends it with the
-// revoked code, and the mailbox is not read again.
+// A device whose binding is gone, without CloseDevice, must not be served by a
+// connection that was already parked: the wake ends it with the binding code, and
+// the mailbox is not read again. (Version 1: a reload that gave the party another
+// node key.) A's first put builds the stranger book of B's queue with a listing, so
+// the one listing counted here is B's own fetch; B's fetch starts after that entry.
 //
-// spec: SPO-Xmailbox-SEC-025, SPO-Xmailbox-INV-014
-func TestLongPollOfAPartyWithAnotherNodeKeyIsEndedAtTheWake(t *testing.T) {
+// spec: SPO-Xmailbox-SEC-025, SPO-Xmailbox-INV-014, SPO-Xmailbox-OUT-085
+func TestLongPollOfARevokedDeviceIsEndedAtTheWake(t *testing.T) {
 	r := newRig(t)
 	a, _ := r.login(r.a)
 	b, _ := r.login(r.b)
+	first := envelope(80, 9)
+	if got := a.put(1, r.b.fp, first).Status; got != mailbox.StatusStored {
+		t.Fatalf("put status %d", got)
+	}
+	after := mailbox.HashOf(first)
 	lists := r.store.listCalls()
-	b.send(mailbox.Fetch{RequestID: 1, MaxItems: 16, WaitSeconds: 5})
+	b.send(mailbox.Fetch{RequestID: 1, After: &after, MaxItems: 16, WaitSeconds: 5})
 	r.awaitLongPoll(lists)
-	e := r.b.entry(r.a.fp)
-	e.Node = party.NodeKey{0x66}
-	r.acc.put(e) // the reload; nobody calls CloseParty
-	if got := a.put(1, r.b.fp, envelope(80, 1)).Status; got != mailbox.StatusStored {
+	// A's put looks B up three times (before, next to the store, after it); from
+	// the fourth look on, which is B's own session after the wake, B is gone, and
+	// nobody calls CloseDevice
+	r.hreg.hideLookup(r.b.fp, 3)
+	if got := a.put(2, r.b.fp, envelope(80, 1)).Status; got != mailbox.StatusStored {
 		t.Fatalf("put status %d", got)
 	}
 	m := b.recv()
-	if e, ok := m.(mailbox.Error); !ok || e.Code != mailbox.CodeRevoked {
-		t.Fatalf("got %#v, want the revoked code and no items", m)
+	if !isBindingCode(m) {
+		t.Fatalf("got %#v, want the binding code and no items", m)
 	}
 	b.expectClosed()
 	if n := r.store.listCalls(); n != lists+1 {
@@ -204,24 +224,25 @@ func TestLongPollOfAPartyWithAnotherNodeKeyIsEndedAtTheWake(t *testing.T) {
 // The same check stands immediately before the items are sent: a change that
 // lands between the read and the send is seen.
 //
-// spec: SPO-Xmailbox-SEC-025
-func TestEntryChangedBetweenTheReadAndTheSendGetsNoItems(t *testing.T) {
+// spec: SPO-Xmailbox-SEC-025, SPO-Xmailbox-OUT-085
+func TestBindingRevokedBetweenTheReadAndTheSendGetsNoItems(t *testing.T) {
 	r := newRig(t)
 	a, _ := r.login(r.a)
 	b, _ := r.login(r.b)
 	a.put(1, r.b.fp, envelope(80, 1))
+	revoke := revokeAt(t, r, r.b)
 	r.store.arm(func(f *faultStore) {
-		f.AfterList = func() { r.acc.remove(r.b.fp) }
+		f.AfterList = revoke
 	})
 	b.send(mailbox.Fetch{RequestID: 1, MaxItems: 16})
-	if m := b.recv(); !isRevoked(m) {
-		t.Fatalf("got %#v, want the revoked code and no items", m)
+	if m := b.recv(); !isBindingCode(m) {
+		t.Fatalf("got %#v, want the binding code and no items", m)
 	}
 }
 
-func isRevoked(m mailbox.Message) bool {
+func isBindingCode(m mailbox.Message) bool {
 	e, ok := m.(mailbox.Error)
-	return ok && e.Code == mailbox.CodeRevoked
+	return ok && e.Code == mailbox.CodeBinding
 }
 
 // hasClose reports whether a session has ended with the reason.
@@ -234,19 +255,19 @@ func hasClose(r *rig, why relay.Reason) bool {
 	return false
 }
 
-// And at the end of the wait: a party that left while parked is answered
-// revoked, not with an empty reply.
+// And at the end of the wait: a device that was revoked while parked is answered
+// with the binding code, not with an empty reply.
 //
-// spec: SPO-Xmailbox-SEC-025
-func TestLongPollThatEndsAfterTheEntryChangedIsAnsweredRevoked(t *testing.T) {
+// spec: SPO-Xmailbox-SEC-025, SPO-Xmailbox-OUT-085
+func TestLongPollThatEndsAfterTheBindingWentIsAnsweredWithTheBindingCode(t *testing.T) {
 	r := newRig(t)
 	b, _ := r.login(r.b)
 	lists := r.store.listCalls()
 	b.send(mailbox.Fetch{RequestID: 1, MaxItems: 16, WaitSeconds: 1})
 	r.awaitLongPoll(lists)
-	r.acc.remove(r.b.fp)
-	if m := b.recv(); !isRevoked(m) {
-		t.Fatalf("got %#v, want the revoked code", m)
+	revokeAt(t, r, r.b)()
+	if m := b.recv(); !isBindingCode(m) {
+		t.Fatalf("got %#v, want the binding code", m)
 	}
 }
 
@@ -274,7 +295,7 @@ func TestRevokedSessionBlockedInAWriteEndsPromptly(t *testing.T) {
 	within(t, 2*time.Second, "the relay to open the entry", func() bool { c, _, _ := r.store.openCalls(); return c == 1 })
 	// the write timeout is 8 s: a session that ends within 3.5 s was ended by
 	// the revocation and not by the deadline of its write
-	r.srv.CloseParty(r.b.fp)
+	r.srv.CloseDevice(r.b.fp)
 	within(t, 3500*time.Millisecond, "the revoked session to end", closed(r, 2))
 	if !hasClose(r, relay.ReasonRevoked) {
 		t.Fatalf("close events %+v", r.ev.of(relay.EventClose))
@@ -360,27 +381,30 @@ func TestServeRetriesATemporaryAcceptError(t *testing.T) {
 // ---- L3: the rate tables stay bounded ----
 
 // A key's window is dropped when the minute has passed and the next accept or
-// release sweeps, whether or not the key is still on the access list; the
-// tables do not grow with the keys that were ever seen.
+// release sweeps, whether or not the key still has a live session or a binding;
+// the tables do not grow with the keys that were ever seen. The sweep is made by
+// a refused connection, which records nothing in them. (The puts table is counted
+// per wallet key.)
 //
-// spec: SPO-Xmailbox-INV-012, SPO-Xmailbox-OUT-033
+// spec: SPO-Xmailbox-INV-012, SPO-Xmailbox-OUT-033, SPO-Xmailbox-OUT-084
 func TestRateTablesAreSweptOfStaleKeys(t *testing.T) {
-	r := newRig(t)
+	r := newRig(t, withLimits(func(l *relay.Limits) { l.MaxConnsPerKey = 1; l.ConnLifetime = 5 * time.Second }))
 	a, _ := r.login(r.a)
 	b, _ := r.login(r.b)
 	a.put(1, r.b.fp, envelope(80, 1))
 	b.put(1, r.a.fp, envelope(80, 2))
 	if recent, puts, _ := r.srv.Tables(); recent != 2 || puts != 2 {
-		t.Fatalf("tables %d, %d; want a window for each of the two keys and the two senders", recent, puts)
+		t.Fatalf("tables %d, %d; want a window for each of the two node keys and the two wallet keys", recent, puts)
 	}
-	a.s.Close()
-	b.s.Close()
-	eventually(t, "both sessions to end", closed(r, 2))
-	r.acc.remove(r.a.fp) // a key that has left the list
+	revokeAt(t, r, r.b)() // a key whose binding is gone
 	r.clock.Advance(61 * time.Second)
-	// the next accept sweeps: a refused connection records nothing in these tables
-	s := r.dialNode(r.a, r.stranger, fakenet.Fault{})
-	s.expectError()
+	// the next accept sweeps: a second connection of A is over the bound of one
+	// live connection per key, so it is refused, and a refusal records nothing in
+	// these tables
+	s := r.dial(r.a)
+	if code := s.expectError(); code != mailbox.CodeLimit {
+		t.Fatalf("code %d, want limit", code)
+	}
 	if recent, puts, _ := r.srv.Tables(); recent != 0 || puts != 0 {
 		t.Fatalf("tables %d, %d after the window passed; want them empty", recent, puts)
 	}
@@ -394,8 +418,8 @@ func TestRateTablesAreSweptOfStaleKeys(t *testing.T) {
 
 // ---- L4: fetch opens lazily, counts what it sends, and keeps `more` ----
 
-// putFor stores n envelopes for B directly in the store (no connection of A is
-// used) and returns them with their ids and sizes.
+// storeFor stores n envelopes for B from A over a connection of A, which it closes,
+// and returns them with their ids and sizes.
 func storeFor(t *testing.T, r *rig, n, size int) ([][]byte, []mailbox.Item) {
 	t.Helper()
 	a, _ := r.login(r.a)
@@ -607,102 +631,106 @@ func TestEveryHeaderReplyCountsAgainstTheSendBound(t *testing.T) {
 
 // ---- L5: a refused connection costs the accept loop nothing ----
 
-// strangers dials n connections from n distinct node keys that the tunnel
-// admits and the access list does not know.
-func (r *rig) strangers(n int, prefix string) []*conn {
+// In version 2 the relay refuses a connection at accept for a bound (the total of
+// live connections, the unauthenticated slots, the live connections or the new
+// connections of its tunnel node key); a node key it does not know is the tunnel's
+// to refuse. These tests make the refusals with the total bound: a rig with room for
+// one connection, one session logged in, and every other connection refused.
+
+// floodConns dials n connections from n distinct node keys that the tunnel admits.
+func (r *rig) floodConns(n int, prefix string) []*conn {
 	r.t.Helper()
-	var nodes []*fakenet.Node
-	keys := r.acc.NodeKeys()
-	for i := range n {
-		nd := r.net.Node(fmt.Sprintf("%s-%d", prefix, i))
-		nodes = append(nodes, nd)
-		keys = append(keys, nd.Key)
-	}
-	keys = append(keys, r.stranger.Key)
-	r.ln.SetAllowed(keys)
 	var out []*conn
-	for i, nd := range nodes {
-		out = append(out, r.dialNode(&peer{name: fmt.Sprintf("%s-%d", prefix, i)}, nd, fakenet.Fault{}))
+	for i := range n {
+		nd := r.extraNode(fmt.Sprintf("%s-%d", prefix, i))
+		out = append(out, r.dialNode(&peer{name: nd.Name}, nd, fakenet.Fault{}))
 	}
 	return out
 }
 
 func (r *rig) rejected() int { return len(r.ev.of(relay.EventRejected)) }
 
-// A flood of unlisted connections whose peers do not read (the reply of a few
-// bytes blocks) does not delay a listed party's accept: the replies are written
-// off the accept path, by a bounded number of writers; the rest are closed
-// without a reply.
+// A flood of refused connections whose peers do not read (the reply of a few bytes
+// blocks) does not delay the accept of the next connection: the replies are written
+// off the accept path, by a bounded number of writers; the rest are closed without
+// a reply. The connection behind the flood is dealt with at once, and when the
+// session that held the last slot ends the device logs in.
 //
 // spec: SPO-Xmailbox-PRE-021, SPO-Xmailbox-INV-013, SPO-Xmailbox-OUT-034
-func TestFloodOfStalledUnlistedConnectionsDoesNotDelayAListedParty(t *testing.T) {
-	r := newRig(t, withLimits(func(l *relay.Limits) { l.WriteTimeout = 1500 * time.Millisecond }))
-	r.net.SetBuffer(1) // the peers' streams hold one byte: a reply of five blocks in its write
-	flood := r.strangers(relay.MaxRejectWriters+6, "flood")
+func TestFloodOfStalledRefusedConnectionsDoesNotDelayTheAcceptLoop(t *testing.T) {
+	r := newRig(t, withLimits(func(l *relay.Limits) { l.WriteTimeout = 1500 * time.Millisecond; l.MaxConnections = 1 }))
+	holder, _ := r.login(r.b) // the one slot
+	r.net.SetBuffer(1)        // the peers' streams hold one byte: a reply of five blocks in its write
+	flood := r.floodConns(relay.MaxRejectWriters+6, "flood")
 	r.net.SetBuffer(fakenet.DefaultBuffer)
 	start := time.Now()
-	a, _ := r.login(r.a) // accepted after every connection of the flood
+	behind := r.dial(r.a) // accepted after every connection of the flood
+	behind.expectClosed() // the writers are all busy: no reply, and no wait for them
 	if d := time.Since(start); d > 800*time.Millisecond {
-		t.Fatalf("the listed party was accepted after %v behind %d stalled rejects", d, len(flood))
+		t.Fatalf("the connection behind %d stalled rejects was dealt with after %v", len(flood), d)
 	}
 	if n := r.rejected(); n > relay.MaxRejectWriters {
 		t.Fatalf("%d reject writers ran at once; the bound is %d", n, relay.MaxRejectWriters)
 	}
+	holder.s.Close()
+	eventually(t, "the slot to free", closed(r, 1))
+	a, _ := r.login(r.a)
 	a.fetch(1, nil, 1, 0)
 }
 
-// One unlisted key gets a reply to at most MaxNewConnsPerMinute connections a
-// minute; the rest are closed without one. The window moves with the clock.
+// One tunnel node key gets a reply to at most MaxNewConnsPerMinute refused
+// connections a minute; the rest are closed without one. The window moves with the
+// clock. Two connections of the key are admitted and held (the live bound), so
+// every later one is refused.
 //
 // spec: SPO-Xmailbox-PRE-021, SPO-Xmailbox-OUT-034
-func TestUnlistedKeyIsRateBounded(t *testing.T) {
-	r := newRig(t)
+func TestRefusedKeyIsRateBounded(t *testing.T) {
+	r := newRig(t, withLimits(func(l *relay.Limits) { l.UnauthBudget = 5 * time.Second; l.ConnLifetime = 5 * time.Second }))
 	var cs []*conn
-	for range 10 {
+	for range 14 {
 		cs = append(cs, r.dialNode(&peer{name: "stranger"}, r.stranger, fakenet.Fault{}))
 	}
 	r.login(r.c) // behind them all in the accept queue
 	if n := r.rejected(); n != 6 {
-		t.Fatalf("%d replies to one unlisted key in a minute, want 6", n)
+		t.Fatalf("%d replies to one key in a minute, want 6", n)
 	}
 	for i, c := range cs {
-		if i < 6 {
-			if code := c.expectError(); code != mailbox.CodeRevoked {
+		switch {
+		case i < 2:
+			c.challenge() // admitted: it holds the live slots of the key
+		case i < 8:
+			if code := c.expectError(); code != mailbox.CodeLimit {
 				t.Fatalf("connection %d: code %d", i, code)
 			}
-			continue
+		default:
+			c.expectClosed() // closed without a reply
 		}
-		c.expectClosed() // closed without a reply
 	}
 	r.clock.Advance(61 * time.Second)
 	c := r.dialNode(&peer{name: "stranger"}, r.stranger, fakenet.Fault{})
-	if code := c.expectError(); code != mailbox.CodeRevoked {
+	if code := c.expectError(); code != mailbox.CodeLimit {
 		t.Fatalf("after the minute: code %d", code)
 	}
 }
 
-// The table of rejected keys has a fixed size: when it is full, a connection
-// of a key that is not in it is closed without a reply, and the table is swept
-// when its windows have passed.
+// The table of refused keys has a fixed size: when it is full, a connection of a
+// key that is not in it is closed without a reply, and the table is swept when its
+// windows have passed.
 //
 // spec: SPO-Xmailbox-PRE-021, SPO-Xmailbox-OUT-034
 func TestTableOfRejectedKeysIsBounded(t *testing.T) {
-	r := newRig(t)
+	r := newRig(t, withLimits(func(l *relay.Limits) { l.MaxConnections = 1 }))
+	r.login(r.b) // the one slot: every other connection is refused
 	// one at a time, each reply read before the next key connects, so that the
 	// writers are never all busy and only the table can say no
 	var all []*fakenet.Node
 	for i := range relay.RejectTableSize + 10 {
-		all = append(all, r.net.Node(fmt.Sprintf("many-%d", i)))
+		all = append(all, r.extraNode(fmt.Sprintf("many-%d", i)))
 	}
-	keys := append(r.acc.NodeKeys(), r.stranger.Key)
-	for _, nd := range all {
-		keys = append(keys, nd.Key)
-	}
-	r.ln.SetAllowed(keys)
 	for i, nd := range all {
 		c := r.dialNode(&peer{name: nd.Name}, nd, fakenet.Fault{})
 		if i < relay.RejectTableSize {
-			if code := c.expectError(); code != mailbox.CodeRevoked {
+			if code := c.expectError(); code != mailbox.CodeLimit {
 				t.Fatalf("key %d: code %d", i, code)
 			}
 			continue
@@ -717,8 +745,8 @@ func TestTableOfRejectedKeysIsBounded(t *testing.T) {
 	}
 	// the windows pass and the next reject sweeps the table
 	r.clock.Advance(61 * time.Second)
-	late := r.strangers(1, "late")[0]
-	if code := late.expectError(); code != mailbox.CodeRevoked {
+	late := r.floodConns(1, "late")[0]
+	if code := late.expectError(); code != mailbox.CodeLimit {
 		t.Fatalf("after the windows passed: code %d", code)
 	}
 	if _, _, rej := r.srv.Tables(); rej != 1 {

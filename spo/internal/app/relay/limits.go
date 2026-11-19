@@ -1,12 +1,15 @@
-// Package relay is the session logic of the relay mailbox (ADR 0013, work
-// package 3): the handshake, put, fetch and ack of one connection, and the
-// bounds that are the session's job. It is pure over ports. It imports the
-// standard library, domain/mailbox, domain/party and ports/relayport and
-// nothing else, so that nothing it links can open an envelope.
+// Package relay is the session logic of the relay mailbox, protocol version 2
+// (ADR 0013 work package 3, ADR 0014 work package 6): the login with a wallet-key
+// binding, the revokes a peer may send before it, and put, fetch and ack of one
+// connection, and the bounds that are the session's job. It is pure over ports.
+// It imports the standard library, the relay-side domain packages (mailbox,
+// party, relaybind, relayregistry) and ports/relayport and nothing else, so that
+// nothing it links can open an envelope.
 //
 // The server holds only narrow capabilities: it can write, list, open and
-// remove one recipient's entries by id and read usage. It cannot delete a
-// mailbox (relayport.MailboxRevoker is the reload's) or sweep (the Sweeper's).
+// remove one recipient's entries by id, read usage, read and write the binding
+// registry, and delete a revoked device's queue in the revoke path alone
+// (relayport.MailboxRevoker). It cannot sweep (the Sweeper's).
 package relay
 
 import (
@@ -24,7 +27,7 @@ var ErrLimits = errors.New("relay: invalid limits")
 // ADR's table (the constants of domain/mailbox) and a server may only tighten
 // it: Validated refuses a zero or a looser value. Durations are real time.
 //
-// spec: SPO-Xmailbox-IF-005, SPO-Xmailbox-INV-012
+// spec: SPO-Xmailbox-IF-015, SPO-Xmailbox-INV-012
 type Limits struct {
 	MaxEnvelope uint32 // largest envelope announced in AuthOK and accepted
 	MaxItems    uint   // items per fetch reply
@@ -33,19 +36,35 @@ type Limits struct {
 	MaxWaitSeconds uint
 
 	MaxConnections       int // live connections in total
-	MaxConnsPerKey       int // live connections per node key
-	MaxNewConnsPerMinute int // new connections per node key per minute
-	MaxRequests          int // requests per connection, then close
-	MaxBytes             uint64
+	MaxConnsPerKey       int // live connections per tunnel node key
+	MaxNewConnsPerMinute int // new connections per tunnel node key per minute
+	// MaxConnsPerDevice bounds the live logged-in connections of one bound device
+	// (default 2), MaxConnsPerWalletKey those of all the devices of one wallet key
+	// together (default 16: 8 devices of 2). Both are checked at login and answered
+	// with the `limit` code; a connection that has not logged in counts against
+	// neither (it holds an unauthenticated slot instead).
+	MaxConnsPerDevice    int
+	MaxConnsPerWalletKey int
+	// MaxUnauthConns bounds the connections that have not logged in, relay-wide
+	// (ADR 0014 decision 5: 16).
+	MaxUnauthConns int
+	// MaxRevokes bounds the Revoke frames of one connection before login, the
+	// refused ones counting (ADR 0014 decision 7: 8).
+	MaxRevokes  int
+	MaxRequests int // requests per connection, then close
+	MaxBytes    uint64
 	// MaxBytesSent bounds what is sent on one connection, headers and raw
 	// frames together.
-	MaxBytesSent      uint64
-	MaxPutsPerMinute  int // puts per party per minute
-	MaxConcurrentPuts int // puts in flight per sender, over all its connections
+	MaxBytesSent uint64
+	// MaxPutsPerMinute counts the puts of one wallet key, summed over its devices.
+	MaxPutsPerMinute  int
+	MaxConcurrentPuts int // puts in flight per sender device, over all its connections
 
-	ConnLifetime     time.Duration
-	IdleTimeout      time.Duration
-	HandshakeTimeout time.Duration
+	ConnLifetime time.Duration
+	IdleTimeout  time.Duration
+	// UnauthBudget is the time for the whole connection before the login is
+	// complete (AuthOK sent): ADR 0014 decision 5, 5 seconds.
+	UnauthBudget time.Duration
 	// BodyTimeout bounds one raw frame, from the header that announces it.
 	BodyTimeout time.Duration
 	// WriteTimeout bounds one write of a header frame or of a raw frame.
@@ -65,6 +84,10 @@ func DefaultLimits() Limits {
 		MaxConnections:       mailbox.MaxConnections,
 		MaxConnsPerKey:       mailbox.MaxConnsPerKey,
 		MaxNewConnsPerMinute: mailbox.MaxNewConnsPerKeyPerMinute,
+		MaxConnsPerDevice:    mailbox.MaxConnsPerDevice,
+		MaxConnsPerWalletKey: mailbox.MaxConnsPerWalletKey,
+		MaxUnauthConns:       mailbox.MaxUnauthConnections,
+		MaxRevokes:           mailbox.MaxRevokesPerConn,
 		MaxRequests:          mailbox.MaxRequestsPerConn,
 		MaxBytes:             mailbox.MaxBytesPerConn,
 		MaxBytesSent:         mailbox.MaxBytesSentPerConn,
@@ -72,7 +95,7 @@ func DefaultLimits() Limits {
 		MaxConcurrentPuts:    mailbox.MaxConnsPerKey,
 		ConnLifetime:         mailbox.ConnLifetime,
 		IdleTimeout:          mailbox.IdleTimeout,
-		HandshakeTimeout:     mailbox.HandshakeTimeout,
+		UnauthBudget:         mailbox.UnauthBudget,
 		BodyTimeout:          mailbox.IdleTimeout,
 		WriteTimeout:         mailbox.IdleTimeout,
 		RetentionSeconds:     mailbox.DefaultRetentionSeconds,
@@ -117,6 +140,10 @@ func (l Limits) Validated() (ValidLimits, error) {
 		{"connections", posi(l.MaxConnections), mailbox.MaxConnections},
 		{"connections per key", posi(l.MaxConnsPerKey), mailbox.MaxConnsPerKey},
 		{"new connections per key per minute", posi(l.MaxNewConnsPerMinute), mailbox.MaxNewConnsPerKeyPerMinute},
+		{"connections per device", posi(l.MaxConnsPerDevice), mailbox.MaxConnsPerDevice},
+		{"connections per wallet key", posi(l.MaxConnsPerWalletKey), mailbox.MaxConnsPerWalletKey},
+		{"unauthenticated connections", posi(l.MaxUnauthConns), mailbox.MaxUnauthConnections},
+		{"revokes per connection", posi(l.MaxRevokes), mailbox.MaxRevokesPerConn},
 		{"requests per connection", posi(l.MaxRequests), mailbox.MaxRequestsPerConn},
 		{"bytes per connection", l.MaxBytes, mailbox.MaxBytesPerConn},
 		{"bytes sent per connection", l.MaxBytesSent, mailbox.MaxBytesSentPerConn},
@@ -124,7 +151,7 @@ func (l Limits) Validated() (ValidLimits, error) {
 		{"concurrent puts per sender", posi(l.MaxConcurrentPuts), mailbox.MaxConnsPerKey},
 		{"connection lifetime", pos(l.ConnLifetime), uint64(mailbox.ConnLifetime)},
 		{"idle timeout", pos(l.IdleTimeout), uint64(mailbox.IdleTimeout)},
-		{"handshake timeout", pos(l.HandshakeTimeout), uint64(mailbox.HandshakeTimeout)},
+		{"unauthenticated budget", pos(l.UnauthBudget), uint64(mailbox.UnauthBudget)},
 		{"body timeout", pos(l.BodyTimeout), uint64(mailbox.IdleTimeout)},
 		{"write timeout", pos(l.WriteTimeout), uint64(mailbox.IdleTimeout)},
 	} {

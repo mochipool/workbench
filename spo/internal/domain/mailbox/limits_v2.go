@@ -63,6 +63,13 @@ const (
 	OpenPairBytes    = 2 << 20
 	// MaxDevicesPerKey is how many devices one wallet key may have.
 	MaxDevicesPerKey = 8
+	// MaxConnsPerDevice is how many live logged-in connections one bound device
+	// may hold, and MaxConnsPerWalletKey how many all the devices of one wallet key
+	// may hold together: 8 devices of 2 connections. The tunnel node key costs a
+	// peer nothing, so these are the bounds that follow the identity a session
+	// proved (ADR 0014 decision 5). A server may only tighten them.
+	MaxConnsPerDevice    = 2
+	MaxConnsPerWalletKey = MaxDevicesPerKey * MaxConnsPerDevice
 	// BindingIdleDrop is how long an unauthenticated binding with an empty queue
 	// is kept.
 	BindingIdleDrop = 30 * 24 * time.Hour

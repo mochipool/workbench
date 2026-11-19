@@ -19,9 +19,22 @@ import (
 // spec: SPO-Xmailbox-OUT-030
 type Sweeper struct {
 	exp       relayport.MailboxExpirer
+	reg       relayport.RegistryExpirer // optional: the binding registry's sweep, beside the mailbox sweep
 	clock     relayport.Clock
 	retention uint64
 	events    EventSink
+}
+
+// WithRegistry makes the sweeper also sweep the binding registry on every pass:
+// bindings past their `until`, bindings a stored tombstone invalidates, idle
+// bindings that the eviction guard allows, and expired tombstones. Tombstones are
+// dropped nowhere else (SPO-Xmailbox-OUT-079). It returns the sweeper.
+//
+// spec: SPO-Xmailbox-OUT-066 (obligation 17 of "What a session must still do in
+// version 2")
+func (s *Sweeper) WithRegistry(reg relayport.RegistryExpirer) *Sweeper {
+	s.reg = reg
+	return s
 }
 
 // NewSweeper makes a Sweeper for a retention in seconds. Zero is refused and a
@@ -47,6 +60,21 @@ func (s *Sweeper) Sweep(ctx context.Context) (int, error) {
 			e = Event{Kind: EventSweepErr, Time: e.Time, Reason: ReasonStore}
 		}
 		s.events(e)
+	}
+	if s.reg != nil {
+		// the registry is swept even when the mailbox sweep failed: they are
+		// independent, and the first error is the one returned
+		res, rerr := s.reg.Sweep(ctx)
+		if s.events != nil {
+			e := Event{Kind: EventRegistrySweep, Time: s.clock.Now(), Count: len(res.Expired) + len(res.Idle) + len(res.Invalidated) + res.Tombstones}
+			if rerr != nil {
+				e = Event{Kind: EventSweepErr, Time: e.Time, Reason: ReasonRegistry}
+			}
+			s.events(e)
+		}
+		if err == nil {
+			err = rerr
+		}
 	}
 	return n, err
 }

@@ -17,11 +17,11 @@ import (
 // that kept a goroutine after its peer stalled or was cut fails the test.
 
 // A frame whose prefix is half sent: the relay waits for the rest only until
-// its deadline.
+// its deadline (the unauthenticated budget, before login).
 //
-// spec: SPO-Xmailbox-INV-013
+// spec: SPO-Xmailbox-INV-013, SPO-Xmailbox-PRE-054
 func TestStallInTheMiddleOfTheAuthFrame(t *testing.T) {
-	r := newRig(t, withLimits(func(l *relay.Limits) { l.HandshakeTimeout = 150 * time.Millisecond }))
+	r := newRig(t, withLimits(func(l *relay.Limits) { l.UnauthBudget = 150 * time.Millisecond }))
 	c := r.dial(r.a)
 	recvChallenge(t, c)
 	c.write([]byte{0, 0})
@@ -38,8 +38,7 @@ func TestStallAfterThePutHeaderReleasesTheReservation(t *testing.T) {
 	r := newRig(t, withLimits(func(l *relay.Limits) { l.BodyTimeout = 250 * time.Millisecond; l.IdleTimeout = 5 * time.Second }))
 	a, _ := r.login(r.a)
 	env := envelope(500, 1)
-	h, _ := mailbox.NewPutOf(1, r.b.fp, env)
-	a.write(frame(t, h)) // the header and nothing more
+	a.write(a.putHeader(1, r.b.fp, env)) // the header and nothing more
 	eventually(t, "the reservation", func() bool { return r.usage(r.b.fp, r.a.fp).PairEntries == 1 })
 	start := time.Now()
 	if code := a.expectError(); code != mailbox.CodeLimit {
@@ -58,8 +57,7 @@ func TestStallInTheMiddleOfTheBodyReleasesTheReservation(t *testing.T) {
 	r := newRig(t, withLimits(func(l *relay.Limits) { l.BodyTimeout = 250 * time.Millisecond; l.IdleTimeout = 5 * time.Second }))
 	a, _ := r.login(r.a)
 	env := envelope(500, 1)
-	h, _ := mailbox.NewPutOf(1, r.b.fp, env)
-	a.write(append(frame(t, h), rawFrame(t, env)[:4+200]...))
+	a.write(append(a.putHeader(1, r.b.fp, env), rawFrame(t, env)[:4+200]...))
 	eventually(t, "the reservation", func() bool { return r.usage(r.b.fp, r.a.fp).PairEntries == 1 })
 	start := time.Now()
 	if code := a.expectError(); code != mailbox.CodeLimit {
@@ -74,16 +72,19 @@ func TestStallInTheMiddleOfTheBodyReleasesTheReservation(t *testing.T) {
 	}
 }
 
-// A put that is refused (the recipient is not in send_to) still has its body
-// read to keep the stream in step; a stall in that body ends at the body
-// deadline too.
+// A put that is refused (the recipient device is not bound to the key the put
+// names) still has its body read to keep the stream in step; a stall in that body
+// ends at the body deadline too.
 //
-// spec: SPO-Xmailbox-INV-013, SPO-Xmailbox-PRE-022
+// spec: SPO-Xmailbox-INV-013, SPO-Xmailbox-PRE-022, SPO-Xmailbox-OUT-084
 func TestStallInTheBodyOfARefusedPutEndsAtTheBodyDeadline(t *testing.T) {
 	r := newRig(t, withLimits(func(l *relay.Limits) { l.BodyTimeout = 250 * time.Millisecond; l.IdleTimeout = 5 * time.Second }))
 	a, _ := r.login(r.a)
 	env := envelope(500, 1)
-	h, _ := mailbox.NewPutOf(1, r.c.fp, env) // carol is not in alice's send_to
+	h, err := mailbox.NewPutV2Of(1, r.a.wkey(), r.c.fp, env) // carol is bound under another wallet key
+	if err != nil {
+		t.Fatal(err)
+	}
 	a.write(append(frame(t, h), rawFrame(t, env)[:4+100]...))
 	start := time.Now()
 	if code := a.expectError(); code != mailbox.CodeLimit {
@@ -187,9 +188,10 @@ func TestStallOnAHeaderReplyEndsAtTheWriteDeadline(t *testing.T) {
 //
 // spec: SPO-Xmailbox-INV-013
 func TestCutsAtEveryStateReleaseEverything(t *testing.T) {
-	auth := int64(authFrameLen(t))
+	pa, pb := rigPeers()
+	auth := int64(authFrameLen(t, pa))
 	env := envelope(400, 1)
-	hdr := int64(len(frame(t, mailboxPutTo(newPeer(fakenet.New(), "bob").fp, env))))
+	hdr := int64(len(frame(t, mailboxPutTo(pb, env))))
 	for _, tc := range []struct {
 		name string
 		cut  int64 // client to server
@@ -206,9 +208,9 @@ func TestCutsAtEveryStateReleaseEverything(t *testing.T) {
 			c := r.dialFault(r.a, fakenet.Fault{CutClientToServer: fakenet.Int64(tc.cut)})
 			ch := recvChallenge(t, c)
 			// the writes may fail once the cut is reached; that is the fault
-			_ = c.tryWrite(frame(t, mailbox.Auth{Version: 1, Fingerprint: r.a.fp, Signature: c.signAuth(ch, r.a.fp, r.a.node.Key, r.relay.Key)}))
+			_ = c.tryWrite(frame(t, c.authFrame(ch, authOpt{})))
 			if tc.cut > auth {
-				_ = c.tryWrite(append(frame(t, mailboxPutTo(r.b.fp, env)), rawFrame(t, env)...))
+				_ = c.tryWrite(append(c.putHeader(1, r.b.fp, env), rawFrame(t, env)...))
 			}
 			eventually(t, "the session to end", closed(r, 1))
 			if u := r.usage(r.b.fp, r.a.fp); u != (mailbox.Usage{}) {
@@ -229,14 +231,27 @@ func TestCutsAtEveryStateReleaseEverything(t *testing.T) {
 	}
 }
 
-// A cut towards the client, at the challenge and after the AuthOK.
+// A cut towards the client, in the challenge, in the AuthOK and after it, ends
+// the session.
 //
 // spec: SPO-Xmailbox-INV-013
 func TestCutsTowardsTheClientEndTheSession(t *testing.T) {
-	for _, cut := range []int64{3, 100} {
+	hs := handshakeBytes(t)
+	for _, cut := range []int64{3, 100, hs - 3, hs + 3} {
 		r := newRig(t)
 		c := r.dialFault(r.a, fakenet.Fault{CutServerToClient: fakenet.Int64(cut)})
-		_, _ = c.tryRecv()
+		if m, err := c.tryRecv(); err == nil {
+			if ch, ok := m.(mailbox.Challenge); ok {
+				// the whole Challenge arrived: log in, and ask for something, as far as the
+				// cut lets the client read the answers
+				st, _ := mailbox.StageAfterChoice(mailbox.Version2)
+				c.stage = st
+				_ = c.tryWrite(frame(t, c.authFrame(ch, authOpt{})))
+				if _, err := c.tryRecv(); err == nil {
+					_ = c.tryWrite(frame(t, mailbox.Fetch{RequestID: 1, MaxItems: 1}))
+				}
+			}
+		}
 		_ = c.tryWrite([]byte{0, 0, 0, 1, 0})
 		eventually(t, "the session to end", closed(r, 1))
 		r.stop()
@@ -251,8 +266,7 @@ func TestSlowBodyEndsAtTheBodyDeadline(t *testing.T) {
 	r := newRig(t, withLimits(func(l *relay.Limits) { l.BodyTimeout = 300 * time.Millisecond }))
 	a, _ := r.login(r.a)
 	env := envelope(400, 1)
-	h, _ := mailbox.NewPutOf(1, r.b.fp, env)
-	a.write(frame(t, h))
+	a.write(a.putHeader(1, r.b.fp, env))
 	body := rawFrame(t, env)
 	start := time.Now()
 	for i := 0; i < len(body); i++ {
@@ -278,15 +292,14 @@ func TestShutdownEndsEverySessionPromptly(t *testing.T) {
 	r := newRig(t, withLimits(func(l *relay.Limits) {
 		l.IdleTimeout = 10 * time.Second
 		l.BodyTimeout = 10 * time.Second
-		l.HandshakeTimeout = 10 * time.Second
+		l.UnauthBudget = 5 * time.Second
 	}))
 	idle, _ := r.login(r.b)
 	pre := r.dial(r.c) // never answers the challenge
 	recvChallenge(t, pre)
 	a, _ := r.login(r.a)
 	env := envelope(500, 1)
-	h, _ := mailbox.NewPutOf(1, r.b.fp, env)
-	a.write(append(frame(t, h), rawFrame(t, env)[:4+10]...)) // half a body
+	a.write(append(a.putHeader(1, r.b.fp, env), rawFrame(t, env)[:4+10]...)) // half a body
 	eventually(t, "the reservation", func() bool { return r.usage(r.b.fp, r.a.fp).PairEntries == 1 })
 	start := time.Now()
 	r.ev.slowClose(150 * time.Millisecond) // sessions take a while to finish
@@ -314,11 +327,11 @@ func TestShutdownEndsEverySessionPromptly(t *testing.T) {
 	}
 }
 
-// CloseParty (the reload's revocation) ends that party's live sessions with the
-// revoked code, also in a long-poll, and no one else's.
+// CloseDevice (what a verified revoke calls) ends that device's live sessions with
+// the binding code, also in a long-poll, and no one else's.
 //
 // spec: SPO-Xmailbox-SEC-024
-func TestCloseParty(t *testing.T) {
+func TestCloseDevice(t *testing.T) {
 	r := newRig(t, withLimits(func(l *relay.Limits) { l.IdleTimeout = 10 * time.Second }))
 	a1, _ := r.login(r.a)
 	a2, _ := r.login(r.a)
@@ -327,43 +340,49 @@ func TestCloseParty(t *testing.T) {
 	a2.send(mailbox.Fetch{RequestID: 1, MaxItems: 1, WaitSeconds: 20})
 	r.awaitLongPoll(lists) // a2 is parked in its long-poll
 	start := time.Now()
-	r.srv.CloseParty(r.a.fp)
+	r.srv.CloseDevice(r.a.fp)
 	for _, c := range []*conn{a1, a2} {
-		if code := c.expectError(); code != mailbox.CodeRevoked {
-			t.Fatalf("code %d, want revoked", code)
+		if code := c.expectError(); code != mailbox.CodeBinding {
+			t.Fatalf("code %d, want binding", code)
 		}
 		c.expectClosed()
 	}
 	if d := time.Since(start); d > time.Second {
-		t.Fatalf("CloseParty took %v", d)
+		t.Fatalf("CloseDevice took %v", d)
 	}
 	b.fetch(1, nil, 1, 0) // bob is untouched
 }
 
-// The reload as the relay's main will do it, in the order the spec fixes: the
-// list first, then the live sessions, then the mailbox. The revoked party's
-// next request on a connection the reload missed is still refused, and its
-// mailbox is gone.
+// The revocation as the relay does it, in the order the spec fixes: the
+// registry first (the verified revoke), then the live sessions, then the mailbox.
+// The revoked device's next request on a connection that was missed is still
+// refused, it cannot log in again with its old binding, and its mailbox is gone.
 //
-// spec: SPO-Xmailbox-SEC-024
+// spec: SPO-Xmailbox-SEC-024, SPO-Xmailbox-OUT-083
 func TestRevocationEndToEnd(t *testing.T) {
 	r := newRig(t)
 	a, _ := r.login(r.a)
 	b, _ := r.login(r.b)
 	a.put(1, r.b.fp, envelope(100, 1))
 	b.put(1, r.a.fp, envelope(100, 2))
-	r.acc.remove(r.a.fp)
-	r.srv.CloseParty(r.a.fp)
+	if _, err := r.reg.Revoke(context.Background(), r.a.wallet.WalletRevoke(t, r.a.fp, startTime, startTime)); err != nil {
+		t.Fatal(err)
+	}
+	r.srv.CloseDevice(r.a.fp)
 	if _, err := r.real.RemoveMailbox(context.Background(), r.a.fp); err != nil {
 		t.Fatal(err)
 	}
-	if code := a.expectError(); code != mailbox.CodeRevoked {
+	if code := a.expectError(); code != mailbox.CodeBinding {
 		t.Fatalf("code %d", code)
 	}
-	// A cannot come back
+	// A cannot come back with its old binding
 	again := r.dial(r.a)
-	if code := again.expectError(); code != mailbox.CodeRevoked {
-		t.Fatalf("code %d, want revoked", code)
+	if code := again.loginFails(authOpt{}); code != mailbox.CodeBinding {
+		t.Fatalf("code %d, want binding", code)
+	}
+	// and nothing can be put to it
+	if got := b.put(3, r.a.fp, envelope(100, 3)).Status; got != mailbox.StatusUnbound {
+		t.Fatalf("a put to the revoked device: status %d, want unbound", got)
 	}
 	// what A put before stays for B; what was addressed to A is gone
 	if items, _ := b.fetch(2, nil, 16, 0); len(items.Entries) != 1 {

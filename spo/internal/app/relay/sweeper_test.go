@@ -151,7 +151,7 @@ func TestSweeperPassesTheClampedRetention(t *testing.T) {
 
 // The sweeper takes the expirer capability and a clock and nothing else.
 //
-// spec: SPO-Xmailbox-OUT-030, SPO-Xmailbox-IF-005
+// spec: SPO-Xmailbox-OUT-030, SPO-Xmailbox-IF-015
 func TestSweeperTakesOnlyTheExpirerAndAClock(t *testing.T) {
 	ft := reflect.TypeOf(relay.NewSweeper)
 	exp := ft.In(0)
@@ -166,9 +166,9 @@ func TestSweeperTakesOnlyTheExpirerAndAClock(t *testing.T) {
 	}
 }
 
-type failingExpirer struct{ calls int }
+type failingMailboxExpirer struct{ calls int }
 
-func (f *failingExpirer) Sweep(context.Context, uint64) (int, error) {
+func (f *failingMailboxExpirer) Sweep(context.Context, uint64) (int, error) {
 	f.calls++
 	return 0, errors.New("/secret/dir: disk gone")
 }
@@ -179,7 +179,7 @@ func (f *failingExpirer) Sweep(context.Context, uint64) (int, error) {
 func TestSweepFailureIsAnEventWithoutDetail(t *testing.T) {
 	ev := &events{}
 	clock := relayporttest.NewManualClock(5)
-	sw, _ := relay.NewSweeper(&failingExpirer{}, clock, 10, ev.sink)
+	sw, _ := relay.NewSweeper(&failingMailboxExpirer{}, clock, 10, ev.sink)
 	if _, err := sw.Sweep(context.Background()); err == nil {
 		t.Fatal("no error")
 	}

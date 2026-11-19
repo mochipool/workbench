@@ -351,7 +351,10 @@ func (s *Store) Register(ctx context.Context, p relayregistry.Presented) (relayr
 	applied, err := s.execute(plan.Ops)
 	if err != nil {
 		// the victims that were deleted before the failure are lost with the error
-		// unless they are returned: the session purges their queues
+		// unless they are returned. The session does NOT purge their queues: an evicted
+		// or lapsed binding's mail is kept until retention and is served again when a
+		// fresh binding arrives (ADR 0014 decision 5, SPO-Xmailbox-SEC-069); only a
+		// revoke purges, and only for the devices it invalidated
 		var res relayregistry.RegisterResult
 		for _, op := range applied {
 			if op.Kind == relayregistry.OpDeleteBinding {
