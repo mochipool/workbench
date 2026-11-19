@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"testing"
@@ -34,6 +35,10 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	// Every Open derives a key with 256 MiB of Argon2id memory. Without a limit
+	// the runtime keeps that garbage between tests and the package needs well
+	// over a gibibyte (more under the race detector).
+	debug.SetMemoryLimit(512 << 20)
 	code := m.Run()
 	if tmplDir != "" {
 		os.RemoveAll(tmplDir)

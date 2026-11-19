@@ -100,11 +100,12 @@ func TestLayering(t *testing.T) {
 // Confinement: each of these imports is allowed in exactly one place.
 func TestConfinedImports(t *testing.T) {
 	confined := map[string]string{
-		"os/exec":                      module + "/internal/platform/execx",
-		"github.com/tailscale/tailcat": module + "/internal/adapters/tailcat",
-		"github.com/blinklabs-io":      module + "/internal/adapters/native",
-		"github.com/awnumar/memguard":  module + "/internal/platform/secret",
-		"modernc.org/sqlite":           module + "/internal/adapters/sqlitestore",
+		"os/exec": module + "/internal/platform/execx",
+		// The tunnel libraries (tailcat, tailscale.com, gVisor, WireGuard) are
+		// confined by tunnel_closure_test.go, which names every importer.
+		"github.com/blinklabs-io":     module + "/internal/adapters/native",
+		"github.com/awnumar/memguard": module + "/internal/platform/secret",
+		"modernc.org/sqlite":          module + "/internal/adapters/sqlitestore",
 		// The QR code encoder: only the qrcode adapter draws a QR code.
 		"rsc.io/qr": module + "/internal/adapters/qrcode",
 		// The terminal UI library and its text-width helper (ADR 0009).

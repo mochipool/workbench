@@ -122,19 +122,45 @@ var (
 	ErrNoRoute = errors.New("no route to that party")
 	// ErrClosed: the transport was closed.
 	ErrClosed = errors.New("transport closed")
+	// ErrRefusedByTransport: the transport's far end took the envelope's bytes
+	// and said it will not hold this envelope, whatever the time: the relay
+	// answered refused, too large or bad hash (ADR 0013 decision 5). Unlike
+	// ErrNoRoute, trying again with the same bytes will not help soon, so a
+	// caller must not treat it as "queue and retry later". Outbox.Flush records
+	// it as an event, marks the item refused for that kind of transport (it is
+	// offered again after an hour, or when the operator asks, and to a transport
+	// of the other kind at once), goes on with the other items and does not
+	// return it (SPO-Xparty-INV-040).
+	ErrRefusedByTransport = errors.New("the transport refused the envelope")
 )
 
 // EnvelopeSender sends one sealed envelope to a party. It sees ciphertext
 // only and holds no application state (SPO-Xparty-SEC-003). A nil error means
-// the transport took the envelope, not that the party accepted it.
+// the transport took the envelope, not that the party accepted it, and not that
+// the party has it. For a store-and-forward transport (the mailbox client) it
+// means the relay stored it (stored or duplicate). A reply that the relay later
+// loses is recovered only while the coordinator keeps running its pump and the
+// request has not expired: the pump puts the unanswered request again and the
+// signer answers it again from its stored response (SPO-Xparty-INV-017). That
+// is the same as the direct tailcat transport's "the write succeeded and the
+// peer lost it": no transport reports delivery.
 type EnvelopeSender interface {
 	Send(ctx context.Context, to party.Fingerprint, envelope []byte) error
 }
 
 // EnvelopeReceiver delivers sealed envelopes. Receive blocks until one is
 // available or ctx ends, and returns ctx's error then. Delivery order is not
-// specified. The bytes are unchecked: the caller opens them with
-// adapters/envelope, whatever the transport said (SPO-Xparty-SEC-002).
+// specified. Delivery is at least once for a receiver that keeps what it
+// delivered until it is acknowledged (EnvelopeAcker): an envelope that was
+// delivered and not acked may be delivered again, in the same session by the
+// mailbox client (a later fetch lists it again), and after a restart by the file
+// bag (which does not repeat it within one Bag's lifetime). A receiver that is
+// not an acker (the tailcat server and client) delivers each frame it read once;
+// the same bytes arrive again only when the peer sends them again. The caller
+// does not rely on exactly-once: the replay log and the signer's stored response
+// make a repeat harmless (SPO-Xparty-INV-007, INV-017). The bytes are
+// unchecked: the caller opens them with adapters/envelope, whatever the
+// transport said (SPO-Xparty-SEC-002).
 type EnvelopeReceiver interface {
 	Receive(ctx context.Context) (Received, error)
 }
@@ -142,10 +168,24 @@ type EnvelopeReceiver interface {
 // EnvelopeAcker is an EnvelopeReceiver that keeps what it delivered until the
 // caller has handled it: the file bag marks a file read only after Ack, so a
 // crash between delivery and handling delivers it again (the replay log makes
-// that harmless). Ack marks the envelope returned by the last Receive.
+// that harmless), and the mailbox client's relay deletes an entry only after
+// Ack, so an envelope that is not acked comes again by a later fetch in the same
+// session. Delivery is therefore at least once, never exactly once. Ack marks
+// the envelope returned by the last Receive. A failed Ack leaves the envelope
+// waiting: the next Ack of the mailbox client names it again together with the
+// next envelope (SPO-Xmailbox-OUT-037).
 type EnvelopeAcker interface {
 	EnvelopeReceiver
 	Ack() error
+}
+
+// EnvelopeContextAcker is an EnvelopeAcker whose acknowledgement can be bounded
+// by the caller's context: Ack() has none, and a relay that does not answer would
+// cost the client's own timeout. Pump uses AckContext when the receiver has it
+// (SPO-Xmailbox-OUT-047).
+type EnvelopeContextAcker interface {
+	EnvelopeAcker
+	AckContext(ctx context.Context) error
 }
 
 // PartyReader reads the party registry inside a Store View or Update.

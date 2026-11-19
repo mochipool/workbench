@@ -680,6 +680,39 @@ func TestRingWrapsWithoutLosingBytes(t *testing.T) {
 	}
 }
 
+// Abort is the optional abortive end (relayport.Aborter): the peer reads what
+// was delivered and then a connection error, not io.EOF, and the aborted end's
+// own operations fail. relayport.Abort uses it, and falls back to Close.
+//
+// spec: SPO-Xmailbox-IF-003
+func TestAbortIsAResetNotAnEnd(t *testing.T) {
+	r := newRig(t)
+	c, s := r.connect(t)
+	if _, err := s.Write([]byte("tail")); err != nil {
+		t.Fatal(err)
+	}
+	if err := relayport.Abort(s); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readAll(t, c, 8)
+	if string(got) != "tail" {
+		t.Fatalf("the peer read %q before the reset, want the delivered bytes", got)
+	}
+	if err == nil || errors.Is(err, io.EOF) || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("the peer of an aborted stream read %v, want a connection error", err)
+	}
+	if _, err := s.Write([]byte("x")); err == nil {
+		t.Fatal("Write on an aborted stream succeeded")
+	}
+	// a stream that is not an Aborter is closed
+	if err := relayport.Abort(plainStream{c}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// plainStream hides Abort.
+type plainStream struct{ relayport.Stream }
+
 // FailAccept makes the next Accepts fail, in order, and then the listener
 // accepts again; a temporary failure satisfies relayport.ErrAcceptRetry and a
 // closed listener relayport.ErrListenerClosed.

@@ -3,6 +3,7 @@ package multisig
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/mochipool/workbench/spo/internal/domain/party"
@@ -148,6 +149,16 @@ func (o Outbox) Pending(ctx context.Context) ([]OutItem, error) {
 // (Rearm, or the coordinator's handling of that signer's Hello), until the
 // answer it asks for arrives, the collection closes, or it expires
 // (SPO-Xparty-INV-017).
+//
+// A transport that answers ports.ErrRefusedByTransport for an item (the relay
+// said refused, too large or bad hash) does not stop the others and is not
+// returned: the item is marked refused for that kind of transport and an event
+// is recorded, once. It is not offered to a transport of that kind again for
+// RefusedRetryAfter, or until RetryRefused; a transport of the other kind is
+// offered it at once, so an operator who switches to a file loses nothing; it
+// expires as any item does (SPO-Xparty-INV-040). Any other error (the transport
+// closed, a caller's context, an envelope the transport cannot carry) is returned
+// after the other items were tried.
 func (o Outbox) Flush(ctx context.Context, tr ports.Transport) (int, error) {
 	if !tr.Kind().Known() {
 		return 0, ErrTransportKind
@@ -159,11 +170,17 @@ func (o Outbox) Flush(ctx context.Context, tr ports.Transport) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	done := map[string]bool{} // message id -> delivered, not only sent
+	now := o.Clock.Now()
+	via := tr.Kind().String()
+	done := map[string]bool{}          // message id -> delivered, not only sent
+	refused := map[string]OutRefusal{} // message id -> the refusal
 	var first error
 	for _, it := range items {
 		if it.Sent || (it.ColdKey && tr.Kind() != ports.ViaFile) {
 			continue
+		}
+		if r := it.Refused; r != nil && r.Via == via && now.Unix() < r.At+int64(RefusedRetryAfter/time.Second) {
+			continue // refused by a transport of this kind a short while ago
 		}
 		to, err := fpOfHex(it.To)
 		if err != nil {
@@ -173,13 +190,15 @@ func (o Outbox) Flush(ctx context.Context, tr ports.Transport) (int, error) {
 		case err == nil:
 			done[it.ID] = tr.Kind() == ports.ViaFile || it.Type != string(party.TypeSigningRequest)
 		case errors.Is(err, ports.ErrNoRoute):
+		case errors.Is(err, ports.ErrRefusedByTransport):
+			refused[it.ID] = OutRefusal{At: now.Unix(), Via: via, Reason: refusalText(err)}
 		default:
 			if first == nil {
 				first = err
 			}
 		}
 	}
-	if len(done) > 0 {
+	if len(done) > 0 || len(refused) > 0 {
 		err := o.Store.Update(ctx, func(w ports.NamedWriter) error {
 			all, err := readOutbox(w)
 			if err != nil {
@@ -189,6 +208,15 @@ func (o Outbox) Flush(ctx context.Context, tr ports.Transport) (int, error) {
 				if delivered, ok := done[all[i].ID]; ok {
 					all[i].Sent = true
 					all[i].Delivered = delivered
+					all[i].Refused = nil
+				}
+				if r, ok := refused[all[i].ID]; ok {
+					all[i].Refused = &r
+					ev := eventOf(now, "outbox-item-refused", all[i].Collection, all[i].Slot, [32]byte{})
+					ev.Peer, ev.Reason, ev.Detail = all[i].To, r.Reason, all[i].Type+" "+all[i].ID+" via "+r.Via
+					if err := appendEvent(w, ev); err != nil {
+						return err
+					}
 				}
 			}
 			return writeJSON(w, outboxRef, all)
@@ -198,6 +226,51 @@ func (o Outbox) Flush(ctx context.Context, tr ports.Transport) (int, error) {
 		}
 	}
 	return len(done), first
+}
+
+// RefusedRetryAfter is how long an item that a transport refused is not offered
+// to a transport of the same kind again: the refusal may depend on the relay's
+// access list, which its administrator can change, so it is not for ever.
+const RefusedRetryAfter = time.Hour
+
+// refusalText is the transport's own reason for a refusal, cut and printable:
+// it goes into the audit log and the outbox record.
+func refusalText(err error) string {
+	s := strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, err.Error())
+	if len(s) > 200 {
+		s = strings.ToValidUTF8(s[:200], "")
+	}
+	return s
+}
+
+// RetryRefused clears the refused mark of every undelivered item, so that the
+// next Flush offers them again: the operator's action after the relay's access
+// list was changed. It returns how many items it cleared.
+func (o Outbox) RetryRefused(ctx context.Context) (int, error) {
+	n := 0
+	err := o.Store.Update(ctx, func(w ports.NamedWriter) error {
+		n = 0
+		items, err := readOutbox(w)
+		if err != nil {
+			return err
+		}
+		for i := range items {
+			if items[i].Refused != nil && !items[i].Delivered {
+				items[i].Refused = nil
+				n++
+			}
+		}
+		if n == 0 {
+			return nil
+		}
+		return writeJSON(w, outboxRef, items)
+	})
+	return n, err
 }
 
 // Rearm makes the SigningRequests that were sent over a network and not
@@ -344,8 +417,14 @@ func (p Pump) receiveOne(ctx context.Context) (bool, error) {
 		return true, err
 	}
 	// Handled: a transport that keeps what it delivered until now may let go
-	// (the file bag marks the file read).
-	if a, ok := p.Receive.(ports.EnvelopeAcker); ok {
+	// (the file bag marks the file read). A receiver that can bound the
+	// acknowledgement by a context gets the run's own (SPO-Xmailbox-OUT-047).
+	switch a := p.Receive.(type) {
+	case ports.EnvelopeContextAcker:
+		if err := a.AckContext(ctx); err != nil {
+			return true, err
+		}
+	case ports.EnvelopeAcker:
 		if err := a.Ack(); err != nil {
 			return true, err
 		}

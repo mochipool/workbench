@@ -4,6 +4,14 @@
 // tailcat do, and a second network transport would have to. The suite checks
 // delivery, the size limit, that bytes are copied, that nothing is delivered
 // twice, and cancellation. It does not assume ordering.
+//
+// "Nothing is delivered twice" is a property of a receiver whose caller
+// acknowledges what it handled. The port is at least once (ports.EnvelopeReceiver):
+// the mailbox client lists an envelope that is not acked again by a later fetch,
+// so its pair must wrap the receiver to ack after each delivery, as Pump does for
+// an EnvelopeAcker. The wrapper is required here, not a convenience: without it
+// the suite's second look at the receiver is delivered the same envelope again,
+// by design. The file bag and tailcat pass without a wrapper.
 package porttest
 
 import (

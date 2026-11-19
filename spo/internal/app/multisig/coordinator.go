@@ -430,8 +430,14 @@ func (c Coordinator) authorise(r ports.NamedReader, st coordState, ps []party.Pa
 	switch m := b.(type) {
 	case party.SigningResponse:
 		concern = c.slotConcern(r, st, ps, m.Collection, m.Slot)
+		if c.lateSigner(r, st, m.Collection, m.Slot, sender) {
+			concern = party.Concern{SlotSigner: sender.Fingerprint, HasSlotSigner: true}
+		}
 	case party.SigningRefusal:
 		concern = c.slotConcern(r, st, ps, m.Collection, m.Slot)
+		if c.lateSigner(r, st, m.Collection, m.Slot, sender) {
+			concern = party.Concern{SlotSigner: sender.Fingerprint, HasSlotSigner: true}
+		}
 	case party.Hello:
 		if err := party.CheckHelloExpiry(o.Created(), o.Expires()); err != nil {
 			return err
@@ -461,6 +467,31 @@ func (c Coordinator) slotConcern(r ports.NamedReader, st coordState, ps []party.
 		}
 	}
 	return party.Concern{}
+}
+
+// lateSigner reports that a response or a refusal for a slot is a late one from
+// the party the slot's request was sealed to: the collection is closed (the
+// coordinator announced its end, or its record is gone or was replaced by
+// another) and the sender is the recorded signer of that slot. Such a message is
+// not an impersonation, and the "not the signer of that slot" refusal is
+// kept for a live collection and for any other sender (SPO-Xparty-INV-041).
+func (c Coordinator) lateSigner(r ports.NamedReader, st coordState, cid party.CollectionID, slot party.SlotID, sender party.Party) bool {
+	cs := st.find(cid)
+	if cs == nil {
+		return false
+	}
+	ss, ok := cs.Slots[int(slot)]
+	if !ok || ss.LastRequest == "" || ss.To != hexFP(sender.Fingerprint) {
+		return false
+	}
+	if cs.Closed != "" {
+		return true
+	}
+	// gone, or replaced by another collection. A record that cannot be read or
+	// parsed is not "gone": a live collection must not lose a valid response to a
+	// storage fault, so that case stays a refusal.
+	l, err := c.loadCollection(r, c.TxIDs, cs.Ref)
+	return errors.Is(err, ErrNoCollection) || (err == nil && collectionID(cs.Ref, l.coll) != cid)
 }
 
 // refusal is a refusal found inside a transaction: it rolls the transaction
@@ -503,7 +534,7 @@ func (c Coordinator) Handle(ctx context.Context, rcv ports.Received) (Handled, e
 	}
 	var o ports.OpenedEnvelope
 	var body party.Body
-	var answered, dup bool // dup: the id is that of an accepted answer; answered: it is that slot's
+	var answered, dup, late bool // dup: the id is that of an accepted answer; answered: it is that slot's; late: see lateSigner
 	err = c.Store.View(ctx, func(r ports.NamedReader) error {
 		lookup, ps, err := c.loadParties(r)
 		if err != nil {
@@ -526,7 +557,16 @@ func (c Coordinator) Handle(ctx context.Context, rcv ports.Received) (Handled, e
 			func(sender party.Party, t party.Type, b party.Body) error {
 				return c.authorise(r, st, ps, o, sender, t, b)
 			})
-		return err
+		if err != nil {
+			return err
+		}
+		switch m := body.(type) {
+		case party.SigningResponse:
+			late = c.lateSigner(r, st, m.Collection, m.Slot, o.Sender())
+		case party.SigningRefusal:
+			late = c.lateSigner(r, st, m.Collection, m.Slot, o.Sender())
+		}
+		return nil
 	})
 	if err != nil {
 		if local.IsRefusal(err) {
@@ -557,6 +597,9 @@ func (c Coordinator) Handle(ctx context.Context, rcv ports.Received) (Handled, e
 			return h, nil
 		}
 		return c.refuse(ctx, o, ports.ErrReplay, now)
+	}
+	if late {
+		return c.onLate(ctx, o, body, now)
 	}
 	err = c.Store.Update(ctx, func(w ports.NamedWriter) error {
 		var err error
@@ -598,6 +641,38 @@ func (c Coordinator) refuse(ctx context.Context, o ports.OpenedEnvelope, why err
 		return Handled{}, uerr
 	}
 	return Handled{Type: o.Type(), Sender: o.Sender().Fingerprint, HasSender: true, Refused: true, Reason: why.Error()}, nil
+}
+
+// onLate takes a response or a refusal that reached a closed collection from the
+// party its request was sealed to, and whose id was not accepted before. It has
+// no effect on the collection. Its id is recorded in the replay log, so that
+// any later delivery of the same envelope is an ordinary replay (refused as one,
+// by the replay check, and not as an impersonation), and one event of its own
+// kind records it: not a refusal, and not coalesced into one
+// (SPO-Xparty-INV-041).
+func (c Coordinator) onLate(ctx context.Context, o ports.OpenedEnvelope, body party.Body, now time.Time) (Handled, error) {
+	var cid party.CollectionID
+	var slot party.SlotID
+	switch m := body.(type) {
+	case party.SigningResponse:
+		cid, slot = m.Collection, m.Slot
+	case party.SigningRefusal:
+		cid, slot = m.Collection, m.Slot
+	}
+	h := Handled{Type: o.Type(), Sender: o.Sender().Fingerprint, HasSender: true, Effect: "late-response", Reason: "the collection was already closed"}
+	err := c.Store.Update(ctx, func(w ports.NamedWriter) error {
+		if err := c.Replay.Record(w, o.Sender().Fingerprint, o.ID(), o.Expires(), now); err != nil {
+			return &refusal{err}
+		}
+		ev := eventOf(now, "late-response", hexColl(cid), int(slot), [32]byte{})
+		ev.Peer, ev.Reason, ev.Detail = o.Sender().Fingerprint.String(), h.Reason, string(o.Type())
+		return appendEvent(w, ev)
+	})
+	var rf *refusal
+	if errors.As(err, &rf) {
+		return c.refuse(ctx, o, rf.err, now)
+	}
+	return h, err
 }
 
 func (c Coordinator) onHello(w ports.NamedWriter, o ports.OpenedEnvelope, now time.Time) (Handled, error) {

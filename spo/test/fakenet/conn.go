@@ -238,6 +238,15 @@ func (c *Conn) Write(b []byte) (int, error) { return c.wr.write(b) }
 // Close ends both directions at this end. It is safe to call twice.
 func (c *Conn) Close() error { c.wr.closeWriter(); c.rd.closeReader(); return nil }
 
+// Abort ends both directions at this end like a reset: the peer's pending and
+// later reads and writes fail with ErrCut after the bytes already delivered
+// (relayport.Aborter). Close is the orderly end.
+func (c *Conn) Abort() error {
+	c.wr.markCut()
+	c.rd.markCut()
+	return c.Close()
+}
+
 // SetDeadline sets both deadlines.
 func (c *Conn) SetDeadline(t time.Time) error {
 	c.rd.setReadDeadline(t)
