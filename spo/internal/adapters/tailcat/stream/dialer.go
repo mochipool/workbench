@@ -441,6 +441,12 @@ func (d *Dialer) teardown(tun *tunnel, streams []*Stream) {
 		d.testBeforeEngineClose()
 	}
 	tun.c.Close()
+	// the engine is closed: the copies this package handed the client are
+	// dropped. The key is a value and is cleared; the address is a Go string
+	// and can only be dropped. What tailcat copied from them inside the engine
+	// stays until the garbage collector takes it (SPO-Xmailbox-SEC-083).
+	clearPriv(&tun.c.Key)
+	tun.c.Server = ""
 }
 
 // Close resets the streams it opened, cancels the dials in flight and starts the
@@ -477,6 +483,7 @@ func (d *Dialer) Close() error {
 		d.retired.Wait()
 		d.mu.Lock()
 		clearPriv(&d.priv)
+		d.addr = "" // dropped, not wiped: see teardown
 		d.mu.Unlock()
 	}()
 	return nil

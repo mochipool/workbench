@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/mochipool/workbench/spo/internal/platform/tomlsubset"
 )
@@ -103,6 +104,26 @@ type Registry struct {
 // never a synced folder (ADR 0005, obligation 5).
 type Party struct {
 	Inbox, Outbox string
+	// RelayLoginMax is relay_login_max as written ("12h"; "" is the default),
+	// checked by ParseRelayLoginMax when the file is read.
+	RelayLoginMax string
+}
+
+// DefaultRelayLoginMax is the login limit of a relay session when
+// relay_login_max is not set (ADR 0014 decision 9).
+const DefaultRelayLoginMax = 12 * time.Hour
+
+// ParseRelayLoginMax reads relay_login_max: Go's duration form, from 1 minute
+// to 168 hours; "" is DefaultRelayLoginMax (SPO-Xmailbox-PRE-066).
+func ParseRelayLoginMax(s string) (time.Duration, error) {
+	if s == "" {
+		return DefaultRelayLoginMax, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < time.Minute || d > 168*time.Hour {
+		return 0, fmt.Errorf("[party] relay_login_max must be a duration from 1m to 168h (such as \"12h\" or \"90m\"), not %q", s)
+	}
+	return d, nil
 }
 
 // Tailcat tunes the tailcat transport ([tailcat]). The node key, the
@@ -469,6 +490,13 @@ func Parse(data []byte) (Config, error) {
 					if c.Party.Outbox, err = e.val.str("party.outbox"); err != nil {
 						return Config{}, err
 					}
+				case "relay_login_max":
+					if c.Party.RelayLoginMax, err = e.val.str("party.relay_login_max"); err != nil {
+						return Config{}, err
+					}
+					if _, err := ParseRelayLoginMax(c.Party.RelayLoginMax); err != nil || c.Party.RelayLoginMax == "" {
+						return Config{}, fmt.Errorf("line %d: [party] relay_login_max must be a duration from 1m to 168h (such as \"12h\" or \"90m\")", e.val.line)
+					}
 				default:
 					return Config{}, fmt.Errorf("line %d: unknown key %q in [party]", e.val.line, e.key)
 				}
@@ -574,6 +602,9 @@ func Marshal(c Config) ([]byte, error) {
 		}
 		if p.Outbox != "" {
 			fmt.Fprintf(&b, "outbox = %s\n", q.quote("[party] outbox", p.Outbox))
+		}
+		if p.RelayLoginMax != "" {
+			fmt.Fprintf(&b, "relay_login_max = %s\n", q.quote("[party] relay_login_max", p.RelayLoginMax))
 		}
 	}
 	if t := c.Tailcat; t != nil {

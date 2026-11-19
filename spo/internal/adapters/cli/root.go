@@ -94,7 +94,13 @@ func NewRoot(d Deps) *cobra.Command {
 	assetCmd := a.assetCommand()
 	assetCmd.AddCommand(a.assetMetaCommand())
 	root.AddCommand(a.policyCommand(), assetCmd, a.workspaceCommand(), a.keyCommand(), a.catalystCommand(), a.pollCommand(), a.partyCommand(), a.nodeCommand())
-	explainAll(root, d.MapError)
+	mapErr := d.MapError
+	explainAll(root, func(err error) error {
+		if mapErr != nil {
+			err = mapErr(err)
+		}
+		return a.explainOwnSession(err)
+	})
 	a.cleanupAfterEveryCommand(root)
 	return root
 }

@@ -837,10 +837,24 @@ func (m *Multi) Close() error {
 
 // Logout closes the composite and then every member's dialer with CloseWithin,
 // at once. A dialer that does not stop within the bound is ErrTunnelDidNotStop:
-// the caller says "tunnel did not stop" and exits non-zero.
+// the caller says "tunnel did not stop" and exits non-zero. The close of the
+// composite is bounded by within too: when its goroutines have not ended by
+// then (a member's receive stuck in the tunnel library), the dialers are
+// closed all the same and Logout says the tunnel did not stop, never that it
+// logged out; the close goes on in the background (SPO-Xmailbox-OUT-117).
 func (m *Multi) Logout(within time.Duration) error {
-	m.Close()
-	errs := make([]error, len(m.members))
+	closed := make(chan struct{})
+	go func() { m.Close(); close(closed) }()
+	t := time.NewTimer(within)
+	var hung error
+	select {
+	case <-closed:
+		t.Stop()
+	case <-t.C:
+		hung = fmt.Errorf("the clients did not stop within %v", within)
+	}
+	errs := make([]error, len(m.members)+1)
+	errs[len(m.members)] = hung
 	var wg sync.WaitGroup
 	for i, mb := range m.members {
 		if mb.d == nil {

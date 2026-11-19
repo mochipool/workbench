@@ -116,6 +116,12 @@ type pfix struct {
 	// snapshotData is what the file of each snapshot reader held when it was built.
 	snapshotData [][]byte
 	absent       map[Cap]string
+	// wrapSealed, when set, wraps the store every command opens; storeGone is
+	// Deps.StoreGone.
+	wrapSealed func(SealedStore) SealedStore
+	storeGone  func(error) bool
+	// relayLock is Deps.RelayLock (nil: no lock).
+	relayLock func(path string) (func() error, error)
 }
 
 func newPfixDir(t *testing.T, dir string, st *plainstore.Store, clock *partyrig.Clock, ch *partyrig.Chain) *pfix {
@@ -182,9 +188,13 @@ func (f *pfix) deps(term Terminal) Deps {
 		cfgs[f.dir] = WorkspaceConfig{Network: "preview", Mode: f.mode}
 	}
 	return Deps{
-		Out: &f.out, Err: &f.err, Terminal: term, Config: memConfig(cfgs),
+		Out: &f.out, Err: &f.err, Terminal: term, Config: memConfig(cfgs), StoreGone: f.storeGone, RelayLock: f.relayLock,
 		Sealed: SealedOps{Open: func(string, *secret.Buffer, OpenOptions) (SealedStore, error) {
-			return fakeSealed{Anchored: f.st.Anchor(), tokens: map[ports.Ref][]byte{}}, nil
+			var st SealedStore = fakeSealed{Anchored: f.st.Anchor(), tokens: map[ports.Ref][]byte{}}
+			if f.wrapSealed != nil {
+				st = f.wrapSealed(st)
+			}
+			return st, nil
 		}},
 		OpenUpstream: plainstore.Upstream,
 		Wire: func(st ports.Store, o WireOptions) (*Env, error) {

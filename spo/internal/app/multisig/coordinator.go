@@ -311,11 +311,11 @@ func (c Coordinator) RequestSignatures(ctx context.Context, in RequestInput, tr 
 	}
 	// The cold-key rule reads the role history of each slot's key, which may read
 	// the store: it is decided before the transaction opens (a store read inside
-	// an Update of the same handle would wait for itself).
-	var coldSlots map[string]bool
-	if !tr.Kind().IsFile() {
-		coldSlots = c.coldSlots(ctx, in.Ref)
-	}
+	// an Update of the same handle would wait for itself). It is decided for
+	// every transport: over a network it refuses the request, and over a file it
+	// sets the outbox item's ColdKey from the same rule, so a request whose file
+	// flush failed is never flushed into a network later.
+	coldSlots := c.coldSlots(ctx, in.Ref)
 	var results []SlotResult
 	err = c.Store.Update(ctx, func(w ports.NamedWriter) error {
 		results = nil
@@ -394,7 +394,7 @@ func (c Coordinator) RequestSignatures(ctx context.Context, in RequestInput, tr 
 				}
 				cs.Slots[i] = slotState{LastRequest: hexMsg(mid), RequestedAt: now.Unix(), Expires: expires.Unix(), To: hexFP(p.Fingerprint)}
 				items = append(items, OutItem{ID: hexMsg(mid), To: hexFP(p.Fingerprint), Type: string(party.TypeSigningRequest),
-					Collection: hexColl(id), Slot: i, Expires: expires.Unix(), Envelope: env, ColdKey: s.Role == custody.RolePoolCold})
+					Collection: hexColl(id), Slot: i, Expires: expires.Unix(), Envelope: env, ColdKey: coldSlots[s.Name]})
 				ev := eventOf(now, "request-sealed", hexColl(id), i, l.coll.Body.ID)
 				ev.Peer, ev.Detail = p.Fingerprint.String(), hexMsg(mid)
 				if err := appendEvent(w, ev); err != nil {

@@ -37,6 +37,9 @@ type partyRun struct {
 	// gateNote is what the passphrase prompt says about the request being
 	// approved: its id prefix and its net.
 	gateNote string
+	// relayHeld counts the uses of the relay-login lock this command holds
+	// (holdRelays).
+	relayHeld int
 }
 
 func (r *partyRun) kit() *PartyKit { return r.env.Party }

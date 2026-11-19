@@ -37,6 +37,15 @@ const (
 	// its whole session (the workspace directory, the layout), so it is not
 	// offered again in each command's form.
 	Global = "spo.ui/global"
+
+	// RelaySession marks a command that the TUI's relay session needs to know
+	// (ADR 0014 decision 9): RelayLogin is the login the TUI runs as its
+	// background session, RelayForget is run after a logout, and RelayOutbox
+	// only queues mail that the session sends (SPO-Xmailbox-IF-029).
+	RelaySession = "spo.ui/relay-session"
+	RelayLogin   = "login"
+	RelayForget  = "forget"
+	RelayOutbox  = "outbox"
 )
 
 // What a flag or a positional argument holds, for a driver that helps fill

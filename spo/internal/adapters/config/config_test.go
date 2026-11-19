@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // spec: SPO-Cconf-INV-004, SPO-Cconf-INV-006, SPO-Cconf-INV-011
@@ -187,6 +188,59 @@ func TestKoiosURL(t *testing.T) {
 	if (Config{}).KoiosURL() != "" {
 		t.Error("no provider, no URL")
 	}
+}
+
+// relay_login_max in [party] is a duration from 1 minute to 168 hours, read
+// back as written; anything else refuses the configuration naming the key.
+//
+// spec: SPO-Xmailbox-PRE-066, SPO-Xmailbox-IF-028
+func TestRelayLoginMax(t *testing.T) {
+	base := "network = \"preview\"\nmode = \"offline\"\n[party]\n"
+	for in, want := range map[string]time.Duration{`"12h"`: 12 * time.Hour, `"90m"`: 90 * time.Minute, `"1m"`: time.Minute, `"168h"`: 168 * time.Hour} {
+		c, err := Parse([]byte(base + "relay_login_max = " + in + "\n"))
+		if err != nil {
+			t.Fatalf("%s: %v", in, err)
+		}
+		got, err := ParseRelayLoginMax(c.Party.RelayLoginMax)
+		if err != nil || got != want {
+			t.Fatalf("%s: %v %v", in, got, err)
+		}
+		b, err := Marshal(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c2, err := Parse(b); err != nil || *c2.Party != *c.Party {
+			t.Fatalf("round trip of %s: %v %+v", in, err, c2.Party)
+		}
+	}
+	for _, bad := range []string{`"59s"`, `"0s"`, `"-1h"`, `"168h0m1s"`, `"169h"`, `"12"`, `"twelve hours"`, `720`, `""`} {
+		_, err := Parse([]byte(base + "relay_login_max = " + bad + "\n"))
+		if err == nil || !strings.Contains(err.Error(), "relay_login_max") {
+			t.Errorf("relay_login_max = %s: %v", bad, err)
+		}
+	}
+	if DefaultRelayLoginMax != 12*time.Hour {
+		t.Fatalf("the default is %v, the ADR says 12 hours", DefaultRelayLoginMax)
+	}
+	if d, err := ParseRelayLoginMax(""); err != nil || d != DefaultRelayLoginMax {
+		t.Fatalf("unset: %v %v", d, err)
+	}
+}
+
+// The parser of relay_login_max never accepts a value outside its range.
+func FuzzParseRelayLoginMax(f *testing.F) {
+	for _, s := range []string{"12h", "1m", "168h", "59s", "-1h", "1e9h", "9223372036854775807ns", "1h1h1h", "0"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		d, err := ParseRelayLoginMax(s)
+		if err != nil {
+			return
+		}
+		if s != "" && (d < time.Minute || d > 168*time.Hour) {
+			t.Fatalf("%q gave %v", s, d)
+		}
+	})
 }
 
 // [party] and [tailcat] are optional, strict and round-trip; the secrets of the

@@ -16,6 +16,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/app/multisig"
 	"github.com/mochipool/workbench/spo/internal/app/parties"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
+	"github.com/mochipool/workbench/spo/internal/platform/uihint"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -582,8 +583,9 @@ func (a *app) partyApproveCommand() *cobra.Command {
 	var f signerFlags
 	var yes bool
 	cmd := &cobra.Command{
-		Use:   "approve ID",
-		Short: "Review a signing request again, answer yes or no, and sign it",
+		Use:         "approve ID",
+		Annotations: map[string]string{uihint.RelaySession: uihint.RelayOutbox},
+		Short:       "Review a signing request again, answer yes or no, and sign it",
 		Long: `Show the review of the request again, then ask: sign it? The default is No. No
 flag answers that question (there is no --yes), and without a terminal the
 command refuses. It also refuses, before printing, when the summary does not fit
@@ -704,8 +706,9 @@ func (a *app) partyRefuseCommand() *cobra.Command {
 	var f signerFlags
 	var reason string
 	cmd := &cobra.Command{
-		Use:   "refuse ID [--reason TEXT]",
-		Short: "Decline a signing request",
+		Use:         "refuse ID [--reason TEXT]",
+		Annotations: map[string]string{uihint.RelaySession: uihint.RelayOutbox},
+		Short:       "Decline a signing request",
 		Long: `Decline the request. The coordinator is told only that you declined; the
 reason you give is kept in your own log and never sent, because it would let
 a coordinator probe this machine. Declining needs no review: it signs nothing.`,

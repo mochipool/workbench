@@ -269,7 +269,7 @@ func (m *model) importDiscover() {
 		return
 	}
 	flags := f.flags(false)
-	r := m.launch(f.node, m.importCommandLine(append(flags, "--dry-run", "--format=json")),
+	r := m.launch(f.node, sessionKind(f.node), m.importCommandLine(append(flags, "--dry-run", "--format=json")),
 		m.importArgs(flags, "--dry-run", "--format=json"), nil)
 	r.quiet = true
 	r.onLeave = func(m *model) { m.screen = scImport }
@@ -396,7 +396,7 @@ func (m *model) importSummarise() {
 		return
 	}
 	flags := f.flags(true)
-	r := m.launch(f.node, m.importCommandLine(append(flags, "--dry-run", "--format=json")),
+	r := m.launch(f.node, sessionKind(f.node), m.importCommandLine(append(flags, "--dry-run", "--format=json")),
 		m.importArgs(flags, "--dry-run", "--format=json"), nil)
 	r.quiet = true
 	r.onLeave = func(m *model) { m.screen = scImport }
@@ -491,7 +491,7 @@ func (m *model) importRun() {
 		return
 	}
 	flags := f.flags(true)
-	r := m.launch(f.node, m.importCommandLine(flags), m.importArgs(flags), nil)
+	r := m.launch(f.node, sessionKind(f.node), m.importCommandLine(flags), m.importArgs(flags), nil)
 	r.onLeave = func(m *model) { m.imp, m.screen = nil, scMenu }
 }
 
@@ -499,7 +499,7 @@ func (m *model) importRun() {
 func (m *model) importSaveManifest(path string) {
 	f := m.imp
 	flags := append(f.flags(true), "--manifest-out="+path)
-	r := m.launch(f.node, m.importCommandLine(flags), m.importArgs(flags), nil)
+	r := m.launch(f.node, sessionKind(f.node), m.importCommandLine(flags), m.importArgs(flags), nil)
 	r.onLeave = func(m *model) { m.screen = scImport }
 }
 

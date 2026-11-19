@@ -45,6 +45,7 @@ type Teller struct {
 	statement []byte
 	remedy    func(error) error
 	told      map[string]string // a failure's kind -> the text told last
+	last      string            // the remedy told last
 }
 
 // New makes the teller of an exchange that writes to w, uses the binding
@@ -83,7 +84,17 @@ func (t *Teller) Statement() []byte {
 func (t *Teller) Remedy(err error) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return TellRemedyOnce(func(f string, a ...any) { fmt.Fprintf(t.w, f, a...) }, t.statement, err, t.remedy)
+	return TellRemedyOnce(func(f string, a ...any) {
+		t.last = fmt.Sprintf(f, a...)
+		fmt.Fprint(t.w, t.last)
+	}, t.statement, err, t.remedy)
+}
+
+// LastRemedy is the text of the remedy told last ("" before the first).
+func (t *Teller) LastRemedy() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.last
 }
 
 // Failure tells a failure of one kind ("receiving", "sending") when it is new:

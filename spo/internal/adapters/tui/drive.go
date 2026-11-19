@@ -5,6 +5,8 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/mochipool/workbench/spo/internal/app/relayloop"
 )
 
 // Driver drives the TUI model with no terminal, the way an operator would:
@@ -12,8 +14,9 @@ import (
 // its prompts. Tests use it to run real commands through the TUI; it goes
 // through the same key handling as a real session.
 type Driver struct {
-	m  *model
-	ch chan tea.Msg
+	m    *model
+	ch   chan tea.Msg
+	quit bool
 }
 
 // State is where a driven session stands.
@@ -63,7 +66,7 @@ func (d *Driver) Open(path ...string) error {
 	for i, p := range path {
 		found := -1
 		for j, e := range d.m.entries() {
-			if e.n.name() == p && (len(d.m.group) == 0 || e.n != d.m.current()) {
+			if e.n != nil && e.n.name() == p && (len(d.m.group) == 0 || e.n != d.m.current()) {
 				found = j
 			}
 		}
@@ -237,3 +240,109 @@ func (d *Driver) AwaitNames(timeout time.Duration) error {
 
 // Notice is the form's current notice line.
 func (d *Driver) Notice() string { return d.m.notice }
+
+// ---- the relay session ----
+
+// Session is where the relay session stands, as the operator sees it.
+type Session struct {
+	Phase   string // "logged out", "logging in", "logged in", "logging out", "TUNNEL DID NOT STOP"
+	Message string
+	State   relayloop.State
+	Log     []string
+	Live    bool // what a foreground command's terminal says: logged in
+	Busy    bool // and: a session is in any phase but logged out
+}
+
+// Session reports the relay session.
+func (d *Driver) Session() Session {
+	s := d.m.sess
+	return Session{Phase: s.phase.String(), Message: s.message, State: s.last, Log: append([]string(nil), s.log...),
+		Live: d.m.live.Load(), Busy: d.m.busy.Load()}
+}
+
+// Pump processes what the commands and the session send until cond holds, or
+// the timeout passes.
+func (d *Driver) Pump(timeout time.Duration, cond func() bool) error {
+	deadline := time.After(timeout)
+	// cond may depend on what a goroutine does without a message (a test's
+	// channel): it is looked at again every millisecond
+	poll := time.NewTicker(time.Millisecond)
+	defer poll.Stop()
+	for !cond() {
+		select {
+		case msg := <-d.ch:
+			d.update(msg)
+		case <-poll.C:
+		case <-deadline:
+			return fmt.Errorf("timed out")
+		}
+	}
+	return nil
+}
+
+func (d *Driver) update(msg tea.Msg) {
+	_, cmd := d.m.Update(msg)
+	d.noteQuit(cmd)
+}
+
+// noteQuit records that the model asked the program to quit.
+func (d *Driver) noteQuit(cmd tea.Cmd) {
+	if d.m.quitted {
+		d.quit = true
+	}
+	_ = cmd
+}
+
+// Tick is the timer of a logout firing once.
+func (d *Driver) Tick() { d.update(tickMsg{}) }
+
+// Logout logs the relay session out as "Log out of relays" does, without
+// leaving the screen.
+func (d *Driver) Logout() { d.update(logoutMsg{}) }
+
+// Choose opens an entry of the root menu by its label ("Log out of relays",
+// "Relay session").
+func (d *Driver) Choose(label string) error {
+	d.m.dropRun()
+	d.m.screen, d.m.group, d.m.filtering, d.m.form = scMenu, nil, false, nil
+	for j, e := range d.m.entries() {
+		if e.label == label {
+			d.m.cursors[d.m.cursorKey()] = j
+			d.key("enter")
+			return nil
+		}
+	}
+	return fmt.Errorf("the menu has no %q", label)
+}
+
+// Entries lists the labels of the root menu.
+func (d *Driver) Entries() []string {
+	group, filtering := d.m.group, d.m.filtering
+	d.m.group, d.m.filtering = nil, false
+	defer func() { d.m.group, d.m.filtering = group, filtering }()
+	var out []string
+	for _, e := range d.m.entries() {
+		out = append(out, e.label)
+	}
+	return out
+}
+
+// Quit presses q in the menu.
+func (d *Driver) Quit() {
+	d.m.screen, d.m.form = scMenu, nil
+	d.key("q")
+}
+
+// Quitted reports that the program would have ended.
+func (d *Driver) Quitted() bool { return d.quit || d.m.quitted }
+
+// End is the end of the program (Run returns what this returns).
+func (d *Driver) End() error { return d.m.endSession() }
+
+// OffUpdate counts the changes of the session made outside the UI's update.
+func (d *Driver) OffUpdate() int64 { return d.m.offUpdate.Load() }
+
+// Executor reports the session jobs queued and whether one runs.
+func (d *Driver) Executor() (queued int, running bool) {
+	return len(d.m.exec.queue), d.m.exec.running != nil
+}

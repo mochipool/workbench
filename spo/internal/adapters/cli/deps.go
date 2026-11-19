@@ -55,6 +55,17 @@ type Deps struct {
 	// is plain TCP to a non-loopback host, "" otherwise. Nil: no warning.
 	NodeAddressWarning func(address string) string
 	Sealed             SealedOps
+	// StoreGone reports that an error of the store says the handle can no
+	// longer be used (rekeyed elsewhere, lock lost): a relay login that holds the
+	// workspace for its lifetime then logs out (SPO-Xmailbox-OUT-118). Nil: no
+	// error ends it.
+	StoreGone func(error) bool
+	// RelayLock takes the relay-login lock of a workspace without waiting: an
+	// exclusive advisory lock on the file at path, held by every command that
+	// logs in to the relays or dials them, so that one device never has two
+	// logins from two processes (SPO-Xmailbox-PRE-067). It returns
+	// ErrRelayLockHeld when another process holds it. Nil: no lock.
+	RelayLock func(path string) (release func() error, err error)
 
 	// OpenUpstream opens a directory in the upstream scripts' file layout as
 	// a WORKSPACE, with signing keys unsealed (--upstream-layout). The release
@@ -149,8 +160,13 @@ type NodeConfig struct {
 // token-registry server.
 type RegistryConfig struct{ URL string }
 
-// PartyConfig is the [party] section: the file transport's directories.
-type PartyConfig struct{ Inbox, Outbox string }
+// PartyConfig is the [party] section: the file transport's directories, and
+// relay_login_max, the limit of a relay login (0: the default, 12 hours;
+// SPO-Xmailbox-IF-028).
+type PartyConfig struct {
+	Inbox, Outbox string
+	RelayLoginMax time.Duration
+}
 
 // TailcatConfig is the [tailcat] section. Zero values keep the defaults.
 type TailcatConfig struct {

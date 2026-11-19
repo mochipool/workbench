@@ -23,6 +23,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/app/parties"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
+	"github.com/mochipool/workbench/spo/internal/platform/uihint"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -134,8 +135,9 @@ already has one outstanding; the old request's answer is then refused as stale.`
 	var qrenew bool
 	var qcf chainFlags
 	queue := &cobra.Command{
-		Use:   "queue POOL [--purpose TEXT] [--renew]",
-		Short: "Seal the signing requests of a pool registration into the outbox, for spo party serve to deliver over tailcat",
+		Use:         "queue POOL [--purpose TEXT] [--renew]",
+		Annotations: map[string]string{uihint.RelaySession: uihint.RelayOutbox},
+		Short:       "Seal the signing requests of a pool registration into the outbox, for spo party serve to deliver over tailcat",
 		Long: `Like request export, but the requests are only sealed and kept in the outbox:
 spo party serve sends each to its signer when that signer connects, and sends
 it again, with the same message id, each time the signer reconnects until the
@@ -174,7 +176,13 @@ by file only (request export). Not available in offline mode.`,
 						refused++
 					}
 				}
-				fmt.Fprintf(a.d.Out, "%d request(s) sealed into the outbox. Deliver them with: spo party serve\n", queued)
+				if a.inTUI() {
+					// the TUI says how what waits in the outbox is sent (the relay
+					// session's flush), after the command (SPO-Xmailbox-OUT-120)
+					fmt.Fprintf(a.d.Out, "%d request(s) sealed into the outbox.\n", queued)
+				} else {
+					fmt.Fprintf(a.d.Out, "%d request(s) sealed into the outbox. Deliver them with: spo party serve (or spo party relay login)\n", queued)
+				}
 				if refused > 0 {
 					return fmt.Errorf("%d slot(s) were not requested", refused)
 				}
@@ -386,8 +394,9 @@ spo party request export POOL --out DIR.`,
 // when, by which kind of transport and why (SPO-Xmailbox-IF-021).
 func (a *app) partyOutboxStatusCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   "status",
-		Short: "What waits in the outbox, and what a transport refused and why",
+		Use:         "status",
+		Short:       "What waits in the outbox, and what a transport refused and why",
+		Annotations: map[string]string{uihint.RelaySession: uihint.RelayOutbox},
 		Long: `List every envelope that waits to be carried: its type, its recipient (the local
 name) and its expiry. An envelope a transport refused (the relay said refused,
 too large or bad hash) is offered to that kind of transport again after an hour,
@@ -438,9 +447,10 @@ is offered it at once.`,
 
 func (a *app) partyOutboxRetryCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   "retry",
-		Short: "Offer the envelopes a transport refused again at the next send",
-		Args:  cobra.NoArgs,
+		Use:         "retry",
+		Annotations: map[string]string{uihint.RelaySession: uihint.RelayOutbox},
+		Short:       "Offer the envelopes a transport refused again at the next send",
+		Args:        cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return a.party(cmd, nil, []Need{CapClock}, func(ctx context.Context, r *partyRun) error {
 				n, err := r.node().Outbox().RetryRefused(ctx)
