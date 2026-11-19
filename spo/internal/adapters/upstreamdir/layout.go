@@ -85,6 +85,8 @@ var layout = map[ports.Kind]func(r ports.NamedRef) string{
 	ports.MultisigEvents:      func(r ports.NamedRef) string { return r.Name + ".multisig.events" },
 	ports.MultisigCollection:  func(r ports.NamedRef) string { return r.Name + ".multisig.collection" },
 	ports.MultisigSubmitted:   func(r ports.NamedRef) string { return r.Name + ".multisig.submitted" },
+	// spec: SPO-Xmailbox-OUT-097
+	ports.RelayOwn: func(r ports.NamedRef) string { return r.Name + ".relay.own" },
 }
 
 // modes of the kinds that are not locked at 0400: the published metadata is

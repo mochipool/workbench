@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -107,7 +108,7 @@ All of it needs a sealed workspace.`,
 		a.partyRevokeCommand(), a.partyScopeCommand(), a.partyEventsCommand(), a.partyRotateCommand(), a.partyRotationCommand(),
 		a.partyRequestCommand(), a.partyInboxCommand(), a.partyOutboxCommand(),
 		a.partyRequestsCommand(), a.partyReviewCommand(), a.partyApproveCommand(), a.partyRefuseCommand(),
-		a.partyServeCommand(), a.partyConnectCommand())
+		a.partyServeCommand(), a.partyConnectCommand(), a.partyRelayCommand())
 	return c
 }
 
@@ -257,41 +258,94 @@ func partyIdentityErr(err error) error {
 }
 
 func (a *app) partyExportCommand() *cobra.Command {
-	var overwrite bool
+	var (
+		overwrite bool
+		binding   string
+	)
 	cmd := &cobra.Command{
-		Use:   "export FILE",
+		Use:   "export FILE [--binding BFILE] [--overwrite]",
 		Short: "Write this workspace's public identity document",
 		Long: `Write the signed public identity document (no secret, no address) to FILE, for
 another operator to enroll with: spo party enroll FILE. Then read them the
-first four groups of the fingerprint over another channel.`,
+first four groups of the fingerprint over another channel.
+
+--binding also writes this device's relay binding to BFILE (spo party relay
+bind makes it), the companion they enroll with: spo party enroll FILE --binding
+BFILE. The identity document is the same with or without it.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return a.party(cmd, nil, nil, func(ctx context.Context, r *partyRun) error {
+			if binding != "" && samePath(args[0], binding) {
+				return errors.New("FILE and --binding BFILE are the same file: the binding would overwrite the identity document. Give two paths")
+			}
+			needs := []Need(nil)
+			if binding != "" {
+				needs = []Need{CapClock}
+			}
+			return a.party(cmd, nil, needs, func(ctx context.Context, r *partyRun) error {
 				res, err := parties.ExportIdentity{Store: r.s.Store, Kit: r.kit().Kit}.Run(ctx)
 				if err != nil {
 					return partyIdentityErr(err)
 				}
-				flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
-				if overwrite {
-					flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+				var bfile []byte
+				if binding != "" {
+					svc, err := r.self(ctx)
+					if err != nil {
+						return err
+					}
+					s, err := svc.Status(ctx)
+					if err != nil {
+						return err
+					}
+					// An ended binding is refused: every peer's enrollment check
+					// refuses it on its clock (SPO-Xparty-PRE-008), so the file
+					// could only fail there.
+					if s.Binding != nil && s.Expired {
+						return fmt.Errorf("this device's binding ended on %s: a peer cannot enroll with it. Renew it with spo party relay bind, then export again",
+							time.Unix(s.Binding.Until, 0).UTC().Format(time.DateTime+" MST"))
+					}
+					st, err := svc.Load(ctx)
+					if err != nil {
+						return err
+					}
+					if bfile, err = st.BindingFile(); err != nil {
+						return fmt.Errorf("%w: bind it first with spo party relay bind", err)
+					}
+					if s.RenewDue {
+						fmt.Fprintf(a.d.Err, "WARNING: this device's binding ends in %d day(s); a peer that enrolls with it after that is refused. Renew with spo party relay bind.\n", s.DaysLeft)
+					}
 				}
-				f, err := os.OpenFile(args[0], flags, 0o644)
-				if err != nil {
-					return fmt.Errorf("%w (use --overwrite to replace it)", err)
+				write := func(path string, b []byte) error {
+					flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
+					if overwrite {
+						flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+					}
+					f, err := os.OpenFile(path, flags, 0o644)
+					if err != nil {
+						return fmt.Errorf("%w (use --overwrite to replace it)", err)
+					}
+					if _, err := f.Write(b); err != nil {
+						f.Close()
+						return err
+					}
+					return f.Close()
 				}
-				if _, err := f.Write(res.Document); err != nil {
-					f.Close()
+				if err := write(args[0], res.Document); err != nil {
 					return err
 				}
-				if err := f.Close(); err != nil {
-					return err
+				fmt.Fprintf(a.d.Out, "Wrote the public identity to %s.\nfingerprint  %s\n", args[0], res.Fingerprint)
+				if bfile != nil {
+					if err := write(binding, bfile); err != nil {
+						return err
+					}
+					fmt.Fprintf(a.d.Out, "Wrote this device's relay binding to %s; give it with the identity.\n", binding)
 				}
-				fmt.Fprintf(a.d.Out, "Wrote the public identity to %s.\nfingerprint  %s\nRead the first four groups to the other operator over a separate channel.\n", args[0], res.Fingerprint)
+				fmt.Fprintln(a.d.Out, "Read the first four groups to the other operator over a separate channel.")
 				return nil
 			})
 		},
 	}
-	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "replace FILE if it exists")
+	cmd.Flags().BoolVar(&overwrite, "overwrite", false, "replace FILE (and BFILE) if it exists")
+	cmd.Flags().StringVar(&binding, "binding", "", "also write this device's relay binding to BFILE")
 	return cmd
 }
 
@@ -352,12 +406,13 @@ const unscopedWhy = "UNSCOPED lets this coordinator ask for the parts of a trans
 
 func (a *app) partyEnrollCommand() *cobra.Command {
 	var (
-		name  string
-		roles []string
-		sf    scopeFlags
+		name        string
+		roles       []string
+		sf          scopeFlags
+		bindingFile string
 	)
 	cmd := &cobra.Command{
-		Use:   "enroll FILE --as NAME --role ROLE... [--key-role R]... [--pool P]... [--unscoped]",
+		Use:   "enroll FILE --as NAME --role ROLE... [--key-role R]... [--pool P]... [--unscoped] [--binding BFILE]",
 		Short: "Enroll another party from its identity document",
 		Long: `Record another party. The document is verified (it must be signed by the key it
 contains), then you are shown its label, the roles you give it and the LAST
@@ -373,7 +428,13 @@ requests may be about (--pool) and/or --unscoped. There is no default scope;
 the scope applies to a coordinator and is checked again at every approval.
 
 Enrollment is not mutual by itself: the other operator enrolls you the same
-way.`,
+way.
+
+--binding BFILE is the party's relay binding, given with its document (spo party
+export FILE --binding BFILE). It is checked (signature, this party's device,
+dates, network, never a cold key) and shown as evidence: the wallet key and the
+dates. It does not replace the groups you type. Mail to the party then goes
+through a relay under that wallet key.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if name == "" {
@@ -394,15 +455,31 @@ way.`,
 			if err != nil {
 				return err
 			}
+			var ev *parties.BindingEvidence
+			if bindingFile != "" {
+				if ev, err = readBindingFile(bindingFile); err != nil {
+					return err
+				}
+			}
 			return a.party(cmd, nil, []Need{CapClock}, func(ctx context.Context, r *partyRun) error {
 				k := r.kit()
-				uc := parties.Enroll{Store: r.s.Store, Kit: k.Kit, Registry: k.Registry, Clock: r.env.Clock}
+				uc := parties.Enroll{Store: r.s.Store, Kit: k.Kit, Registry: k.Registry, Clock: r.env.Clock, Relay: r.relayCheck()}
 				ins, err := uc.Inspect(raw, rs)
 				if err != nil {
 					return err
 				}
+				var view parties.BindingView
+				if ev != nil {
+					// the evidence is checked before anything is shown or typed
+					if view, err = uc.InspectBinding(ctx, raw, ev); err != nil {
+						return fmt.Errorf("the binding is refused, nothing was enrolled: %w", err)
+					}
+				}
 				w := a.d.Out
 				fmt.Fprintf(w, "Enrolling %s\n  label       %s (chosen by its owner; not trusted)\n  roles       %v\n", strconv.Quote(name), strconv.Quote(ins.Label), ins.Roles)
+				if ev != nil {
+					printEvidence(w, view)
+				}
 				if slices.Contains(rs, party.RoleCoordinator) {
 					fmt.Fprintf(w, "  scope       key roles %v, pools %v, unscoped %v\n", krs, sf.pools, sf.unscoped)
 				}
@@ -425,7 +502,7 @@ way.`,
 				if err != nil {
 					return err
 				}
-				p, err := uc.Run(ctx, parties.EnrollRequest{Document: raw, Name: name, Roles: rs, KeyRoles: krs, Pools: sf.pools, Unscoped: sf.unscoped, Confirmation: typed})
+				p, err := uc.Run(ctx, parties.EnrollRequest{Document: raw, Name: name, Roles: rs, KeyRoles: krs, Pools: sf.pools, Unscoped: sf.unscoped, Confirmation: typed, Binding: ev})
 				if err != nil {
 					if errors.Is(err, party.ErrConfirmation) {
 						return errors.New("the groups you typed are not the first four groups of that identity's fingerprint: nothing was enrolled. If the other operator read them out correctly, this document is not theirs")
@@ -434,7 +511,10 @@ way.`,
 				}
 				allowLive(p)
 				fmt.Fprintf(w, "Enrolled %s.\n  fingerprint  %s\n", p.Name, p.Fingerprint)
-				if slices.Contains(rs, party.RoleSigner) && p.Identity.Node == nil {
+				if p.Relay != nil {
+					fmt.Fprintf(w, "  wallet key   %x (mail to it goes through a relay under this key)\n", p.Relay.WalletKey[:])
+				}
+				if slices.Contains(rs, party.RoleSigner) && p.Identity.Node == nil && p.Relay == nil {
 					fmt.Fprintln(w, "note: this party has no tailcat node key; it can exchange files only.")
 				}
 				fmt.Fprintln(w, "Enrollment is not mutual by itself: the other operator enrolls you too.")
@@ -444,6 +524,7 @@ way.`,
 	}
 	cmd.Flags().StringVar(&name, "as", "", "the local name for this party (letters, digits, - and _)")
 	cmd.Flags().StringArrayVar(&roles, "role", nil, "coordinator, signer or machine (repeatable)")
+	cmd.Flags().StringVar(&bindingFile, "binding", "", "the party's relay binding file, given with its document")
 	sf.add(cmd)
 	return cmd
 }
@@ -488,11 +569,39 @@ func (a *app) partyListCommand() *cobra.Command {
 					if p.Identity.Node != nil {
 						fmt.Fprintf(w, "  tailcat node key %x\n", p.Identity.Node[:])
 					}
+					if rl := p.Relay; rl != nil {
+						fmt.Fprintf(w, "  relay wallet key %x  binding until %s\n", rl.WalletKey[:], time.Unix(rl.Until, 0).UTC().Format(time.DateTime+" MST"))
+						if rl.Unverified != "" {
+							warnUnverified(a.d.Err, p.Name, rl.Unverified)
+						}
+					}
 				}
 				return nil
 			})
 		},
 	}
+}
+
+// samePath reports whether two paths name one file: the same cleaned absolute
+// path, or, when both exist, the same file (a link).
+func samePath(a, b string) bool {
+	if aa, err := filepath.Abs(a); err == nil {
+		if bb, err := filepath.Abs(b); err == nil && aa == bb {
+			return true
+		}
+	}
+	sa, ea := os.Stat(a)
+	sb, eb := os.Stat(b)
+	return ea == nil && eb == nil && os.SameFile(sa, sb)
+}
+
+// warnUnverified tells the operator that a party's stored relay identity no
+// longer verifies: it is kept, bytes and all, and is no route until replaced or
+// cleared (SPO-Xparty-OUT-007).
+func warnUnverified(w io.Writer, name, why string) {
+	fmt.Fprintf(w, "WARNING: the relay identity of %s no longer verifies (%s): nothing is sent to it through a relay.\n"+
+		"  It is kept as it is. Record a new binding with: spo party relay peer %s --binding BFILE, or remove it with --clear\n",
+		strconv.Quote(name), why, name)
 }
 
 func scopeText(s party.Scope) string {

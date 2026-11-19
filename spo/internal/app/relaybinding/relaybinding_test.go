@@ -655,7 +655,7 @@ func TestRoleAndHistoryAreRefusedBeforeSigning(t *testing.T) {
 		sg := honest(h)
 		s := svc(sg, at(now0))
 		s.History = history(false)
-		s.AllowUnknownHistory = true
+		s = s.AllowingUnknownHistory()
 		if _, err := s.SignBinding(ctx, h.w, devFP(1), 0, relaybind.NoTombstone); err != nil || sg.calls != 1 {
 			t.Errorf("no history with the option: %v", err)
 		}

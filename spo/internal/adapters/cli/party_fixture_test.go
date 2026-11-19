@@ -171,7 +171,7 @@ func realKit(st ports.NamedStore) *PartyKit {
 		v, _ = st.(ports.NamedVault)
 	}
 	reg := partystore.Registry{}
-	return &PartyKit{Kit: envelope.Kit{Store: st, Vault: v}, Registry: reg, SetScope: reg.SetScope, Replay: partystore.Replay{}, Addresses: native.Ledger{},
+	return &PartyKit{Kit: envelope.Kit{Store: st, Vault: v}, Registry: reg, SetScope: reg.SetScope, SetRelay: reg.SetRelay, Replay: partystore.Replay{}, Addresses: native.Ledger{},
 		CheckAncestors: filebag.CheckAncestors, OpenInbox: bagOpener(filebag.Open), OpenOutput: bagOpener(filebag.OpenOutput),
 		Tailcat: TailcatOps{NewNodeKey: tailcat.NewKey, NodePublic: tailcat.PublicKey}}
 }
@@ -203,6 +203,7 @@ func (f *pfix) deps(term Terminal) Deps {
 			}
 			env.Signers = native.Signers{Vault: v}
 			env.Party = realKit(labels.Named(st))
+			env.Party.Relay = testRelayOps(v)
 			if f.edit != nil {
 				f.edit(env, env.Party)
 			}

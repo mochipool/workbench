@@ -191,11 +191,50 @@ func newSockets(before, after []osSocket) []osSocket {
 	return out
 }
 
+// allSockets lists the sockets that this test process holds open. The tables
+// in /proc/self/net cover the whole network namespace, so they also list the
+// sockets of every other process in it: under `go test ./...` the test binaries
+// of other packages (each with its own tailcat engines) run beside this one, in
+// the same namespace. Only the rows whose inode is one of this process's
+// descriptors are kept. The descriptors are read after the tables: a socket
+// that is listed and still open is then among them.
 func allSockets(t *testing.T) (tcp, udp []osSocket) {
 	t.Helper()
 	tcp = append(procSockets(t, "tcp"), procSockets(t, "tcp6")...)
 	udp = append(procSockets(t, "udp"), procSockets(t, "udp6")...)
-	return tcp, udp
+	own := ownSocketInodes(t)
+	return onlyOwn(tcp, own), onlyOwn(udp, own)
+}
+
+// ownSocketInodes returns the inodes of the sockets among this process's
+// descriptors ("socket:[inode]").
+func ownSocketInodes(t *testing.T) map[string]bool {
+	t.Helper()
+	es, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Skipf("no /proc/self/fd: %v", err)
+	}
+	own := map[string]bool{}
+	for _, e := range es {
+		target, err := os.Readlink("/proc/self/fd/" + e.Name())
+		if err != nil {
+			continue // closed since the directory was read
+		}
+		if ino, ok := strings.CutPrefix(target, "socket:["); ok {
+			own[strings.TrimSuffix(ino, "]")] = true
+		}
+	}
+	return own
+}
+
+func onlyOwn(all []osSocket, own map[string]bool) []osSocket {
+	var out []osSocket
+	for _, s := range all {
+		if own[s.inode] {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // Neither side opens a TCP socket that listens, and the served port is not an

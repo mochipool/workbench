@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/mochipool/workbench/spo/internal/app/multisig"
+	"github.com/mochipool/workbench/spo/internal/app/parties"
+	"github.com/mochipool/workbench/spo/internal/app/relayself"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
@@ -68,7 +71,24 @@ peer enroll it from scratch: spo party enroll.`,
 				if !ok {
 					return errors.New("not rotated: the identity is unchanged")
 				}
-				done, err := r.node().RotateIdentity(ctx, label)
+				// This device's relay identity follows the rotation (ADR 0014
+				// decision 11): the old device's revoke is signed now, with the old
+				// key, and stored in the rotation's transaction with the old binding
+				// dropped (SPO-Xmailbox-SEC-076).
+				self, err := r.self(ctx)
+				if err != nil {
+					return err
+				}
+				rr, err := self.PrepareRotation(ctx)
+				if err != nil {
+					return err
+				}
+				var note relayself.RotationNote
+				done, err := r.node().RotateIdentity(ctx, label, func(w ports.NamedWriter, old, next party.Fingerprint) error {
+					var err error
+					note, err = self.OnRotated(w, rr, old, next)
+					return err
+				})
 				if err != nil {
 					return err
 				}
@@ -83,6 +103,17 @@ peer enroll it from scratch: spo party enroll.`,
 					fmt.Fprintf(a.d.Err, "WARNING: the replaced old keys may still be in the store's write-ahead log (%v). Close every spo process on this workspace and open it once more to fold it.\n", done.CheckpointErr)
 				case done.Checkpointed:
 					fmt.Fprintln(w, "  the store's write-ahead log was folded, so the replaced keys are not left in it; a backup made BEFORE this still holds them")
+				}
+				switch {
+				case note.Revoked:
+					fmt.Fprintf(w, "  relay: the old device's binding is dropped and its revoke (signed by the old key) is kept to send to every relay until %s.\n"+
+						"  Bind this device again (one wallet signature): spo party relay bind, then give the binding to your peers with spo party export FILE --binding BFILE\n",
+						time.Unix(note.OldUntil, 0).UTC().Format(time.DateTime+" MST"))
+				case note.Needed:
+					fmt.Fprintf(a.d.Err, "WARNING: the revokes waiting to be sent are full, so the revoke of the old device %s was NOT stored.\n"+
+						"  Its binding stays valid at relays until %s. Make room (spo party relay status, spo party relay drop-revoke ID),\n"+
+						"  then revoke it with the wallet key: spo party relay revoke --device %x (--key NAME | --print --wallet HEX)\n",
+						note.Old, time.Unix(note.OldUntil, 0).UTC().Format(time.DateTime+" MST"), note.Old[:])
 				}
 				fmt.Fprintf(w, "\nRead the FIRST FOUR groups of the new fingerprint to each peer over a separate channel. They type them to accept.\nCarry the announcements with: spo party outbox export DIR\n")
 				return nil
@@ -145,8 +176,9 @@ func (a *app) partyRotationListCommand() *cobra.Command {
 }
 
 func (a *app) partyRotationAcceptCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:   "accept NAME",
+	var bindingFile string
+	cmd := &cobra.Command{
+		Use:   "accept NAME [--binding BFILE]",
 		Short: "Replace an enrolled party's identity by the one it announced, after you confirm the new fingerprint",
 		Long: `Show the announcement of NAME and ask for the first four groups of the NEW fingerprint,
 which NAME's operator reads out over a separate channel and which are never on the screen,
@@ -156,18 +188,39 @@ There is no flag that answers either, and with no terminal nothing changes.
 
 In one step the old identity is revoked (kept, under a name that cannot be an enrollment
 name, so it can never be enrolled again) and the new one is enrolled under NAME with the
-same roles. Requests that were sent to the old identity are void and must be made again.`,
+same roles. Requests that were sent to the old identity are void and must be made again.
+
+The new identity has no relay identity unless you give its binding with --binding BFILE
+(checked and shown as evidence, as at enrollment); without it NAME is reachable by file
+or a direct connection until you record one with spo party relay peer NAME --binding.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			var ev *parties.BindingEvidence
+			if bindingFile != "" {
+				var err error
+				if ev, err = readBindingFile(bindingFile); err != nil {
+					return err
+				}
+			}
 			return a.party(cmd, nil, []Need{CapClock}, func(ctx context.Context, r *partyRun) error {
 				node := r.node()
 				pr, err := node.RotationOf(ctx, args[0])
 				if err != nil {
 					return rotationErr(err, args[0])
 				}
+				var relay *party.RelayIdentity
+				var view parties.BindingView
+				if ev != nil {
+					if relay, view, err = r.relayCheck().CheckRotationBinding(ctx, r.s.Store, r.kit().Registry, pr.New.Fingerprint(), ev, r.env.Clock.Now()); err != nil {
+						return fmt.Errorf("the binding is refused, nothing changed: %w", err)
+					}
+				}
 				w := a.d.Out
 				fmt.Fprintf(w, "%s announces a new identity.\n  old fingerprint  %s\n  new label        %s (chosen by its owner; not trusted)\n  last four groups of the new fingerprint  %s\n  roles it keeps   %v\n  scope now        %s\n",
 					strconv.Quote(pr.Name), pr.Old, strconv.Quote(pr.New.Label), pr.New.Fingerprint().Tail(), pr.Roles, scopeText(pr.Scope))
+				if ev != nil {
+					printEvidence(w, view)
+				}
 				fmt.Fprintf(w, "The other operator reads you the FIRST %d groups of the NEW fingerprint over a separate channel (not this announcement, not a message that came with it).\n", party.ConfirmGroups)
 				typed, err := a.term.ReadLine(ctx, fmt.Sprintf("Type the first %d groups of the new fingerprint: ", party.ConfirmGroups))
 				if errors.Is(err, ErrNoTerminal) {
@@ -194,7 +247,7 @@ same roles. Requests that were sent to the old identity are void and must be mad
 						hooks = append(hooks, c.OnRotate)
 					}
 				}
-				res, err := node.AcceptRotation(ctx, args[0], party.RotationAcceptance{Confirmation: typed, CarryScope: carry}, hooks...)
+				res, err := node.AcceptRotation(ctx, args[0], party.RotationAcceptance{Confirmation: typed, CarryScope: carry, Relay: relay}, hooks...)
 				if err != nil {
 					return rotationErr(err, args[0])
 				}
@@ -211,10 +264,17 @@ same roles. Requests that were sent to the old identity are void and must be mad
 					fmt.Fprintf(w, "  %d request(s) sent to the old identity are void and must be requested again; %d queued envelope(s) dropped; %d request(s) from it closed\n",
 						res.VoidedSlots, res.DroppedEnvelopes, res.ClosedRequests)
 				}
+				if res.Party.Relay != nil {
+					fmt.Fprintf(w, "  relay wallet key %x\n", res.Party.Relay.WalletKey[:])
+				} else {
+					fmt.Fprintf(w, "  no relay identity: record one with spo party relay peer %s --binding BFILE\n", res.Party.Name)
+				}
 				return nil
 			})
 		},
 	}
+	cmd.Flags().StringVar(&bindingFile, "binding", "", "the new identity's relay binding file")
+	return cmd
 }
 
 func (a *app) partyRotationRejectCommand() *cobra.Command {

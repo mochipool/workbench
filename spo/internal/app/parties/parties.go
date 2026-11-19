@@ -21,6 +21,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
+	"github.com/mochipool/workbench/spo/internal/domain/relaypeer"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -138,6 +139,10 @@ type Enroll struct {
 	Kit      ports.IdentityKit
 	Registry ports.PartyRegistry
 	Clock    ports.Clock
+	// Relay checks a binding given with the document (SPO-Xparty-PRE-008); its
+	// zero value refuses every binding and leaves enrollment without one as it
+	// was.
+	Relay RelayCheck
 }
 
 // Inspection is what the operator is shown before typing the groups. It
@@ -183,6 +188,9 @@ type EnrollRequest struct {
 	// Confirmation is the first four groups of the fingerprint as the
 	// operator typed them. There is no default (SPO-Xparty-PR-001).
 	Confirmation string
+	// Binding is the party's binding, given with the document; nil enrolls it
+	// with no relay identity.
+	Binding *BindingEvidence
 }
 
 // canonicalPool turns a pool id into its bech32 form, the form a body's pool
@@ -217,6 +225,15 @@ func (uc Enroll) Run(ctx context.Context, req EnrollRequest) (party.Party, error
 		}
 		pools = append(pools, c)
 	}
+	now := uc.Clock.Now()
+	var pre relaypeer.Evidence
+	if req.Binding != nil {
+		// the binding and the role history first, outside the transaction (the
+		// history is read from the key index); the registry is checked inside
+		if pre, err = uc.Relay.verifyNoStore(ctx, req.Binding, doc.Identity.Fingerprint(), now); err != nil {
+			return party.Party{}, err
+		}
+	}
 	var out party.Party
 	err = uc.Store.Update(ctx, func(w ports.NamedWriter) error {
 		// A party does not enroll itself.
@@ -231,18 +248,30 @@ func (uc Enroll) Run(ctx context.Context, req EnrollRequest) (party.Party, error
 		if err != nil {
 			return err
 		}
-		p, err := party.Enroll(party.Enrollment{Document: doc, Name: req.Name, Roles: req.Roles,
+		e := party.Enrollment{Document: doc, Name: req.Name, Roles: req.Roles,
 			Scope:        party.Scope{KeyRoles: req.KeyRoles, Pools: pools, Unscoped: req.Unscoped},
-			Confirmation: req.Confirmation}, existing, uc.Clock.Now())
+			Confirmation: req.Confirmation}
+		if req.Binding != nil {
+			e.Relay = &pre.Relay
+		}
+		p, err := party.Enroll(e, existing, now)
 		if err != nil {
 			return err
+		}
+		if p.Relay != nil {
+			if _, err := relaypeer.CheckClaim(p.Relay.WalletKey, p.Fingerprint, append(existing, p)); err != nil {
+				return err
+			}
 		}
 		if err := uc.Registry.Put(w, p); err != nil {
 			return err
 		}
 		out = p
-		return AppendEvent(w, Event{At: uc.Clock.Now(), Kind: "party-enrolled", Peer: p.Fingerprint.String(),
-			Detail: fmt.Sprintf("%s roles=%v key roles=%v pools=%v unscoped=%v", p.Name, p.Roles, p.Scope.KeyRoles, p.Scope.Pools, p.Scope.Unscoped)})
+		detail := fmt.Sprintf("%s roles=%v key roles=%v pools=%v unscoped=%v", p.Name, p.Roles, p.Scope.KeyRoles, p.Scope.Pools, p.Scope.Unscoped)
+		if p.Relay != nil {
+			detail += fmt.Sprintf(" wallet key=%x until=%d", p.Relay.WalletKey[:], p.Relay.Until)
+		}
+		return AppendEvent(w, Event{At: now, Kind: "party-enrolled", Peer: p.Fingerprint.String(), Detail: detail})
 	})
 	return out, err
 }

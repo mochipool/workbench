@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/mochipool/workbench/spo/internal/domain/party"
+	"github.com/mochipool/workbench/spo/internal/domain/relaypeer"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -245,6 +246,17 @@ func (n Node) AcceptRotation(ctx context.Context, name string, a party.RotationA
 		if err != nil {
 			return err
 		}
+		if next.Relay != nil {
+			// the wallet-key claim against the registry as it is in this
+			// transaction (SPO-Xparty-INV-042, PRE-008): no pool id named in a
+			// scope, fewer than 8 other active parties with the key; the old
+			// identity counts as what it becomes, revoked
+			after := slices.Clone(ps)
+			after[i] = retired
+			if _, err := relaypeer.CheckClaim(next.Relay.WalletKey, next.Fingerprint, after); err != nil {
+				return err
+			}
+		}
 		if err := n.Parties.Rotate(w, old.Fingerprint, retired, next); err != nil {
 			return err
 		}
@@ -387,7 +399,12 @@ type RotationDone struct {
 // collections lose their outstanding requests (SPO-Xparty-INV-033).
 //
 // spec: SPO-Xparty-IF-008, SPO-Xparty-INV-030, SPO-Xparty-INV-033
-func (n Node) RotateIdentity(ctx context.Context, label string) (RotationDone, error) {
+//
+// The hooks run in the same transaction, after the check that the workspace's
+// identity is still the old one: a hook's error rotates nothing. The relay
+// state of this device follows the rotation this way (relayself.OnRotated: the
+// revoke of the old device is stored, its binding dropped).
+func (n Node) RotateIdentity(ctx context.Context, label string, hooks ...func(w ports.NamedWriter, old, next party.Fingerprint) error) (RotationDone, error) {
 	now := n.Clock.Now()
 	var peers []party.Party
 	if err := n.Store.View(ctx, func(r ports.NamedReader) error {
@@ -424,6 +441,11 @@ func (n Node) RotateIdentity(ctx context.Context, label string) (RotationDone, e
 		}
 		if err := undeliveredRotations(w, now); err != nil {
 			return err
+		}
+		for _, h := range hooks {
+			if err := h(w, g.Old, g.Identity.Fingerprint()); err != nil {
+				return err
+			}
 		}
 		if err := w.PutSecret(localKeysRef, g.Keys); err != nil {
 			return err

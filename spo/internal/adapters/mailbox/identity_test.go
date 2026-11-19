@@ -103,7 +103,7 @@ func TestTheLoginCodesBindingAndNotAllowedBackOffAndNameTheRemedy(t *testing.T) 
 // the client's own clock. A Receive whose context outlasts the backoff returns the
 // sentinel too. SetBinding ends it.
 //
-// spec: SPO-Xmailbox-OUT-092, SPO-Xmailbox-OUT-094
+// spec: SPO-Xmailbox-OUT-092, SPO-Xmailbox-OUT-094, SPO-Xmailbox-OUT-099
 func TestSendDuringTheBackoffStillSaysTheIdentityIsRefused(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -135,11 +135,14 @@ func TestSendDuringTheBackoffStillSaysTheIdentityIsRefused(t *testing.T) {
 			}
 			if err := sendOnce(c); !errors.Is(err, tc.is) {
 				t.Fatalf("the first Send = %v, want %v", err, tc.is)
+			} else if !errors.Is(err, ports.ErrIdentityRefused) {
+				// the outbox stops its run at it (SPO-Xmailbox-OUT-099)
+				t.Fatalf("the first Send = %v, want it to be ports.ErrIdentityRefused too", err)
 			}
 			dials := cd.count()
 			for i := range 3 {
 				err := sendOnce(c)
-				if !errors.Is(err, ports.ErrNoRoute) || !errors.Is(err, tc.is) || errors.Is(err, mailbox.ErrUnreachable) {
+				if !errors.Is(err, ports.ErrNoRoute) || !errors.Is(err, tc.is) || !errors.Is(err, ports.ErrIdentityRefused) || errors.Is(err, mailbox.ErrUnreachable) {
 					t.Fatalf("Send %d inside the backoff = %v, want ErrNoRoute wrapping %v and not ErrUnreachable", i, err, tc.is)
 				}
 				if !strings.Contains(err.Error(), string(tc.reason)) {

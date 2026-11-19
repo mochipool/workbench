@@ -105,13 +105,23 @@ type Service struct {
 	// Policy is what the client assumes of the relay: the skew it allows and the
 	// longest lifetime it accepts. The zero value is relaybind.DefaultPolicy().
 	Policy relaybind.Policy
-	// AllowUnknownHistory lets a key with NO known role history pass the history
+	// allowUnknownHistory lets a key with NO known role history pass the history
 	// check (a known history is always checked in full). It is reserved for
 	// device-only keys in work package 4, whose safety rests on the derivation-path
 	// check, and nothing sets it today. The default is to refuse
 	// (relaywallet.ErrNoHistory): a key the workspace has no record of cannot be
-	// shown never to have been a cold key.
-	AllowUnknownHistory bool
+	// shown never to have been a cold key. It is unexported so that no literal
+	// and no assignment of another package can set it; AllowingUnknownHistory is
+	// the one way, and an architecture test refuses a production call of it.
+	allowUnknownHistory bool
+}
+
+// AllowingUnknownHistory is s with the pass-through for a key of no known role
+// history. Reserved for device-only hardware keys (work package 4); no
+// production code calls it (SPO-Xmailbox-SEC-074).
+func (s Service) AllowingUnknownHistory() Service {
+	s.allowUnknownHistory = true
+	return s
 }
 
 // DefaultLifetime is the lifetime of a binding when none is asked for: 90 days
@@ -187,7 +197,7 @@ func (s Service) checkKey(ctx context.Context, key relaywallet.WalletKey) error 
 		return ErrNoHistory
 	}
 	h, known, err := s.History(ctx, key.Ref().Identity)
-	if s.AllowUnknownHistory {
+	if s.allowUnknownHistory {
 		return key.CheckHistoryAllowingUnknown(h, known, err)
 	}
 	return key.CheckHistory(h, known, err)
