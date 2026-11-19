@@ -210,7 +210,7 @@ func TestSlotKeySeparation(t *testing.T) {
 		"another format version":          base(func(s *SlotSpec) { s.FormatVersion = 3 }),
 		"another factor id":               base(func(s *SlotSpec) { s.Factors[1].ID = rep(0xab, 32) }),
 		"another factor kind (backend)": base(func(s *SlotSpec) {
-			s.Factors[1] = FactorParams{Kind: FactorBackend, ID: rep(0xaa, 32), BackendKeyRef: "k"}
+			s.Factors[1] = FactorParams{Kind: FactorBackend, ID: rep(0xaa, 32), BackendKind: "vault-transit", BackendAddress: "https://v", BackendKeyRef: "t/k", BackendBlob: []byte("x")}
 		}),
 		"another first output":  base(nil, rep(0x56, 32), b),
 		"another second output": base(nil, a, rep(0x45, 32)),

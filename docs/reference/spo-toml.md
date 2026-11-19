@@ -45,6 +45,33 @@ relay_login_max = "12h" # default; the longest relay login (spo party relay logi
 [tailcat]               # optional; multi-party signing, tailcat transport
 port = 7345             # the one TCP port a coordinator serves and a signer dials
 derp_map_url = "https://controlplane.tailscale.com/derpmap/default"   # relay map override
+
+[vault]                 # optional; a Vault Transit unlock factor (workspace slot add-backend)
+address = "https://vault.example:8200"
+namespace = "ops"       # optional (Vault Enterprise, HCP Vault)
+mount = "transit"       # default
+key = "spo-unlock"      # an aes256-gcm96, aes128-gcm96 or chacha20-poly1305 key, not derived
+ca_file = "/etc/spo/vault-ca.pem"   # optional; default: the system roots
+auth = "token"          # token (VAULT_TOKEN, else token_file) or jwt
+token_file = "/home/op/.vault-token" # default: $HOME/.vault-token
+jwt_mount = "jwt"       # auth = "jwt" only
+jwt_role = "spo"
+jwt_file = "/run/user/1000/vault.jwt"
+timeout_seconds = 30    # 1 to 600
+allow_loopback_http = false  # default; true allows http:// to a loopback IP only
+
+[kms]                   # optional; an AWS KMS unlock factor
+key_arn = "arn:aws:kms:eu-west-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
+# KMS and STS: the public endpoints of the key's region, with the system roots.
+# The private_* keys are for private (VPC) endpoints only:
+# private_endpoint = "https://vpce-0abc.kms.eu-west-1.vpce.amazonaws.com"
+# private_ca_file = "/etc/spo/kms-ca.pem"       # the CA of private_endpoint only
+# private_sts_endpoint = "https://vpce-0def.sts.eu-west-1.vpce.amazonaws.com"
+# private_sts_ca_file = "/etc/spo/sts-ca.pem"   # the CA of private_sts_endpoint only
+role_arn = "arn:aws:iam::111122223333:role/spo-unlock"  # with web_identity_token_file
+web_identity_token_file = "/run/user/1000/aws.jwt"
+role_session_name = "spo-unlock"  # default
+timeout_seconds = 30
 ```
 
 | Key | Type | Meaning |
@@ -68,6 +95,21 @@ derp_map_url = "https://controlplane.tailscale.com/derpmap/default"   # relay ma
 | `[tailcat]` | section | The tailcat transport. |
 | `[tailcat] port` | integer | The TCP port a coordinator serves and a signer dials, 1 to 65535. Default 7345. |
 | `[tailcat] derp_map_url` | string | Where tailcat fetches its relay (DERP) map from. Default: tailcat's own. |
+| `[vault]` | section | A Vault Transit key used as an unlock factor ([how-to](../how-to/unlock-with-vault-or-kms.md)). `address`, `namespace`, `mount` and `key` are read by `workspace slot add-backend --backend vault`, which stores them in the slot. They stay the authority: the slot's copy is a claim, and every unlock, verify and restore refuses a slot whose backend differs from these before any credential is read or any call is made (SPO-Xunlock-PRE-045). |
+| `[vault] address` | string | `https://host[:port]`. No path, query or credentials. |
+| `[vault] allow_loopback_http`, `[kms] allow_loopback_http` | boolean | `true` allows plain `http` to a loopback IP address (`127.0.0.1`, `[::1]`) for that section's endpoints: a local agent or a test server. Default `false`: TLS always. A slot cannot turn it on. |
+| `[vault] namespace`, `mount`, `key` | string | The namespace (optional), the Transit mount (default `transit`) and the key name. The key must be of a type that takes associated data and must not be a derived key; the client reads its configuration and refuses otherwise. |
+| `[vault] ca_file` | string | A PEM file of the CA certificates that sign the server's certificate. Default: the system roots. |
+| `[vault] auth` | string | `token` (default): the token in `VAULT_TOKEN`, else in `token_file` (default `$HOME/.vault-token`, where `vault login` keeps it). `jwt`: a JWT login at `auth/<jwt_mount>/login` with `jwt_role` and the JWT in `jwt_file`. Token and JWT files must be regular files (no symbolic link, no pipe) owned by you and readable by you only. The token is looked up first; a token with TTL 0 or the `root` policy is refused. |
+| `[vault] timeout_seconds` | integer | The deadline of each call, connection included, 1 to 600. Default 30. |
+| `[kms]` | section | An AWS KMS symmetric key used as an unlock factor. `key_arn` and the endpoint (the public one of its region, or `private_endpoint`) are read by `workspace slot add-backend --backend kms`, which stores them in the slot; as with `[vault]`, they stay the authority at every unlock. |
+| `[kms] key_arn` | string | A key ARN (`arn:aws:kms:<region>:<account>:key/<id>`). An alias or a bare key id is refused: every answer's key id is compared with this ARN. The KMS and STS endpoints are the public ones of its partition and region, with the system roots. |
+| `[kms] private_endpoint`, `private_ca_file` | string | For a private (VPC) KMS endpoint only: its URL, and the PEM file of its CA (used for this endpoint only). `private_ca_file` without `private_endpoint` is refused. |
+| `[kms] private_sts_endpoint`, `private_sts_ca_file` | string | For a private (VPC) STS endpoint only: where the web identity token is sent instead of the public STS endpoint, and its CA (for this endpoint only). `private_sts_ca_file` without `private_sts_endpoint` is refused. |
+| `[kms] role_arn`, `web_identity_token_file`, `role_session_name` | string | A web identity exchanged at STS `AssumeRoleWithWebIdentity` for 15-minute credentials. Default: `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_ROLE_SESSION_NAME` (default `spo-unlock`). The token file follows the rules of the Vault token file. Without a web identity, the environment must hold temporary credentials: an `ASIA` key id with `AWS_SESSION_TOKEN`; any other key id is refused. |
+| `[kms] timeout_seconds` | integer | As for `[vault]`. |
+
+No Vault token, JWT, AWS access key, secret key or session token is ever a setting: `[vault]` and `[kms]` have no key for one, and such a key is an unknown key and an error.
 
 The tailcat node key, the pre-shared key and the coordinator's address are **sealed records**, never settings: a key such as `psk`, `node_key`, `address` or `auth_key` is an unknown key and an error. There is no tailcat auth key anywhere: the pre-shared key is part of the address, which a coordinator gives only inside an invitation sealed to one signer.
 

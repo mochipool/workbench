@@ -368,6 +368,9 @@ func (t *table) infos() []SlotInfo {
 						fi.CredentialID = sf.CredentialID
 						fi.Touch = sf.Touch
 					}
+					if sf.Kind == seal.FactorBackend && f.Kind == unlock.Backend && bytes.Equal(sf.ID, f.ID) {
+						fi.Backend = backendRefOf(sf)
+					}
 				}
 			}
 			info.Factors = append(info.Factors, fi)

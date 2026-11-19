@@ -5,7 +5,8 @@
 //
 // The package knows slots as a set of factors by kind and id. It does not know
 // how a slot key is derived (platform/seal) or where a table is kept. A
-// Vault or KMS factor is only a factor kind here; no client of either exists.
+// Vault or KMS factor is only a factor kind here; its clients are in
+// adapters/vaultkms.
 package unlock
 
 import (

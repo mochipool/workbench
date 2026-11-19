@@ -73,7 +73,7 @@ func (c SnapshotCredential) resolve() (credential, func(), error) {
 		}
 		return credential{kind: seal.SlotRecovery, buf: raw}, raw.Destroy, nil
 	}
-	if c.Factors.Source == nil {
+	if !c.Factors.canPresent() {
 		return credential{}, nil, errors.New("sqlitestore: no factor source")
 	}
 	return credential{kind: credFactors, factors: c.Factors}, func() {}, nil

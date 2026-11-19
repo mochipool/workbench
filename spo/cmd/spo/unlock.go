@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/mochipool/workbench/spo/internal/adapters/cli"
 	"github.com/mochipool/workbench/spo/internal/adapters/native"
 	"github.com/mochipool/workbench/spo/internal/adapters/sqlitestore"
+	"github.com/mochipool/workbench/spo/internal/adapters/vaultkms"
 	"github.com/mochipool/workbench/spo/internal/app/layoutexport"
 	"github.com/mochipool/workbench/spo/internal/domain/unlock"
 	"github.com/mochipool/workbench/spo/internal/platform/seal"
@@ -19,7 +21,8 @@ import (
 // The recovery key arrives as typed (grouped text) and goes to the store as its
 // 32 raw bytes.
 func factorInputs(in cli.FactorOpen) sqlitestore.FactorInputs {
-	out := sqlitestore.FactorInputs{Source: in.Source, Device: in.Device, PIN: in.PIN, Passphrase: in.Passphrase, Notify: in.Notify}
+	out := sqlitestore.FactorInputs{Source: in.Source, Device: in.Device, PIN: in.PIN, Passphrase: in.Passphrase, Notify: in.Notify,
+		Backend: in.Backend, BackendCheck: in.BackendCheck}
 	if in.Recovery != nil {
 		out.Recovery = func(ctx context.Context) (*secret.Buffer, error) {
 			text, err := in.Recovery(ctx)
@@ -95,11 +98,15 @@ func describe(path string) (cli.WorkspaceInfo, error) {
 		s := cli.Slot{ID: x.ID, Kind: x.Kind, Legacy: x.Legacy}
 		for _, f := range x.Factors {
 			s.Factors = append(s.Factors, f.Kind)
-			touch := ""
+			touch, backend := "", ""
 			if f.Kind == "fido2" {
 				touch = ports.TouchProbe(f.Touch).String()
 			}
+			if f.Kind == string(unlock.Backend) {
+				backend = f.Backend.String()
+			}
 			s.Touch = append(s.Touch, touch)
+			s.Backend = append(s.Backend, backend)
 		}
 		info.Slots = append(info.Slots, s)
 	}
@@ -125,6 +132,63 @@ func (w sealedStore) Policy(ctx context.Context) (string, error) {
 func (w sealedStore) AddFIDO2Slot(ctx context.Context, in cli.FactorOpen) ([]byte, error) {
 	id, err := w.s.EnrolAndAddFIDO2(ctx, factorInputs(in))
 	return id, mapStoreErr(err)
+}
+
+// AddBackendSlot makes the other factor (a new passphrase factor, or a new
+// FIDO2 credential) and adds the composite slot with the backend factor.
+func (w sealedStore) AddBackendSlot(ctx context.Context, req cli.AddBackendRequest) ([]byte, error) {
+	if c, ok := req.Client.(interface{ Close() }); ok {
+		defer c.Close() // the credential lives for this command only
+	}
+	if req.Client == nil {
+		return nil, errors.New("no backend client")
+	}
+	var kind seal.FactorKind
+	switch {
+	case req.Passphrase != nil:
+		kind = seal.FactorPassphrase
+	case req.FIDO2 != nil:
+		kind = seal.FactorFIDO2
+	default:
+		return nil, errors.New("a backend slot needs a passphrase or a FIDO2 factor beside it")
+	}
+	// every refusal of the store first, before an authenticator makes a
+	// credential or the backend is called: a refused slot leaves nothing behind
+	if err := w.s.CheckBackendSlot(ctx, req.Client.Ref(), []seal.FactorKind{kind}); err != nil {
+		return nil, mapStoreErr(err)
+	}
+	var other sqlitestore.FactorPlan
+	var err error
+	if kind == seal.FactorPassphrase {
+		other, err = sqlitestore.NewPassphraseFactor(req.Passphrase)
+	} else {
+		other, _, err = sqlitestore.EnrolFactor(ctx, factorInputs(*req.FIDO2), w.s.WorkspaceNonce(), nil)
+	}
+	if err != nil {
+		return nil, mapStoreErr(err)
+	}
+	defer other.Output.Destroy()
+	id, err := w.s.AddBackendSlot(ctx, req.Client, []sqlitestore.FactorPlan{other})
+	return id, mapStoreErr(err)
+}
+
+// keyWrap builds the Vault or KMS client of a backend reference (one the
+// command layer has checked against spo.toml) with the client-side settings of
+// spo.toml. Plain http to loopback and the private KMS and STS endpoints come
+// from the file only.
+func keyWrap(ref ports.BackendRef, vc *cli.VaultConfig, kc *cli.KMSConfig) (ports.KeyWrapBackend, error) {
+	var o vaultkms.Options
+	if vc != nil {
+		o.Vault = vaultkms.VaultOptions{CAFile: vc.CAFile, Auth: vc.Auth, TokenFile: vc.TokenFile, JWTMount: vc.JWTMount, JWTRole: vc.JWTRole,
+			JWTFile: vc.JWTFile, Timeout: time.Duration(vc.TimeoutSeconds) * time.Second, AllowLoopbackHTTP: vc.AllowLoopbackHTTP}
+	}
+	if kc != nil {
+		o.KMS = vaultkms.KMSOptions{PrivateEndpoint: kc.PrivateEndpoint, PrivateCAFile: kc.PrivateCAFile,
+			PrivateSTSEndpoint: kc.PrivateSTSEndpoint, PrivateSTSCAFile: kc.PrivateSTSCAFile, AllowLoopbackHTTP: kc.AllowLoopbackHTTP,
+			RoleARN: kc.RoleARN, WebIdentityTokenFile: kc.WebIdentityTokenFile,
+			RoleSessionName: kc.RoleSessionName, Timeout: time.Duration(kc.TimeoutSeconds) * time.Second}
+	}
+	return vaultkms.Open(ref, o)
 }
 
 // Reauthenticate asks the authenticator again and checks the answer against the
