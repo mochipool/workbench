@@ -96,11 +96,17 @@ let
     # SPO-Xbackup-SEC-017): signatures made by the code must verify with stock
     # OpenSSH. SPO_REQUIRE_SSH_KEYGEN makes a missing tool a failure here, where
     # the tests otherwise skip when it is absent.
-    nativeCheckInputs = [ pkgs.openssh ];
+    #
+    # python3 runs the independent checks of the committed test vectors
+    # (domain/mailbox and domain/relaybind testdata/check_vectors.py, standard
+    # library only). SPO_REQUIRE_PYTHON makes a missing interpreter a failure
+    # here, where the tests otherwise skip when it is absent.
+    nativeCheckInputs = [ pkgs.openssh pkgs.python3 ];
     checkPhase = ''
       runHook preCheck
       export HOME=$TMPDIR
       export SPO_REQUIRE_SSH_KEYGEN=1
+      export SPO_REQUIRE_PYTHON=1
       go vet ./...
       go test ./...
       # The tests above run without the plainlayout tag. The tagged build is

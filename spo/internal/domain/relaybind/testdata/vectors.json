@@ -1,0 +1,391 @@
+{
+  "note": "ADR 0014 work package 1. SOFTWARE test-key vectors: provisional, NOT frozen for hardware wallets (ADR 0014 freezes them only after a real-device check). Hex is lower-case; numbers are decimal.",
+  "software_key_seed": "0708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20212223242526",
+  "software_key_public": "00d05a1d1ea251396d557afbd4588b3c6d99dbeb972fed10a32562ea26dcdcfa",
+  "software_key_hash": "3d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d4",
+  "statements": [
+    {
+      "name": "typical",
+      "kind": "binding",
+      "device": "303132333435363738393a3b3c3d3e3f40414243",
+      "from": 1799999940,
+      "until": 1807775940,
+      "not_before": 0,
+      "payload": "spo-relay-binding-v1 device 303132333435363738393a3b3c3d3e3f40414243 from 1799999940 until 1807775940",
+      "payload_hex": "73706f2d72656c61792d62696e64696e672d76312064657669636520333033313332333333343335333633373338333933613362336333643365336634303431343234332066726f6d203137393939393939343020756e74696c2031383037373735393430",
+      "address_form": "key-hash",
+      "address_hex": "3d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d4",
+      "protected_hex": "a201276761646472657373581c3d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d4",
+      "sig_structure_hex": "846a5369676e6174757265315829a201276761646472657373581c3d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d440586573706f2d72656c61792d62696e64696e672d76312064657669636520333033313332333333343335333633373338333933613362336333643365336634303431343234332066726f6d203137393939393939343020756e74696c2031383037373735393430",
+      "signature_hex": "7030200ab5d297690fac7ad58a8dcd0239c0e8f0ede96b34d97fc0ee4cce66aef7ebbcf6b0a92a65ceff870336473fc5e84a88640f0df02ee24a88b108288307",
+      "sign1_hex": "845829a201276761646472657373581c3d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d4a166686173686564f4586573706f2d72656c61792d62696e64696e672d76312064657669636520333033313332333333343335333633373338333933613362336333643365336634303431343234332066726f6d203137393939393939343020756e74696c203138303737373539343058407030200ab5d297690fac7ad58a8dcd0239c0e8f0ede96b34d97fc0ee4cce66aef7ebbcf6b0a92a65ceff870336473fc5e84a88640f0df02ee24a88b108288307",
+      "canonical_hash_hex": "d2d6484df99c6d170b03b19df59d9c92f6a6a22494dd62f12b499d359f5cb770",
+      "statement_id_hex": "69ec7353023ea4869357321d263af5647f3468fb9940b01ae521e4548613e600",
+      "cose_key_hex": "a401010327200621582000d05a1d1ea251396d557afbd4588b3c6d99dbeb972fed10a32562ea26dcdcfa"
+    },
+    {
+      "name": "shortest lifetime, from zero",
+      "kind": "binding",
+      "device": "000102030405060708090a0b0c0d0e0f10111213",
+      "from": 0,
+      "until": 3600,
+      "not_before": 0,
+      "payload": "spo-relay-binding-v1 device 000102030405060708090a0b0c0d0e0f10111213 from 0 until 3600",
+      "payload_hex": "73706f2d72656c61792d62696e64696e672d76312064657669636520303030313032303330343035303630373038303930613062306330643065306631303131313231332066726f6d203020756e74696c2033363030",
+      "address_form": "key-hash",
+      "address_hex": "3d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d4",
+      "protected_hex": "a201276761646472657373581c3d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d4",
+      "sig_structure_hex": "846a5369676e6174757265315829a201276761646472657373581c3d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d440585673706f2d72656c61792d62696e64696e672d76312064657669636520303030313032303330343035303630373038303930613062306330643065306631303131313231332066726f6d203020756e74696c2033363030",
+      "signature_hex": "7146ee74e099595a5a5cbffc164214af37986342547de79b77aa328ad82ecdee5bec9dad4064a328ca38e996607219ecbc7e0ec398a0e786271754ac82af2f01",
+      "sign1_hex": "845829a201276761646472657373581c3d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d4a166686173686564f4585673706f2d72656c61792d62696e64696e672d76312064657669636520303030313032303330343035303630373038303930613062306330643065306631303131313231332066726f6d203020756e74696c203336303058407146ee74e099595a5a5cbffc164214af37986342547de79b77aa328ad82ecdee5bec9dad4064a328ca38e996607219ecbc7e0ec398a0e786271754ac82af2f01",
+      "canonical_hash_hex": "95ccaef1b9d7c30fbb3c212fdbd63c20f361b1f5957c18482ce9ba9166364603",
+      "statement_id_hex": "389f368b887e73b5128c8af1322078f910d48451913ea1d5329ff654c05e712a",
+      "cose_key_hex": "a401010327200621582000d05a1d1ea251396d557afbd4588b3c6d99dbeb972fed10a32562ea26dcdcfa"
+    },
+    {
+      "name": "longest lifetime",
+      "kind": "binding",
+      "device": "e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3",
+      "from": 1700000000,
+      "until": 1715552000,
+      "not_before": 0,
+      "payload": "spo-relay-binding-v1 device e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3 from 1700000000 until 1715552000",
+      "payload_hex": "73706f2d72656c61792d62696e64696e672d76312064657669636520653065316532653365346535653665376538653965616562656365646565656666306631663266332066726f6d203137303030303030303020756e74696c2031373135353532303030",
+      "address_form": "key-hash",
+      "address_hex": "3d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d4",
+      "protected_hex": "a201276761646472657373581c3d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d4",
+      "sig_structure_hex": "846a5369676e6174757265315829a201276761646472657373581c3d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d440586573706f2d72656c61792d62696e64696e672d76312064657669636520653065316532653365346535653665376538653965616562656365646565656666306631663266332066726f6d203137303030303030303020756e74696c2031373135353532303030",
+      "signature_hex": "c5c16364ddb1ae90909885eb3fceb1b7b0fffec09ea3939c2f1662e616d052ab04de69b5a6199b714c95e3d445f7fc75e94fc5a53c0349924625cd5cf3ef5e09",
+      "sign1_hex": "845829a201276761646472657373581c3d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d4a166686173686564f4586573706f2d72656c61792d62696e64696e672d76312064657669636520653065316532653365346535653665376538653965616562656365646565656666306631663266332066726f6d203137303030303030303020756e74696c20313731353535323030305840c5c16364ddb1ae90909885eb3fceb1b7b0fffec09ea3939c2f1662e616d052ab04de69b5a6199b714c95e3d445f7fc75e94fc5a53c0349924625cd5cf3ef5e09",
+      "canonical_hash_hex": "adef404d2f363ac1c8f5b669b34056a225b46a5048a1d2227b7a9deb30000169",
+      "statement_id_hex": "508f1f1c296d35466a9cfe564256366830db8a648a34f8031a4a679302b73899",
+      "cose_key_hex": "a401010327200621582000d05a1d1ea251396d557afbd4588b3c6d99dbeb972fed10a32562ea26dcdcfa"
+    },
+    {
+      "name": "until at the largest time",
+      "kind": "binding",
+      "device": "101112131415161718191a1b1c1d1e1f20212223",
+      "from": 253402297199,
+      "until": 253402300799,
+      "not_before": 0,
+      "payload": "spo-relay-binding-v1 device 101112131415161718191a1b1c1d1e1f20212223 from 253402297199 until 253402300799",
+      "payload_hex": "73706f2d72656c61792d62696e64696e672d76312064657669636520313031313132313331343135313631373138313931613162316331643165316632303231323232332066726f6d2032353334303232393731393920756e74696c20323533343032333030373939",
+      "address_form": "key-hash",
+      "address_hex": "3d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d4",
+      "protected_hex": "a201276761646472657373581c3d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d4",
+      "sig_structure_hex": "846a5369676e6174757265315829a201276761646472657373581c3d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d440586973706f2d72656c61792d62696e64696e672d76312064657669636520313031313132313331343135313631373138313931613162316331643165316632303231323232332066726f6d2032353334303232393731393920756e74696c20323533343032333030373939",
+      "signature_hex": "513dc28c34fb12671d6d22825cc1f666cd20cf8aebb921ebe223145736597198e8dd7c76df3c15aa2383098d0373137e77bff62975a85ce460ffa4c58e973103",
+      "sign1_hex": "845829a201276761646472657373581c3d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d4a166686173686564f4586973706f2d72656c61792d62696e64696e672d76312064657669636520313031313132313331343135313631373138313931613162316331643165316632303231323232332066726f6d2032353334303232393731393920756e74696c203235333430323330303739395840513dc28c34fb12671d6d22825cc1f666cd20cf8aebb921ebe223145736597198e8dd7c76df3c15aa2383098d0373137e77bff62975a85ce460ffa4c58e973103",
+      "canonical_hash_hex": "0147dc872dbd99155f4373036d99c62585bf7d4b01ad8bef538a251f13f8b023",
+      "statement_id_hex": "601397dbf1bb224c902ebbfc484a5a3e13210eee4c74e754c6d89cd8bee4e2e2",
+      "cose_key_hex": "a401010327200621582000d05a1d1ea251396d557afbd4588b3c6d99dbeb972fed10a32562ea26dcdcfa"
+    },
+    {
+      "name": "Shelley base address",
+      "kind": "binding",
+      "device": "303132333435363738393a3b3c3d3e3f40414243",
+      "from": 1799999940,
+      "until": 1807775940,
+      "not_before": 0,
+      "payload": "spo-relay-binding-v1 device 303132333435363738393a3b3c3d3e3f40414243 from 1799999940 until 1807775940",
+      "payload_hex": "73706f2d72656c61792d62696e64696e672d76312064657669636520333033313332333333343335333633373338333933613362336333643365336634303431343234332066726f6d203137393939393939343020756e74696c2031383037373735393430",
+      "address_form": "base-address",
+      "address_hex": "013d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d4404142434445464748494a4b4c4d4e4f505152535455565758595a5b",
+      "protected_hex": "a2012767616464726573735839013d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d4404142434445464748494a4b4c4d4e4f505152535455565758595a5b",
+      "sig_structure_hex": "846a5369676e6174757265315846a2012767616464726573735839013d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d4404142434445464748494a4b4c4d4e4f505152535455565758595a5b40586573706f2d72656c61792d62696e64696e672d76312064657669636520333033313332333333343335333633373338333933613362336333643365336634303431343234332066726f6d203137393939393939343020756e74696c2031383037373735393430",
+      "signature_hex": "d3af814dfcf7e66d57ea19cba340c7872e4321446178d790a58d0d8b5a185c610ef5a629cb85fe300cd213b9a0728b2c64a70376f5e1fc6771c67af4e6b9230f",
+      "sign1_hex": "845846a2012767616464726573735839013d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d4404142434445464748494a4b4c4d4e4f505152535455565758595a5ba166686173686564f4586573706f2d72656c61792d62696e64696e672d76312064657669636520333033313332333333343335333633373338333933613362336333643365336634303431343234332066726f6d203137393939393939343020756e74696c20313830373737353934305840d3af814dfcf7e66d57ea19cba340c7872e4321446178d790a58d0d8b5a185c610ef5a629cb85fe300cd213b9a0728b2c64a70376f5e1fc6771c67af4e6b9230f",
+      "canonical_hash_hex": "77b18f0ef5b3b867806053f187d8295ad48467567678af0f67ae28076f342321",
+      "statement_id_hex": "69ec7353023ea4869357321d263af5647f3468fb9940b01ae521e4548613e600",
+      "cose_key_hex": "a401010327200621582000d05a1d1ea251396d557afbd4588b3c6d99dbeb972fed10a32562ea26dcdcfa"
+    },
+    {
+      "name": "revoke one device",
+      "kind": "revoke",
+      "device": "303132333435363738393a3b3c3d3e3f40414243",
+      "from": 0,
+      "until": 0,
+      "not_before": 1800000000,
+      "payload": "spo-relay-revoke-v1 device 303132333435363738393a3b3c3d3e3f40414243 not-before 1800000000",
+      "payload_hex": "73706f2d72656c61792d7265766f6b652d7631206465766963652033303331333233333334333533363337333833393361336233633364336533663430343134323433206e6f742d6265666f72652031383030303030303030",
+      "address_form": "key-hash",
+      "address_hex": "3d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d4",
+      "protected_hex": "a201276761646472657373581c3d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d4",
+      "sig_structure_hex": "846a5369676e6174757265315829a201276761646472657373581c3d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d440585973706f2d72656c61792d7265766f6b652d7631206465766963652033303331333233333334333533363337333833393361336233633364336533663430343134323433206e6f742d6265666f72652031383030303030303030",
+      "signature_hex": "bc7794fbdac8e03e4a7ce52115f34b6a137bc0ae9feef4983fa08267159c074204e87c193828f1f5c069114abeba05921053419cc2acd4691970705cc59e540e",
+      "sign1_hex": "845829a201276761646472657373581c3d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d4a166686173686564f4585973706f2d72656c61792d7265766f6b652d7631206465766963652033303331333233333334333533363337333833393361336233633364336533663430343134323433206e6f742d6265666f726520313830303030303030305840bc7794fbdac8e03e4a7ce52115f34b6a137bc0ae9feef4983fa08267159c074204e87c193828f1f5c069114abeba05921053419cc2acd4691970705cc59e540e",
+      "canonical_hash_hex": "603d28c75139ef6a650500474ffb150eea43d8d60d318c8aaa20bf8a0d6a9c52",
+      "statement_id_hex": "99c5026fcca42def3e6ddc7438123fba4db0eaca0b04b0342175b0331aaf96c8",
+      "cose_key_hex": "a401010327200621582000d05a1d1ea251396d557afbd4588b3c6d99dbeb972fed10a32562ea26dcdcfa"
+    },
+    {
+      "name": "revoke all devices",
+      "kind": "revoke",
+      "all": true,
+      "from": 0,
+      "until": 0,
+      "not_before": 1800000000,
+      "payload": "spo-relay-revoke-v1 device all not-before 1800000000",
+      "payload_hex": "73706f2d72656c61792d7265766f6b652d76312064657669636520616c6c206e6f742d6265666f72652031383030303030303030",
+      "address_form": "key-hash",
+      "address_hex": "3d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d4",
+      "protected_hex": "a201276761646472657373581c3d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d4",
+      "sig_structure_hex": "846a5369676e6174757265315829a201276761646472657373581c3d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d440583473706f2d72656c61792d7265766f6b652d76312064657669636520616c6c206e6f742d6265666f72652031383030303030303030",
+      "signature_hex": "42372697744059e9730ec4e10a295f39b795ee2173cfc77904e770211143124df77e0f9d38bdc368b26c7c5344f06c48111ff83718f40c6fc897be976845b202",
+      "sign1_hex": "845829a201276761646472657373581c3d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d4a166686173686564f4583473706f2d72656c61792d7265766f6b652d76312064657669636520616c6c206e6f742d6265666f72652031383030303030303030584042372697744059e9730ec4e10a295f39b795ee2173cfc77904e770211143124df77e0f9d38bdc368b26c7c5344f06c48111ff83718f40c6fc897be976845b202",
+      "canonical_hash_hex": "97a59cbe2c9fbd272eac9b644b998c78e6308031d87095a71f1da8d21b35a35b",
+      "statement_id_hex": "d75ac6bcf204ce6d4bb36f105e31657e5af86bf9390c1c205c6496cf543f3fdb",
+      "cose_key_hex": "a401010327200621582000d05a1d1ea251396d557afbd4588b3c6d99dbeb972fed10a32562ea26dcdcfa"
+    },
+    {
+      "name": "revoke all, not-before zero",
+      "kind": "revoke",
+      "all": true,
+      "from": 0,
+      "until": 0,
+      "not_before": 0,
+      "payload": "spo-relay-revoke-v1 device all not-before 0",
+      "payload_hex": "73706f2d72656c61792d7265766f6b652d76312064657669636520616c6c206e6f742d6265666f72652030",
+      "address_form": "base-address",
+      "address_hex": "013d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d4404142434445464748494a4b4c4d4e4f505152535455565758595a5b",
+      "protected_hex": "a2012767616464726573735839013d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d4404142434445464748494a4b4c4d4e4f505152535455565758595a5b",
+      "sig_structure_hex": "846a5369676e6174757265315846a2012767616464726573735839013d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d4404142434445464748494a4b4c4d4e4f505152535455565758595a5b40582b73706f2d72656c61792d7265766f6b652d76312064657669636520616c6c206e6f742d6265666f72652030",
+      "signature_hex": "eac1abf1f45e160514f8f8a7feb85d26e42869acaca6a84eefb1dd076701b010985a80b0dc0a151c30f0f04e0979e840d26e69e3673a6321f1c45d7549463709",
+      "sign1_hex": "845846a2012767616464726573735839013d98f73029144e198d70b7ad16496a44714b704bba31db1842a916d4404142434445464748494a4b4c4d4e4f505152535455565758595a5ba166686173686564f4582b73706f2d72656c61792d7265766f6b652d76312064657669636520616c6c206e6f742d6265666f726520305840eac1abf1f45e160514f8f8a7feb85d26e42869acaca6a84eefb1dd076701b010985a80b0dc0a151c30f0f04e0979e840d26e69e3673a6321f1c45d7549463709",
+      "canonical_hash_hex": "78718f360af7b1996215b47f580f13fc320b328cfe488b7031619923cfef8f2d",
+      "statement_id_hex": "6182d17844a007eae8359f12ed16fd1620a2cd73f91a1f99fb7bcc439170228b",
+      "cose_key_hex": "a401010327200621582000d05a1d1ea251396d557afbd4588b3c6d99dbeb972fed10a32562ea26dcdcfa"
+    }
+  ],
+  "device_revokes": [
+    {
+      "name": "device revoke",
+      "ed25519_seed": "0708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20212223242526",
+      "ed25519_public": "00d05a1d1ea251396d557afbd4588b3c6d99dbeb972fed10a32562ea26dcdcfa",
+      "x25519_public": "505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f",
+      "fingerprint": "ef536d79292319f9a77e7d971ef152c8e055f5e7",
+      "not_before": 1800000000,
+      "bytes_hex": "83781a73706f2f72656c61792d7265766f6b652d6465766963652f763154ef536d79292319f9a77e7d971ef152c8e055f5e71a6b49d200",
+      "signature_hex": "dfd33c80906f6f54511c19dd7f66a8763084c194a579b38b872e2c908003f19138be7d0ff3fa2a6253afe2c6529c3651b0ac54edf90931c058a7334bdb80650c"
+    },
+    {
+      "name": "device revoke, not-before zero",
+      "ed25519_seed": "0708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20212223242526",
+      "ed25519_public": "00d05a1d1ea251396d557afbd4588b3c6d99dbeb972fed10a32562ea26dcdcfa",
+      "x25519_public": "505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f",
+      "fingerprint": "ef536d79292319f9a77e7d971ef152c8e055f5e7",
+      "not_before": 0,
+      "bytes_hex": "83781a73706f2f72656c61792d7265766f6b652d6465766963652f763154ef536d79292319f9a77e7d971ef152c8e055f5e700",
+      "signature_hex": "cfe3ef12a74c4f97836f4df561a2f06e152aec68150da982c20b7dc0c902fc1f340651618ead4d5fcd5cae961aaa9a2a91f26ec3940932fa5ff3ed4890838d03"
+    }
+  ],
+  "near_miss_payloads": [
+    "",
+    "Spo-relay-binding-v1 device 000102030405060708090a0b0c0d0e0f10111213 from 1700000000 until 1707776000",
+    "spo-relay-binding-v1 device 000102030405060708090a0b0c0d0e0f10111213 from 01700000000 until 1707776000",
+    "spo-relay-binding-v1 device 000102030405060708090a0b0c0d0e0f10111213 from +1700000000 until 1707776000",
+    "spo-relay-binding-v1 device 000102030405060708090a0b0c0d0e0f10111213  from 1700000000 until 1707776000",
+    "spo-relay-binding-v1 device 000102030405060708090a0b0c0d0e0f10111213 from 1700000000 until 1707776000\n",
+    "spo-relay-binding-v1 device 000102030405060708090a0b0c0d0e0f10111213 from 1700000000 until 1707776000 ",
+    "spo-relay-binding-v1 device 000102030405060708090a0b0c0d0e0f1011121 from 1700000000 until 1707776000",
+    "spo-relay-binding-v1 device 000102030405060708090A0B0C0D0E0F10111213 from 1700000000 until 1707776000",
+    "spo-relay-binding-v1 device 000102030405060708090a0b0c0d0e0f10111213 until 1707776000 from 1700000000",
+    "spo-relay-revoke-v1 device ALL not-before 1700000000",
+    "spo-relay-revoke-v1 device all not-before 01",
+    "spo-relay-revoke-v1 device all not-before 1700000000 "
+  ],
+  "rejected_public_keys": [
+    {
+      "name": "identity (y=1)",
+      "public_key_hex": "0100000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "identity, sign bit set",
+      "public_key_hex": "0100000000000000000000000000000000000000000000000000000000000080"
+    },
+    {
+      "name": "order 2 (y=-1)",
+      "public_key_hex": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
+    },
+    {
+      "name": "order 2, sign bit set",
+      "public_key_hex": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "name": "order 4 (y=0)",
+      "public_key_hex": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "order 4 (y=0), sign set",
+      "public_key_hex": "0000000000000000000000000000000000000000000000000000000000000080"
+    },
+    {
+      "name": "order 8, y1",
+      "public_key_hex": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a"
+    },
+    {
+      "name": "order 8, y1, sign set",
+      "public_key_hex": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa"
+    },
+    {
+      "name": "order 8, y2",
+      "public_key_hex": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05"
+    },
+    {
+      "name": "order 8, y2, sign set",
+      "public_key_hex": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85"
+    },
+    {
+      "name": "y = p+0",
+      "public_key_hex": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
+    },
+    {
+      "name": "y = p+0, sign bit set",
+      "public_key_hex": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "name": "y = p+1",
+      "public_key_hex": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
+    },
+    {
+      "name": "y = p+1, sign bit set",
+      "public_key_hex": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "name": "y = p+10",
+      "public_key_hex": "f7ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
+    },
+    {
+      "name": "y = p+10, sign bit set",
+      "public_key_hex": "f7ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "name": "y = p+11",
+      "public_key_hex": "f8ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
+    },
+    {
+      "name": "y = p+11, sign bit set",
+      "public_key_hex": "f8ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "name": "y = p+12",
+      "public_key_hex": "f9ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
+    },
+    {
+      "name": "y = p+12, sign bit set",
+      "public_key_hex": "f9ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "name": "y = p+13",
+      "public_key_hex": "faffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
+    },
+    {
+      "name": "y = p+13, sign bit set",
+      "public_key_hex": "faffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "name": "y = p+14",
+      "public_key_hex": "fbffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
+    },
+    {
+      "name": "y = p+14, sign bit set",
+      "public_key_hex": "fbffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "name": "y = p+15",
+      "public_key_hex": "fcffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
+    },
+    {
+      "name": "y = p+15, sign bit set",
+      "public_key_hex": "fcffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "name": "y = p+16",
+      "public_key_hex": "fdffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
+    },
+    {
+      "name": "y = p+16, sign bit set",
+      "public_key_hex": "fdffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "name": "y = p+17",
+      "public_key_hex": "feffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
+    },
+    {
+      "name": "y = p+17, sign bit set",
+      "public_key_hex": "feffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "name": "y = p+18",
+      "public_key_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
+    },
+    {
+      "name": "y = p+18, sign bit set",
+      "public_key_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "name": "y = p+2",
+      "public_key_hex": "efffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
+    },
+    {
+      "name": "y = p+2, sign bit set",
+      "public_key_hex": "efffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "name": "y = p+3",
+      "public_key_hex": "f0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
+    },
+    {
+      "name": "y = p+3, sign bit set",
+      "public_key_hex": "f0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "name": "y = p+4",
+      "public_key_hex": "f1ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
+    },
+    {
+      "name": "y = p+4, sign bit set",
+      "public_key_hex": "f1ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "name": "y = p+5",
+      "public_key_hex": "f2ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
+    },
+    {
+      "name": "y = p+5, sign bit set",
+      "public_key_hex": "f2ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "name": "y = p+6",
+      "public_key_hex": "f3ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
+    },
+    {
+      "name": "y = p+6, sign bit set",
+      "public_key_hex": "f3ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "name": "y = p+7",
+      "public_key_hex": "f4ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
+    },
+    {
+      "name": "y = p+7, sign bit set",
+      "public_key_hex": "f4ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "name": "y = p+8",
+      "public_key_hex": "f5ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
+    },
+    {
+      "name": "y = p+8, sign bit set",
+      "public_key_hex": "f5ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "name": "y = p+9",
+      "public_key_hex": "f6ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"
+    },
+    {
+      "name": "y = p+9, sign bit set",
+      "public_key_hex": "f6ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+  ]
+}

@@ -15,16 +15,20 @@ import (
 // The closure is listed by the go tool, so a package reached through a port
 // counts (a direct-import check would miss it).
 //
-// spec: SPO-Xmailbox-SEC-009
+// The binding and revoke statements (ADR 0014) are linked by the relay too, so
+// their domain package is in the list.
+//
+// spec: SPO-Xmailbox-SEC-009, SPO-Xrelaybind-INV-001
 
 var relayPackages = []string{
+	module + "/internal/domain/relaybind",
 	module + "/internal/adapters/mailboxstore",
 	module + "/internal/adapters/relayconfig",
 	module + "/internal/ports/relayport",
 	module + "/internal/app/relay",
 }
 
-// relayBanned are the import-path fragments no one of the four packages above
+// relayBanned are the import-path fragments no one of the packages above
 // may reach: the hard bans and the primitive bans of tunnel_closure_test.go,
 // which states the rule for the whole relay side, the tunnel adapter included.
 var relayBanned = slices.Concat(relayHardBans, relayPrimitiveBans)
