@@ -1,334 +1,209 @@
-// Package relayconfig reads the relay's configuration file: its limits and the
-// access list (ADR 0013 decisions 2 and 3, work package 4).
+// Package relayconfig reads the relay operator's files (ADR 0014 work package
+// 10): the configuration file, version 2, and the relay's key file.
 //
-// An access-list entry is a party's signed identity document. This package
-// verifies the document's self-signature with party.Document.Verify and refuses
-// a document with no node key. It parses the document through a function the
-// caller injects (DocumentParser), because the real parser lives in
-// adapters/envelope, which links age, and the relay binary must not (ADR 0013
-// decision 1). The wiring passes envelope.ParseDocument. The injected parser is
-// trusted to return an Identity that is the decoding of Content, as
-// party.Document documents; the fingerprint is recomputed from those keys and
-// never read from the file.
+// The configuration names the admission (open, or an allow-list of wallet
+// keys), the key file and the two store directories, the tunnel's port and DERP
+// map, the device node keys the tunnel admits (restricted by default), the
+// registry's bounds and policy, the open quota, the session limits, the
+// retention and the sweep interval. It is read into a relayconf.Config whose
+// parts are validated by the domain packages that use them; the session limits
+// are kept as overrides and validated by app/relayhost, which owns the session's
+// table (an adapter does not import a use case). The file is a small subset of
+// TOML read by internal/platform/tomlsubset (see parse.go); unknown keys and
+// tables are refused.
 //
-// The file is a small subset of TOML (see parse.go) read by
-// internal/platform/tomlsubset, the parser that adapters/config uses too, with
-// arrays of tables and lists of strings switched on. Unknown keys and tables
-// are refused, and so is every control character but tab.
-//
-// The tunnel allow-list is exactly the node keys of the access list.
+// The relay parses no identity document: the access list of version 1 is gone.
+// Nothing this package links can open an envelope (SPO-Xmailbox-SEC-009).
 package relayconfig
 
 import (
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"slices"
+	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"syscall"
-	"unicode"
-	"unicode/utf8"
 
-	"github.com/mochipool/workbench/spo/internal/domain/mailbox"
-	"github.com/mochipool/workbench/spo/internal/domain/party"
-	"github.com/mochipool/workbench/spo/internal/ports/relayport"
+	"github.com/mochipool/workbench/spo/internal/domain/relayconf"
 )
 
-// geteuid is the effective uid the file's owner is compared with; a variable so
-// that a test can change it.
+// geteuid is the effective uid owners are compared with; a variable so that a
+// test can change it.
 var geteuid = os.Geteuid
 
-// Bounds on the file, checked before anything of that size is read or built.
+// Bounds of the file, checked before anything of that size is read or built.
 const (
-	// MaxFileBytes is the largest configuration file: 1024 parties with a
-	// document of 4 KiB each and a send_to of some size would still fit.
-	MaxFileBytes = 4 << 20
-	// MaxLineBytes is the longest line: a send_to of 1024 fingerprints is about 45 KiB.
-	MaxLineBytes = 64 << 10
-	// MaxDocumentBytes is the largest identity document, decoded. A real one is
-	// a few hundred bytes.
-	MaxDocumentBytes = 4 << 10
+	// MaxFileBytes is the largest configuration file: room for the 4096 array
+	// tables.
+	MaxFileBytes = 1 << 20
+	// MaxLineBytes is the longest line.
+	MaxLineBytes = 4 << 10
+	// MaxArrayTables is the most [[device]] and [[wallet]] tables together.
+	MaxArrayTables = relayconf.MaxDevices
+	// MaxLabelBytes is the longest label of a device or a wallet key.
+	MaxLabelBytes = 64
 )
 
-// DocumentParser decodes an identity document. It does not verify it.
-type DocumentParser func([]byte) (party.Document, error)
+// ErrConfig is the root of every refusal (relayconf's).
+var ErrConfig = relayconf.ErrConfig
 
-// Config is a validated configuration.
-type Config struct {
-	Quota mailbox.Quota
-	// Limits is Quota after Validated(len(Entries)): the value to hand to a
-	// store, which refuses an unvalidated quota.
-	Limits           mailbox.ValidQuota
-	RetentionSeconds uint64
-	Entries          []relayport.AccessEntry
-}
+func bad(format string, a ...any) error { return relayconf.Bad(format, a...) }
 
-// AccessList is the list of the configuration.
-func (c *Config) AccessList() *List { return NewList(c.Entries) }
-
-// Parse validates the text of a configuration file.
-func Parse(data []byte, parse DocumentParser) (*Config, error) {
-	if parse == nil {
-		return nil, errors.New("no document parser was given")
-	}
-	raw, err := parseFile(data)
-	if err != nil {
-		return nil, err
-	}
-	c := &Config{Quota: mailbox.DefaultQuota(), RetentionSeconds: mailbox.DefaultRetentionSeconds}
-	if err := raw.applyRelay(c); err != nil {
-		return nil, err
-	}
-	seenFP := map[party.Fingerprint]int{}
-	seenNode := map[party.NodeKey]int{}
-	seenLabel := map[string]int{}
-	for i, rp := range raw.parties {
-		who := fmt.Sprintf("party %d (line %d)", i+1, rp.line)
-		e, err := rp.entry(parse)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", who, err)
-		}
-		who = fmt.Sprintf("party %d (%s)", i+1, e.Label)
-		if j, dup := seenFP[e.Fingerprint]; dup {
-			return nil, fmt.Errorf("%s: the same fingerprint as party %d", who, j)
-		}
-		if j, dup := seenNode[e.Node]; dup {
-			return nil, fmt.Errorf("%s: the same node key as party %d", who, j)
-		}
-		if j, dup := seenLabel[e.Label]; dup {
-			return nil, fmt.Errorf("%s: the same label as party %d; labels name parties in every message and must differ", who, j)
-		}
-		seenFP[e.Fingerprint], seenNode[e.Node], seenLabel[e.Label] = i+1, i+1, i+1
-		c.Entries = append(c.Entries, e)
-	}
-	for i, rp := range raw.parties {
-		listed := map[party.Fingerprint]bool{}
-		var to []party.Fingerprint
-		for _, s := range rp.sendTo {
-			fp, err := parseFingerprint(s)
-			if err != nil {
-				return nil, fmt.Errorf("party %d (%s): send_to: %w", i+1, c.Entries[i].Label, err)
-			}
-			if _, ok := seenFP[fp]; !ok {
-				return nil, fmt.Errorf("party %d (%s): send_to names %s, which is not in the access list", i+1, c.Entries[i].Label, s)
-			}
-			if listed[fp] {
-				return nil, fmt.Errorf("party %d (%s): send_to names %s twice", i+1, c.Entries[i].Label, s)
-			}
-			listed[fp] = true
-			to = append(to, fp)
-		}
-		c.Entries[i] = c.Entries[i].WithSendTo(to)
-	}
-	limits, err := c.Quota.Validated(len(c.Entries))
-	if err != nil {
-		return nil, fmt.Errorf("[relay]: %w", err)
-	}
-	c.Limits = limits
-	return c, nil
-}
-
-func (rp *rawParty) entry(parse DocumentParser) (relayport.AccessEntry, error) {
-	var e relayport.AccessEntry
-	if rp.document == "" {
-		return e, errors.New("there is no document")
-	}
-	if len(rp.document) > base64.StdEncoding.EncodedLen(MaxDocumentBytes) {
-		return e, fmt.Errorf("the document is over %d bytes", MaxDocumentBytes)
-	}
-	b, err := base64.StdEncoding.Strict().DecodeString(rp.document)
-	if err != nil {
-		return e, fmt.Errorf("the document is not base64: %w", err)
-	}
-	doc, err := parse(b)
-	if err != nil {
-		return e, fmt.Errorf("the document does not parse: %w", err)
-	}
-	if err := doc.Verify(); err != nil {
-		return e, fmt.Errorf("the document's self-signature does not verify: %w", err)
-	}
-	if doc.Identity.Node == nil || *doc.Identity.Node == (party.NodeKey{}) {
-		return e, errors.New("the document has no node key; the relay admits a party only by its tunnel node key")
-	}
-	label := rp.label
-	if !rp.hasLabel {
-		label = doc.Identity.Label
-	}
-	if len(label) > party.MaxLabelBytes || !cleanText(label) {
-		return e, fmt.Errorf("the label is over %d bytes or has a control character", party.MaxLabelBytes)
-	}
-	if strings.TrimSpace(label) == "" {
-		return e, errors.New("the label is empty (give a label, or use a document that has one)")
-	}
-	return relayport.AccessEntry{
-		Label:       label,
-		Document:    doc,
-		Fingerprint: doc.Identity.Fingerprint(),
-		Node:        *doc.Identity.Node,
-	}, nil
-}
-
-func cleanText(s string) bool {
-	if !utf8.ValidString(s) {
-		return false
-	}
-	for _, r := range s {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == 0x2028 || r == 0x2029 {
-			return false
-		}
-	}
-	return true
-}
-
-// Load reads and validates the file at path. The file must be a regular file
-// owned by the effective user or by root (by fstat on the opened descriptor),
-// that its group and others cannot write, of at most MaxFileBytes; the size is
-// checked before a byte is read. A link is followed (a store path is one) and a
-// FIFO is refused without being waited on.
-func Load(path string, parse DocumentParser) (*Config, error) {
+// Load reads and validates the file at path, and checks the store and key paths
+// on the disk (SPO-Xmailbox-PRE-063). The file must be a regular file owned by
+// the effective user or by root (by fstat on the opened descriptor), that its
+// group and others cannot write, of at most MaxFileBytes; the size is checked
+// before a byte is read. A link is followed (a mounted secret or a store path
+// is one) and a FIFO is refused without being waited on.
+func Load(path string) (*relayconf.Config, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrConfig, err)
 	}
 	defer f.Close()
 	st, err := f.Stat()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrConfig, err)
 	}
 	switch {
 	case !st.Mode().IsRegular():
-		return nil, fmt.Errorf("%s is not a regular file", path)
+		return nil, bad("%s is not a regular file", path)
 	case !ownerOK(st, geteuid()):
-		return nil, fmt.Errorf("%s is owned by uid %d; it must belong to the user running the relay (uid %d) or to root, or its owner could add a party to the access list", path, fileUid(st), geteuid())
+		return nil, bad("%s is owned by uid %d; it must belong to the user running the relay (uid %d) or to root, or its owner could add a device or change the admission", path, fileUID(st), geteuid())
 	case st.Mode().Perm()&0o022 != 0:
-		return nil, fmt.Errorf("%s is writable by its group or by everyone (mode %o); another user could add a party to the access list. Run: chmod 600 %s", path, st.Mode().Perm(), path)
+		return nil, bad("%s is writable by its group or by everyone (mode %o); another user could add a device or change the admission. Run: chmod 600 %s", path, st.Mode().Perm(), path)
 	case st.Size() > MaxFileBytes:
-		return nil, fmt.Errorf("%s is %d bytes; the limit is %d", path, st.Size(), MaxFileBytes)
+		return nil, bad("%s is %d bytes; the limit is %d", path, st.Size(), MaxFileBytes)
 	}
 	b, err := io.ReadAll(io.LimitReader(f, MaxFileBytes+1))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrConfig, err)
 	}
-	c, err := Parse(b, parse)
+	c, err := Parse(b)
 	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if err := CheckPaths(c); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return c, nil
 }
 
-// ownerOK reports whether the file's owner may write the access list: the
-// effective user, or root.
+// CheckPaths checks the store directories and the key file's directory on the
+// disk: an existing store directory is a directory of the effective user with
+// no group or other permission bit; the parent of one that does not exist yet,
+// and the key's directory, belong to the user or to root and are not writable by
+// their group or others; an existing key file has no group or other permission
+// bit and belongs to the user (its content is checked by LoadKey).
+func CheckPaths(c *relayconf.Config) error {
+	for _, d := range []struct{ what, path string }{{"mailbox_dir", c.MailboxDir}, {"registry_dir", c.RegistryDir}} {
+		st, err := os.Stat(d.path)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			if err := checkParent(d.what, filepath.Dir(d.path)); err != nil {
+				return err
+			}
+			continue
+		case err != nil:
+			return fmt.Errorf("%w: %s: %w", ErrConfig, d.what, err)
+		case !st.IsDir():
+			return bad("%s %s is not a directory", d.what, d.path)
+		case fileUID(st) != geteuid():
+			return bad("%s %s is owned by uid %d, not by the user running the relay (uid %d)", d.what, d.path, fileUID(st), geteuid())
+		case st.Mode().Perm()&0o077 != 0:
+			return bad("%s %s has group or other permission bits (mode %o); the stores are the relay's alone. Run: chmod 700 %s", d.what, d.path, st.Mode().Perm(), d.path)
+		}
+	}
+	if err := checkParent("key_file", filepath.Dir(c.KeyFile)); err != nil {
+		return err
+	}
+	st, err := os.Stat(c.KeyFile)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil
+	case err != nil:
+		return fmt.Errorf("%w: key_file: %w", ErrConfig, err)
+	}
+	return keyMode(c.KeyFile, st)
+}
+
+// keyMode is the rule of a key file's metadata: a regular file of the user with
+// no group or other permission bit.
+func keyMode(path string, st os.FileInfo) error {
+	switch {
+	case !st.Mode().IsRegular():
+		return bad("key_file %s is not a regular file", path)
+	case fileUID(st) != geteuid():
+		return bad("key_file %s is owned by uid %d, not by the user running the relay (uid %d)", path, fileUID(st), geteuid())
+	case st.Mode().Perm()&0o077 != 0:
+		return bad("key_file %s has group or other permission bits (mode %o); the relay key must not be readable by anyone else. Run: chmod 600 %s", path, st.Mode().Perm(), path)
+	}
+	return nil
+}
+
+// checkParent requires dir to be a directory owned by the user or by root that
+// its group and others cannot write.
+func checkParent(what, dir string) error {
+	st, err := os.Stat(dir)
+	switch {
+	case err != nil:
+		return fmt.Errorf("%w: %s: the directory %s: %w", ErrConfig, what, dir, err)
+	case !st.IsDir():
+		return bad("%s: %s is not a directory", what, dir)
+	case !ownerOK(st, geteuid()):
+		return bad("%s: the directory %s is owned by uid %d; it must belong to the user running the relay or to root", what, dir, fileUID(st))
+	case st.Mode().Perm()&0o022 != 0:
+		return bad("%s: the directory %s is writable by its group or by everyone (mode %o); another user could replace what the relay keeps there", what, dir, st.Mode().Perm())
+	}
+	return nil
+}
+
+// ownerOK reports whether the file's owner may write the relay's
+// configuration: the effective user, or root.
 func ownerOK(st os.FileInfo, euid int) bool {
-	uid := fileUid(st)
+	uid := fileUID(st)
 	return uid == euid || uid == 0
 }
 
-func fileUid(st os.FileInfo) int {
+func fileUID(st os.FileInfo) int {
 	if sys, ok := st.Sys().(*syscall.Stat_t); ok {
 		return int(sys.Uid)
 	}
 	return -1 // not a unix stat: nobody
 }
 
-// ---- the list ----
-
-// List is an access list in memory. It implements relayport.AccessList.
-type List struct {
-	entries []relayport.AccessEntry
-	byFP    map[party.Fingerprint]int
-	byNode  map[party.NodeKey]int
-}
-
-var _ relayport.AccessList = (*List)(nil)
-
-// NewList indexes entries. It trusts them: Parse is what validates.
-func NewList(entries []relayport.AccessEntry) *List {
-	l := &List{entries: slices.Clone(entries), byFP: map[party.Fingerprint]int{}, byNode: map[party.NodeKey]int{}}
-	for i, e := range l.entries {
-		l.byFP[e.Fingerprint] = i
-		l.byNode[e.Node] = i
+// checkPathsText is the part of PRE-063 that needs no disk: required, absolute,
+// clean, distinct and not inside one another.
+func checkPathsText(c *relayconf.Config) error {
+	paths := []struct{ what, p string }{{"key_file", c.KeyFile}, {"mailbox_dir", c.MailboxDir}, {"registry_dir", c.RegistryDir}}
+	for _, x := range paths {
+		switch {
+		case x.p == "":
+			return bad("[relay] %s is required", x.what)
+		case !filepath.IsAbs(x.p):
+			return bad("[relay] %s %q is not an absolute path", x.what, x.p)
+		case filepath.Clean(x.p) != x.p:
+			return bad("[relay] %s %q is not a clean path (write it as %q)", x.what, x.p, filepath.Clean(x.p))
+		}
 	}
-	return l
-}
-
-// Lookup implements relayport.AccessList.
-func (l *List) Lookup(fp party.Fingerprint) (relayport.AccessEntry, bool) {
-	i, ok := l.byFP[fp]
-	if !ok {
-		return relayport.AccessEntry{}, false
+	for i, a := range paths {
+		for _, b := range paths[i+1:] {
+			if a.p == b.p {
+				return bad("[relay] %s and %s are the same path; the three must be distinct", a.what, b.what)
+			}
+			if inside(a.p, b.p) || inside(b.p, a.p) {
+				return bad("[relay] %s and %s: one is inside the other; the key and the two stores must be apart", a.what, b.what)
+			}
+		}
 	}
-	return l.entries[i], true
-}
-
-// LookupNode implements relayport.AccessList.
-func (l *List) LookupNode(k party.NodeKey) (relayport.AccessEntry, bool) {
-	i, ok := l.byNode[k]
-	if !ok {
-		return relayport.AccessEntry{}, false
-	}
-	return l.entries[i], true
-}
-
-// NodeKeys implements relayport.AccessList: exactly the node keys of the entries.
-func (l *List) NodeKeys() []party.NodeKey {
-	out := make([]party.NodeKey, 0, len(l.entries))
-	for _, e := range l.entries {
-		out = append(out, e.Node)
-	}
-	return out
-}
-
-// ---- reload ----
-
-// Reloadable is the access list of a file that can be loaded again (SIGHUP). A
-// reload that fails keeps the list that was there.
-type Reloadable struct {
-	path  string
-	parse DocumentParser
-	cur   atomic.Pointer[state]
-}
-
-type state struct {
-	cfg  *Config
-	list *List
-}
-
-var _ relayport.AccessList = (*Reloadable)(nil)
-
-// OpenReloadable loads the file; a file that does not validate is an error.
-func OpenReloadable(path string, parse DocumentParser) (*Reloadable, error) {
-	r := &Reloadable{path: path, parse: parse}
-	if err := r.Reload(); err != nil {
-		return nil, err
-	}
-	return r, nil
-}
-
-// Reload loads the file again. On an error the old configuration stays.
-func (r *Reloadable) Reload() error {
-	c, err := Load(r.path, r.parse)
-	if err != nil {
-		return err
-	}
-	r.cur.Store(&state{cfg: c, list: c.AccessList()})
 	return nil
 }
 
-// Config is the configuration now in force.
-func (r *Reloadable) Config() *Config { return r.cur.Load().cfg }
-
-// Lookup implements relayport.AccessList.
-func (r *Reloadable) Lookup(fp party.Fingerprint) (relayport.AccessEntry, bool) {
-	return r.cur.Load().list.Lookup(fp)
+// inside reports whether p is below dir.
+func inside(p, dir string) bool {
+	if dir == "/" {
+		return p != "/"
+	}
+	return strings.HasPrefix(p, dir+"/")
 }
-
-// LookupNode implements relayport.AccessList.
-func (r *Reloadable) LookupNode(k party.NodeKey) (relayport.AccessEntry, bool) {
-	return r.cur.Load().list.LookupNode(k)
-}
-
-// NodeKeys implements relayport.AccessList.
-func (r *Reloadable) NodeKeys() []party.NodeKey { return r.cur.Load().list.NodeKeys() }

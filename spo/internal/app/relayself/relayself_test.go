@@ -458,12 +458,12 @@ func TestForgetLost(t *testing.T) {
 		t.Fatalf("this device with --lost: %v", err)
 	}
 	var sent []relayport.Revoke
-	r.svc.Send = func(_ context.Context, b relayport.RevokeBook) error {
+	r.svc.Send = func(_ context.Context, b relayport.RevokeBook) (map[string]error, error) {
 		sent = b.Pending()
 		for _, p := range sent {
 			b.Result(p, relayport.RevokeRecorded)
 		}
-		return nil
+		return nil, nil
 	}
 	rep, err := r.svc.ForgetLost(ctx, r.key, relayporttest.Device(5))
 	if err != nil {

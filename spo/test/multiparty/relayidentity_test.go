@@ -52,7 +52,8 @@ type device struct {
 	local  ports.LocalIdentity
 
 	mu       sync.Mutex
-	resolved []party.Fingerprint // every fingerprint the client asked a route for
+	resolved []party.Fingerprint        // every fingerprint the client asked a route for
+	dialers  map[string]*fakenet.Dialer // the composite's dialers, by relay name
 }
 
 func newDevice(t *testing.T, ws *partyrig.Workspace, node *fakenet.Node, walletByte byte) *device {
@@ -165,15 +166,15 @@ func (d *device) lookups() []party.Fingerprint {
 
 // revokeSender is the Send of relayself: the pending revokes on a revoke-only
 // connection from d's node, with no binding and no signer.
-func (d *device) revokeSender(n *fakenet.Net, relay *fakenet.Node, clock ports.Clock) func(context.Context, relayport.RevokeBook) error {
-	return func(ctx context.Context, book relayport.RevokeBook) error {
+func (d *device) revokeSender(n *fakenet.Net, relay *fakenet.Node, clock ports.Clock) func(context.Context, relayport.RevokeBook) (map[string]error, error) {
+	return func(ctx context.Context, book relayport.RevokeBook) (map[string]error, error) {
 		rs, err := mailbox.NewRevokeSender(mailbox.RevokeConfig{Dialer: n.Dialer(d.node, relay), RelayKey: relay.Key, Clock: clock, Revokes: book})
 		if err != nil {
-			return err
+			return nil, err
 		}
 		defer rs.Close()
 		_, err = rs.SendRevokes(ctx)
-		return err
+		return nil, err
 	}
 }
 

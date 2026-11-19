@@ -177,6 +177,9 @@ type RevokeResult struct {
 // what was learnt before the failure.
 type RevokeReport struct {
 	Results []RevokeResult
+	// Err is the relay's error, in the reports of Multi.SendRevokes and
+	// SendRevokesTo (nil: the exchange ran; what each revoke got is in Results).
+	Err error
 }
 
 // Count is how many results have the outcome o.

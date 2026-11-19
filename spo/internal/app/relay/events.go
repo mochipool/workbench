@@ -54,6 +54,7 @@ const (
 	ReasonHandshake   Reason = "handshake"   // no AuthOK within the unauthenticated budget
 	ReasonPeer        Reason = "peer"        // the peer closed or the stream failed
 	ReasonRevoked     Reason = "revoked"     // the device's binding was revoked
+	ReasonDelisted    Reason = "delisted"    // a reload removed the node key from the device list
 	ReasonShutdown    Reason = "shutdown"    // the server is stopping
 	ReasonStore       Reason = "store"       // the store failed
 	ReasonRandom      Reason = "random"      // no nonce could be made

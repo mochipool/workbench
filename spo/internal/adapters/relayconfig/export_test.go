@@ -6,8 +6,8 @@ import (
 	"time"
 )
 
-// SetEuid replaces the effective uid Load compares the file's owner with and
-// returns the func that puts it back.
+// SetEuid replaces the effective uid Load compares owners with and returns the
+// func that puts it back.
 func SetEuid(f func() int) (restore func()) {
 	old := geteuid
 	geteuid = f

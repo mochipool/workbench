@@ -51,11 +51,12 @@ func openBag(open func(string) (*filebag.Bag, error)) func(string) (cli.FileBag,
 // always (ADR 0005, obligation 1). It is not read from the environment.
 func partyAddresses() ports.AddressInspector { return native.Ledger{} }
 
-// relayOps is the relay-identity stack (ADR 0014 work package 8): the vault's
-// relay statement signer (the only implementation of
-// ports.RelayStatementSigner) inside relaybinding, and the device-signed revoke
-// through the typed method of the local identity. No relay is wired yet (work
-// packages 9 and 10), so revokes are stored and not sent.
+// relayOps is the relay-identity stack (ADR 0014 work packages 8 and 10): the
+// vault's relay statement signer (the only implementation of
+// ports.RelayStatementSigner) inside relaybinding, the device-signed revoke
+// through the typed method of the local identity, and the relay transport
+// (relaynet.go): the clients of every listed relay, the revoke-only senders and
+// the address check.
 func relayOps(vault ports.Vault) cli.RelayOps {
 	var signer ports.RelayStatementSigner = native.VaultSignatures{VaultSigner: native.VaultSigner{Vault: vault}}
 	return cli.RelayOps{
@@ -69,6 +70,9 @@ func relayOps(vault ports.Vault) cli.RelayOps {
 			}
 			return svc.SignDeviceRevoke(ctx, dev, nb)
 		},
+		SendRevokes:  relaySendRevokes,
+		Connect:      relayConnect,
+		CheckAddress: relayCheckAddress,
 	}
 }
 

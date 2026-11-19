@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/mochipool/workbench/spo/internal/app/relaybinding"
@@ -83,9 +84,11 @@ type Service struct {
 	// the local identity (relaybinding.Service.SignDeviceRevoke over it); the
 	// composition root supplies it.
 	DeviceRevoke func(ctx context.Context, notBefore int64) (relaybinding.DeviceRevokeResult, error)
-	// Send sends the book's pending revokes on a revoke-only connection
-	// (mailbox.RevokeSender); nil when no relay is wired.
-	Send func(ctx context.Context, book relayport.RevokeBook) error
+	// Send sends the book's pending revokes on a revoke-only connection to every
+	// listed relay (a mailbox.RevokeSender each, needing no binding) and returns
+	// each relay's own error (nil: the exchange ran; what the relay recorded is
+	// told to the book with its name); nil when no relay is wired.
+	Send func(ctx context.Context, book relayport.RevokeBook) (map[string]error, error)
 }
 
 // Load reads the state.
@@ -561,6 +564,32 @@ func (s Service) importRevoke(ctx context.Context, p relaybinding.Prepared, sign
 //
 // spec: SPO-Xmailbox-SEC-073, SPO-Xmailbox-OUT-098
 func (s Service) Forget(ctx context.Context) (relayport.Revoke, error) {
+	return s.forget(ctx, false)
+}
+
+// ForgetRevoke is the first half of "forget this device" over relays
+// (SPO-Xmailbox-OUT-109): it signs and stores the device-signed revoke of this
+// device and raises its not-before, as Forget does, but keeps the binding, which
+// DropBinding deletes once the revoke was sent and the clients were closed
+// (ADR 0014 decision 8: the bindings are deleted last).
+//
+// spec: SPO-Xmailbox-OUT-109, SPO-Xmailbox-SEC-073
+func (s Service) ForgetRevoke(ctx context.Context) (relayport.Revoke, error) {
+	return s.forget(ctx, true)
+}
+
+// DropBinding deletes this device's binding and any prepared request: the last
+// step of "forget this device" over relays. A new login needs a new binding.
+//
+// spec: SPO-Xmailbox-OUT-109
+func (s Service) DropBinding(ctx context.Context) error {
+	return s.update(ctx, func(st *State) error {
+		st.Binding, st.Prepared = nil, nil
+		return nil
+	})
+}
+
+func (s Service) forget(ctx context.Context, keepBinding bool) (relayport.Revoke, error) {
 	if s.DeviceRevoke == nil {
 		return relayport.Revoke{}, errors.New("relayself: no device identity to sign the revoke")
 	}
@@ -586,7 +615,9 @@ func (s Service) Forget(ctx context.Context) (relayport.Revoke, error) {
 			return err
 		}
 		raise(st, s.Device, nb, s.Device)
-		st.Binding, st.Prepared = nil, nil
+		if !keepBinding {
+			st.Binding, st.Prepared = nil, nil
+		}
 		return nil
 	})
 	return out, err
@@ -691,9 +722,11 @@ func (s Service) OnRotated(w ports.NamedWriter, rr RotationRevoke, old, next par
 	return note, save(w, st)
 }
 
-// SendReport is what a send of the book did: how many revokes had each outcome.
+// SendReport is what a send of the book did: how many revokes had each outcome,
+// and each relay's own error (nil: the exchange with it ran).
 type SendReport struct {
 	Outcomes map[relayport.RevokeOutcome]int
+	Relays   map[string]error
 }
 
 // ForgetLost revokes ANOTHER device of the wallet key with a key of the vault
@@ -715,9 +748,11 @@ func (s Service) ForgetLost(ctx context.Context, key relaywallet.WalletKey, devi
 }
 
 // SendPending sends the pending revokes through Send and saves what the book
-// learnt.
+// learnt, the relays that recorded each revoke included. It needs no binding:
+// it is how a revoke still owed to a relay is completed after forget deleted
+// the binding (SPO-Xmailbox-OUT-111).
 //
-// spec: SPO-Xmailbox-SEC-073, SPO-Xmailbox-OUT-098
+// spec: SPO-Xmailbox-SEC-073, SPO-Xmailbox-OUT-098, SPO-Xmailbox-OUT-111
 func (s Service) SendPending(ctx context.Context) (SendReport, error) {
 	if s.Send == nil {
 		return SendReport{}, ErrNoSender
@@ -726,8 +761,9 @@ func (s Service) SendPending(ctx context.Context) (SendReport, error) {
 	if err != nil {
 		return SendReport{}, err
 	}
-	serr := s.Send(ctx, b)
+	relays, serr := s.Send(ctx, b)
 	rep := b.Report()
+	rep.Relays = relays
 	if err := b.Save(ctx); err != nil {
 		return rep, errors.Join(serr, err)
 	}
@@ -774,21 +810,48 @@ type Status struct {
 	// dropped at the next write.
 	Foreign         *Binding
 	ForeignPrepared bool
+	// Relays are the names of the listed relays; Owed counts, per listed
+	// relay, the pending revokes that have not ended and that it has not
+	// recorded.
+	Relays []string
+	Owed   map[string]int
 }
 
-// Status reads the state and says how the binding stands.
+// Status reads the state and says how the binding stands, and which listed
+// relay still owes which pending revoke (SPO-Xmailbox-OUT-111).
 //
-// spec: SPO-Xmailbox-IF-021, SPO-Xmailbox-OUT-097
+// spec: SPO-Xmailbox-IF-021, SPO-Xmailbox-OUT-097, SPO-Xmailbox-OUT-111
 func (s Service) Status(ctx context.Context) (Status, error) {
-	st, err := s.Load(ctx)
+	var st State
+	var relays []Relay
+	err := s.Store.View(ctx, func(r ports.NamedReader) error {
+		var err error
+		if st, err = load(r, s.Device); err != nil {
+			return err
+		}
+		relays, err = readRelays(r)
+		return err
+	})
 	if err != nil {
 		return Status{}, err
 	}
-	out := Status{Binding: st.Binding, Pending: len(st.Revokes), Prepared: st.Prepared, Foreign: st.Foreign, ForeignPrepared: st.ForeignPrepared}
+	out := Status{Binding: st.Binding, Pending: len(st.Revokes), Prepared: st.Prepared, Foreign: st.Foreign, ForeignPrepared: st.ForeignPrepared,
+		Owed: map[string]int{}}
+	for _, rl := range relays {
+		out.Relays = append(out.Relays, rl.Name)
+	}
+	now := s.Clock.Now().Unix()
 	for _, r := range st.Revokes {
 		v, err := viewOf(r)
 		if err != nil {
 			return Status{}, err
+		}
+		v.RecordedAt = st.RecordedAt[revokeID(r)]
+		for _, n := range out.Relays {
+			if !slices.Contains(v.RecordedAt, n) && r.Until >= now {
+				v.OwedTo = append(v.OwedTo, n)
+				out.Owed[n]++
+			}
 		}
 		out.Revokes = append(out.Revokes, v)
 	}

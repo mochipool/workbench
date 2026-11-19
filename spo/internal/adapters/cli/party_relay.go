@@ -24,6 +24,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/relaybind"
 	"github.com/mochipool/workbench/spo/internal/domain/relaywallet"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
+	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
 	"github.com/mochipool/workbench/spo/internal/ports/labels"
 	"github.com/mochipool/workbench/spo/internal/ports/relayport"
@@ -41,10 +42,19 @@ type RelayOps struct {
 	// SignDeviceRevoke signs the device-signed revoke of the local identity
 	// through its typed method (relaybinding.Service.SignDeviceRevoke).
 	SignDeviceRevoke func(ctx context.Context, svc relaybinding.Service, local ports.LocalIdentity, notBefore int64) (relaybinding.DeviceRevokeResult, error)
-	// SendRevokes sends pending revokes on a revoke-only relay connection
-	// (mailbox.RevokeSender). Nil until a relay is configured (work packages 9
-	// and 10): revokes are then stored and sent at the next connection.
-	SendRevokes func(ctx context.Context, book relayport.RevokeBook) error
+	// SendRevokes sends the pending revokes to every listed relay on revoke-only
+	// connections (a mailbox.RevokeSender per relay, with no binding and no
+	// signer) and returns each relay's own error by name; the book is told what
+	// each relay recorded, with its name. Nil: revokes are stored and sent at the
+	// next connection.
+	SendRevokes func(ctx context.Context, c RelaySendConfig) (map[string]error, error)
+	// Connect makes this device's client of every listed relay (one
+	// mailbox.Client per relay over its tunnel, and mailbox.Multi over them).
+	// Nil refuses --transport mailbox.
+	Connect func(RelayConnectConfig) (RelayClient, error)
+	// CheckAddress checks, without dialing, that a relay address leads to the
+	// pinned node key. Nil refuses spo party relay add.
+	CheckAddress func(e RelayEndpoint, nodeKey *secret.Buffer) error
 }
 
 // relayRemedy adds what to do to a refused identity (SPO-Xmailbox-OUT-099).
@@ -194,7 +204,7 @@ func (r *partyRun) self(ctx context.Context) (relayself.Service, error) {
 		sign = relaybinding.Service{Clock: r.env.Clock, History: r.history()}
 	}
 	ops := r.kit().Relay
-	svc := relayself.Service{Store: r.s.Store, Clock: r.env.Clock, Device: fp, Sign: sign, Send: ops.SendRevokes, PoolIDs: r.knownPoolIDs}
+	svc := relayself.Service{Store: r.s.Store, Clock: r.env.Clock, Device: fp, Sign: sign, Send: r.relaySender(), PoolIDs: r.knownPoolIDs}
 	if ops.SignDeviceRevoke != nil {
 		svc.DeviceRevoke = func(ctx context.Context, nb int64) (relaybinding.DeviceRevokeResult, error) {
 			l, err := r.kit().Kit.Local(ctx)
@@ -447,12 +457,68 @@ signs; peers record that wallet key when they enroll you with your binding.
 The binding grants no authority: envelopes are still sealed to the device, and
 a peer still enrolls you by the typed fingerprint groups.
 
-Logging in to a relay is not here yet (it is the relay session of a later
-version); a revoke made here is stored and sent at the next relay connection.`,
+The relays this device uses are listed with add, list and remove; spo party
+serve and spo party connect exchange over all of them with --transport mailbox
+(logging out is the end of that command). A revoke made here is stored, sent to
+every listed relay at once when it can be, and sent again at every connection.`,
 	}
 	c.AddCommand(a.partyRelayBindCommand(), a.partyRelayStatusCommand(), a.partyRelayRevokeCommand(),
-		a.partyRelayForgetCommand(), a.partyRelayPeerCommand(), a.partyRelayDropRevokeCommand())
+		a.partyRelayForgetCommand(), a.partyRelayPeerCommand(), a.partyRelayDropRevokeCommand(),
+		a.partyRelayAddCommand(), a.partyRelayListCommand(), a.partyRelayRemoveCommand(), a.partyRelaySendRevokesCommand())
 	return c
+}
+
+// partyRelaySendRevokesCommand sends the pending revokes to every listed relay
+// on revoke-only connections, which need no binding and sign nothing: how a
+// revoke that a relay missed is completed after forget deleted the binding
+// (SPO-Xmailbox-OUT-111).
+func (a *app) partyRelaySendRevokesCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "send-revokes",
+		Short: "Send the pending revokes to every listed relay now (no binding needed)",
+		Long: `Send every pending revoke to every listed relay now, on connections that carry
+only revokes: they need no binding and sign nothing, so this works after forget
+deleted the binding. It says, per relay, which revokes the relay has not
+recorded yet, and fails while any is owed: a relay that has not recorded a
+revoke keeps the revoked binding valid until it ends. Run it again until every
+relay recorded them.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return a.party(cmd, nil, []Need{CapClock}, func(ctx context.Context, r *partyRun) error {
+				svc, err := r.self(ctx)
+				if err != nil {
+					return err
+				}
+				st, err := svc.Status(ctx)
+				if err != nil {
+					return err
+				}
+				if len(st.Relays) == 0 {
+					return errors.New("no relay is listed: add one with spo party relay add NAME --node-key HEX --address-file FILE")
+				}
+				if st.Pending == 0 {
+					fmt.Fprintln(a.d.Out, "No revoke is waiting to be sent.")
+					return nil
+				}
+				if svc.Send == nil {
+					return errors.New("this build has no relay transport")
+				}
+				rep, err := svc.SendPending(ctx)
+				if err != nil && rep.Relays == nil {
+					return err
+				}
+				if err != nil {
+					fmt.Fprintf(a.d.Err, "sending the revokes: %v\n", err)
+				}
+				fmt.Fprintln(a.d.Out, "Sent the pending revokes. At the relays:")
+				if err := r.reportOwed(ctx, svc, "", rep.Relays); err != nil {
+					return err
+				}
+				fmt.Fprintln(a.d.Out, "Every listed relay recorded every pending revoke. They are sent again on every connection until they end.")
+				return nil
+			})
+		},
+	}
 }
 
 // partyRelayDropRevokeCommand is the way out of a full revoke book: one named
@@ -655,6 +721,19 @@ func (a *app) partyRelayStatusCommand() *cobra.Command {
 					}
 					fmt.Fprintf(w, "  %s  %s, not before %s, sent until %s\n", v.ID, target,
 						time.Unix(v.NotBefore, 0).UTC().Format(time.DateTime+" MST"), time.Unix(v.Until, 0).UTC().Format(time.DateTime+" MST"))
+					if len(s.Relays) > 0 {
+						rec, owed := "none", "none"
+						if len(v.RecordedAt) > 0 {
+							rec = strings.Join(v.RecordedAt, ", ")
+						}
+						if len(v.OwedTo) > 0 {
+							owed = strings.Join(v.OwedTo, ", ")
+						}
+						fmt.Fprintf(w, "      recorded at %s; NOT yet recorded at %s\n", rec, owed)
+					}
+				}
+				if len(s.Owed) > 0 {
+					fmt.Fprintln(w, "a relay that has not recorded a revoke keeps the revoked binding valid: send them with spo party relay send-revokes (no binding needed)")
 				}
 				if p := s.Prepared; p != nil {
 					what := "binding"
@@ -742,7 +821,7 @@ func (a *app) walletRevoke(ctx context.Context, r *partyRun, wf *walletFlags, mo
 		}
 		if lost != nil {
 			rep, err := svc.ForgetLost(ctx, k, *lost)
-			return a.reportLost(rep, err)
+			return a.reportLost(ctx, r, svc, rep, err)
 		}
 		if got, err = svc.RevokeWallet(ctx, k, target); err != nil {
 			return bindErr(err)
@@ -776,7 +855,7 @@ func (a *app) walletRevoke(ctx context.Context, r *partyRun, wf *walletFlags, mo
 				return bindErr(err)
 			}
 			rep, err := svc.SendPending(ctx)
-			return a.reportLost(rep, err)
+			return a.reportLost(ctx, r, svc, rep, err)
 		}
 		if got, err = svc.ImportRevoke(ctx, s1, key); err != nil {
 			return bindErr(err)
@@ -786,19 +865,19 @@ func (a *app) walletRevoke(ctx context.Context, r *partyRun, wf *walletFlags, mo
 	return nil
 }
 
-// reportLost says what forget --lost did once its revoke is stored.
-func (a *app) reportLost(rep relayself.SendReport, err error) error {
+// reportLost says what forget --lost did once its revoke is stored: per listed
+// relay, whether it recorded every pending revoke (SPO-Xmailbox-OUT-111).
+func (a *app) reportLost(ctx context.Context, r *partyRun, svc relayself.Service, rep relayself.SendReport, err error) error {
 	w := a.d.Out
 	switch {
 	case errors.Is(err, relayself.ErrNoSender):
 		fmt.Fprintln(w, "Stored the revoke. No relay is configured here: it goes with the next relay connection, on every connection until the revoked binding ends.")
 		return nil
-	case err != nil:
+	case err != nil && rep.Relays == nil:
 		return bindErr(err)
 	}
-	fmt.Fprintf(w, "Stored and sent: %d recorded, %d refused (kept, sent again), %d deferred.\n",
-		rep.Outcomes[relayport.RevokeRecorded], rep.Outcomes[relayport.RevokeRefused], rep.Outcomes[relayport.RevokeDeferred])
-	return nil
+	fmt.Fprintln(w, "Stored and sent. At the relays:")
+	return r.reportOwed(ctx, svc, "", rep.Relays)
 }
 
 func (a *app) partyRelayForgetCommand() *cobra.Command {
@@ -806,14 +885,17 @@ func (a *app) partyRelayForgetCommand() *cobra.Command {
 		wf   walletFlags
 		lost string
 		yes  bool
+		as   string
 	)
 	cmd := &cobra.Command{
-		Use:   "forget [--yes] | forget --lost DEVICE (--key NAME [--role R] | --print --wallet HEX | --import --sign1 HEX --cose-key HEX)",
+		Use:   "forget [--yes] [--as coordinator|signer] | forget --lost DEVICE (--key NAME [--role R] | --print --wallet HEX | --import --sign1 HEX --cose-key HEX)",
 		Short: "Revoke this device at relays and delete its binding, or revoke a lost device with the wallet key",
 		Long: `Without --lost: revoke THIS device with its own key (dated now), keep the revoke
 to send to every relay, and delete this device's binding, so a new login needs
-a new binding. Handle the mail waiting at the relay first: a relay deletes the
-queue of a revoked device. It asks first.
+a new binding. A relay deletes the queue of a revoked device, so when relays
+are listed this logs in first, fetches and handles what waits there (as the
+coordinator or the signer of this machine; --as when it is both), then stores
+and sends the revoke, logs out, and deletes the binding last. It asks first.
 
 With --lost DEVICE: revoke ANOTHER device of your wallet key (a lost or stolen
 one) with the wallet key, and send it from this device without logging in.`,
@@ -838,12 +920,50 @@ one) with the wallet key, and send it from this device without logging in.`,
 					if svc.DeviceRevoke == nil {
 						return errors.New("this build cannot sign a revoke with the device key")
 					}
+					st, err := svc.Load(ctx)
+					if err != nil {
+						return err
+					}
+					relays, err := relayself.Relays(ctx, r.s.Store)
+					if err != nil {
+						return err
+					}
+					until := func(got relayport.Revoke) string {
+						return time.Unix(got.Until, 0).UTC().Format(time.DateTime + " MST")
+					}
+					if st.Binding != nil && len(relays) > 0 && r.kit().Relay.Connect != nil {
+						h, err := r.forgetHandler(ctx, as)
+						if err != nil {
+							return err
+						}
+						got, errs, err := r.relayForget(ctx, h)
+						if err != nil {
+							return bindErr(err)
+						}
+						fmt.Fprintln(a.d.Out, "Stored this device's revoke, logged out and deleted its binding. At the relays:")
+						if err := r.reportOwed(ctx, svc, relayself.ShortID(got), errs); err != nil {
+							return err
+						}
+						fmt.Fprintf(a.d.Out, "Revoked this device at every listed relay. The revoke is sent again on every connection until %s.\n", until(got))
+						return nil
+					}
 					got, err := svc.Forget(ctx)
 					if err != nil {
 						return bindErr(err)
 					}
-					fmt.Fprintf(a.d.Out, "Revoked this device and deleted its binding. The revoke is sent to every relay on every connection until %s.\n",
-						time.Unix(got.Until, 0).UTC().Format(time.DateTime+" MST"))
+					if len(relays) == 0 {
+						fmt.Fprintf(a.d.Out, "Revoked this device and deleted its binding. No relay is listed: the revoke is sent to every relay on every connection until %s.\n", until(got))
+						return nil
+					}
+					fmt.Fprintln(a.d.Out, "Stored this device's revoke and deleted its binding. At the relays:")
+					rep, err := svc.SendPending(ctx)
+					if err != nil && !errors.Is(err, relayself.ErrNoSender) {
+						fmt.Fprintf(a.d.Err, "sending the revoke: %v\n", err)
+					}
+					if err := r.reportOwed(ctx, svc, relayself.ShortID(got), rep.Relays); err != nil {
+						return err
+					}
+					fmt.Fprintf(a.d.Out, "Revoked this device at every listed relay. The revoke is sent again on every connection until %s.\n", until(got))
 					return nil
 				})
 			}
@@ -865,6 +985,7 @@ one) with the wallet key, and send it from this device without logging in.`,
 	wf.add(cmd, false)
 	cmd.Flags().StringVar(&lost, "lost", "", "revoke this other device of your wallet key (the eight groups or 40 hex)")
 	cmd.Flags().BoolVar(&yes, "yes", false, "do not ask")
+	cmd.Flags().StringVar(&as, "as", "", "which role handles the relays' queue first, when this machine is both: coordinator or signer")
 	return cmd
 }
 

@@ -234,6 +234,8 @@ type world struct {
 	ev     *events
 	mu     sync.Mutex
 	routes map[party.Fingerprint]mailbox.Route
+	// downOnce makes shutdown idempotent: a test may stop the relay itself.
+	downOnce sync.Once
 }
 
 // newWorld makes the real version 2 relay server (app/relay.Server over the real
@@ -316,13 +318,15 @@ func (w *world) bind(p *peer) {
 }
 
 func (w *world) shutdown() {
-	w.stop()
-	select {
-	case <-w.done:
-	case <-time.After(5 * time.Second):
-		w.t.Error("the relay's Serve did not return")
-	}
-	w.ln.Close()
+	w.downOnce.Do(func() {
+		w.stop()
+		select {
+		case <-w.done:
+		case <-time.After(5 * time.Second):
+			w.t.Error("the relay's Serve did not return")
+		}
+		w.ln.Close()
+	})
 }
 
 // sha256Rand is a deterministic nonce source: the relay's nonces differ per
