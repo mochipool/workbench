@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/mochipool/workbench/spo/internal/domain/party"
+	"github.com/mochipool/workbench/spo/internal/domain/relaybind"
 	"github.com/mochipool/workbench/spo/internal/ports"
+	"github.com/mochipool/workbench/spo/internal/ports/relayport"
 )
 
 // Local is a Private behind the ports of use cases: it seals and opens
@@ -32,6 +34,28 @@ func NewLocal(p *Private, r io.Reader) *Local {
 
 func (l *Local) Identity() party.Identity { return l.p.Identity() }
 func (l *Local) Destroy()                 { l.p.Destroy() }
+
+// SignRelayDeviceRevoke implements relayport.DeviceRevokeSigner: the device
+// signs its own revoke (ADR 0014 decision 7). The signed bytes are built here
+// by relaybind.DeviceRevokeBytes from this identity's own fingerprint and the
+// not-before, so the identity cannot be made to sign another device's revoke or
+// any other bytes; a not-before outside 0 to relaybind.MaxTime, or above the
+// bound the caller gives (relay time plus the skew: the method has no clock), is
+// refused and nothing is signed.
+//
+// spec: SPO-Xrelaybind-INV-005
+func (l *Local) SignRelayDeviceRevoke(notBefore, notBeforeBound int64) ([64]byte, error) {
+	if notBefore > notBeforeBound {
+		return [64]byte{}, fmt.Errorf("%w: not-before %d is above the bound %d", relaybind.ErrRevokeFuture, notBefore, notBeforeBound)
+	}
+	msg, err := relaybind.DeviceRevokeBytes(l.p.Fingerprint(), notBefore)
+	if err != nil {
+		return [64]byte{}, err
+	}
+	return l.p.sign(msg)
+}
+
+var _ relayport.DeviceRevokeSigner = (*Local)(nil)
 
 // Seal implements ports.EnvelopeSealer.
 func (l *Local) Seal(to party.Identity, body party.Body, now, expires time.Time) ([]byte, party.MessageID, error) {

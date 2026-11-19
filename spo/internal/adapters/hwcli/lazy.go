@@ -7,6 +7,7 @@ import (
 
 	"github.com/mochipool/workbench/spo/internal/domain/cose"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/relaybind"
 	"github.com/mochipool/workbench/spo/internal/domain/txbuild"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
@@ -87,7 +88,12 @@ func (l *Lazy) Canonicalize(ctx context.Context, body txbuild.TxBody, opt ports.
 	return s.Canonicalize(ctx, body, opt)
 }
 
+// SignMessage refuses a reserved payload (`spo-`, `spo/`) before the session is
+// opened, so the device is not even looked for (SPO-Xrelaybind-SEC-016).
 func (l *Lazy) SignMessage(ctx context.Context, req ports.MessageRequest) (ports.SignedMessage, error) {
+	if relaybind.IsReserved(req.Payload) {
+		return ports.SignedMessage{}, relaybind.ErrReservedPayload
+	}
 	s, err := l.Session(ctx)
 	if err != nil {
 		return ports.SignedMessage{}, err

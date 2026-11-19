@@ -265,9 +265,14 @@ func (a *app) calidusSignCommand() *cobra.Command {
 print the Calidus id, the public key and the signature in hex. The signature is
 a plain Ed25519 signature over the bytes of the text, not a CIP-8 message. A
 Calidus key on a hardware wallet does not exist (see calidus new), so there is no
-device variant. Nothing is written.`,
+device variant. Nothing is written. Data that is not valid UTF-8 text, or that
+is the signing input of a relay statement, is refused.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// refused before the workspace is unlocked (SPO-Xidentity-SEC-008)
+			if err := ports.CheckSignableText([]byte(args[1])); err != nil {
+				return err
+			}
 			return a.withEnv(cmd, envSpec{flags: &cf, needs: []Need{CapSigners, CapSignatures}}, func(ctx context.Context, s *session, env *Env, _ WireOptions) error {
 				res, err := poolkey.SignWithCalidusKey{Store: s.Store, Signers: env.Signers}.Run(ctx, args[0], []byte(args[1]))
 				if err != nil {

@@ -12,6 +12,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/chain"
 	"github.com/mochipool/workbench/spo/internal/domain/cose"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/relaybind"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -22,8 +23,24 @@ import (
 // the COSE header is not supported: the tool takes it as text, and no script
 // gives one.
 //
-// spec: SPO-15-EXT-004, SPO-15-EXT-005, SPO-15-PR-001
+// A payload that starts with `spo-` or `spo/` is refused first, on the data and
+// before the device or any hashing is involved: only the typed relay statement
+// methods make one (ADR 0014 decision 3). The registrations of this adapter
+// sign a hash and go through signMessage, which has no guard: a Blake2b digest
+// has no meaning as text, and a refusal of one that happened to start with the
+// prefix would be a one-in-four-billion failure of an honest registration.
+//
+// spec: SPO-15-EXT-004, SPO-15-EXT-005, SPO-15-PR-001, SPO-Xrelaybind-SEC-016, SPO-Xidentity-SEC-007
 func (s *Session) SignMessage(ctx context.Context, req ports.MessageRequest) (ports.SignedMessage, error) {
+	if relaybind.IsReserved(req.Payload) {
+		return ports.SignedMessage{}, relaybind.ErrReservedPayload
+	}
+	return s.signMessage(ctx, req)
+}
+
+// signMessage is the message path without the reserved-prefix guard, for the
+// callers that sign a digest they computed themselves (SignCip88).
+func (s *Session) signMessage(ctx context.Context, req ports.MessageRequest) (ports.SignedMessage, error) {
 	if err := s.has(req.Key.Role, custody.OpSignMessage); err != nil {
 		return ports.SignedMessage{}, err
 	}
@@ -208,7 +225,7 @@ func (s *Session) SignCip88(ctx context.Context, key custody.Key[custody.PoolCol
 		return ports.Registration{}, errors.New("the hardware cold key is not the pool's key: its hash is not the registration's pool id")
 	}
 	hash := reg.PayloadHash()
-	msg, err := s.SignMessage(ctx, ports.MessageRequest{Key: key.Ref(), Payload: hash[:]})
+	msg, err := s.signMessage(ctx, ports.MessageRequest{Key: key.Ref(), Payload: hash[:]})
 	if err != nil {
 		return ports.Registration{}, err
 	}

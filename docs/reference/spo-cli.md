@@ -923,7 +923,7 @@ Lists the Calidus keys registered on chain for a pool, a Calidus id or key (upst
 
 ### `pool calidus sign CALIDUS TEXT`
 
-Signs `TEXT` with the Calidus signing key `CALIDUS` from the workspace and prints the Calidus id, the public key and the signature in hex (upstream `15 sign`). The signature is a plain Ed25519 signature over the bytes of the text, not a CIP-8 message. Nothing is written. A failed signature is an error (upstream exits 0). There is no hardware variant. Needs: signers, `registration-signing`.
+Signs `TEXT` with the Calidus signing key `CALIDUS` from the workspace and prints the Calidus id, the public key and the signature in hex (upstream `15 sign`). The signature is a plain Ed25519 signature over the bytes of the text, not a CIP-8 message. Nothing is written. A failed signature is an error (upstream exits 0). There is no hardware variant. `TEXT` must be valid UTF-8, and must not be, or start like, the signing input of a relay statement (a COSE `Sig_structure`, or text that starts with `spo-` or `spo/`): a Calidus key made from a mnemonic is also that mnemonic's payment key 0/0, so a raw signature over such bytes could be passed off as a relay binding. The command refuses these before it unlocks the workspace (`SPO-Xidentity-SEC-008`). Needs: signers, `registration-signing`.
 
 `pool calidus new` takes `--hardware` only to say no: a Calidus key cannot be made on a device, because upstream suspends it until CIP-151 has a dedicated derivation path (`SPO-15-PRE-002`). The command refuses before anything is read; no table row grants a Calidus key on any device.
 

@@ -159,7 +159,17 @@ func verifiesAsBinding(b []byte) error {
 // verifyDevRevoke calls VerifyDeviceRevoke with a Policy of the given skew and
 // the ADR's lifetime bound.
 func verifyDevRevoke(ed party.Ed25519Public, x party.X25519Public, nb int64, sig [64]byte, now, skew int64) (party.Fingerprint, error) {
-	return relaybind.VerifyDeviceRevoke(ed, x, nb, sig, now, relaybind.Policy{Skew: skew, MaxLifetime: relaybind.MaxLifetimeSeconds})
+	v, err := relaybind.VerifyDeviceRevoke(ed, x, nb, sig, now, relaybind.Policy{Skew: skew, MaxLifetime: relaybind.MaxLifetimeSeconds})
+	if err != nil {
+		if !v.IsZero() {
+			panic("a refused device revoke returned a verified value")
+		}
+		return party.Fingerprint{}, err
+	}
+	if v.NotBefore() != nb {
+		panic("the verified not-before is not the one signed")
+	}
+	return v.Device(), nil
 }
 
 func hx(b []byte) string { return hex.EncodeToString(b) }

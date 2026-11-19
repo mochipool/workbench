@@ -11,6 +11,8 @@ import (
 
 	"github.com/mochipool/workbench/spo/internal/domain/cose"
 	"github.com/mochipool/workbench/spo/internal/domain/custody"
+	"github.com/mochipool/workbench/spo/internal/domain/relaybind"
+	"github.com/mochipool/workbench/spo/internal/domain/relaywallet"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -76,7 +78,14 @@ func (v VaultSignatures) openKey(ctx context.Context, key custody.KeyRef) (*burs
 // with a payment or stake key. The key must belong to the address
 // (cardano-signer's hash check, without its --nohashcheck escape: a message
 // for an address the key does not control is refused).
+//
+// A payload that starts with `spo-` or `spo/` is refused first, on the data and
+// before any hashing: only SignRelayBinding and SignRelayRevoke make one
+// (ADR 0014 decision 3; spec: SPO-Xrelaybind-SEC-016, SPO-Xidentity-SEC-007).
 func (v VaultSignatures) SignMessage(ctx context.Context, req ports.MessageRequest) (ports.SignedMessage, error) {
+	if relaybind.IsReserved(req.Payload) {
+		return ports.SignedMessage{}, relaybind.ErrReservedPayload
+	}
 	if req.Key.Role != custody.RolePayment && req.Key.Role != custody.RoleStake {
 		return ports.SignedMessage{}, fmt.Errorf("a message is signed with a payment or stake key, not a %s key", req.Key.Role)
 	}
@@ -98,6 +107,65 @@ func (v VaultSignatures) SignMessage(ctx context.Context, req ports.MessageReque
 		return ports.SignedMessage{}, err
 	}
 	s1 := cose.Sign1{Protected: protected, Hashed: req.Hashed, Payload: payload, Signature: sig}
+	return ports.SignedMessage{Sign1: s1.Encode(), Key: cose.EncodeKey(lk.VKey)}, nil
+}
+
+// SignRelayBinding implements ports.RelayStatementSigner: the CIP-8 COSE_Sign1
+// of the binding statement (ADR 0014 decision 3), signed with the wallet key.
+// The payload is rendered here from the typed Binding, so the relay's rules
+// refuse a statement a client would build wrongly before the key is opened.
+//
+// spec: SPO-Xrelaybind-SEC-017
+func (v VaultSignatures) SignRelayBinding(ctx context.Context, key relaywallet.WalletKey, b relaybind.Binding) (ports.SignedMessage, error) {
+	payload, err := b.Render()
+	if err != nil {
+		return ports.SignedMessage{}, err
+	}
+	return v.signStatement(ctx, key, payload)
+}
+
+// SignRelayRevoke implements ports.RelayStatementSigner for the wallet-signed
+// revoke (ADR 0014 decision 7).
+//
+// spec: SPO-Xrelaybind-SEC-017
+func (v VaultSignatures) SignRelayRevoke(ctx context.Context, key relaywallet.WalletKey, r relaybind.Revoke) (ports.SignedMessage, error) {
+	payload, err := r.Render()
+	if err != nil {
+		return ports.SignedMessage{}, err
+	}
+	return v.signStatement(ctx, key, payload)
+}
+
+// signStatement is the only code that signs a reserved payload. It checks the
+// role history of the key itself (a caller that skipped the use case still
+// cannot use a key that was once cold), opens the key, uses the 28-byte key hash
+// K of the key it opened as the protected-header address, embeds the payload
+// un-hashed and signs the CIP-8 Sig_structure.
+func (v VaultSignatures) signStatement(ctx context.Context, key relaywallet.WalletKey, payload []byte) (ports.SignedMessage, error) {
+	if key.IsZero() {
+		return ports.SignedMessage{}, relaywallet.ErrRole
+	}
+	idx, err := v.index()
+	if err != nil {
+		return ports.SignedMessage{}, fmt.Errorf("%w: %w", relaywallet.ErrHistoryUnreadable, err)
+	}
+	h, known, err := ports.RoleHistoryOf(ctx, idx, key.Ref().Identity)
+	if err := key.CheckHistory(h, known, err); err != nil {
+		return ports.SignedMessage{}, err
+	}
+	lk, err := v.openKey(ctx, key.Ref())
+	if err != nil {
+		return ports.SignedMessage{}, err
+	}
+	defer wipe(lk.SKey)
+	k := cose.Blake2b224(lk.VKey)
+	protected := cose.ProtectedHeader(k[:])
+	embedded := cose.PayloadFor(payload, false)
+	sig, err := signWith(lk, cose.SigStructure(protected, embedded))
+	if err != nil {
+		return ports.SignedMessage{}, err
+	}
+	s1 := cose.Sign1{Protected: protected, Hashed: false, Payload: embedded, Signature: sig}
 	return ports.SignedMessage{Sign1: s1.Encode(), Key: cose.EncodeKey(lk.VKey)}, nil
 }
 

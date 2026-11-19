@@ -69,6 +69,33 @@ const (
 	addressNetworkMask = 0x0f
 )
 
+// KeyOfAddress reads the wallet key hash K out of an address in exactly the forms
+// a statement's protected header may carry (the table above): a 29-byte
+// enterprise or reward address with a key-hash credential, or a 57-byte base
+// address with a key-hash payment credential, network id 0 or 1. It is what a
+// caller that is given an address (not a key hash) of an external wallet uses to
+// learn K; it uses the same rules as the verifiers, so an address that it refuses
+// would also be refused in a statement (ErrAddressForm). A bare 28-byte key hash
+// is its own K (PartKeyHash).
+func KeyOfAddress(addr []byte) (KeyHash, AddressPart, error) {
+	var k KeyHash
+	switch len(addr) {
+	case KeyHashSize:
+		copy(k[:], addr)
+	case enterpriseAddressSize:
+		copy(k[:], addr[1:])
+	case baseAddressSize:
+		copy(k[:], addr[1:1+KeyHashSize])
+	default:
+		return KeyHash{}, 0, ErrAddressForm
+	}
+	part, err := matchAddress(addr, k[:])
+	if err != nil {
+		return KeyHash{}, 0, err
+	}
+	return k, part, nil
+}
+
 // matchAddress checks the protected-header address against K, the Blake2b-224
 // of the verification key. A form that is not accepted is ErrAddressForm; an
 // accepted form that names no key credential equal to K is ErrWrongKey.

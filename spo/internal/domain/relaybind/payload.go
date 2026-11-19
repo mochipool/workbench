@@ -173,25 +173,25 @@ func DeviceRevokeBytes(device party.Fingerprint, notBefore int64) ([]byte, error
 // not be beyond now plus the skew. A small-order or non-canonical Ed25519 key is
 // refused (ErrWeakKey). It returns the revoked device. The revoke carries no
 // wallet key, so its tombstone has scope ScopeDevice.
-func VerifyDeviceRevoke(ed party.Ed25519Public, x party.X25519Public, notBefore int64, sig [64]byte, now int64, pol Policy) (party.Fingerprint, error) {
+func VerifyDeviceRevoke(ed party.Ed25519Public, x party.X25519Public, notBefore int64, sig [64]byte, now int64, pol Policy) (VerifiedDeviceRevoke, error) {
 	if err := pol.Validate(); err != nil {
-		return party.Fingerprint{}, err
+		return VerifiedDeviceRevoke{}, err
 	}
 	if err := checkPublicKey(ed[:]); err != nil {
-		return party.Fingerprint{}, err
+		return VerifiedDeviceRevoke{}, err
 	}
 	device := party.FingerprintOf(ed, x)
 	msg, err := DeviceRevokeBytes(device, notBefore)
 	if err != nil {
-		return party.Fingerprint{}, err
+		return VerifiedDeviceRevoke{}, err
 	}
 	if futureNotBefore(notBefore, now, pol.Skew) {
-		return party.Fingerprint{}, ErrRevokeFuture
+		return VerifiedDeviceRevoke{}, ErrRevokeFuture
 	}
 	if !ed25519.Verify(ed[:], msg, sig[:]) {
-		return party.Fingerprint{}, ErrBadSignature
+		return VerifiedDeviceRevoke{}, ErrBadSignature
 	}
-	return device, nil
+	return VerifiedDeviceRevoke{ok: true, device: device, notBefore: notBefore}, nil
 }
 
 // futureNotBefore reports notBefore > now + skew without computing the sum

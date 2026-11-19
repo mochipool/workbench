@@ -994,7 +994,7 @@ func TestVerifyDeviceRevokeTakesAPolicy(t *testing.T) {
 	msg, _ := relaybind.DeviceRevokeBytes(dev, nowT)
 	var sig [64]byte
 	copy(sig[:], signRaw(msg))
-	if got, err := relaybind.VerifyDeviceRevoke(ed, x, nowT, sig, nowT, pol()); err != nil || got != dev {
+	if got, err := relaybind.VerifyDeviceRevoke(ed, x, nowT, sig, nowT, pol()); err != nil || got.Device() != dev {
 		t.Fatalf("default policy: %v", err)
 	}
 	for name, p := range map[string]relaybind.Policy{
