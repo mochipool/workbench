@@ -212,8 +212,8 @@ func TestPolicyOnlyTightens(t *testing.T) {
 
 // The address forms of the protected header, exactly: the 28-byte key hash; an
 // enterprise or reward address of 29 bytes with a KEY-hash credential equal to
-// K; a base address of 57 bytes with a key-hash credential equal to K as the
-// payment part (types 0, 2) or the stake part (types 0, 1). Network id 0 or 1.
+// K; a base address of 57 bytes whose key-hash PAYMENT credential equals K
+// (types 0, 2); K as only the stake part is refused. Network id 0 or 1.
 // Nothing else. The verified result says which part matched.
 //
 // spec: SPO-Xrelaybind-PRE-014
@@ -239,17 +239,21 @@ func TestProtectedAddressForms(t *testing.T) {
 		{"reward address, mainnet", cat(hdr(0xe1), k), ok(relaybind.PartReward)},
 		{"reward address, testnet", cat(hdr(0xe0), k), ok(relaybind.PartReward)},
 		{"base, K payment (key, key)", cat(hdr(0x01), k, other), ok(relaybind.PartBasePayment)},
-		{"base, K stake (key, key)", cat(hdr(0x01), other, k), ok(relaybind.PartBaseStake)},
-		{"base, K in both slots reports the payment part", cat(hdr(0x00), k, k), ok(relaybind.PartBasePayment)},
+		{"base, K in both slots is the payment part", cat(hdr(0x00), k, k), ok(relaybind.PartBasePayment)},
 		{"base (key, script), K payment", cat(hdr(0x21), k, other), ok(relaybind.PartBasePayment)},
-		{"base (script, key), K stake", cat(hdr(0x11), other, k), ok(relaybind.PartBaseStake)},
+		// K as only the stake part of a base address is not a match: a wallet
+		// signing for a base address signs with the payment key, and one signing
+		// with the stake key presents the reward address.
+		{"base, K only as the stake part (key, key)", cat(hdr(0x01), other, k), want{err: relaybind.ErrWrongKey}},
+		{"base, K only as the stake part, testnet", cat(hdr(0x00), other, k), want{err: relaybind.ErrWrongKey}},
+		{"base (script, key), K as the stake part", cat(hdr(0x11), other, k), want{err: relaybind.ErrAddressForm}},
 		// A well-formed address that does not name K.
 		{"another key hash", bs(28, 1), want{err: relaybind.ErrWrongKey}},
 		{"enterprise address of another key", cat(hdr(0x61), other), want{err: relaybind.ErrWrongKey}},
 		{"reward address of another key", cat(hdr(0xe1), other), want{err: relaybind.ErrWrongKey}},
 		{"base address without K", cat(hdr(0x01), other, other), want{err: relaybind.ErrWrongKey}},
 		{"K shifted by one byte in a base address", cat(hdr(0x01), []byte{0}, k[:27], other), want{err: relaybind.ErrWrongKey}},
-		{"(script, key) base with K in the SCRIPT payment slot", cat(hdr(0x11), k, other), want{err: relaybind.ErrWrongKey}},
+		{"(script, key) base with K in the SCRIPT payment slot", cat(hdr(0x11), k, other), want{err: relaybind.ErrAddressForm}},
 		{"(key, script) base with K in the SCRIPT stake slot", cat(hdr(0x21), other, k), want{err: relaybind.ErrWrongKey}},
 		// Forms that are not accepted.
 		{"script enterprise address with K", cat(hdr(0x71), k), want{err: relaybind.ErrAddressForm}},
@@ -311,7 +315,7 @@ func TestProtectedAddressForms(t *testing.T) {
 		t.Errorf("revoke with a script enterprise address: %v", err)
 	}
 	// The verification key must hash to K: the address alone is never the identity.
-	v, err := verifyBinding(t, signed(cat(hdr(0x01), other, k), goodPayload(t)), testDev, nowT, pol())
+	v, err := verifyBinding(t, signed(cat(hdr(0x01), k, other), goodPayload(t)), testDev, nowT, pol())
 	if err != nil || v.Key() != testK {
 		t.Errorf("the result key is %x (%v), want the hash of the verification key", v.Key(), err)
 	}

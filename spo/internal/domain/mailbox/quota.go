@@ -72,6 +72,20 @@ func (q Quota) Validate(parties int) error {
 	if parties < 1 || parties > MaxAccessListParties {
 		return bad(ErrQuota, "%d parties; the access list has 1 to %d", parties, MaxAccessListParties)
 	}
+	if err := q.checkBounds(); err != nil {
+		return err
+	}
+	// A global quota of zero fails the cover rule, as parties >= 1 and
+	// SenderBytes >= 1. parties <= 1024 and SenderBytes <= 64 MiB, so the product cannot wrap.
+	if need := uint64(parties) * q.SenderBytes; q.GlobalBytes < need {
+		return bad(ErrQuota, "the global quota %d does not cover %d parties at %d bytes each (%d)", q.GlobalBytes, parties, q.SenderBytes, need)
+	}
+	return nil
+}
+
+// checkBounds is the part of the load rule that is the same in both versions:
+// every bound is set and no looser than the table.
+func (q Quota) checkBounds() error {
 	for _, c := range []struct {
 		name     string
 		v, limit uint64
@@ -85,11 +99,6 @@ func (q Quota) Validate(parties int) error {
 		if c.v == 0 || c.v > c.limit {
 			return bad(ErrQuota, "%s is %d; it must be 1 to %d", c.name, c.v, c.limit)
 		}
-	}
-	// A global quota of zero fails the cover rule, as parties >= 1 and
-	// SenderBytes >= 1. parties <= 1024 and SenderBytes <= 64 MiB, so the product cannot wrap.
-	if need := uint64(parties) * q.SenderBytes; q.GlobalBytes < need {
-		return bad(ErrQuota, "the global quota %d does not cover %d parties at %d bytes each (%d)", q.GlobalBytes, parties, q.SenderBytes, need)
 	}
 	return nil
 }

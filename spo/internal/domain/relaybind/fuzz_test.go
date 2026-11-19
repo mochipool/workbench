@@ -173,10 +173,6 @@ func FuzzProtectedAddress(f *testing.F) {
 			if len(addr) != 57 || (typ != 0 && typ != 2) || net > 1 || !bytes.Equal(addr[1:29], k) {
 				t.Fatalf("base-payment accepted for %x", addr)
 			}
-		case relaybind.PartBaseStake:
-			if len(addr) != 57 || (typ != 0 && typ != 1) || net > 1 || !bytes.Equal(addr[29:], k) {
-				t.Fatalf("base-stake accepted for %x", addr)
-			}
 		default:
 			t.Fatalf("part %v", vb.AddressPart())
 		}
