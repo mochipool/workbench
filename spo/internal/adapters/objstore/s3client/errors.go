@@ -15,9 +15,18 @@ var (
 	ErrPreconditionFailed = errors.New("the store refused a conditional write: precondition failed (412)")
 	// ErrConflict is a 409: a conditional write raced another one.
 	ErrConflict = errors.New("the store refused a conditional write: conflict (409)")
-	// ErrNotFound is a 404: no such object or version, or If-Match on an object
-	// that is gone or whose current version is a delete marker.
+	// ErrNotFound is a 404 about an object: the code NoSuchKey (no such object,
+	// a current delete marker, or If-Match on an object that is gone) or
+	// NoSuchVersion, or a 404 without a code to a GET or a HEAD of an object.
+	// A HEAD answer has no body, so a HEAD 404 cannot tell a missing object from
+	// a missing bucket: Head alone must not decide existence where it matters
+	// (use Get, or check the bucket with Versioning). Any other 404 (NoSuchBucket,
+	// a code-less 404 to a put or a delete, a bucket configuration not found)
+	// is not ErrNotFound.
 	ErrNotFound = errors.New("the store has no such object (404)")
+	// ErrBucketNotFound is a 404 NoSuchBucket: the bucket is missing or the
+	// name is wrong.
+	ErrBucketNotFound = errors.New("the store has no such bucket (404 NoSuchBucket)")
 	// ErrAccessDenied is a 403 that is not about the clock: a policy deny, or a
 	// delete that Object Lock retention refuses.
 	ErrAccessDenied = errors.New("the store denied the request (403)")
@@ -33,10 +42,18 @@ var (
 	// ErrStatus is any other refusal.
 	ErrStatus = errors.New("the store refused the request")
 
-	// ErrOutcomeUnknown is joined to the error of a write whose request may have
-	// been applied: no answer came (a lost response, a deadline, a reset). Read
-	// the object back before deciding.
-	ErrOutcomeUnknown = errors.New("the write may or may not have been applied: no answer was received")
+	// ErrOutcomeUnknown matches the error of a write (a put or a delete) of
+	// which some attempt may have been applied: an attempt got no answer (a
+	// lost response, a reset, the deadline or a cancel while it was in flight),
+	// or a 5xx (a proxy may answer one after the backend committed), or a 2xx
+	// whose body or headers fail the checks. It matches whatever error ended the
+	// write: a *StatusError with Uncertain set (a 412 after a lost attempt is
+	// still ErrPreconditionFailed as well), a credential failure on a later
+	// attempt, a bad body. A 429 and every other 4xx are definite refusals and
+	// leave it unset unless an earlier attempt set it; so does a request never
+	// sent (the context already done, credentials refused before the first
+	// attempt). Read the object back (ReadBack) before deciding.
+	ErrOutcomeUnknown = errors.New("the write may or may not have been applied")
 	// ErrNoDeadline is returned for a context without a deadline: every request
 	// must have one.
 	ErrNoDeadline = errors.New("the request has no deadline: every store request must carry one")
@@ -90,9 +107,11 @@ type StatusError struct {
 	DeleteMarker bool
 	// Attempts is the number of attempts made, this one included.
 	Attempts int
-	// Uncertain is true when an earlier attempt of this write had no answer, so
-	// this refusal may be caused by that attempt having been applied (a 412 to a
-	// retried create whose first try landed). Read the object back to tell.
+	// Uncertain is true when an attempt of this write may have been applied (see
+	// ErrOutcomeUnknown): an earlier attempt, so that this refusal may be caused
+	// by it (a 412 to a retried create whose first try landed), or this one (a
+	// 5xx). The error then matches ErrOutcomeUnknown too. Read the object back
+	// to tell.
 	Uncertain bool
 }
 
@@ -108,20 +127,32 @@ func (e *StatusError) Error() string {
 	if e.Attempts > 1 {
 		s += fmt.Sprintf(" after %d attempts", e.Attempts)
 	}
+	if e.Uncertain {
+		s += "; the write may have been applied"
+	}
 	return s
 }
 
-// Is matches the sentinel of the status.
+// Is matches the sentinel of the status, and ErrOutcomeUnknown when Uncertain.
+// A HEAD answer has no body and so no code: a 403 to a HEAD is ErrAccessDenied
+// even when the cause is the clock (use a GET where the code matters).
 func (e *StatusError) Is(target error) bool {
 	switch target {
 	case ErrStatus:
 		return true
+	case ErrOutcomeUnknown:
+		return e.Uncertain
 	case ErrPreconditionFailed:
 		return e.Status == http.StatusPreconditionFailed
 	case ErrConflict:
 		return e.Status == http.StatusConflict
 	case ErrNotFound:
-		return e.Status == http.StatusNotFound
+		if e.Status != http.StatusNotFound {
+			return false
+		}
+		return e.Code == "NoSuchKey" || e.Code == "NoSuchVersion" || (e.Code == "" && e.Key != "" && (e.Op == "get" || e.Op == "head"))
+	case ErrBucketNotFound:
+		return e.Status == http.StatusNotFound && e.Code == "NoSuchBucket"
 	case ErrClockSkew:
 		return e.Status == http.StatusForbidden && e.Code == "RequestTimeTooSkewed"
 	case ErrAccessDenied:

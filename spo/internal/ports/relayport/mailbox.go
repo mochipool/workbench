@@ -65,11 +65,25 @@ type MailboxPut struct {
 	Quota mailbox.ValidQuota
 }
 
+// The bound on bodies a put may hold whole (ADR 0015 decision 2, m1): an
+// adapter whose store cannot refuse bytes that do not hash to the mid holds a
+// body in memory until it is checked, at most MaxHeldBodies of them for the
+// whole store, each at most mailbox.MaxEnvelopeBytes: MaxHeldBodyBytes in all.
+const (
+	MaxHeldBodies    = 64
+	MaxHeldBodyBytes = MaxHeldBodies * mailbox.MaxEnvelopeBytes
+)
+
 // MailboxWriter stores envelopes.
 type MailboxWriter interface {
 	// Put stores the body of r, which must be Size bytes that hash to Mid,
 	// unless the entry exists (MailboxDuplicate) or a bound is passed
-	// (MailboxFull, MailboxTooLarge). The body is streamed, never held whole.
+	// (MailboxFull, MailboxTooLarge). The body is streamed, or held whole up to
+	// mailbox.MaxEnvelopeBytes by an adapter whose store cannot refuse wrong
+	// bytes; such an adapter holds at most MaxHeldBodies bodies (MaxHeldBodyBytes)
+	// for the whole store, and a put that finds no room waits for one until ctx
+	// ends and otherwise fails as a store failure does (the sender puts it again).
+	// Nothing is visible to a reader before the hash was checked.
 	// A body that ends before Size bytes returns an error that wraps both
 	// mailbox.ErrSize and io.ErrUnexpectedEOF; bytes that do not hash to Mid
 	// return one that wraps mailbox.ErrHash. Either stores nothing. Framing is

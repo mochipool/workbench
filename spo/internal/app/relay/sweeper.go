@@ -23,6 +23,20 @@ type Sweeper struct {
 	clock     relayport.Clock
 	retention uint64
 	events    EventSink
+	srv       *Server // optional: the server whose authority the sweeps run under
+}
+
+// WithAuthority makes the sweeper run under the authority of srv: a sweep after
+// the authority was lost calls no store and returns ErrAuthorityLost; a sweep
+// that reports relayport.ErrAuthorityLost, or after which the authority is
+// lost (the eviction guard's read reported it), ends the relay
+// (Server.LoseAuthority); a sweep that ended without an answer is counted in
+// srv.Unanswered. It returns the sweeper.
+//
+// spec: SPO-Xmailbox-OUT-127, SPO-Xmailbox-SEC-088
+func (s *Sweeper) WithAuthority(srv *Server) *Sweeper {
+	s.srv = srv
+	return s
 }
 
 // WithRegistry makes the sweeper also sweep the binding registry on every pass:
@@ -53,7 +67,15 @@ func NewSweeper(exp relayport.MailboxExpirer, clock relayport.Clock, retentionSe
 // Sweep runs one pass and returns how many entries it removed. A failure is
 // returned and logged as a class, with none of the error's text.
 func (s *Sweeper) Sweep(ctx context.Context) (int, error) {
+	if s.srv != nil {
+		if err := s.srv.gate(); err != nil {
+			s.srv.LoseAuthority()
+			return 0, err
+		}
+	}
+	live := ctx.Err() == nil
 	n, err := s.exp.Sweep(ctx, s.retention)
+	s.noted(live, err)
 	if s.events != nil {
 		e := Event{Kind: EventSweep, Time: s.clock.Now(), Count: n}
 		if err != nil {
@@ -61,10 +83,13 @@ func (s *Sweeper) Sweep(ctx context.Context) (int, error) {
 		}
 		s.events(e)
 	}
-	if s.reg != nil {
+	if s.reg != nil && !s.lost() {
 		// the registry is swept even when the mailbox sweep failed: they are
-		// independent, and the first error is the one returned
+		// independent, and the first error is the one returned; not after the
+		// mailbox sweep lost the authority
+		live := ctx.Err() == nil
 		res, rerr := s.reg.Sweep(ctx)
+		s.noted(live, rerr)
 		if s.events != nil {
 			e := Event{Kind: EventRegistrySweep, Time: s.clock.Now(), Count: len(res.Expired) + len(res.Idle) + len(res.Invalidated) + res.Tombstones}
 			if rerr != nil {
@@ -76,8 +101,24 @@ func (s *Sweeper) Sweep(ctx context.Context) (int, error) {
 			err = rerr
 		}
 	}
+	if s.lost() {
+		s.srv.LoseAuthority()
+		if err == nil {
+			err = ErrAuthorityLost
+		}
+	}
 	return n, err
 }
+
+// noted gives the error of one store call to the server (Server.noteWrite).
+func (s *Sweeper) noted(live bool, err error) {
+	if s.srv != nil {
+		s.srv.noteWrite(live, err)
+	}
+}
+
+// lost reports whether the authority the sweeper runs under is lost.
+func (s *Sweeper) lost() bool { return s.srv != nil && s.srv.lostNow() }
 
 // Run sweeps every interval until ctx ends, and returns ctx's error. A sweep
 // that fails is logged and the next one still runs. It starts no goroutine and

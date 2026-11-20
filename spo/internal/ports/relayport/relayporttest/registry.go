@@ -22,6 +22,15 @@ import (
 type RegistryFixture struct {
 	Registry relayport.Registry
 	Reopen   func(t *testing.T) relayport.Registry
+	// Drops, when set, is consulted by the registry before each drop of a
+	// tombstone; the cases of a refused drop are skipped without it.
+	Drops *DropFaults
+	// Learn, when set, puts tombstones in the registry's storage as another
+	// writer would; the case of a learnt tombstone is skipped without it.
+	Learn Learner
+	// Unknown, when set, is consulted by the registry before each write of a
+	// tombstone; the case of an unknown outcome is skipped without it.
+	Unknown *UnknownFaults
 }
 
 // RegistryFactory makes a registry with the configuration cfg on clock.
@@ -214,6 +223,11 @@ func RunRegistry(t *testing.T, mk RegistryFactory) {
 		{"ClosedRegistry", func(t *testing.T) { regClosed(t, mk) }},
 		{"CancelledContext", func(t *testing.T) { regCancelled(t, mk) }},
 		{"RacingOperations", func(t *testing.T) { regRace(t, mk) }},
+		{"RefusedDropsAtAFullTable", func(t *testing.T) { regRefusedDropsAtAFullTable(t, mk) }},
+		{"RefusedDropsInASweep", func(t *testing.T) { regRefusedDropsInASweep(t, mk) }},
+		{"RefreshTombstones", func(t *testing.T) { regRefreshTombstones(t, mk) }},
+		{"UnknownTombstoneIsNotRecorded", func(t *testing.T) { regUnknownTombstone(t, mk) }},
+		{"SaveRates", func(t *testing.T) { regSaveRates(t, mk) }},
 		{"RestartKeepsBindings", func(t *testing.T) { durable(t); regRestartBindings(t, mk) }},
 		{"RestartKeepsTombstonesAndMaxWins", func(t *testing.T) { durable(t); regRestartTombstones(t, mk) }},
 		{"RestartKeepsExpectedSenders", func(t *testing.T) { durable(t); regRestartSenders(t, mk) }},

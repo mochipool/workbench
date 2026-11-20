@@ -48,11 +48,26 @@ type PutInput struct {
 	Checksum bool
 }
 
-// PutResult is a put the store accepted.
+// PutResult is a put the store accepted. With an error that matches
+// ErrOutcomeUnknown after a 2xx (its body or headers failed the checks), it
+// holds what of the answer passed them: an ETag and a version id that passed,
+// empty otherwise. Compare them with ReadBack's Info; they are the store's
+// word, not proof.
 type PutResult struct {
 	ETag      string
 	VersionID string // empty in an unversioned bucket
 	Attempts  int
+}
+
+// seen is what of a 2xx answer passes the checks.
+func seen(rep *reply) (etag, vid string) {
+	if e := rep.header.Get("ETag"); validETag(e) {
+		etag = e
+	}
+	if v := rep.header.Get("X-Amz-Version-Id"); printable(v, 1024) {
+		vid = v
+	}
+	return etag, vid
 }
 
 func retentionHeaders(r *Retention) ([]string, error) {
@@ -66,8 +81,13 @@ func retentionHeaders(r *Retention) ([]string, error) {
 }
 
 // Put sends a conditional put. A 412, 409 or 404 is a *StatusError (with
-// Uncertain set when an earlier attempt had no answer: then read the object
-// back with SameAsCurrent before treating it as someone else's write).
+// Uncertain set, and matching ErrOutcomeUnknown, when an attempt may have been
+// applied: then read the object back with ReadBack before treating it as
+// someone else's write). Any error matching ErrOutcomeUnknown means the same.
+// A 2xx whose ETag, version id or checksum fails the checks is ErrBadResponse
+// or ErrChecksumMismatch joined with ErrOutcomeUnknown: the store says it
+// committed, but what it committed is not known. A version id the store
+// invents cannot be seen on a put; Head or Get by that id tells.
 func (c *Client) Put(ctx context.Context, in PutInput) (PutResult, error) {
 	if !ValidKey(in.Key) {
 		return PutResult{}, ErrInvalidKey
@@ -105,20 +125,30 @@ func (c *Client) Put(ctx context.Context, in PutInput) (PutResult, error) {
 	}
 	rep, err := c.do(ctx, k)
 	if err != nil {
+		if rep != nil && rep.status/100 == 2 {
+			e, v := seen(rep)
+			return PutResult{ETag: e, VersionID: v, Attempts: rep.attempts}, err
+		}
 		return PutResult{}, err
 	}
-	if rep.status != http.StatusOK {
+	if rep.status/100 != 2 {
 		return PutResult{}, fail(k, rep)
 	}
-	res := PutResult{ETag: rep.header.Get("ETag"), VersionID: rep.header.Get("X-Amz-Version-Id"), Attempts: rep.attempts}
-	if !validETag(res.ETag) {
-		return PutResult{}, fmt.Errorf("%w: put %s: the answer carries no valid ETag", ErrBadResponse, in.Key)
+	e, v := seen(rep)
+	res := PutResult{ETag: e, VersionID: v, Attempts: rep.attempts}
+	var bad error
+	switch {
+	case rep.status != http.StatusOK:
+		bad = fmt.Errorf("%w: put %s: answered %d, not 200", ErrBadResponse, in.Key, rep.status)
+	case e == "":
+		bad = fmt.Errorf("%w: put %s: the answer carries no valid ETag", ErrBadResponse, in.Key)
+	case v == "" && rep.header.Get("X-Amz-Version-Id") != "":
+		bad = fmt.Errorf("%w: put %s: the version id is malformed", ErrBadResponse, in.Key)
+	case sum != "" && rep.header.Get("X-Amz-Checksum-Sha256") != "" && rep.header.Get("X-Amz-Checksum-Sha256") != sum:
+		bad = fmt.Errorf("%w: put %s", ErrChecksumMismatch, in.Key)
 	}
-	if res.VersionID != "" && !printable(res.VersionID, 1024) {
-		return PutResult{}, fmt.Errorf("%w: put %s: the version id is malformed", ErrBadResponse, in.Key)
-	}
-	if got := rep.header.Get("X-Amz-Checksum-Sha256"); sum != "" && got != "" && got != sum {
-		return PutResult{}, fmt.Errorf("%w: put %s", ErrChecksumMismatch, in.Key)
+	if bad != nil {
+		return res, errors.Join(ErrOutcomeUnknown, bad)
 	}
 	return res, nil
 }
@@ -130,8 +160,13 @@ type GetInput struct {
 	VersionID string
 	MaxBytes  int64 // 1..MaxGetBytes
 	// Checksum asks the store for its SHA-256 (x-amz-checksum-mode: ENABLED);
-	// one it reports is checked against the bytes.
+	// one it reports is checked against the bytes. A store that reports none
+	// passes: use ExpectSHA256 where the bytes must be known.
 	Checksum bool
+	// ExpectSHA256, when set, is the SHA-256 the caller expects (32 bytes): the
+	// bytes received are hashed here and compared, whatever the store reports
+	// (ErrChecksumMismatch).
+	ExpectSHA256 []byte
 }
 
 // Object is a body read whole and what the store said of it.
@@ -190,6 +225,9 @@ func (c *Client) Get(ctx context.Context, in GetInput) (Object, error) {
 	if in.MaxBytes <= 0 || in.MaxBytes > MaxGetBytes {
 		return Object{}, fmt.Errorf("%w: a get needs a bound of 1 to %d bytes", ErrInvalidInput, MaxGetBytes)
 	}
+	if in.ExpectSHA256 != nil && len(in.ExpectSHA256) != sha256.Size {
+		return Object{}, fmt.Errorf("%w: an expected SHA-256 is 32 bytes", ErrInvalidInput)
+	}
 	q, err := versionQuery(in.VersionID)
 	if err != nil {
 		return Object{}, err
@@ -209,18 +247,37 @@ func (c *Client) Get(ctx context.Context, in GetInput) (Object, error) {
 	if err != nil {
 		return Object{}, err
 	}
+	if err := sameVersion(in.Key, in.VersionID, info.VersionID); err != nil {
+		return Object{}, err
+	}
 	info.Size = int64(len(rep.body))
-	if in.Checksum && info.ChecksumSHA256 != "" {
-		s := sha256.Sum256(rep.body)
-		if info.ChecksumSHA256 != base64.StdEncoding.EncodeToString(s[:]) {
-			return Object{}, fmt.Errorf("%w: get %s", ErrChecksumMismatch, in.Key)
-		}
+	s := sha256.Sum256(rep.body)
+	if in.Checksum && info.ChecksumSHA256 != "" && info.ChecksumSHA256 != base64.StdEncoding.EncodeToString(s[:]) {
+		return Object{}, fmt.Errorf("%w: get %s", ErrChecksumMismatch, in.Key)
+	}
+	if in.ExpectSHA256 != nil && !bytes.Equal(s[:], in.ExpectSHA256) {
+		return Object{}, fmt.Errorf("%w: get %s: the bytes are not the ones expected", ErrChecksumMismatch, in.Key)
 	}
 	return Object{Info: info, Body: rep.body}, nil
 }
 
+// sameVersion refuses an answer to a request by version id that names another
+// version.
+func sameVersion(key, asked, got string) error {
+	if asked != "" && got != asked {
+		return fmt.Errorf("%w: %s: asked for version %q, the answer is of %q", ErrBadResponse, key, asked, got)
+	}
+	return nil
+}
+
 // Head reports an object (its current version, or versionID) without its body.
 // A current delete marker is a 404 *StatusError with DeleteMarker set.
+//
+// A HEAD answer has no body, so its refusal has no error code: a 404 cannot
+// tell a missing object from a missing bucket (it is ErrNotFound either way),
+// and a 403 cannot tell a clock skew from a deny (ErrAccessDenied). Head alone
+// must not decide existence where it matters, and a caller that needs the
+// code uses Get.
 func (c *Client) Head(ctx context.Context, key, versionID string) (ObjectInfo, error) {
 	if !ValidKey(key) {
 		return ObjectInfo{}, ErrInvalidKey
@@ -237,7 +294,14 @@ func (c *Client) Head(ctx context.Context, key, versionID string) (ObjectInfo, e
 	if rep.status != http.StatusOK {
 		return ObjectInfo{}, fail(k, rep)
 	}
-	return infoOf(key, rep.header)
+	info, err := infoOf(key, rep.header)
+	if err == nil {
+		err = sameVersion(key, versionID, info.VersionID)
+	}
+	if err != nil {
+		return ObjectInfo{}, err
+	}
+	return info, nil
 }
 
 // DeleteResult is what a delete did.
@@ -249,7 +313,22 @@ type DeleteResult struct {
 }
 
 // Delete removes key: in an unversioned bucket the bytes go; in a versioned
-// bucket it adds a delete marker and every version stays. It is idempotent.
+// bucket it adds a delete marker and every version stays.
+//
+// Its visible effect is idempotent: after one attempt or several the key reads
+// as absent. Its effect on a versioned bucket is not: each attempt that landed
+// adds one more delete marker, so a retry after a lost answer can leave two.
+// That is harmless for ADR 0015's uses: the registry bucket's role may make a
+// simple delete only on registry/bindings/* (the policy denies it on the
+// tombstones and the marker), a stacked marker reads as absent as one does, a
+// create with If-None-Match: * over it succeeds, and the load reads current
+// bindings only. The cost is one noncurrent marker per lost answer, which the
+// registry bucket's lifecycle rule (noncurrent versions and expired delete
+// markers under registry/bindings/, ADR 0015 decision 3) removes as it removes
+// the others. A caller for whom it matters uses DeleteVersion.
+//
+// Like a put, an error that matches ErrOutcomeUnknown means an attempt may
+// have been applied.
 func (c *Client) Delete(ctx context.Context, key string) (DeleteResult, error) {
 	return c.del(ctx, key, "")
 }
@@ -276,31 +355,83 @@ func (c *Client) del(ctx context.Context, key, vid string) (DeleteResult, error)
 	if err != nil {
 		return DeleteResult{}, err
 	}
-	if rep.status != http.StatusNoContent && rep.status != http.StatusOK {
+	if rep.status/100 != 2 {
 		return DeleteResult{}, fail(k, rep)
 	}
 	r := DeleteResult{DeleteMarker: rep.header.Get("X-Amz-Delete-Marker") == "true", VersionID: rep.header.Get("X-Amz-Version-Id")}
-	if r.VersionID != "" && !printable(r.VersionID, 1024) {
-		return DeleteResult{}, fmt.Errorf("%w: delete %s: the version id is malformed", ErrBadResponse, key)
+	var bad error
+	switch {
+	case rep.status != http.StatusNoContent && rep.status != http.StatusOK:
+		bad = fmt.Errorf("%w: delete %s: answered %d", ErrBadResponse, key, rep.status)
+	case r.VersionID != "" && !printable(r.VersionID, 1024):
+		bad = fmt.Errorf("%w: delete %s: the version id is malformed", ErrBadResponse, key)
+	case vid != "" && r.VersionID != "" && r.VersionID != vid:
+		bad = fmt.Errorf("%w: delete %s: asked to delete version %q, the answer is of %q", ErrBadResponse, key, vid, r.VersionID)
+	}
+	if bad != nil {
+		return DeleteResult{}, errors.Join(ErrOutcomeUnknown, bad)
 	}
 	return r, nil
 }
 
-// SameAsCurrent reads the current version of key back and reports whether its
-// bytes are body: the read-back that tells a precondition failure this writer
-// caused itself (a retried put whose first attempt landed) from another
-// writer's change. A key that is gone reports false with no error.
-func (c *Client) SameAsCurrent(ctx context.Context, key string, body []byte) (ObjectInfo, bool, error) {
+// ReadBackState is what a read-back showed.
+type ReadBackState int
+
+const (
+	// ReadBackCannotTell: the read did not show the current state. The error
+	// says why: a 403 (which a store without s3:ListBucket gives for a missing
+	// key), a missing bucket, a deadline, a bad answer.
+	ReadBackCannotTell ReadBackState = iota
+	// ReadBackApplied: the current version's bytes are the body. They are this
+	// writer's write or one with the same bytes (see ReadBack's precondition).
+	ReadBackApplied
+	// ReadBackNotYet: as of this read the key is absent (NoSuchKey) or holds
+	// other bytes. That is not proof that the write was not applied: a request
+	// whose outcome is unknown may still be applied later, for as long as its
+	// signature is valid (15 minutes), and another writer may have replaced it.
+	ReadBackNotYet
+)
+
+// ReadBack is the result of Client.ReadBack.
+type ReadBack struct {
+	State ReadBackState
+	// Info is the current version's, when one was read (Applied, or NotYet with
+	// other bytes).
+	Info ObjectInfo
+}
+
+// ReadBack reads the current version of key back, bounded by the length of
+// body, and reports whether its bytes are body: the read-back that tells a
+// refusal or an unknown outcome this writer caused itself (a retried put whose
+// first attempt landed) from another writer's change.
+//
+// Precondition: equal bytes must mean "my write or an equivalent one". The
+// caller's bodies must make that true: the lease carries the holder id and the
+// renewal counter, so no other writer writes its bytes; a mailbox entry's name
+// holds its hash; a tombstone or a binding with the same bytes is the same
+// record. A body that two writers could both write with different intent must
+// not rely on ReadBack.
+//
+// The rule after an outcome-unknown or Uncertain error: ReadBackApplied is
+// success; ReadBackNotYet must be treated as a conflict (the exit rule of ADR
+// 0015 decision 5), never as "absent, so write again with different content",
+// because the first write may still land; ReadBackCannotTell is an error of the
+// store and is not success either. With a PutResult from a 2xx whose checks
+// failed, Info.ETag equal to its ETag adds the store's word to equal bytes.
+func (c *Client) ReadBack(ctx context.Context, key string, body []byte) (ReadBack, error) {
 	o, err := c.Get(ctx, GetInput{Key: key, MaxBytes: int64(len(body)) + 1})
 	switch {
 	case errors.Is(err, ErrNotFound):
-		return ObjectInfo{}, false, nil
+		return ReadBack{State: ReadBackNotYet}, nil
 	case errors.Is(err, ErrTooLarge):
-		return ObjectInfo{}, false, nil // larger than ours: not ours
+		return ReadBack{State: ReadBackNotYet}, nil // larger than ours: not ours
 	case err != nil:
-		return ObjectInfo{}, false, err
+		return ReadBack{State: ReadBackCannotTell}, err
 	}
-	return o.Info, bytes.Equal(o.Body, body), nil
+	if bytes.Equal(o.Body, body) {
+		return ReadBack{State: ReadBackApplied, Info: o.Info}, nil
+	}
+	return ReadBack{State: ReadBackNotYet, Info: o.Info}, nil
 }
 
 // ListInput is one page request of a listing.
@@ -434,6 +565,13 @@ func (c *Client) ListVersions(ctx context.Context, in VersionsInput) (VersionPag
 			return VersionPage{}, fmt.Errorf("%w: a version listed twice", ErrBadListing)
 		}
 		seen[id] = true
+		// versions of a key come newest first and the newest alone is IsLatest;
+		// the page's first entry continues the key of the markers when both are set
+		first := i == 0 || v.Key != p.Versions[i-1].Key
+		continued := i == 0 && in.VersionIDMarker != "" && v.Key == in.KeyMarker
+		if v.IsLatest != (first && !continued) {
+			return VersionPage{}, fmt.Errorf("%w: IsLatest is not on exactly the newest entry of %s", ErrBadListing, v.Key)
+		}
 	}
 	if p.Truncated && (p.NextKeyMarker == "" || len(p.Versions) == 0) {
 		return VersionPage{}, fmt.Errorf("%w: a truncated page without a marker or without entries", ErrBadListing)

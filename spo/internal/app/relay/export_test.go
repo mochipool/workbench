@@ -35,3 +35,23 @@ const RejectTableSize = rejectTableSize
 
 // MaxRejectWriters is the bound on concurrent reject writers.
 const MaxRejectWriters = maxRejectWriters
+
+// Note is what a store call of the server does with its error: a test makes
+// the window between a store call that reported a lost authority and the end
+// of the session that made it (LoseAuthority has not run yet).
+func (s *Server) Note(err error) { s.note(err) }
+
+// StoreFieldsWatched reports whether every store capability the server holds
+// is the authority wrapper (authority.go), the purge of the revoke path
+// included, and whether the eviction guard reads through it too.
+func StoreFieldsWatched(s *Server) bool {
+	for _, f := range []any{s.w, s.rd, s.ack, s.retract, s.purge, s.usage, s.reg} {
+		if _, ok := f.(*watched); !ok {
+			return false
+		}
+	}
+	s.guard.mu.Lock()
+	defer s.guard.mu.Unlock()
+	_, ok := s.guard.rd.(*watched)
+	return ok
+}

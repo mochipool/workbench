@@ -435,16 +435,16 @@ func TestPartialRevoke(t *testing.T) {
 		t.Fatalf("plan: %+v, %v", plan, err)
 	}
 	// the tombstone was not written: nothing is invalidated, nothing recorded
-	if got := relayregistry.PartialRevoke(plan, nil); got.Recorded || got.Raised || len(got.Invalidated) != 0 {
+	if got := relayregistry.PartialRevoke(plan, nil, nil); got.Recorded || got.Raised || len(got.Invalidated) != 0 {
 		t.Fatalf("nothing applied: %+v", got)
 	}
 	// the tombstone was written and no delete took effect: both are invalidated (no
 	// reader serves them) and the result says so
-	got := relayregistry.PartialRevoke(plan, plan.Ops[:1])
+	got := relayregistry.PartialRevoke(plan, plan.Ops[:1], nil)
 	if !got.Recorded || !got.Raised || len(got.Invalidated) != 2 {
 		t.Fatalf("tombstone applied: %+v", got)
 	}
-	if got := relayregistry.PartialRevoke(plan, plan.Ops); len(got.Invalidated) != 2 {
+	if got := relayregistry.PartialRevoke(plan, plan.Ops, nil); len(got.Invalidated) != 2 {
 		t.Fatalf("all applied: %+v", got)
 	}
 
@@ -459,10 +459,10 @@ func TestPartialRevoke(t *testing.T) {
 	if err != nil || !up.Result.TombstoneUnrecorded || !errors.Is(up.Warn, relayregistry.ErrTombstoneUnrecorded) || len(up.Ops) != 1 {
 		t.Fatalf("unrecorded plan: %+v, %v", up, err)
 	}
-	if got := relayregistry.PartialRevoke(up, nil); len(got.Invalidated) != 0 {
+	if got := relayregistry.PartialRevoke(up, nil, nil); len(got.Invalidated) != 0 {
 		t.Fatalf("an unrecorded revoke with no delete applied invalidates %v", got.Invalidated)
 	}
-	if got := relayregistry.PartialRevoke(up, up.Ops); len(got.Invalidated) != 1 || !got.TombstoneUnrecorded {
+	if got := relayregistry.PartialRevoke(up, up.Ops, nil); len(got.Invalidated) != 1 || !got.TombstoneUnrecorded {
 		t.Fatalf("an unrecorded revoke with its delete applied: %+v", got)
 	}
 }

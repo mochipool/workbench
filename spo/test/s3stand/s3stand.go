@@ -48,6 +48,24 @@
 // operator does). Every request is recorded with its conditions (Records,
 // UnconditionalPuts), so an adapter test can assert that no unconditional
 // write was made where the ADR forbids one.
+//
+// Where the honest mode is laxer than S3, or its fidelity is not known. Tests
+// must not rely on a row marked "laxer": a client that passes only because of
+// it is wrong against a real store.
+//
+//	behaviour                                    stand-in                                  S3
+//	two racing conditional writes                serialised: never 409 unless injected     may answer 409 ConditionalRequestConflict (doc) — laxer
+//	retention headers on GET/HEAD                returned unless Principal.NoGetRetention  only with s3:GetObjectRetention (memory)
+//	GET/HEAD of a missing key                    404, or 403 with Principal.NoList         403 without s3:ListBucket (doc: GetObject)
+//	wrong region in the credential scope         403 AuthorizationHeaderMalformed          unknown (memory: 400)
+//	a session token that is not the principal's  403 InvalidToken                          unknown (memory: 400)
+//	expired token                                400 ExpiredToken                          memory
+//	Object Lock without versioning               AddBucket panics                          impossible (doc)
+//	version-id-marker that names no version      400 InvalidArgument                       memory
+//	ETag                                         MD5 of the body, or opaque per write      not MD5 under SSE-KMS or multipart (memory)
+//	                                             with Bucket.OpaqueETag
+//	HEAD error                                   status only, no body                      the same (doc: HEAD has no body)
+//	versioning suspended                         Bucket.Suspended: "null" version replaced memory
 package s3stand
 
 import (
@@ -103,14 +121,28 @@ type Principal struct {
 	// MayBypassGovernance grants s3:BypassGovernanceRetention (the ADR's policy
 	// denies it to everyone; tests of governance mode turn it on).
 	MayBypassGovernance bool
+	// NoList withholds s3:ListBucket: listings are denied, and a GET or HEAD of a
+	// missing key answers 403 AccessDenied, not 404 (doc: GetObject, "If you
+	// don't have the s3:ListBucket permission, Amazon S3 returns ... 403").
+	NoList bool
+	// NoGetRetention withholds s3:GetObjectRetention: a GET or HEAD carries no
+	// Object Lock headers (memory).
+	NoGetRetention bool
 }
 
 // Bucket is one bucket's configuration. Change it only before requests, or
 // under Server.Do.
 type Bucket struct {
-	Name       string
-	Versioned  bool
-	ObjectLock bool // needs Versioned, as in S3
+	Name      string
+	Versioned bool
+	// Suspended (with Versioned) is a bucket whose versioning was enabled and
+	// then suspended: it reports "Suspended", keeps its older versions, and a put
+	// or a simple delete replaces the version whose id is "null" (memory).
+	Suspended  bool
+	ObjectLock bool // needs Versioned and not Suspended, as in S3; AddBucket panics otherwise
+	// OpaqueETag gives each write an ETag that is not the MD5 of the body and
+	// differs per write, as SSE-KMS does (memory).
+	OpaqueETag bool
 	// DenySimpleDelete are key patterns ('*' matches any run of characters, '/'
 	// included, as in IAM) on which a delete without a version id is denied for
 	// every principal (ADR 0015 decision 3, B1).
@@ -203,6 +235,17 @@ const (
 	FaultRepeatKey
 	// FaultSlowBody sends the body one byte every Delay.
 	FaultSlowBody
+	// FaultCommitThenStatus applies the request, then answers Status with Code
+	// (a proxy's 5xx after the backend committed).
+	FaultCommitThenStatus
+	// FaultWrongVersionID applies the request and answers with a version id
+	// that is not the one stored.
+	FaultWrongVersionID
+	// FaultWrongChecksum applies the request and answers with a SHA-256 checksum
+	// header that is not the body's.
+	FaultWrongChecksum
+	// FaultLieIsLatest marks every entry of a version listing IsLatest.
+	FaultLieIsLatest
 )
 
 // Fault is one hostile behaviour for the requests it matches.
@@ -280,8 +323,13 @@ func (s *Server) RootCAs() *x509.CertPool {
 	return p
 }
 
-// AddBucket creates a bucket.
+// AddBucket creates a bucket. It panics on a configuration S3 cannot have:
+// Object Lock without versioning or with versioning suspended, or suspended
+// versioning that was never enabled.
 func (s *Server) AddBucket(b *Bucket) *Bucket {
+	if (b.ObjectLock && (!b.Versioned || b.Suspended)) || (b.Suspended && !b.Versioned) {
+		panic("s3stand: Object Lock needs versioning enabled, and suspended versioning needs Versioned")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b.objects = map[string]*history{}
@@ -310,10 +358,15 @@ func (s *Server) Do(f func()) {
 	f()
 }
 
-// Inject adds a fault; the earliest matching fault fires first.
+// Inject adds a fault; the earliest matching fault fires first. A
+// FaultStaleList without an earlier Snapshot panics: it would serve live data
+// and the test would pass for the wrong reason.
 func (s *Server) Inject(f Fault) *Fault {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if f.Kind == FaultStaleList && s.snapshot == nil {
+		panic("s3stand: FaultStaleList needs a Snapshot first")
+	}
 	p := &f
 	s.faults = append(s.faults, p)
 	return p
@@ -468,20 +521,26 @@ func (s *Server) AdminRollback(bucket, key, versionID string) error {
 }
 
 func (s *Server) newVersionID(b *Bucket) string {
-	if !b.Versioned {
+	if !b.Versioned || b.Suspended {
 		return "null"
 	}
 	s.seq++
 	return fmt.Sprintf("v%012d", s.seq)
 }
 
-// commitLocked appends (versioned) or replaces (unversioned) the current version.
+// commitLocked appends (versioned) or replaces (unversioned; the "null"
+// version of a suspended bucket) the current version.
 func (s *Server) commitLocked(b *Bucket, key string, v *version) *version {
 	v.id = s.newVersionID(b)
 	v.modified = s.clock()
 	if !v.marker {
 		sum := md5.Sum(v.body)
 		v.etag = `"` + hex.EncodeToString(sum[:]) + `"`
+		if b.OpaqueETag {
+			s.seq++
+			o := sha256.Sum256(append([]byte(strconv.Itoa(s.seq)+"\x00"), v.body...))
+			v.etag = `"` + hex.EncodeToString(o[:16]) + `-1"`
+		}
 		if b.ConstantETag {
 			v.etag = `"0123456789abcdef0123456789abcdef"`
 		}
@@ -491,7 +550,15 @@ func (s *Server) commitLocked(b *Bucket, key string, v *version) *version {
 		h = &history{}
 		b.objects[key] = h
 	}
-	if b.Versioned {
+	if b.Versioned && b.Suspended {
+		kept := h.versions[:0:0]
+		for _, x := range h.versions {
+			if x.id != "null" {
+				kept = append(kept, x)
+			}
+		}
+		h.versions = append(kept, v)
+	} else if b.Versioned {
 		h.versions = append(h.versions, v)
 	} else if v.marker {
 		delete(b.objects, key)
@@ -558,7 +625,7 @@ func route(r *http.Request) (bucket, key string) {
 
 func (s *Server) take(op, key string) *Fault {
 	for _, f := range s.faults {
-		if f.Kind == FaultOmitKey || f.Kind == FaultRepeatKey || f.Kind == FaultStaleList {
+		if f.Kind == FaultOmitKey || f.Kind == FaultRepeatKey || f.Kind == FaultStaleList || f.Kind == FaultLieIsLatest {
 			continue // listing modes are looked up by listFaults
 		}
 		if (f.Op == "" || f.Op == op) && strings.HasPrefix(key, f.Key) && (f.Count == 0 || f.fired < f.Count) {
@@ -569,12 +636,15 @@ func (s *Server) take(op, key string) *Fault {
 	return nil
 }
 
-func (s *Server) listFaults(op string) (omit []string, repeat, stale bool) {
+func (s *Server) listFaults(op string) (omit []string, repeat, stale, lieLatest bool) {
 	for _, f := range s.faults {
 		if (f.Op != "" && f.Op != op) || (f.Count != 0 && f.fired >= f.Count) {
 			continue
 		}
 		switch f.Kind {
+		case FaultLieIsLatest:
+			lieLatest = true
+			f.fired++
 		case FaultOmitKey:
 			omit = append(omit, f.Key)
 			f.fired++
@@ -704,7 +774,7 @@ func (s *Server) dispatchLocked(b *Bucket, op, key string, r *http.Request, body
 			s.commitLocked(b, key, &version{body: bytes.Clone(body)})
 		}
 	case OpGet, OpHead:
-		out = s.getLocked(b, key, r, op == OpHead)
+		out = s.getLocked(b, key, r, op == OpHead, p)
 	case OpDelete, OpDeleteVersion:
 		out = s.deleteLocked(b, key, r, p)
 	case OpList:
@@ -713,6 +783,9 @@ func (s *Server) dispatchLocked(b *Bucket, op, key string, r *http.Request, body
 		out = s.listVersionsLocked(b, r)
 	case OpVersioning:
 		st := "Enabled"
+		if b.Suspended {
+			st = "Suspended"
+		}
 		if !b.Versioned || b.ReportVersioningOff {
 			st = ""
 		}
@@ -781,6 +854,18 @@ func (s *Server) write(w *statusWriter, raw http.ResponseWriter, r *http.Request
 		}
 	case FaultWrongETag:
 		w.Header().Set("ETag", `"ffffffffffffffffffffffffffffffff"`)
+	case FaultWrongVersionID:
+		w.Header().Set("X-Amz-Version-Id", "vffffffffffff")
+	case FaultWrongChecksum:
+		w.Header().Set("X-Amz-Checksum-Sha256", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	case FaultCommitThenStatus:
+		if out.status/100 == 2 {
+			for k := range out.header {
+				w.Header().Del(k)
+			}
+			writeError(w, f.Status, f.Code)
+			return
+		}
 	case FaultTruncateBody, FaultStallMidBody:
 		w.Header().Set("Content-Length", strconv.Itoa(len(out.body)))
 		w.WriteHeader(out.status)
@@ -843,6 +928,9 @@ func (s *Server) write(w *statusWriter, raw http.ResponseWriter, r *http.Request
 
 // policy emulates the bucket policy and the principal's rights; "" allows.
 func (s *Server) policy(p *Principal, b *Bucket, op, key string, r *http.Request) string {
+	if p.NoList && (op == OpList || op == OpListVersions) {
+		return "AccessDenied"
+	}
 	if p.Prefix != "" {
 		k := key
 		if op == OpList || op == OpListVersions {
@@ -950,7 +1038,7 @@ func (s *Server) putLocked(b *Bucket, key string, r *http.Request, body []byte, 
 	return response{status: http.StatusOK, header: h}
 }
 
-func (s *Server) getLocked(b *Bucket, key string, r *http.Request, head bool) response {
+func (s *Server) getLocked(b *Bucket, key string, r *http.Request, head bool, p *Principal) response {
 	h := b.objects[key]
 	var v *version
 	if vid := r.URL.Query().Get("versionId"); vid != "" {
@@ -967,6 +1055,9 @@ func (s *Server) getLocked(b *Bucket, key string, r *http.Request, head bool) re
 		}
 	} else {
 		v = h.current()
+		if v == nil && p.NoList {
+			return response{status: http.StatusForbidden, code: "AccessDenied", head: head}
+		}
 		if v == nil {
 			return response{status: http.StatusNotFound, code: "NoSuchKey", head: head}
 		}
@@ -978,7 +1069,7 @@ func (s *Server) getLocked(b *Bucket, key string, r *http.Request, head bool) re
 	if b.Versioned {
 		hd["X-Amz-Version-Id"] = v.id
 	}
-	if v.mode != "" && !b.HideRetention {
+	if v.mode != "" && !b.HideRetention && !p.NoGetRetention {
 		hd["X-Amz-Object-Lock-Mode"] = v.mode
 		hd["X-Amz-Object-Lock-Retain-Until-Date"] = v.until.Format(time.RFC3339)
 	}
@@ -1045,13 +1136,15 @@ func esc(s string) string {
 	return b.String()
 }
 
-func (s *Server) objectsFor(b *Bucket, stale bool) map[string]*history {
-	if stale && s.snapshot != nil {
-		if m, ok := s.snapshot[b.Name]; ok {
-			return m
-		}
+// objectsFor is the bucket's objects, or its snapshot for a stale listing; ok
+// is false for a stale listing of a bucket the snapshot does not hold (a
+// misuse: answered 500 StandInMisuse, never with live data).
+func (s *Server) objectsFor(b *Bucket, stale bool) (map[string]*history, bool) {
+	if !stale {
+		return b.objects, true
 	}
-	return b.objects
+	m, ok := s.snapshot[b.Name]
+	return m, ok
 }
 
 func sortedKeys(m map[string]*history, prefix string) []string {
@@ -1089,8 +1182,11 @@ func (s *Server) listLocked(b *Bucket, r *http.Request) response {
 		}
 		after = string(d)
 	}
-	omit, repeat, stale := s.listFaults(OpList)
-	objs := s.objectsFor(b, stale)
+	omit, repeat, stale, _ := s.listFaults(OpList)
+	objs, ok := s.objectsFor(b, stale)
+	if !ok {
+		return response{status: http.StatusInternalServerError, code: "StandInMisuse"}
+	}
 	var page []string
 	if repeat && after != "" {
 		if objs[after].live() != nil {
@@ -1130,8 +1226,11 @@ func (s *Server) listVersionsLocked(b *Bucket, r *http.Request) response {
 	if !ok {
 		return response{status: http.StatusBadRequest, code: "InvalidArgument"}
 	}
-	omit, repeat, stale := s.listFaults(OpListVersions)
-	objs := s.objectsFor(b, stale)
+	omit, repeat, stale, lieLatest := s.listFaults(OpListVersions)
+	objs, okSnap := s.objectsFor(b, stale)
+	if !okSnap {
+		return response{status: http.StatusInternalServerError, code: "StandInMisuse"}
+	}
 	type ent struct {
 		key string
 		v   *version
@@ -1145,6 +1244,21 @@ func (s *Server) listVersionsLocked(b *Bucket, r *http.Request) response {
 		vs := objs[k].versions
 		for i := len(vs) - 1; i >= 0; i-- { // newest first
 			all = append(all, ent{k, vs[i], i == len(vs)-1})
+		}
+	}
+	if km != "" && vm != "" {
+		found := false
+		for _, e := range all {
+			found = found || (e.key == km && e.v.id == vm)
+		}
+		if !found {
+			// memory: a version-id-marker that names no version of the key-marker is refused
+			return response{status: http.StatusBadRequest, code: "InvalidArgument"}
+		}
+	}
+	if lieLatest {
+		for i := range all {
+			all[i].cur = true
 		}
 	}
 	start := 0
@@ -1267,7 +1381,9 @@ func (s *Server) verifyLocked(r *http.Request, body []byte) (*Principal, int, st
 	if d := now.Sub(at); d > 15*time.Minute || d < -15*time.Minute {
 		return p, http.StatusForbidden, "RequestTimeTooSkewed"
 	}
-	if p.Token != "" && r.Header.Get("X-Amz-Security-Token") != p.Token {
+	// the token must be the principal's exactly: none for a principal without
+	// one (a long-term key sent with any token is refused)
+	if r.Header.Get("X-Amz-Security-Token") != p.Token {
 		return p, http.StatusForbidden, "InvalidToken"
 	}
 	if !p.Expires.IsZero() && !now.Before(p.Expires) {
@@ -1290,14 +1406,43 @@ func (s *Server) verifyLocked(r *http.Request, body []byte) (*Principal, int, st
 			return p, http.StatusForbidden, "SignatureDoesNotMatch" // every x-amz-* header must be signed
 		}
 	}
+	want, ok := RefSign(RefRequest{Method: r.Method, EscapedPath: r.URL.EscapedPath(), RawQuery: r.URL.RawQuery, Host: r.Host,
+		Header: r.Header, SignedHeaders: signed, PayloadHash: r.Header.Get("X-Amz-Content-Sha256"),
+		AmzDate: r.Header.Get("X-Amz-Date"), Region: cred[2], Service: cred[3], Secret: p.Secret})
+	if !ok || !hmac.Equal([]byte(want), []byte(fields["Signature"])) {
+		return p, http.StatusForbidden, "SignatureDoesNotMatch"
+	}
+	return p, 0, ""
+}
+
+// RefRequest is the input of RefSign: a request as it arrives.
+type RefRequest struct {
+	Method        string
+	EscapedPath   string // the canonical URI as sent
+	RawQuery      string
+	Host          string
+	Header        http.Header // canonical names, as net/http keeps them
+	SignedHeaders []string    // lower case, sorted
+	PayloadHash   string
+	AmzDate       string // 20060102T150405Z
+	Region        string
+	Service       string
+	Secret        string
+}
+
+// RefSign is the stand-in's own Signature Version 4: the lower-case hex
+// signature of in, written from the published description and sharing no code
+// with platform/sigv4. ok is false when a signed header is absent. Tests use it
+// to derive vectors where no published figure exists.
+func RefSign(in RefRequest) (sig string, ok bool) {
 	var canon strings.Builder
-	canon.WriteString(r.Method + "\n" + r.URL.EscapedPath() + "\n" + refQuery(r.URL.RawQuery) + "\n")
-	for _, h := range signed {
-		val := r.Host
+	canon.WriteString(in.Method + "\n" + in.EscapedPath + "\n" + refQuery(in.RawQuery) + "\n")
+	for _, h := range in.SignedHeaders {
+		val := in.Host
 		if h != "host" {
-			vals := r.Header.Values(h)
+			vals := append([]string(nil), in.Header.Values(h)...)
 			if len(vals) == 0 {
-				return p, http.StatusForbidden, "SignatureDoesNotMatch"
+				return "", false
 			}
 			for i, v := range vals {
 				vals[i] = strings.Join(strings.Fields(v), " ")
@@ -1306,17 +1451,17 @@ func (s *Server) verifyLocked(r *http.Request, body []byte) (*Principal, int, st
 		}
 		canon.WriteString(h + ":" + val + "\n")
 	}
-	canon.WriteString("\n" + fields["SignedHeaders"] + "\n" + r.Header.Get("X-Amz-Content-Sha256"))
+	canon.WriteString("\n" + strings.Join(in.SignedHeaders, ";") + "\n" + in.PayloadHash)
 	ch := sha256.Sum256([]byte(canon.String()))
-	scope := strings.Join(cred[1:], "/")
-	sts := "AWS4-HMAC-SHA256\n" + r.Header.Get("X-Amz-Date") + "\n" + scope + "\n" + hex.EncodeToString(ch[:])
-	k := mac([]byte("AWS4"+p.Secret), cred[1])
-	k = mac(k, cred[2])
-	k = mac(k, cred[3])
-	k = mac(k, "aws4_request")
-	want := hex.EncodeToString(mac(k, sts))
-	if !hmac.Equal([]byte(want), []byte(fields["Signature"])) {
-		return p, http.StatusForbidden, "SignatureDoesNotMatch"
+	if len(in.AmzDate) < 8 {
+		return "", false
 	}
-	return p, 0, ""
+	day := in.AmzDate[:8]
+	scope := day + "/" + in.Region + "/" + in.Service + "/aws4_request"
+	sts := "AWS4-HMAC-SHA256\n" + in.AmzDate + "\n" + scope + "\n" + hex.EncodeToString(ch[:])
+	k := mac([]byte("AWS4"+in.Secret), day)
+	k = mac(k, in.Region)
+	k = mac(k, in.Service)
+	k = mac(k, "aws4_request")
+	return hex.EncodeToString(mac(k, sts)), true
 }

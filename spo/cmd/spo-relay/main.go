@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"io"
 	"os"
 	"os/signal"
@@ -33,15 +34,23 @@ func deps(log io.Writer) relayhost.Deps {
 		PublicKey: func(k *relayconf.Key) (party.NodeKey, error) {
 			return stream.PublicKey(stream.KeyBytes(k.Node))
 		},
-		OpenMailbox: func(dir string, c relayport.Clock) (relayport.MailboxStore, []string, error) {
-			s, notes, err := mailboxstore.Open(dir, c)
+		// the directory stores; OpenLease is left nil: the single-host lease, since
+		// each directory's own lock keeps one writer
+		OpenMailbox: func(spec relayhost.StoreSpec, env relayhost.StoreEnv) (relayport.MailboxStore, []string, error) {
+			if spec.Kind != relayhost.StoreDirectory {
+				return nil, nil, errors.New("this build opens directory stores only")
+			}
+			s, notes, err := mailboxstore.Open(spec.Dir, env.Clock)
 			if err != nil {
 				return nil, nil, err
 			}
 			return s, notes, nil
 		},
-		OpenRegistry: func(dir string, cfg relayregistry.Config, c relayport.Clock) (relayport.Registry, []string, error) {
-			s, notes, err := bindingstore.Open(dir, cfg, c)
+		OpenRegistry: func(spec relayhost.StoreSpec, cfg relayregistry.Config, env relayhost.StoreEnv) (relayport.Registry, []string, error) {
+			if spec.Kind != relayhost.StoreDirectory {
+				return nil, nil, errors.New("this build opens directory stores only")
+			}
+			s, notes, err := bindingstore.Open(spec.Dir, cfg, env.Clock)
 			if err != nil {
 				return nil, nil, err
 			}

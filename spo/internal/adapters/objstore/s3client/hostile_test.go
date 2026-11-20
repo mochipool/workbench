@@ -178,8 +178,8 @@ func TestWrongChecksumAccepted(t *testing.T) {
 	if _, err := e.wc.Put(ctx, PutInput{Key: key, Body: []byte("sealed"), IfNoneMatch: true, Checksum: true}); err != nil {
 		t.Fatal(err)
 	}
-	if _, same, err := e.wc.SameAsCurrent(ctx, key, []byte("sealed")); err != nil || same {
-		t.Errorf("the read-back did not see the damage: %v %v", same, err)
+	if rb, err := e.wc.ReadBack(ctx, key, []byte("sealed")); err != nil || rb.State != ReadBackNotYet {
+		t.Errorf("the read-back did not see the damage: %+v %v", rb, err)
 	}
 	// the checksum the store reports on a get is checked against the bytes
 	if _, err := e.wc.Get(ctx, GetInput{Key: key, MaxBytes: 10, Checksum: true}); !errors.Is(err, ErrChecksumMismatch) {
@@ -609,7 +609,7 @@ func TestCredentialsAreShortLivedAndNeverShown(t *testing.T) {
 // Every way a store can break a required property fails the self-test with
 // that property named.
 //
-// spec: SPO-Xobjstore-OUT-001, SPO-Xobjstore-INV-004
+// spec: SPO-Xobjstore-OUT-001, SPO-Xobjstore-INV-004, SPO-Xobjstore-IF-008, SPO-Xobjstore-PRE-004, SPO-Xobjstore-PRE-005
 func TestEachBrokenPropertyFailsTheSelfTest(t *testing.T) {
 	for _, c := range []struct {
 		name     string
@@ -637,6 +637,14 @@ func TestEachBrokenPropertyFailsTheSelfTest(t *testing.T) {
 		{"the version withheld from the listing", true, func(e *env) {
 			e.srv.Inject(s3stand.Fault{Kind: s3stand.FaultOmitKey, Op: s3stand.OpListVersions, Key: prefix + "selftest/"})
 		}, PropVersionListed},
+		{"a versioned working bucket", false, func(e *env) { e.work.Versioned = true }, PropUnversioned},
+		{"a working bucket with versioning suspended", false, func(e *env) { e.work.Versioned, e.work.Suspended = true, true }, PropUnversioned},
+		{"no simple-delete deny in the registry", true, func(e *env) { e.reg.DenySimpleDelete = nil }, PropDenySimpleDelete},
+		{"a missing working bucket", false, func(e *env) { e.wc = e.client(e.t, "spo-missing", nil) }, PropBucket},
+		{"the cleanup refused", false, func(e *env) { e.work.DenySimpleDelete = []string{"relays/*/selftest/*"} }, PropCleanup},
+		{"the registry cleanup refused", true, func(e *env) {
+			e.srv.Inject(s3stand.Fault{Kind: s3stand.FaultStatus, Op: s3stand.OpDeleteVersion, Status: 403, Code: "AccessDenied"})
+		}, PropCleanup},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			e := newEnv(t)
@@ -644,7 +652,7 @@ func TestEachBrokenPropertyFailsTheSelfTest(t *testing.T) {
 			e.srv.Do(func() {}) // the flags are published to the handlers by the lock
 			cl, o := e.wc, SelfTestOptions{Prefix: prefix}
 			if c.registry {
-				cl, o = e.rc, SelfTestOptions{Prefix: prefix, Registry: true, Mode: Compliance}
+				cl, o = e.rc, SelfTestOptions{Prefix: prefix, Registry: true, Retention: true, Mode: Compliance}
 			}
 			err := SelfTest(ctx5(t), cl, o)
 			var st *SelfTestError

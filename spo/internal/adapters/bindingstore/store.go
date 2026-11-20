@@ -26,8 +26,16 @@
 // What is durable. Bindings, with the time of the last authentication (at the
 // granularity of relayregistry.PersistGranularity) and the expected-sender list
 // of the latest login; and the three kinds of tombstone. Not durable: the rate
-// bucket (it starts full at a restart; nobody but the operator restarts the
-// relay) and the counters.
+// buckets (they start full at a restart; nobody but the operator restarts the
+// relay, so SaveRates does nothing) and the counters.
+//
+// A write whose rename (or unlink) happened and whose directory sync then
+// failed is not known to be durable: it returns an error wrapping
+// relayport.ErrOutcomeUnknown; a tombstone so written is enforced and kept
+// unconfirmed (relayregistry.Core.ApplyUnknown), so its revoke is not
+// `recorded`, and the next Sweep or RefreshTombstones syncs it again and
+// confirms it; one that stays unconfirmed for relayregistry.UnconfirmedSeconds
+// ends the relay (relayport.ErrAuthorityLost).
 //
 // What Open checks, and does about it:
 //   - the directory, its parts and the files are what the registry made, with
@@ -80,7 +88,13 @@
 // WAS applied together with the error, so the session can close the sessions and
 // drop the mail of what was revoked or evicted. A binding whose file could not be
 // deleted but that a stored tombstone invalidates is not served by any reader; a
-// sweep or the next Open removes the file.
+// sweep or the next Open removes the file. The drops of expired tombstones that
+// make room for a revoke run first, each alone (relayregistry.Core.PlanRoom); one
+// that fails is held back (an hour for a refusal, a minute for another error)
+// and never stops the revoke, which then
+// records its tombstone and deletes its bindings with the room there is (ADR 0015
+// decision 3). A sweep skips a drop refused with relayport.ErrDeleteRefused,
+// which this store itself never returns.
 package bindingstore
 
 import (
@@ -348,7 +362,8 @@ func (s *Store) Register(ctx context.Context, p relayregistry.Presented) (relayr
 		s.refused(err)
 		return relayregistry.RegisterResult{}, err
 	}
-	applied, err := s.execute(plan.Ops)
+	applied, unknown, err := s.execute(plan.Ops)
+	applied = append(applied, unknown...) // a victim deleted with an unknown outcome is not served
 	if err != nil {
 		// the victims that were deleted before the failure are lost with the error
 		// unless they are returned. The session does NOT purge their queues: an evicted
@@ -377,15 +392,24 @@ func (s *Store) Revoke(ctx context.Context, r relayregistry.RevokeRecord) (relay
 		return relayregistry.RevokeResult{}, err
 	}
 	defer s.wmu.Unlock()
+	// the drops that make room come first, each on its own, and none of them can
+	// stop the revoke: a drop that fails is held back for an hour and the revoke
+	// is planned with the room that is really there (ADR 0015 decision 3)
+	for _, op := range s.core.PlanRoom(r, now) {
+		if _, _, err := s.executeOne(op); err != nil {
+			s.hold(op, now, err)
+		}
+	}
 	plan, err := s.core.PlanRevoke(r, now)
 	if err != nil {
 		s.refused(err)
 		return relayregistry.RevokeResult{}, err
 	}
-	applied, err := s.execute(plan.Ops)
+	applied, unknown, err := s.execute(plan.Ops)
 	if err != nil {
-		// what was applied is returned with the error (relayregistry.PartialRevoke)
-		return relayregistry.PartialRevoke(plan, applied), err
+		// what was applied is returned with the error (relayregistry.PartialRevoke);
+		// a tombstone whose sync failed is enforced and not recorded
+		return relayregistry.PartialRevoke(plan, applied, unknown), err
 	}
 	return plan.Result, plan.Warn
 }
@@ -401,46 +425,154 @@ func (s *Store) SetExpectedSenders(ctx context.Context, d party.Fingerprint, sen
 	if err != nil {
 		return err
 	}
-	_, err = s.execute(plan.Ops)
+	_, _, err = s.execute(plan.Ops)
 	return err
 }
 
-// Sweep implements relayport.RegistryExpirer.
+// Sweep implements relayport.RegistryExpirer. It first syncs again what is
+// unconfirmed (settle).
 func (s *Store) Sweep(ctx context.Context) (relayregistry.SweepResult, error) {
 	now, err := s.begin(ctx)
 	if err != nil {
 		return relayregistry.SweepResult{}, err
 	}
 	defer s.wmu.Unlock()
-	plan := s.core.PlanSweep(now)
-	if _, err := s.execute(plan.Ops); err != nil {
+	if err := s.settle(now); err != nil {
 		return relayregistry.SweepResult{}, err
 	}
-	return plan.Result, nil
+	plan := s.core.PlanSweep(now)
+	res := plan.Result
+	for _, op := range plan.Ops {
+		_, _, err := s.executeOne(op)
+		switch {
+		case err == nil:
+		case op.Kind == relayregistry.OpDeleteTombstone && errors.Is(err, relayport.ErrDeleteRefused):
+			// a refused drop is skipped and held back; the sweep goes on
+			s.hold(op, now, err)
+			res.Held++
+			res.Tombstones--
+		default:
+			return relayregistry.SweepResult{}, err
+		}
+	}
+	return res, nil
+}
+
+// RefreshTombstones implements relayport.TombstoneRefresher. The directory is
+// written by this process alone, under its lock, so storage holds no tombstone
+// that memory lacks: the merge is empty. What it does is settle the writes
+// whose directory sync failed (settle), so an unknown outcome is settled within
+// one refresh period; it cannot fail otherwise (no request leaves the host),
+// except on a closed registry.
+func (s *Store) RefreshTombstones(ctx context.Context) (relayregistry.MergeResult, error) {
+	now, err := s.begin(ctx)
+	if err != nil {
+		return relayregistry.MergeResult{}, err
+	}
+	defer s.wmu.Unlock()
+	if err := s.settle(now); err != nil {
+		return relayregistry.MergeResult{}, err
+	}
+	return relayregistry.MergeResult{Invalidated: []relayregistry.Entry{}}, nil
+}
+
+// SaveRates implements relayport.RateSaver. The directory store keeps no rate
+// state: one host, restarted by its operator, and the buckets start full as
+// they always have (ADR 0015 decision 1, "Soft state"). It does nothing.
+func (s *Store) SaveRates(ctx context.Context) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, err := s.read(ctx)
+	return err
+}
+
+// settle writes again every operation whose directory sync failed and gives the
+// answer to the core (relayregistry.Core.Settle): a write whose sync now
+// succeeds is confirmed (relayregistry.ReadBackApplied: the rename was visible
+// and now it is durable); one that fails again is ReadBackCannotTell. One that
+// stays unconfirmed for relayregistry.UnconfirmedSeconds ends the relay: the
+// error wraps relayport.ErrAuthorityLost and relayregistry.ErrUnconfirmed. The
+// writers' lock is held.
+func (s *Store) settle(now int64) error {
+	s.mu.RLock()
+	us := s.core.Unconfirmed()
+	s.mu.RUnlock()
+	for _, u := range us {
+		rb := relayregistry.ReadBackCannotTell
+		if ok, err := s.persist(u.Op); ok && err == nil {
+			rb = relayregistry.ReadBackApplied
+		}
+		s.mu.Lock()
+		_, _, err := s.core.Settle(u, rb, now)
+		s.mu.Unlock()
+		if err != nil {
+			return fmt.Errorf("%w: %w", relayport.ErrAuthorityLost, err)
+		}
+	}
+	return nil
+}
+
+// hold records a drop that storage did not make: for relayregistry.HoldSeconds
+// when storage refused it (a retention), for relayregistry.HoldErrorSeconds
+// when it failed otherwise (an I/O error is tried again soon).
+func (s *Store) hold(op relayregistry.Op, now int64, cause error) {
+	d := relayregistry.HoldErrorSeconds
+	if errors.Is(cause, relayport.ErrDeleteRefused) {
+		d = relayregistry.HoldSeconds
+	}
+	s.mu.Lock()
+	s.core.Hold(op.Tomb, now+d)
+	s.mu.Unlock()
+}
+
+// executeOne carries out one operation and applies it as execute does.
+func (s *Store) executeOne(op relayregistry.Op) (applied, unknown bool, err error) {
+	ok, err := s.persist(op)
+	if !ok {
+		return false, false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err == nil {
+		s.core.Apply(op)
+		return true, false, nil
+	}
+	// the rename or unlink is visible and its sync failed: durability is
+	// unknown. A tombstone written and a binding deleted are kept as the
+	// stricter state, unconfirmed (relayregistry.Core.ApplyUnknown); anything
+	// else follows the directory as before.
+	if s.core.ApplyUnknown(op) {
+		return false, true, fmt.Errorf("%w: %w", relayport.ErrOutcomeUnknown, err)
+	}
+	s.core.Apply(op)
+	return true, false, fmt.Errorf("%w: %w", relayport.ErrOutcomeUnknown, err)
 }
 
 // execute carries out a plan in order and returns the operations that took
-// effect. An operation is applied to the memory when its effect is visible in the
-// directory, so after a failure the memory is what the directory holds: a failure
-// before the rename of a write, or before the unlink of a delete, changes
-// nothing; a failure after it (the fsync of the directory) leaves the new state
-// in place and returns the error, because the new state may not survive a crash
-// and the caller must not assume it does. The operations that were applied are
-// returned with the error, so the caller can tell what was done.
-func (s *Store) execute(ops []relayregistry.Op) (applied []relayregistry.Op, err error) {
+// effect and those whose outcome is unknown. An operation is applied to the
+// memory when its effect is visible in the directory, so after a failure the
+// memory is what the directory holds: a failure before the rename of a write,
+// or before the unlink of a delete, changes nothing; a failure after it (the
+// fsync of the directory) leaves the new state in place and returns the error
+// (wrapping relayport.ErrOutcomeUnknown), because the new state may not survive
+// a crash and the caller must not assume it does: a tombstone so written is
+// enforced and unconfirmed until a later sync succeeds (settle), and the revoke
+// is not recorded. The operations that were applied are returned with the
+// error, so the caller can tell what was done.
+func (s *Store) execute(ops []relayregistry.Op) (applied, unknown []relayregistry.Op, err error) {
 	for _, op := range ops {
-		ok, err := s.persist(op)
-		if ok {
-			s.mu.Lock()
-			s.core.Apply(op)
-			s.mu.Unlock()
+		ok, unk, err := s.executeOne(op)
+		switch {
+		case ok:
 			applied = append(applied, op)
+		case unk:
+			unknown = append(unknown, op)
 		}
 		if err != nil {
-			return applied, err
+			return applied, unknown, err
 		}
 	}
-	return applied, nil
+	return applied, nil, nil
 }
 
 func (s *Store) persist(op relayregistry.Op) (applied bool, err error) {
@@ -717,7 +849,9 @@ func (s *Store) scanTombstones(now int64) error {
 		// An expired tombstone is loaded like any other. Dropping one at load would act
 		// on the start-up clock alone, and a clock that is ahead at start would drop
 		// live tombstones for good: only a sweep drops them, by a margin of the skew.
-		s.core.LoadTombstone(k, nb)
+		if err := s.core.LoadTombstone(k, nb); err != nil {
+			return corrupt("%s/%s: %v", tombstonesDir, n, err) // fail closed
+		}
 		loaded++
 		return nil
 	})

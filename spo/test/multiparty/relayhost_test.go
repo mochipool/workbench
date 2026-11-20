@@ -80,15 +80,15 @@ func startHostedRelay(t *testing.T, n *fakenet.Net, name string, clock relayport
 	node := n.Node(name)
 	r, err := relayhost.Start(context.Background(), cfg, key, relayhost.Deps{
 		PublicKey: func(*relayconf.Key) (party.NodeKey, error) { return node.Key, nil },
-		OpenMailbox: func(dir string, c relayport.Clock) (relayport.MailboxStore, []string, error) {
-			s, notes, err := mailboxstore.Open(dir, c)
+		OpenMailbox: func(spec relayhost.StoreSpec, env relayhost.StoreEnv) (relayport.MailboxStore, []string, error) {
+			s, notes, err := mailboxstore.Open(spec.Dir, env.Clock)
 			if err != nil {
 				return nil, nil, err
 			}
 			return s, notes, nil
 		},
-		OpenRegistry: func(dir string, cfg relayregistry.Config, c relayport.Clock) (relayport.Registry, []string, error) {
-			s, notes, err := bindingstore.Open(dir, cfg, c)
+		OpenRegistry: func(spec relayhost.StoreSpec, cfg relayregistry.Config, env relayhost.StoreEnv) (relayport.Registry, []string, error) {
+			s, notes, err := bindingstore.Open(spec.Dir, cfg, env.Clock)
 			if err != nil {
 				return nil, nil, err
 			}

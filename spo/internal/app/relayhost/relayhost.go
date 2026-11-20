@@ -97,10 +97,24 @@ type Deps struct {
 	LoadKey    func(path string) (*relayconf.Key, error)
 	CreateKey  func(path string) (*relayconf.Key, error)
 	// PublicKey is the node public key of a relay key.
-	PublicKey    func(*relayconf.Key) (party.NodeKey, error)
-	OpenMailbox  func(dir string, clock relayport.Clock) (relayport.MailboxStore, []string, error)
-	OpenRegistry func(dir string, cfg relayregistry.Config, clock relayport.Clock) (relayport.Registry, []string, error)
-	Listen       func(ctx context.Context, spec TunnelSpec) (Tunnel, error)
+	PublicKey func(*relayconf.Key) (party.NodeKey, error)
+	// OpenMailbox and OpenRegistry open the two stores of spec, which need not
+	// be directories (StoreSpec, StoreEnv). They are called after the lease is
+	// held and are given it.
+	OpenMailbox  func(spec StoreSpec, env StoreEnv) (relayport.MailboxStore, []string, error)
+	OpenRegistry func(spec StoreSpec, cfg relayregistry.Config, env StoreEnv) (relayport.Registry, []string, error)
+	// OpenLease is the first step of a start (ADR 0015 decision 5, "The start
+	// order"): it makes the lease of the relay identity whose node key is given,
+	// on the relay's clock; Start acquires it before anything is loaded and
+	// before the tunnel starts. nil: SingleHostLease, the lease of directory
+	// stores on one host.
+	OpenLease func(relay party.NodeKey, clock relayport.Clock) (relayport.Lease, error)
+	// RenewEvery replaces the quarter of the lease term; RefreshEvery replaces
+	// relayport.TombstoneRefreshEvery; RequestTimeout replaces
+	// DefaultRequestTimeout, the bound of one renewal and of one refresh (a
+	// test's; 0: the default).
+	RenewEvery, RefreshEvery, RequestTimeout time.Duration
+	Listen                                   func(ctx context.Context, spec TunnelSpec) (Tunnel, error)
 	// Clock is the relay's clock (nil: the system clock); Rand the source of
 	// the session nonces (crypto/rand.Reader in production).
 	Clock relayport.Clock
@@ -186,7 +200,11 @@ type Relay struct {
 	srv      *relay.Server
 	sweeper  *relay.Sweeper
 	sweep    time.Duration
+	refresh  time.Duration
+	reqTime  time.Duration // the bound of one refresh (DefaultRequestTimeout)
 	teardown time.Duration
+	lease    relayport.Lease
+	keep     *keeper
 	log      *logger
 	secrets  *relayconf.Key // the copy the tunnel reads from, cleared after the teardown
 
@@ -231,9 +249,16 @@ func Start(ctx context.Context, cfg *relayconf.Config, key *relayconf.Key, d Dep
 	if err != nil {
 		return nil, fmt.Errorf("relay: the relay key: %w", err)
 	}
-	r := &Relay{key: pub, cfg: cfg, sweep: cfg.SweepInterval, teardown: d.Teardown, log: newLogger(d.Log), stuck: make(chan struct{})}
+	r := &Relay{key: pub, cfg: cfg, sweep: cfg.SweepInterval, refresh: relayport.TombstoneRefreshEvery, teardown: d.Teardown, log: newLogger(d.Log), stuck: make(chan struct{})}
 	if d.SweepEvery > 0 {
 		r.sweep = d.SweepEvery
+	}
+	if d.RefreshEvery > 0 {
+		r.refresh = d.RefreshEvery
+	}
+	r.reqTime = DefaultRequestTimeout
+	if d.RequestTimeout > 0 {
+		r.reqTime = d.RequestTimeout
 	}
 	if r.teardown <= 0 {
 		r.teardown = DefaultTeardown
@@ -242,6 +267,9 @@ func Start(ctx context.Context, cfg *relayconf.Config, key *relayconf.Key, d Dep
 	var stuckClose error // the tunnel's close in the undo did not finish
 	defer func() {
 		if err != nil {
+			if r.keep != nil && !r.keep.held() {
+				err = fmt.Errorf("%w: %w", err, ErrAuthorityLost)
+			}
 			for i := len(undo) - 1; i >= 0; i-- {
 				undo[i]()
 			}
@@ -260,8 +288,45 @@ func Start(ctx context.Context, cfg *relayconf.Config, key *relayconf.Key, d Dep
 		}
 	}()
 
+	// 0. the lease, before anything is loaded and before the tunnel (ADR 0015
+	// decision 5): a taker of a lapsed lease waits out the drain inside Acquire.
+	// It is renewed from here on; a failed start releases it unless it was lost.
+	openLease := d.OpenLease
+	if openLease == nil {
+		openLease = func(party.NodeKey, relayport.Clock) (relayport.Lease, error) { return SingleHostLease(), nil }
+	}
+	lease, err := openLease(pub, clock)
+	if err != nil {
+		return nil, fmt.Errorf("relay: the lease: %w", err)
+	}
+	if err := lease.Acquire(ctx); err != nil {
+		return nil, fmt.Errorf("relay: the lease was not taken: %w", err)
+	}
+	r.lease = lease
+	r.keep = newKeeper(lease, clock, d.RenewEvery)
+	r.keep.timeout = r.reqTime
+	kctx, kstop := context.WithCancel(context.Background())
+	r.keep.stop = kstop
+	go r.keep.run(kctx)
+	undo = append(undo, func() {
+		kstop()
+		<-r.keep.done
+		if r.keep.held() {
+			rctx, cancel := context.WithTimeout(context.Background(), DefaultRequestTimeout)
+			lease.Release(rctx) //nolint:errcheck // a lease that is not released lapses
+			cancel()
+		}
+	})
+	env := StoreEnv{Clock: clock, Lease: lease}
+	lost := func() error {
+		if !r.keep.held() {
+			return fmt.Errorf("relay: %w", ErrAuthorityLost)
+		}
+		return nil
+	}
+
 	// 1. the mailbox store
-	store, notes, err := d.OpenMailbox(cfg.MailboxDir, clock)
+	store, notes, err := d.OpenMailbox(StoreSpec{Kind: StoreDirectory, Dir: cfg.MailboxDir}, env)
 	if err != nil {
 		return nil, fmt.Errorf("relay: the mailbox store: %w", err)
 	}
@@ -274,13 +339,16 @@ func Start(ctx context.Context, cfg *relayconf.Config, key *relayconf.Key, d Dep
 	guard := relay.NewGuard(store)
 	regCfg := cfg.Registry
 	regCfg.Evictable = guard.Evictable
-	reg, notes, err := d.OpenRegistry(cfg.RegistryDir, regCfg, clock)
+	reg, notes, err := d.OpenRegistry(StoreSpec{Kind: StoreDirectory, Dir: cfg.RegistryDir}, regCfg, env)
 	if err != nil {
 		return nil, fmt.Errorf("relay: the registry: %w", err)
 	}
 	undo = append(undo, func() { reg.Close() })
 	r.reg = reg
 	r.log.notes("registry", notes)
+	if err := lost(); err != nil { // the load ran under the lease; it is still held
+		return nil, err
+	}
 
 	// 3. the server, with the same guard, the registry's policy, the quota and
 	// the limits; the relay key the tunnel must report
@@ -294,6 +362,7 @@ func Start(ctx context.Context, cfg *relayconf.Config, key *relayconf.Key, d Dep
 		return nil, err
 	}
 	r.srv = srv
+	r.keep.onLostSet(srv.LoseAuthority)
 
 	// 4. the sweeper, with the same retention and the registry
 	retention := cfg.RetentionSeconds
@@ -301,7 +370,7 @@ func Start(ctx context.Context, cfg *relayconf.Config, key *relayconf.Key, d Dep
 	if err != nil {
 		return nil, err
 	}
-	r.sweeper = sw.WithRegistry(reg)
+	r.sweeper = sw.WithRegistry(reg).WithAuthority(srv)
 
 	// 5. the tunnel, restricted to the configured devices
 	r.secrets = &relayconf.Key{Node: key.Node, PSK: key.PSK}
@@ -329,6 +398,9 @@ func Start(ctx context.Context, cfg *relayconf.Config, key *relayconf.Key, d Dep
 	st := d.StartTimeout
 	if st <= 0 {
 		st = DefaultStartTimeout
+	}
+	if err := lost(); err != nil { // the tunnel never starts without the lease
+		return nil, err
 	}
 	lctx, cancel := context.WithTimeout(ctx, st)
 	tun, err := d.Listen(lctx, spec)
@@ -412,7 +484,17 @@ func (r *Relay) Reload(next *relayconf.Config) (bool, error) {
 // sessions end (the server's context), the sweeper stops, the tunnel is closed
 // with CloseWithin, and the stores are closed. It returns ErrTeardownStuck when
 // any of that did not finish or the tunnel reported a stuck teardown; the
-// stores are then left to the process's exit. Run is called once.
+// stores are then left to the process's exit. A lost lease or authority
+// (SPO-Xmailbox-OUT-127) ends serving the same way; the stores are closed, the
+// lease is not released, and Run returns ErrAuthorityLost. A planned stop saves
+// the rate buckets and releases the lease after the stores are closed, unless a
+// store request was sent and never answered or the registry holds an
+// operation storage has not confirmed: then the lease is left to lapse
+// ("stopped lease=lapses"), so that the taker waits out its drain
+// (SPO-Xmailbox-OUT-129). While serving, the tombstones are re-read every
+// relayport.TombstoneRefreshEvery, each re-read bounded by
+// DefaultRequestTimeout, and StaleRefreshes failures in a row lose the
+// authority. Run is called once.
 func (r *Relay) Run(ctx context.Context) error {
 	sctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -423,14 +505,53 @@ func (r *Relay) Run(ctx context.Context) error {
 		defer close(swDone)
 		r.sweeper.Run(sctx, r.sweep) //nolint:errcheck // ends with the context
 	}()
+	// the re-read of the tombstones every 60 s (ADR 0015 decisions 3 and 5),
+	// each bounded by the request timeout; StaleRefreshes failures in a row lose
+	// the authority (SPO-Xmailbox-OUT-131); the rate buckets are saved with it
+	rfDone := make(chan struct{})
+	go func() {
+		defer close(rfDone)
+		t := time.NewTicker(r.refresh)
+		defer t.Stop()
+		failed := 0
+		for {
+			select {
+			case <-sctx.Done():
+				return
+			case <-t.C:
+			}
+			if sctx.Err() != nil {
+				return // a tick that raced the stop
+			}
+			rctx, rcancel := context.WithTimeout(sctx, r.reqTime)
+			_, err := r.srv.RefreshTombstones(rctx, r.reg)
+			if err == nil {
+				r.srv.SaveRates(rctx, r.reg) //nolint:errcheck // the next tick saves again; a lost authority ends the server
+			}
+			rcancel()
+			switch {
+			case sctx.Err() != nil:
+				return
+			case err == nil:
+				failed = 0
+			default:
+				if failed++; failed >= StaleRefreshes {
+					r.log.line(fmt.Sprintf("tombstone_refresh_stale failures=%d", failed))
+					r.srv.LoseAuthority()
+				}
+			}
+		}
+	}()
 	var serveErr error
-	stuck := false
+	stuck, lost := false, false
 	select {
 	case <-ctx.Done():
 	case serveErr = <-srvDone:
 		srvDone = nil
 	case <-r.stuck:
 		stuck = true
+	case <-r.keep.lost:
+		lost = true
 	}
 	cancel()
 	deadline := time.Now().Add(r.teardown)
@@ -461,7 +582,7 @@ func (r *Relay) Run(ctx context.Context) error {
 	if err := r.tun.CloseWithin(max(time.Until(deadline), time.Millisecond)); err != nil {
 		stuck = true
 	}
-	if !wait(swDone) {
+	if !wait(swDone) || !wait(rfDone) {
 		stuck = true
 	}
 	select {
@@ -469,18 +590,75 @@ func (r *Relay) Run(ctx context.Context) error {
 		stuck = true
 	default:
 	}
+	if errors.Is(serveErr, relay.ErrAuthorityLost) || !r.keep.held() {
+		lost = true
+	}
 	if stuck {
+		r.keep.stop()
+		<-r.keep.done
+		// a stuck tunnel is the more urgent fact: the engine may still be up
 		r.log.line("stopped reason=teardown_stuck")
 		return ErrTeardownStuck
 	}
 	r.secrets.Destroy()
+	// what decides the release, read before the stores close: a store request
+	// that was sent and never answered, or an operation storage has not
+	// confirmed, may still land, so the lease is left to lapse and the taker
+	// waits out its drain (ADR 0015 decision 5, "The drain period";
+	// SPO-Xmailbox-OUT-129)
+	lapse := ""
+	if !lost {
+		sctx, scancel := context.WithTimeout(context.Background(), max(time.Until(deadline), time.Second))
+		if serr := r.srv.SaveRates(sctx, r.reg); errors.Is(serr, relayport.ErrAuthorityLost) {
+			lost = true
+		}
+		st, serr := r.reg.Stats(sctx)
+		scancel()
+		switch {
+		case r.srv.Unanswered() > 0:
+			lapse = "unanswered"
+		case serr != nil:
+			lapse = "registry"
+		case st.Unconfirmed > 0:
+			lapse = "unconfirmed"
+		}
+	}
+	r.keep.stop()
+	<-r.keep.done
 	cerr := errors.Join(r.reg.Close(), r.store.Close())
+	if lost {
+		// the exit rule: the lease is not released, because this process cannot
+		// tell whether the lease it holds is still the one it wrote
+		r.log.line("stopped reason=authority_lost")
+		return fmt.Errorf("relay: %w", ErrAuthorityLost)
+	}
+	if lapse != "" {
+		// a planned stop whose requests may still land: no release
+		r.log.line("stopped lease=lapses reason=" + lapse)
+		if serveErr != nil {
+			return serveErr
+		}
+		return cerr
+	}
+	// a planned stop: every request was answered and the stores are closed, so the
+	// lease is released and a taker need not wait
+	rctx, rcancel := context.WithTimeout(context.Background(), max(time.Until(deadline), time.Second))
+	lerr := r.lease.Release(rctx)
+	rcancel()
 	r.log.line("stopped")
 	if serveErr != nil {
 		return serveErr
 	}
-	return cerr
+	return errors.Join(cerr, lerr)
 }
+
+// StaleRefreshes is how many tombstone refreshes in a row may fail before the
+// relay loses its authority: three periods (three minutes at the default) of
+// tombstones it cannot see (SPO-Xmailbox-OUT-131). Each refresh is bounded by
+// DefaultRequestTimeout, so a store that does not answer cannot stall it or
+// the teardown. The directory store's refresh does not leave the host and fails
+// only on a closed registry or a directory sync that keeps failing.
+const StaleRefreshes = 3
 
 // PartsOf is what Start handed to each part (for tests of the agreement).
 func PartsOf(r *Relay) Parts { return r.parts }

@@ -236,7 +236,9 @@ func TestServerHoldsNoExpirerNoFullStore(t *testing.T) {
 			case "MailboxStore":
 				t.Errorf("%s names %s", fn, id.Name)
 			case "RemoveMailbox", "MailboxRevoker":
-				if fn != "server.go" && fn != "revoke.go" {
+				// authority.go is the wrapper every store call goes through; it
+				// forwards the purge and calls it nowhere itself
+				if fn != "server.go" && fn != "revoke.go" && fn != "authority.go" {
 					t.Errorf("%s names %s", fn, id.Name)
 				}
 			case "MailboxExpirer", "RegistryExpirer", "Sweep":

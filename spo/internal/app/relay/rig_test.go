@@ -129,11 +129,14 @@ type faultStore struct {
 	lists, opens     int
 	openNow, maxOpen int
 
-	puts     []relayport.MailboxPut
-	trusted  [][]byte
-	removes  []mailbox.Hash
-	retracts []retractCall
-	purged   []party.Fingerprint
+	puts []relayport.MailboxPut
+	// the deadline of the context the last Put was given
+	putDeadline    time.Time
+	putHasDeadline bool
+	trusted        [][]byte
+	removes        []mailbox.Hash
+	retracts       []retractCall
+	purged         []party.Fingerprint
 }
 
 type retractCall struct {
@@ -220,6 +223,7 @@ func (f *faultStore) Retract(ctx context.Context, rcpt, sender party.Fingerprint
 func (f *faultStore) Put(ctx context.Context, p relayport.MailboxPut, r io.Reader) (relayport.MailboxOutcome, error) {
 	f.mu.Lock()
 	f.puts = append(f.puts, p)
+	f.putDeadline, f.putHasDeadline = ctx.Deadline()
 	before, perr, out, trusting, gate, spy := f.BeforePut, f.PutErr, f.Outcome, f.Trusting, f.Gate, f.Spy
 	onEnd := f.OnBodyEnd
 	f.mu.Unlock()
@@ -636,6 +640,29 @@ type regHook struct {
 	setSenders    int
 	// LookupErr fails Lookup of the named devices.
 	LookupErr map[party.Fingerprint]error
+	// registers counts the calls of Register that reached the registry; late
+	// counts every call made after mark was set.
+	registers int
+	mark      atomic.Bool
+	late      atomic.Int32
+}
+
+// lateCall counts a call made after the mark.
+func (h *regHook) lateCall() {
+	if h.mark.Load() {
+		h.late.Add(1)
+	}
+}
+
+func (h *regHook) Devices(ctx context.Context, k relaybind.KeyHash) ([]relayregistry.Entry, error) {
+	h.lateCall()
+	return h.Registry.Devices(ctx, k)
+}
+
+func (h *regHook) registerCalls() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.registers
 }
 
 func (h *regHook) failLookup(d party.Fingerprint, err error) {
@@ -654,6 +681,7 @@ func (h *regHook) hideLookup(device party.Fingerprint, after int) {
 }
 
 func (h *regHook) Lookup(ctx context.Context, d party.Fingerprint) (relayregistry.Entry, bool, error) {
+	h.lateCall()
 	e, ok, err := h.Registry.Lookup(ctx, d)
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -681,8 +709,10 @@ func (h *regHook) Revoke(ctx context.Context, rec relayregistry.RevokeRecord) (r
 }
 
 func (h *regHook) Register(ctx context.Context, p relayregistry.Presented) (relayregistry.RegisterResult, error) {
+	h.lateCall()
 	h.mu.Lock()
 	e := h.RegisterErr
+	h.registers++
 	h.mu.Unlock()
 	if e != nil {
 		return relayregistry.RegisterResult{}, e
@@ -691,6 +721,7 @@ func (h *regHook) Register(ctx context.Context, p relayregistry.Presented) (rela
 }
 
 func (h *regHook) ExpectedSenders(ctx context.Context, d party.Fingerprint) ([]mailbox.WalletKey, error) {
+	h.lateCall()
 	h.mu.Lock()
 	e := h.ExpectedErr
 	h.mu.Unlock()
@@ -701,6 +732,7 @@ func (h *regHook) ExpectedSenders(ctx context.Context, d party.Fingerprint) ([]m
 }
 
 func (h *regHook) SetExpectedSenders(ctx context.Context, d party.Fingerprint, s []mailbox.WalletKey) error {
+	h.lateCall()
 	h.mu.Lock()
 	e := h.SetSendersErr
 	h.setSenders++

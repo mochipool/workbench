@@ -63,9 +63,31 @@ type Op struct {
 	// Tomb and NotBefore belong to the tombstone operations.
 	Tomb      TombKey
 	NotBefore int64
+	// Replaces marks an OpPutTombstone that raises a tombstone already stored for
+	// Tomb, whose not-before is Prev. A tombstone is one object per scope key: a
+	// store overwrites that object (a store with versions makes a new version of
+	// the same name, conditional on the one it holds) and never makes another
+	// name. Without Replaces the store creates the name (ADR 0015 decision 3).
+	Replaces bool
+	Prev     int64
 	// Charge marks an OpPutTombstone of a revoke that invalidates nothing: Apply
 	// uses one token of the revoke cap.
 	Charge bool
+	// Retry marks an operation on a scope key or a device whose last write has
+	// an unknown outcome (Core.ApplyUnknown): the write planned again, or a raise
+	// over a value storage has not confirmed. An adapter that keeps versions or
+	// ETags reads the object back before it writes (its Prev may not be there).
+	Retry bool
+}
+
+// applyWhenUnknown reports whether an operation whose outcome storage could not
+// confirm (relayport.ErrOutcomeUnknown) is applied to memory all the same
+// (Core.ApplyUnknown). It is when that is the stricter state: a tombstone
+// written is enforced, a binding deleted is not served. A binding written, and a
+// tombstone dropped, are not applied: memory then serves less than storage may
+// hold, never more.
+func applyWhenUnknown(op Op) bool {
+	return op.Kind == OpPutTombstone || op.Kind == OpDeleteBinding
 }
 
 // Plan is the decision of one call: the operations, and the result for the
@@ -100,9 +122,18 @@ type Core struct {
 	// (not-before / 86400). The least day says whether any tombstone can have
 	// expired, so the scan of the table is skipped when none can (expiredTombstones).
 	tombDays map[int64]int
+	// holds are the tombstones whose drop storage refused, with the relay time
+	// until which they are left out of the expired set (Hold). Only stored
+	// tombstones are held; a tombstone that is raised or goes loses its hold.
+	holds map[TombKey]int64
+	// versions counts the tombstone versions loaded (LoadTombstoneVersion).
+	versions int
+	// unconfirmed are the operations applied to memory whose outcome storage did
+	// not confirm (ApplyUnknown), by what they change.
+	unconfirmed map[unconfKey]Unconfirmed
 
-	evicted, expired, idle, invalidated, unrecorded uint64
-	refused                                         map[string]uint64
+	evicted, expired, idle, invalidated, unrecorded, heldDrops uint64
+	refused                                                    map[string]uint64
 }
 
 const secondsPerDay int64 = 86400
@@ -115,16 +146,18 @@ func NewCore(cfg Config) (*Core, error) {
 	}
 	cfg.Allowed = slices.Clone(cfg.Allowed)
 	return &Core{
-		cfg:      cfg,
-		dev:      map[party.Fingerprint]*Record{},
-		byKey:    map[relaybind.KeyHash]map[party.Fingerprint]struct{}{},
-		pair:     map[pairKey]int64{},
-		all:      map[relaybind.KeyHash]int64{},
-		dtomb:    map[party.Fingerprint]int64{},
-		rate:     newBucket(cfg.NewBindingsPerHour, cfg.NewBindingBurst),
-		revRate:  newBucket(cfg.RevokesPerHour, cfg.RevokeBurst),
-		tombDays: map[int64]int{},
-		refused:  map[string]uint64{},
+		cfg:         cfg,
+		dev:         map[party.Fingerprint]*Record{},
+		byKey:       map[relaybind.KeyHash]map[party.Fingerprint]struct{}{},
+		pair:        map[pairKey]int64{},
+		all:         map[relaybind.KeyHash]int64{},
+		dtomb:       map[party.Fingerprint]int64{},
+		rate:        newBucket(cfg.NewBindingsPerHour, cfg.NewBindingBurst),
+		revRate:     newBucket(cfg.RevokesPerHour, cfg.RevokeBurst),
+		tombDays:    map[int64]int{},
+		holds:       map[TombKey]int64{},
+		unconfirmed: map[unconfKey]Unconfirmed{},
+		refused:     map[string]uint64{},
 	}, nil
 }
 
@@ -150,12 +183,159 @@ func (c *Core) LoadBinding(r Record) error {
 	return nil
 }
 
-// LoadTombstone adds a tombstone read from storage (the maximum wins).
-func (c *Core) LoadTombstone(k TombKey, notBefore int64) {
+// LoadTombstone adds a tombstone read from storage (the maximum wins). A key
+// with no scope, or a not-before outside 0 to relaybind.MaxTime, is refused
+// with an error that wraps relaybind.ErrRange and changes nothing, as
+// MergeTombstones ignores it: the adapter's load then fails closed. A value at
+// least as high as an unconfirmed write of the same key confirms it: storage
+// holds it.
+func (c *Core) LoadTombstone(k TombKey, notBefore int64) error {
+	if !validTomb(k, notBefore) {
+		return fmt.Errorf("%w: a tombstone of scope %d with not-before %d", relaybind.ErrRange, k.Scope, notBefore)
+	}
+	// what storage holds is this value: it confirms an unconfirmed write of the
+	// key only when it is at least as high (never the merged one, which may be
+	// memory's own unconfirmed value)
+	if u, ok := c.unconfirmed[putKey(k)]; ok && notBefore >= u.Op.NotBefore {
+		delete(c.unconfirmed, putKey(k))
+	}
 	if cur, ok := c.getTomb(k); ok {
 		notBefore = relaybind.MergeTombstone(cur, notBefore)
 	}
 	c.setTomb(k, notBefore)
+	return nil
+}
+
+func validTomb(k TombKey, notBefore int64) bool {
+	return k.Scope >= relaybind.ScopePair && k.Scope <= relaybind.ScopeDevice && notBefore >= 0 && notBefore <= relaybind.MaxTime
+}
+
+// LoadTombstoneVersion adds one version of a tombstone read from storage at
+// load. A store that keeps versions holds several values under one scope key
+// (every raise is a new version, and an older, higher version stays locked);
+// the maximum of them wins, whatever their order and whichever is current
+// (ADR 0015 decision 3, "Tombstones are read from versions"). It counts the
+// versions and refuses, with ErrTombstoneVersions and nothing changed, the one
+// past MaxTombstoneVersions: the load then fails closed, as for an unreadable
+// tombstone. An adapter checks its listing against the ceiling before it reads
+// the versions; this is the core's own bound.
+func (c *Core) LoadTombstoneVersion(k TombKey, notBefore int64) error {
+	if c.versions >= MaxTombstoneVersions {
+		return fmt.Errorf("%w: more than %d", ErrTombstoneVersions, MaxTombstoneVersions)
+	}
+	if err := c.LoadTombstone(k, notBefore); err != nil {
+		return err
+	}
+	c.versions++
+	return nil
+}
+
+// TombstoneValue is a tombstone as a store holds it: the scope key and the
+// not-before.
+type TombstoneValue struct {
+	Key       TombKey
+	NotBefore int64
+}
+
+// MergeResult is what MergeTombstones changed.
+type MergeResult struct {
+	// Raised counts the tombstones that are new or higher than the one in memory.
+	Raised int
+	// Ignored counts the values that name no scope or whose not-before is outside
+	// 0 to relaybind.MaxTime.
+	Ignored int
+	// Invalidated are the bindings that were served before the merge and that a
+	// merged tombstone invalidates now, ordered by device: the caller ends their
+	// sessions. They are not deleted; no reader serves them, and a sweep removes
+	// them (SPO-Xmailbox-OUT-081). Never nil.
+	Invalidated []Entry
+}
+
+// MergeTombstones merges tombstones that storage holds and this writer did not
+// write: what a stale writer's late request left, or what another identity of
+// the operator recorded (ADR 0015 decisions 3 and 5, the re-read every 60 s).
+// It is not a plan: storage already holds them, and memory follows storage. The
+// maximum wins and nothing is lowered. A merged tombstone is kept whatever the
+// table's bound: it is in storage, and memory must enforce it; the number of
+// values is the adapter's to bound (its version ceiling). The values are read
+// at now, the relay time of the answer.
+func (c *Core) MergeTombstones(ts []TombstoneValue, now int64) MergeResult {
+	res := MergeResult{Invalidated: []Entry{}}
+	served := map[party.Fingerprint]bool{}
+	note := func(r *Record) {
+		if _, seen := served[r.Device]; !seen {
+			served[r.Device] = c.serves(r, now)
+		}
+	}
+	for _, v := range ts {
+		if !validTomb(v.Key, v.NotBefore) {
+			res.Ignored++
+			continue
+		}
+		if cur, ok := c.getTomb(v.Key); ok && cur >= v.NotBefore {
+			// storage holds this value: an unconfirmed write of it is confirmed
+			if u, ok := c.unconfirmed[putKey(v.Key)]; ok && v.NotBefore >= u.Op.NotBefore {
+				delete(c.unconfirmed, putKey(v.Key))
+			}
+			continue
+		}
+		for _, r := range c.named(v.Key) {
+			note(r)
+		}
+		c.LoadTombstone(v.Key, v.NotBefore) //nolint:errcheck // validTomb above
+		res.Raised++
+	}
+	for d, was := range served {
+		if r := c.dev[d]; was && r != nil && !c.serves(r, now) {
+			res.Invalidated = append(res.Invalidated, r.Entry())
+		}
+	}
+	slices.SortFunc(res.Invalidated, func(a, b Entry) int { return bytes.Compare(a.Device[:], b.Device[:]) })
+	return res
+}
+
+// named are the stored bindings a tombstone of k applies to: for a pair the
+// device's binding under that key, for all every binding of the key, for a
+// device the device's binding under any key.
+func (c *Core) named(k TombKey) []*Record {
+	var out []*Record
+	switch k.Scope {
+	case relaybind.ScopePair:
+		if r := c.dev[k.Device]; r != nil && r.Key == k.Key {
+			out = append(out, r)
+		}
+	case relaybind.ScopeAll:
+		for d := range c.byKey[k.Key] {
+			out = append(out, c.dev[d])
+		}
+	case relaybind.ScopeDevice:
+		if r := c.dev[k.Device]; r != nil {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// Hold records that storage refused to drop the tombstone k (a retention that
+// has not ended on the store's clock): it stays loaded and is left out of the
+// expired set, so neither the room of a revoke nor a sweep plans its drop again,
+// until the relay time until (HoldSeconds later, by the adapters). The refusal is
+// counted (Stats.HeldDrops). A key that is not stored is ignored. A hold ends
+// when its time comes or the tombstone is raised or dropped.
+func (c *Core) Hold(k TombKey, until int64) {
+	if _, ok := c.getTomb(k); !ok {
+		return
+	}
+	c.holds[k] = until
+	c.heldDrops++
+}
+
+// isHeld reports whether the drop of k is held back at now. It changes nothing
+// (plans call it); the map holds only stored tombstones, so a hold whose time
+// has passed costs one entry until its tombstone goes.
+func (c *Core) isHeld(k TombKey, now int64) bool {
+	until, ok := c.holds[k]
+	return ok && now < until
 }
 
 // Tombstones lists every stored tombstone with its not-before, in a stable order.
@@ -246,7 +426,8 @@ func (c *Core) Stats(now int64) Stats {
 	}
 	return Stats{
 		Bindings: len(c.dev), Keys: len(c.byKey), Tombstones: c.tombCount(), NewTokens: c.rate.whole(now),
-		Evicted: c.evicted, Expired: c.expired, IdleDropped: c.idle, Invalidated: c.invalidated, Unrecorded: c.unrecorded, Refused: ref,
+		Evicted: c.evicted, Expired: c.expired, IdleDropped: c.idle, Invalidated: c.invalidated, Unrecorded: c.unrecorded,
+		HeldDrops: c.heldDrops, Unconfirmed: len(c.unconfirmed), Refused: ref,
 	}
 }
 
@@ -287,8 +468,15 @@ func (c *Core) CountRefusal(err error) {
 // ---- state changes ----
 
 // Apply changes the state by one operation of a plan, after storage has taken
-// it.
+// it (confirmed it). It confirms an unconfirmed write that it supersedes: the
+// same scope key written or dropped, the same device written (with Persist) or
+// deleted.
 func (c *Core) Apply(op Op) {
+	c.confirmBy(op)
+	c.apply(op)
+}
+
+func (c *Core) apply(op Op) {
 	switch op.Kind {
 	case OpPutBinding:
 		r := op.Rec.clone()
@@ -371,6 +559,9 @@ func (c *Core) getTomb(k TombKey) (int64, bool) {
 func (c *Core) setTomb(k TombKey, v int64) {
 	if old, ok := c.getTomb(k); ok {
 		c.dayDown(old)
+		if old != v {
+			delete(c.holds, k) // a raised tombstone is a new value: its old drop is moot
+		}
 	}
 	switch k.Scope {
 	case relaybind.ScopePair:
@@ -400,6 +591,7 @@ func (c *Core) dayDown(notBefore int64) {
 }
 
 func (c *Core) delTomb(k TombKey) {
+	delete(c.holds, k)
 	if old, ok := c.getTomb(k); ok {
 		c.dayDown(old)
 	}

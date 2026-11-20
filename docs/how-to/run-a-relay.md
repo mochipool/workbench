@@ -79,7 +79,7 @@ The configuration and the commands are listed in the [reference](../reference/re
 
    Each operator writes the address to a file that only they can read (`umask 077`, or `chmod 600`; `spo party relay add` refuses a file that its group or others can read or write), stores it with `spo party relay add NAME --node-key HEX --address-file FILE`, deletes the file, and compares the node key with you out of band. Do it again only when the key or the `[derp_region]` tables change, or a device reports that the address no longer reaches the relay.
 
-6. Run it under a supervisor that restarts it, without `--print-address`. It exits with status 3 when its tunnel did not stop, also when that happens in a start that failed; a restart is the recovery. It opens no inbound TCP port; the tunnel engine binds two UDP sockets on system-chosen ports and needs outbound access to the DERP relays.
+6. Run it under a supervisor that restarts it, without `--print-address`. It exits with status 3 when its tunnel did not stop, also when that happens in a start that failed; a restart is the recovery. Status 4 means it is no longer the writer of its store (a lost lease; with directory stores this does not happen); a restart is the recovery there too. It opens no inbound TCP port; the tunnel engine binds two UDP sockets on system-chosen ports and needs outbound access to the DERP relays.
 
 ### Adding or removing a device
 

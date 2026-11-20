@@ -72,20 +72,51 @@ func openWithSeams(t testing.TB, dir string, clock relayport.Clock, mod func(*re
 // spec: SPO-Xmailbox-OUT-073, SPO-Xmailbox-OUT-074, SPO-Xmailbox-PRE-032, SPO-Xmailbox-PRE-033
 // spec: SPO-Xmailbox-PRE-034, SPO-Xmailbox-PRE-035, SPO-Xmailbox-PRE-036, SPO-Xmailbox-PRE-037
 // spec: SPO-Xmailbox-PRE-038, SPO-Xmailbox-PRE-039, SPO-Xmailbox-PRE-040, SPO-Xmailbox-SEC-043
+//
+// The cases of a refused drop run over a seam whose unlink of a tombstone
+// answers relayport.ErrDeleteRefused while the fixture says so: the directory
+// itself never refuses, the order of the adapter is what is checked.
+//
+// spec: SPO-Xmailbox-OUT-124, SPO-Xmailbox-IF-033, SPO-Xmailbox-OUT-079
+// spec: SPO-Xmailbox-OUT-128, SPO-Xmailbox-INV-044, SPO-Xmailbox-IF-035
 func TestRegistryContract(t *testing.T) {
 	relayporttest.RunRegistry(t, func(t *testing.T, cfg relayregistry.Config, clock relayport.Clock) relayporttest.RegistryFixture {
 		dir := newDir(t)
-		s, _, err := Open(dir, cfg, clock)
+		drops := &relayporttest.DropFaults{}
+		unknown := &relayporttest.UnknownFaults{}
+		var cur *Store
+		sm := realSeams()
+		sm.unlinkat = func(fd int, name string, fl int) error {
+			if isTombName(name) {
+				if err := drops.Try(); err != nil {
+					return err
+				}
+			}
+			return unix.Unlinkat(fd, name, fl)
+		}
+		// an unknown outcome of a tombstone write is the sync of the tombstones'
+		// directory failing after the rename
+		sm.sync = func(fd int) error {
+			if cur != nil && fd == int(cur.tomb.Fd()) {
+				if err := unknown.Try(); err != nil {
+					return err
+				}
+			}
+			return unix.Fsync(fd)
+		}
+		s, _, err := openWith(dir, cfg, clock, sm)
 		if err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { s.Close() })
-		cur := s
+		cur = s
 		return relayporttest.RegistryFixture{
 			Registry: s,
+			Drops:    drops,
+			Unknown:  unknown,
 			Reopen: func(t *testing.T) relayport.Registry {
 				cur.Close()
-				n, _, err := Open(dir, cfg, clock)
+				n, _, err := openWith(dir, cfg, clock, sm)
 				if err != nil {
 					t.Fatalf("reopen: %v", err)
 				}

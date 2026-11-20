@@ -29,7 +29,17 @@ const (
 	ExitUsage = 2
 	// ExitStuck: the teardown did not finish; the tunnel engine may still be up.
 	ExitStuck = 3
+	// ExitAuthority: the relay is no longer the writer of its store (its lease
+	// was lost, or a conditional write met another writer's change). The teardown
+	// finished and the lease was not released. A restart is the remedy, and the
+	// new process waits for the lease; the status tells a supervisor and an
+	// alert this cause from a configuration fault (1) and from a stuck tunnel
+	// (3), which wins when both happen.
+	ExitAuthority = 4
 )
+
+// authorityMsg is what serve says when the authority is lost.
+const authorityMsg = "spo-relay: the relay is no longer the writer of its store (its lease was lost, or another writer changed it); it stopped serving and exits without releasing the lease, so that its supervisor can start it again"
 
 const usage = `usage:
   spo-relay serve --config FILE [--print-address]
@@ -159,12 +169,45 @@ func serve(path string, cfg *relayconf.Config, printAddr bool, stdout, stderr io
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// the signals are watched during the start too: the lease may be held by
+	// another process for a while, and SIGTERM must end the wait as a planned
+	// stop (SPO-Xmailbox-OUT-132); a reload has nothing to reload yet
+	stopped := false
+	quit, watched := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(watched)
+		for {
+			select {
+			case <-quit:
+				return
+			case s := <-signals:
+				if s == SignalStop {
+					stopped = true
+					cancel()
+					return
+				}
+				fmt.Fprintln(stderr, "spo-relay: reload ignored: the relay is still starting")
+			}
+		}
+	}()
 	r, err := Start(ctx, cfg, k, d)
+	close(quit)
+	<-watched
 	k.Destroy()
+	// a stop during the start that made the start fail is a planned stop; one
+	// that came as the start finished stops it below at once (ctx has ended),
+	// and a stuck teardown or a lost authority keep their own status
+	if stopped && err != nil && !errors.Is(err, ErrTeardownStuck) && !errors.Is(err, ErrAuthorityLost) {
+		fmt.Fprintln(stdout, "spo-relay: stopped before serving")
+		return ExitOK
+	}
 	switch {
 	case errors.Is(err, ErrTeardownStuck):
 		fmt.Fprintf(stderr, "spo-relay: %v\nspo-relay: tunnel did not stop: the tunnel engine may still be up and registered; this process exits now so that its supervisor can restart it\n", err)
 		return ExitStuck
+	case errors.Is(err, ErrAuthorityLost):
+		fmt.Fprintf(stderr, "spo-relay: %v\n%s\n", err, authorityMsg)
+		return ExitAuthority
 	case err != nil:
 		fmt.Fprintf(stderr, "spo-relay: %v\n", err)
 		return ExitFail
@@ -190,6 +233,9 @@ func serve(path string, cfg *relayconf.Config, printAddr bool, stdout, stderr io
 			case errors.Is(err, ErrTeardownStuck):
 				fmt.Fprintln(stderr, "spo-relay: tunnel did not stop: the tunnel engine may still be up and registered; this process exits now so that its supervisor can restart it")
 				return ExitStuck
+			case errors.Is(err, ErrAuthorityLost):
+				fmt.Fprintln(stderr, authorityMsg)
+				return ExitAuthority
 			case err != nil:
 				fmt.Fprintf(stderr, "spo-relay: %v\n", err)
 				return ExitFail
