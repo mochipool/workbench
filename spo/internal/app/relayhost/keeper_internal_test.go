@@ -209,6 +209,154 @@ func TestTheKeeperIsSizedFromTheTerm(t *testing.T) {
 	}
 }
 
+// The outage figures the operator documentation states (docs/how-to/
+// run-a-relay.md, SPO-Xobjstore-OUT-304) are those of the constants: at the
+// default term of 20 s an outage of fast failures (refusals, 5xx) of up to
+// 10 s is ridden out, one of 12.5 s can end the lease and one of 17.5 s always
+// does; an outage in which no request is answered (each waits for its 10 s
+// deadline) of up to 10.25 s is ridden out, a longer one can end the lease, and
+// one of 15.25 s always does. A keeper made by newKeeper has the same figures.
+//
+// spec: SPO-Xobjstore-OUT-304
+func TestTheOutageFiguresFollowTheConstants(t *testing.T) {
+	want := Outage{RiddenOut: 10 * time.Second, MayEnd: 12500 * time.Millisecond, AlwaysEnds: 17500 * time.Millisecond,
+		HungRiddenOut: 10250 * time.Millisecond, HungAlwaysEnds: 15250 * time.Millisecond}
+	if got := OutageBounds(20 * time.Second); got != want {
+		t.Fatalf("OutageBounds(20 s) = %+v, want %+v", got, want)
+	}
+	k := newKeeper(newScriptLease(20*time.Second), systemClock{}, 0)
+	if got := k.outage(20 * time.Second); got != want {
+		t.Fatalf("the keeper's own figures %+v, want %+v", got, want)
+	}
+}
+
+// windowLease is a lease on the system clock whose renewals fail definitely
+// (a 429) during [from, from+d), from counted from the first renewal's sending
+// plus phase, and are confirmed otherwise.
+type windowLease struct {
+	*scriptLease
+	phase, d time.Duration
+	base     time.Time
+}
+
+func (l *windowLease) Renew(ctx context.Context) error {
+	now := time.Now()
+	l.mu.Lock()
+	if l.base.IsZero() {
+		l.base = now
+	}
+	from := l.base.Add(l.phase)
+	l.mu.Unlock()
+	if !now.Before(from) && now.Before(from.Add(l.d)) {
+		l.mu.Lock()
+		l.sends = append(l.sends, now)
+		l.mu.Unlock()
+		return errSlowDown
+	}
+	return l.scriptLease.Renew(ctx)
+}
+
+// A keeper at a tenth of the default figures rides out a definite-failure
+// outage a little shorter than RiddenOut wherever in the cycle it starts, and
+// loses the lease to one of AlwaysEnds.
+//
+// spec: SPO-Xobjstore-OUT-304, SPO-Xmailbox-INV-045
+func TestTheOutageFiguresHoldForAKeeper(t *testing.T) {
+	const term = 2 * time.Second
+	o := scaled(newScriptLease(term)).outage(term)
+	if o.RiddenOut <= 300*time.Millisecond || o.AlwaysEnds <= o.RiddenOut {
+		t.Fatalf("scaled figures %+v", o)
+	}
+	every := term / 4
+	for _, c := range []struct {
+		name  string
+		phase time.Duration
+		d     time.Duration
+		lost  bool
+	}{
+		{"just after a renewal", 10 * time.Millisecond, o.RiddenOut - 150*time.Millisecond, false},
+		{"mid-cycle", every / 2, o.RiddenOut - 150*time.Millisecond, false},
+		{"just before a renewal", every - 10*time.Millisecond, o.RiddenOut - 150*time.Millisecond, false},
+		{"MayEnd just before a renewal", every - 10*time.Millisecond, o.MayEnd + 100*time.Millisecond, true},
+		{"AlwaysEnds", every / 2, o.AlwaysEnds, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			l := &windowLease{scriptLease: newScriptLease(term), phase: c.phase, d: c.d}
+			k := scaled(l)
+			runFor(k, every+c.phase+c.d+term)
+			if isLost(k) != c.lost {
+				t.Fatalf("lost %v, want %v; renewals at %v", isLost(k), c.lost, l.sent())
+			}
+		})
+	}
+}
+
+// hungLease is a lease on the system clock whose renewals sent during [from,
+// from+d) get no answer: each waits for its deadline (its context) whenever
+// the window ends, and fails without a loss, as an object lease's pending
+// renewal does; from counts from the first renewal's sending plus phase.
+type hungLease struct {
+	*scriptLease
+	phase, d time.Duration
+	base     time.Time
+}
+
+func (l *hungLease) Renew(ctx context.Context) error {
+	now := time.Now()
+	l.mu.Lock()
+	if l.base.IsZero() {
+		l.base = now
+	}
+	from := l.base.Add(l.phase)
+	l.mu.Unlock()
+	if !now.Before(from) && now.Before(from.Add(l.d)) {
+		l.mu.Lock()
+		l.sends = append(l.sends, now)
+		l.mu.Unlock()
+		<-ctx.Done()
+		return fmt.Errorf("the renewal is pending: %w", ctx.Err())
+	}
+	return l.scriptLease.Renew(ctx)
+}
+
+// A keeper at a tenth of the default figures rides out an outage of renewals
+// that are never answered a little shorter than HungRiddenOut wherever in the
+// cycle it starts, and loses the lease to one a little longer than it that
+// starts just before a renewal, and to one of HungAlwaysEnds.
+//
+// spec: SPO-Xobjstore-OUT-304, SPO-Xmailbox-INV-045
+func TestTheHungOutageFiguresHoldForAKeeper(t *testing.T) {
+	const term = 2 * time.Second
+	o := scaled(newScriptLease(term)).outage(term)
+	if o.HungRiddenOut <= 300*time.Millisecond || o.HungAlwaysEnds <= o.HungRiddenOut {
+		t.Fatalf("scaled figures %+v", o)
+	}
+	every := term / 4
+	for _, c := range []struct {
+		name  string
+		phase time.Duration
+		d     time.Duration
+		lost  bool
+	}{
+		{"just after a renewal", 10 * time.Millisecond, o.HungRiddenOut - 100*time.Millisecond, false},
+		{"mid-cycle", every / 2, o.HungRiddenOut - 100*time.Millisecond, false},
+		{"just before a renewal", every - 10*time.Millisecond, o.HungRiddenOut - 100*time.Millisecond, false},
+		{"past HungRiddenOut just before a renewal", every - 10*time.Millisecond, o.HungRiddenOut + 150*time.Millisecond, true},
+		{"HungAlwaysEnds", 10 * time.Millisecond, o.HungAlwaysEnds + 100*time.Millisecond, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			l := &hungLease{scriptLease: newScriptLease(term), phase: c.phase, d: c.d}
+			k := scaled(l)
+			runFor(k, every+c.phase+c.d+term)
+			if isLost(k) != c.lost {
+				t.Fatalf("lost %v, want %v; renewals at %v", isLost(k), c.lost, l.sent())
+			}
+		})
+	}
+}
+
 // L4. The keeper's declared loss reaches the lease: Lose is called, so a Renew
 // it abandoned cannot extend the lease, and a request context is refused.
 //

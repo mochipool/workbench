@@ -35,20 +35,54 @@
 //     deadline is the earlier of the request timeout and the lease end; an
 //     answer that arrives after the end it was meant to extend is a loss.
 //   - Release writes the record released with If-Match. From the moment it
-//     starts, the process holds nothing. A release whose outcome is unknown
-//     leaves the lease to lapse.
+//     starts, the process holds nothing. A release whose outcome is unknown is
+//     read back once; unless the read-back shows the released record, the
+//     lease lapses.
 //   - Lose ends the lease on this side without a request (the relay declared
 //     the loss itself).
 //   - Outcomes, by the client's rule (SPO-Xobjstore-PRE-003): success; an
 //     outcome that is unknown is read back, and only equal bytes are success
-//     (the ETag the store reports for them is taken); for a renewal, a read-back
-//     that shows this holder's own previous record and ETag (the write did not
-//     land yet) lets the same bytes be sent again with the same If-Match, twice
-//     at most and while the lease lasts; any other read-back, or one that cannot
-//     tell, is a loss, and this Lease never writes again; a 412, 404 or 409 is a
-//     loss (for a take: someone else won, and the waiter goes on waiting; for a
-//     resent renewal it is read back first, as its first copy may have landed);
-//     any other refusal leaves the lease as it was.
+//     (the ETag the store reports for them is taken); a 412, 404 or 409 to a
+//     first copy is a loss (for a take: someone else won, and the waiter goes
+//     on waiting); any other refusal (429, 403, not sent) applied nothing and
+//     leaves the lease as it was.
+//   - A write whose outcome is unknown and whose read-back does not show it
+//     (the store answers 5xx, or does not answer, or the read-back shows the
+//     record the write is conditional on) is pending: it may still land. A
+//     pending renewal does not end the lease. The lease keeps the end of the
+//     last confirmed write and is lost at that end, as when the store refuses;
+//     the next renewal sends the same bytes again with the same If-Match (see
+//     "Pending writes"). A read-back that shows another record (another holder,
+//     another generation, no object) is a loss at once, and this Lease never
+//     writes again. A pending take does not end Acquire either: the waiter
+//     holds nothing and goes on reading.
+//
+// # Pending writes
+//
+// The rule: while a write of this process is pending, the only write it sends
+// on the ETag that write names is the same bytes with the same condition. A
+// renewal with other content (a raised counter) is built only from a confirmed
+// write, whose ETag a store answer or a read-back gave. Why that is safe: the
+// copies are one write, so whichever lands, the store holds the bytes this
+// process meant, and every copy is conditional on the same ETag, so at most one
+// copy is applied (assumption 1 below); once one is, the ETag has moved on and
+// every other copy is refused (412). A 412 to a copy is therefore not a
+// conflict by itself: an earlier copy may be what moved the ETag. It is read
+// back, and only bytes equal to the pending ones settle it as applied; another
+// record is a loss. A second write with other content on the same ETag would
+// break this: if the first copy landed, the second is refused and the process
+// can no longer tell from a read-back which of its writes the store holds, and
+// it might build on the wrong ETag.
+//
+// The lease is not extended by a pending write. A copy answered 200 was applied
+// itself (its If-Match held, so no earlier copy had been, and none can be
+// after it): the lease holds from that copy's sending. A write settled by a
+// read-back holds from the sending of its FIRST copy: the read-back does not
+// say which copy landed, and the first is the earliest that can have, so the
+// term counted from it ends no later than the one counted from the copy that
+// did. A pending take is settled the same way, by the waiter's next read
+// showing its bytes; one settled after the term it began gives no authority,
+// and its record is waited out like any held record.
 //   - An object that is not a record this package reads, or that names another
 //     node key, refuses the start: it is never taken over blindly.
 //
@@ -237,8 +271,35 @@ type Lease struct {
 	until     time.Time // on Clock: the sending of the last confirmed write plus the term
 	wallUntil time.Time // the same on Wall
 	tried     time.Time // on Clock: the sending of the last renewal tried
+	pend      *pending  // a renewal whose outcome is not known yet; l.op is held to use it
 	lost      chan struct{}
 	lostOnce  sync.Once
+}
+
+// pending is a write of this process whose outcome is not known: a copy may
+// still land. Until it is settled, the only write sent on prev's ETag is the
+// same bytes with the same condition ("Pending writes").
+type pending struct {
+	rec         Record
+	body        []byte
+	prev        observation // the record (or the absence) the write is conditional on
+	lapsed      bool        // a take of a lapsed or absent lease: the drain follows it
+	sent, wsent time.Time   // the first copy's sending, on Clock and on Wall
+	copies      int         // copies sent
+}
+
+// put sends one copy of p within d.
+func (l *Lease) put(ctx context.Context, p *pending, d time.Duration) (s3client.PutResult, error) {
+	in := s3client.PutInput{Key: l.key, Body: p.body}
+	if p.prev.absent {
+		in.IfNoneMatch = true
+	} else {
+		in.IfMatch = p.prev.etag
+	}
+	rctx, cancel := context.WithTimeout(ctx, d)
+	defer cancel()
+	p.copies++
+	return l.store.Put(rctx, in)
 }
 
 var (
@@ -304,6 +365,15 @@ func (l *Lease) lose() {
 	l.mu.Lock()
 	l.loseLocked()
 	l.mu.Unlock()
+}
+
+func isClosed(c <-chan struct{}) bool {
+	select {
+	case <-c:
+		return true
+	default:
+		return false
+	}
 }
 
 // Lose implements relayport.LeaseLoser: the lease is lost from now on, and a
@@ -374,12 +444,18 @@ func (l *Lease) Acquire(ctx context.Context) error {
 	var w watch
 	var readAt time.Time
 	looked := false
-	var last error // the last store error, for the message when ctx ends
+	var last error  // the last store error, for the message when ctx ends
+	var pt *pending // a take whose outcome is not known: it may still land
 	// the largest duration and margin of a record seen by this Acquire: an
 	// absent object is waited for at least that long
 	seenD, seenM := l.times.Duration, l.times.Margin
 	for {
 		if err := ctx.Err(); err != nil {
+			if pt != nil {
+				// the take may still land: this Lease never holds it
+				l.lose()
+				return fmt.Errorf("the lease was not taken: %w (a take whose outcome is not known may still land; it lapses: %v)", err, last)
+			}
 			if last != nil {
 				return fmt.Errorf("the lease was not taken: %w (the last store error: %v)", err, last)
 			}
@@ -387,30 +463,63 @@ func (l *Lease) Acquire(ctx context.Context) error {
 		}
 		now := l.clock.Now()
 		switch {
-		case w.seen && now.Sub(w.at) >= w.after:
-			taken, cause, end := l.take(ctx, w.obs, true)
+		case pt == nil && w.seen && now.Sub(w.at) >= w.after:
+			taken, pend, cause, end := l.take(ctx, w.obs, true, nil)
 			if taken || end != nil {
 				return end
 			}
-			last, w, looked = cause, watch{}, false
+			pt, last, w, looked = pend, cause, watch{}, false
 			continue
 		case !looked || !now.Before(readAt.Add(l.times.Poll)):
 			looked = true
 			readAt = now // the poll counts from the sending
 			obs, err := l.read(ctx)
 			answered := l.clock.Now() // "unchanged" counts from the answer
+			if err == nil && pt != nil {
+				switch {
+				case !obs.absent && bytes.Equal(obs.body, pt.body):
+					// the pending take landed
+					p := pt
+					pt = nil
+					if taken, end := l.landed(ctx, p, obs.etag); taken || end != nil {
+						return end
+					}
+					// settled after the term it began: a record of this process
+					// that gives no authority, waited out below like any other
+				case obs.same(pt.prev):
+					// not landed (yet): only the same take may be sent again,
+					// and not once the lease was declared lost (Lose)
+					if isClosed(l.lost) {
+						return lostErr("the lease was lost while a take was pending")
+					}
+					taken, pend, cause, end := l.take(ctx, pt.prev, pt.lapsed, pt)
+					if taken || end != nil {
+						return end
+					}
+					pt, last = pend, cause
+					l.looks.Add(1)
+					continue
+				default:
+					// the object moved on from the record the take named: no
+					// copy of it can land any more
+					pt = nil
+				}
+			}
 			switch {
 			case errors.Is(err, ErrUnreadable) || errors.Is(err, ErrForeignLease):
+				if pt != nil {
+					l.lose()
+				}
 				return fmt.Errorf("the lease was not taken, and is not taken over blindly: %w; check that no relay of this identity runs, then overwrite %s with a released record with the store tool (spo-relay store); never remove it", err, l.key)
 			case err != nil:
 				last = err
 				continue
 			case !obs.absent && obs.rec.State == StateReleased:
-				taken, cause, end := l.take(ctx, obs, false)
+				taken, pend, cause, end := l.take(ctx, obs, false, nil)
 				if taken || end != nil {
 					return end
 				}
-				last, w, looked = cause, watch{}, false
+				pt, last, w, looked = pend, cause, watch{}, false
 			case !w.seen || !w.obs.same(obs):
 				after := max(seenD, l.times.Duration) + max(seenM, l.times.Margin)
 				if obs.absent {
@@ -456,52 +565,82 @@ func (l *Lease) read(ctx context.Context) (observation, error) {
 	return observation{rec: rec, etag: o.Info.ETag, body: o.Body}, nil
 }
 
-// take writes this holder's record over what prev saw. taken is true when the
-// lease is held (after the drain for a lapsed or absent lease); end is the
-// error Acquire returns; otherwise the take was refused or failed (cause) and
-// the waiter goes on.
-func (l *Lease) take(ctx context.Context, prev observation, lapsed bool) (taken bool, cause, end error) {
-	if prev.rec.Generation == math.MaxUint64 || prev.rec.Counter == math.MaxUint64 {
-		return false, nil, fmt.Errorf("the lease was not taken: %w: its generation or counter is at the maximum", ErrUnreadable)
-	}
-	next := Record{Node: l.node, Holder: l.holder, Generation: prev.rec.Generation + 1, Counter: prev.rec.Counter + 1,
-		Duration: l.times.Duration, Margin: l.times.Margin, State: StateHeld}
-	body, err := Encode(next)
-	if err != nil {
-		return false, nil, err
-	}
-	in := s3client.PutInput{Key: l.key, Body: body}
-	if prev.absent {
-		in.IfNoneMatch = true
-	} else {
-		in.IfMatch = prev.etag
-	}
-	rctx, cancel := context.WithTimeout(ctx, l.times.RequestTimeout)
-	sent, wsent := l.clock.Now(), l.wall()
-	res, err := l.store.Put(rctx, in)
-	cancel()
-	term := l.times.Term()
-	etag, out, why := l.settle(ctx, body, res, err, sent.Add(term), wsent.Add(term))
-	switch out {
-	case refused, failed:
-		return false, why, nil
-	case unknown:
-		l.lose()
-		if ctx.Err() != nil {
-			return false, nil, fmt.Errorf("%w: the take's outcome is unknown (%v), and this process does not write again: %w", relayport.ErrAuthorityLost, why, ctx.Err())
+// take writes this holder's record over what prev saw, or, with p, sends the
+// pending take p again: the same bytes with the same condition. taken is true
+// when the lease is held (after the drain for a lapsed or absent lease); end is
+// the error Acquire returns; otherwise the take was refused or failed (cause)
+// and the waiter goes on, with pend the take when it is pending (it may still
+// land).
+func (l *Lease) take(ctx context.Context, prev observation, lapsed bool, p *pending) (taken bool, pend *pending, cause, end error) {
+	if p == nil {
+		if prev.rec.Generation == math.MaxUint64 || prev.rec.Counter == math.MaxUint64 {
+			return false, nil, nil, fmt.Errorf("the lease was not taken: %w: its generation or counter is at the maximum", ErrUnreadable)
 		}
-		return false, nil, lostErr("the take's outcome is unknown (%v), and this process does not write again", why)
+		next := Record{Node: l.node, Holder: l.holder, Generation: prev.rec.Generation + 1, Counter: prev.rec.Counter + 1,
+			Duration: l.times.Duration, Margin: l.times.Margin, State: StateHeld}
+		body, err := Encode(next)
+		if err != nil {
+			return false, nil, nil, err
+		}
+		p = &pending{rec: next, body: body, prev: prev, lapsed: lapsed, sent: l.clock.Now(), wsent: l.wall()}
 	}
-	if !l.confirm(next, body, etag, sent, wsent, sent.Add(term), wsent.Add(term), false) {
-		return false, nil, lostErr("the take was answered after the term it began, or the lease was lost meanwhile")
+	again := p.copies > 0 // an earlier copy may still land
+	sent, wsent := l.clock.Now(), l.wall()
+	res, err := l.put(ctx, p, l.times.RequestTimeout)
+	term := l.times.Term()
+	etag, out, why := l.settle(ctx, p.body, res, err, again, p.sent.Add(term), p.wsent.Add(term))
+	switch out {
+	case refused:
+		return false, nil, why, nil // the object moved on: no copy can land
+	case failed:
+		if again {
+			return false, p, why, nil
+		}
+		return false, nil, why, nil // nothing of this take was applied
+	case unknown:
+		return false, p, why, nil
+	case applied:
+		// a read-back showed the bytes: the first copy is the earliest that
+		// can have landed
+		sent, wsent = p.sent, p.wsent
+		if !l.clock.Now().Before(sent.Add(term)) || !l.wall().Before(wsent.Add(term)) {
+			return false, nil, errors.New("the take landed, and was confirmed after the term it began; it is waited out"), nil
+		}
 	}
+	// a 200: this copy was applied, from its own sending
+	if !l.confirm(p.rec, p.body, etag, sent, wsent, sent.Add(term), wsent.Add(term), false) {
+		return false, nil, nil, lostErr("the take was answered after the term it began, or the lease was lost meanwhile")
+	}
+	return l.drained(ctx, p.lapsed)
+}
+
+// landed confirms the pending take p, which a read showed in the store with
+// etag, from its first copy's sending; taken and end as for take. A take seen
+// only after the term it began gives no authority: neither is set, and the
+// waiter waits its record out.
+func (l *Lease) landed(ctx context.Context, p *pending, etag string) (taken bool, end error) {
+	term := l.times.Term()
+	until, wuntil := p.sent.Add(term), p.wsent.Add(term)
+	if !l.clock.Now().Before(until) || !l.wall().Before(wuntil) {
+		return false, nil
+	}
+	if !l.confirm(p.rec, p.body, etag, p.sent, p.wsent, until, wuntil, false) {
+		return false, lostErr("the take was confirmed after the term it began, or the lease was lost meanwhile")
+	}
+	taken, _, _, end = l.drained(ctx, p.lapsed)
+	return taken, end
+}
+
+// drained returns take's results for a confirmed take, after the drain when it
+// was of a lapsed or absent lease.
+func (l *Lease) drained(ctx context.Context, lapsed bool) (taken bool, pend *pending, cause, end error) {
 	if !lapsed {
-		return true, nil, nil
+		return true, nil, nil, nil
 	}
 	if err := l.drain(ctx); err != nil {
-		return false, nil, err
+		return false, nil, nil, err
 	}
-	return true, nil, nil
+	return true, nil, nil, nil
 }
 
 // drain waits the drain period after the take of a lapsed or absent lease (a
@@ -564,7 +703,8 @@ func (l *Lease) confirm(next Record, body []byte, etag string, sent, wsent, end,
 type outcome int
 
 const (
-	confirmed outcome = iota // the write is in the store; the ETag is the store's
+	confirmed outcome = iota // the store answered 200: this copy is in the store; the ETag is the store's
+	applied                  // a read-back showed the bytes: some copy is in the store
 	refused                  // 412, 404 or 409, not applied
 	failed                   // refused or not sent otherwise, not applied
 	unknown                  // may have been applied, and the read-back did not show it
@@ -575,23 +715,25 @@ func isRefusal(err error) bool {
 	return errors.As(err, &se) && (se.Status == http.StatusPreconditionFailed || se.Status == http.StatusNotFound || se.Status == http.StatusConflict)
 }
 
-// settle applies the client's rule to the answer of a put of body. A write
-// whose outcome is unknown is read back before end (and wend) at the latest.
-func (l *Lease) settle(ctx context.Context, body []byte, res s3client.PutResult, err error, end, wend time.Time) (string, outcome, error) {
+// settle applies the client's rule to the answer of a copy of a take of body
+// (again: an earlier copy may have landed, so a refusal is read back too). A
+// write whose outcome is unknown is read back before end (and wend) at the
+// latest.
+func (l *Lease) settle(ctx context.Context, body []byte, res s3client.PutResult, err error, again bool, end, wend time.Time) (string, outcome, error) {
 	if err == nil {
 		return res.ETag, confirmed, nil
 	}
-	if errors.Is(err, s3client.ErrOutcomeUnknown) {
+	if errors.Is(err, s3client.ErrOutcomeUnknown) || (again && isRefusal(err)) {
 		d := min(l.times.RequestTimeout, end.Sub(l.clock.Now()), wend.Sub(l.wall()))
 		if d <= 0 {
-			return "", unknown, fmt.Errorf("%v; no read-back, the lease end has passed", err)
+			return "", unknown, fmt.Errorf("%v; no read-back, the term the take begins has passed", err)
 		}
 		rctx, cancel := context.WithTimeout(ctx, d)
 		rb, rerr := l.store.ReadBack(rctx, l.key, body)
 		cancel()
 		switch {
 		case rerr == nil && rb.State == s3client.ReadBackApplied:
-			return rb.Info.ETag, confirmed, nil
+			return rb.Info.ETag, applied, nil
 		case rerr == nil:
 			return "", unknown, fmt.Errorf("%v; the read-back does not show the write", err)
 		default:
@@ -608,9 +750,10 @@ func (l *Lease) settle(ctx context.Context, body []byte, res s3client.PutResult,
 type shown int
 
 const (
-	shownOther    shown = iota // another record, an absent object, or a read that cannot tell
+	shownOther    shown = iota // another record, or no object: a loss
 	shownApplied               // the renewal's bytes
 	shownPrevious              // this holder's previous record with its ETag: the renewal did not land yet
+	shownNothing               // the read failed (5xx, no answer, 403): it cannot tell
 )
 
 // readBack reads the object back after a renewal of body whose outcome is
@@ -620,8 +763,12 @@ func (l *Lease) readBack(ctx context.Context, body, prev []byte, prevETag string
 	defer cancel()
 	o, err := l.store.Get(rctx, s3client.GetInput{Key: l.key, MaxBytes: MaxRecordBytes})
 	switch {
+	case errors.Is(err, s3client.ErrNotFound):
+		return shownOther, "", errors.New("the read-back finds no lease object")
+	case errors.Is(err, s3client.ErrTooLarge):
+		return shownOther, "", errors.New("the read-back shows an object larger than a record")
 	case err != nil:
-		return shownOther, "", fmt.Errorf("the read-back cannot tell: %w", err)
+		return shownNothing, "", fmt.Errorf("the read-back cannot tell: %w", err)
 	case bytes.Equal(o.Body, body) && o.Info.ETag != "":
 		return shownApplied, o.Info.ETag, nil
 	case bytes.Equal(o.Body, prev) && o.Info.ETag == prevETag:
@@ -640,9 +787,12 @@ func (l *Lease) Renew(ctx context.Context) error {
 	return l.renew(ctx)
 }
 
-// renew sends one renewal, and sends its bytes again when its outcome is
-// unknown and the read-back shows this holder's previous record; l.op is
-// held. The renewal holds the lease from its first sending.
+// renew sends one renewal, or a copy of the pending one ("Pending writes"),
+// and sends it again, MaxResends times at most, while its outcome is unknown
+// and the read-back shows this holder's previous record; l.op is held. A
+// renewal that is still pending when it returns is an error without a loss:
+// the lease keeps the end of the last confirmed renewal, and the next renewal
+// sends the same bytes with the same If-Match.
 func (l *Lease) renew(ctx context.Context) error {
 	l.mu.Lock()
 	if !l.held {
@@ -650,54 +800,68 @@ func (l *Lease) renew(ctx context.Context) error {
 		l.mu.Unlock()
 		return lostErr("the lease is not held")
 	}
-	sent, wsent := l.clock.Now(), l.wall()
+	now, wnow := l.clock.Now(), l.wall()
 	end, wend := l.until, l.wallUntil
-	if !sent.Before(end) || !wsent.Before(wend) {
+	if !now.Before(end) || !wnow.Before(wend) {
 		l.loseLocked()
 		l.mu.Unlock()
 		return lostErr("the lease ended before this renewal, which was not sent")
 	}
-	if l.rec.Counter == math.MaxUint64 {
-		l.loseLocked()
-		l.mu.Unlock()
-		return lostErr("the renewal counter is at its maximum")
+	p := l.pend
+	if p == nil {
+		// a new write is built only from the last confirmed one
+		if l.rec.Counter == math.MaxUint64 {
+			l.loseLocked()
+			l.mu.Unlock()
+			return lostErr("the renewal counter is at its maximum")
+		}
+		next := l.rec
+		next.Counter++
+		body, err := Encode(next)
+		if err != nil {
+			l.loseLocked()
+			l.mu.Unlock()
+			return lostErr("%v", err)
+		}
+		p = &pending{rec: next, body: body, prev: observation{rec: l.rec, etag: l.etag, body: l.body}, sent: now, wsent: wnow}
+		l.pend = p
 	}
-	next := l.rec
-	next.Counter++
-	etag, prev := l.etag, l.body
-	l.tried = sent
+	l.tried = now
 	l.mu.Unlock()
-	body, err := Encode(next)
-	if err != nil {
-		l.lose()
-		return lostErr("%v", err)
-	}
-	pending := false // an earlier copy of body may still land
 	for resends := 0; ; resends++ {
 		left := min(l.times.RequestTimeout, end.Sub(l.clock.Now()), wend.Sub(l.wall()))
 		if left <= 0 {
 			l.lose()
 			return lostErr("the lease ended before the renewal was answered")
 		}
-		rctx, cancel := context.WithTimeout(ctx, left)
-		res, err := l.store.Put(rctx, s3client.PutInput{Key: l.key, Body: body, IfMatch: etag})
-		cancel()
+		again := p.copies > 0 // an earlier copy may still land
+		sent, wsent := l.clock.Now(), l.wall()
+		res, err := l.put(ctx, p, left)
 		var why error
 		switch {
 		case err == nil:
-			if !l.confirm(next, body, res.ETag, sent, wsent, end, wend, true) {
+			// this copy was applied (its If-Match held, so no earlier copy had
+			// been, and none can be now): the lease holds from its sending
+			l.settled()
+			if !l.confirm(p.rec, p.body, res.ETag, sent, wsent, end, wend, true) {
 				return lostErr("the renewal was answered after the lease end")
 			}
 			return nil
-		case errors.Is(err, s3client.ErrOutcomeUnknown), pending && isRefusal(err):
+		case errors.Is(err, s3client.ErrOutcomeUnknown), again && isRefusal(err):
+			// a refusal of a copy may be the work of an earlier copy that landed
 			why = err
 		case isRefusal(err):
 			l.lose()
 			return lostErr("the renewal was refused: %v", err)
 		default:
-			// a definite refusal of another kind: nothing was applied by this
-			// copy; one sent before it may still land, and the next renewal
-			// sends the same bytes, so it is the same write
+			// a definite refusal of another kind (429, 403, not sent): nothing
+			// was applied by this copy. When it was the first, nothing of the
+			// write was, and the next renewal is a new one counted from its own
+			// sending (the same bytes, as the record is the same); otherwise an
+			// earlier copy may still land, and it stays pending.
+			if !again {
+				l.settled()
+			}
 			return fmt.Errorf("the lease was not renewed, and still ends at %v on its clock: %w", end, err)
 		}
 		left = min(l.times.RequestTimeout, end.Sub(l.clock.Now()), wend.Sub(l.wall()))
@@ -705,23 +869,39 @@ func (l *Lease) renew(ctx context.Context) error {
 			l.lose()
 			return lostErr("the renewal's outcome is unknown (%v), and the lease ended before a read-back", why)
 		}
-		st, netag, rerr := l.readBack(ctx, body, prev, etag, left)
-		switch {
-		case st == shownApplied:
-			if !l.confirm(next, body, netag, sent, wsent, end, wend, true) {
+		st, netag, rerr := l.readBack(ctx, p.body, p.prev.body, p.prev.etag, left)
+		switch st {
+		case shownApplied:
+			// some copy landed, and the read-back does not say which: the first
+			// is the earliest that can have, so the term counts from its sending
+			l.settled()
+			if !l.confirm(p.rec, p.body, netag, p.sent, p.wsent, end, wend, true) {
 				return lostErr("the renewal was confirmed by its read-back after the lease end")
 			}
 			return nil
-		case st == shownPrevious && !(pending && isRefusal(why)) && resends < MaxResends:
-			pending = true // the same bytes, the same If-Match: the same write
-			continue
+		case shownOther:
+			l.lose()
+			return lostErr("the renewal's outcome is unknown (%v), and this process does not write again: %v", why, rerr)
+		case shownPrevious:
+			// not landed yet; after a refusal the read is older than the store
+			// (the refusal says the ETag moved on), so it is left to the next
+			// renewal
+			if resends < MaxResends && !isRefusal(why) {
+				continue // the same bytes, the same If-Match: the same write
+			}
+			return fmt.Errorf("the lease was not renewed, and still ends at %v on its clock: the renewal is pending (%v), the read-back shows the previous record", end, why)
+		default:
+			return fmt.Errorf("the lease was not renewed, and still ends at %v on its clock: the renewal is pending (%v): %w", end, why, rerr)
 		}
-		if rerr == nil {
-			rerr = errors.New("the read-back shows the previous record and no resend is left")
-		}
-		l.lose()
-		return lostErr("the renewal's outcome is unknown (%v), and this process does not write again: %v", why, rerr)
 	}
+}
+
+// settled drops the pending renewal: it is confirmed, or nothing of it was
+// applied.
+func (l *Lease) settled() {
+	l.mu.Lock()
+	l.pend = nil
+	l.mu.Unlock()
 }
 
 // Release implements relayport.Lease. It returns nil when the lease is
@@ -748,6 +928,10 @@ func (l *Lease) Release(ctx context.Context) error {
 	next.Counter++
 	next.State = StateReleased
 	etag, end, wend := l.etag, l.until, l.wallUntil
+	// a pending renewal may land instead of the release: both are conditional
+	// on the last confirmed ETag, so at most one is applied, and neither gives
+	// this process anything
+	pend := l.pend != nil
 	l.loseLocked() // from here this process holds nothing, whatever the answer
 	l.mu.Unlock()
 	body, err := Encode(next)
@@ -761,7 +945,18 @@ func (l *Lease) Release(ctx context.Context) error {
 	case err == nil:
 		return nil
 	case errors.Is(err, s3client.ErrOutcomeUnknown):
+		// a read is not a write: it may follow the loss
+		if d := min(l.times.RequestTimeout, end.Sub(l.clock.Now()), wend.Sub(l.wall())); d > 0 {
+			rctx, cancel := context.WithTimeout(ctx, d)
+			rb, rerr := l.store.ReadBack(rctx, l.key, body)
+			cancel()
+			if rerr == nil && rb.State == s3client.ReadBackApplied {
+				return nil
+			}
+		}
 		return fmt.Errorf("the release's outcome is unknown; the lease lapses: %w", err)
+	case isRefusal(err) && pend:
+		return fmt.Errorf("the lease was not released, as a renewal whose outcome was not known may have landed first; it lapses: %w", err)
 	case isRefusal(err):
 		return nil // another holder has it: a lease that is lost
 	default:

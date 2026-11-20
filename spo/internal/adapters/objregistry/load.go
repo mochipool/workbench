@@ -285,12 +285,12 @@ func (s *Registry) workingEmpty(ctx context.Context) (bool, error) {
 }
 
 func (s *Registry) writeRegistryMarker(ctx context.Context, now int64) error {
-	until := time.Unix(now, 0).Add(MarkerRetention).UTC().Truncate(time.Second)
-	res, err := s.writeObject(ctx, s.rc, s.prefix+markerPath, encodeMarker(s.node), &s3client.Retention{Mode: s.mode, Until: until})
+	lock := MarkerLock(time.Unix(now, 0), s.mode)
+	res, err := s.writeObject(ctx, s.rc, s.prefix+markerPath, encodeMarker(s.node), lock)
 	if err != nil {
 		return err
 	}
-	s.marker.etag, s.marker.until, s.marker.id, s.marker.latest = res.ETag, until, res.VersionID, res.VersionID
+	s.marker.etag, s.marker.until, s.marker.id, s.marker.latest = res.ETag, lock.Until, res.VersionID, res.VersionID
 	return nil
 }
 
@@ -730,7 +730,7 @@ func (s *Registry) loadGroups(ctx context.Context, entries []listed, now int64, 
 			if err := s.core.LoadTombstoneVersion(k, r.nb); err != nil {
 				return fmt.Errorf("%w: %s version %s: %w", relayport.ErrRegistryCorrupt, tombName(k), v.id, err)
 			}
-			t.ids[v.id] = ver{nb: r.nb, until: untilOf(r.info.Retention)}
+			t.ids[v.id] = s.verOf(r.nb, r.info.Retention, r.unreadable)
 			s.nversions++
 		}
 		if !latest.marker && cur.nb < top {
@@ -763,15 +763,16 @@ func (s *Registry) readNew(ctx context.Context, sc []listed) ([]tombVal, int, er
 		if r.unreadable {
 			unreadable++
 		}
-		out = append(out, tombVal{key: jobs[i].key, id: jobs[i].id, nb: r.nb, until: untilOf(r.info.Retention)})
+		out = append(out, tombVal{key: jobs[i].key, id: jobs[i].id, nb: r.nb, v: s.verOf(r.nb, r.info.Retention, r.unreadable)})
 	}
 	return out, unreadable, nil
 }
 
 type tombVal struct {
-	key       relayregistry.TombKey
-	id        string
-	nb, until int64
+	key relayregistry.TombKey
+	id  string
+	nb  int64
+	v   ver
 }
 
 // adopt records what a refresh read: each new version, and a new current
@@ -785,7 +786,7 @@ func (s *Registry) adopt(sc []listed, values []tombVal) {
 		if _, seen := t.ids[v.id]; !seen {
 			s.nversions++
 		}
-		t.ids[v.id] = ver{nb: v.nb, until: v.until}
+		t.ids[v.id] = v.v
 	}
 	for _, v := range sc {
 		t := s.tombObj(v.key)
@@ -847,7 +848,7 @@ func (s *Registry) checkNames(ctx context.Context, ks []relayregistry.TombKey) (
 		}
 		if len(vs) == 0 && !r.absent {
 			t := s.tombObj(k)
-			s.recordTomb(t, r.info.ETag, r.info.VersionID, r.nb, untilOf(r.info.Retention))
+			s.recordTomb(t, r.info.ETag, r.info.VersionID, r.nb, r.info.Retention)
 			vs = []int64{r.nb}
 		}
 		for _, nb := range vs {
@@ -897,7 +898,9 @@ func (s *Registry) readName(ctx context.Context, k relayregistry.TombKey) ([]int
 		if r.gone {
 			continue
 		}
-		s.recordTomb(t, t.etag, jobs[i].id, r.nb, untilOf(r.info.Retention))
+		// an unreadable version (r.nb is the end of its lock) never covers:
+		// TombstoneLockNeed(r.nb) is after that end
+		s.recordTomb(t, t.etag, jobs[i].id, r.nb, r.info.Retention)
 		out = append(out, r.nb)
 	}
 	t.etag, t.latestVID = "", ""

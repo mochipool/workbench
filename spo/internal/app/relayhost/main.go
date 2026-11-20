@@ -54,9 +54,28 @@ The relay holds sealed envelopes it cannot open and no party secret. Its tunnel
 admits only the device node keys of the [[device]] tables.
 `
 
+// errPanic is a panic of Run, recovered on its goroutine.
+var errPanic = errors.New("internal error")
+
+// panicLine is what Main writes for a panic: its type, never its value (which
+// may hold anything, a key among it).
+func panicLine(stderr io.Writer, p any) {
+	fmt.Fprintf(stderr, "spo-relay: internal error (a panic of type %T); the lease is not released, and the process exits 1\n", p)
+}
+
 // Main is the command line of spo-relay (SPO-Xmailbox-IF-023): it returns the
-// exit status. signals is read by serve only.
-func Main(args []string, stdout, stderr io.Writer, signals <-chan Signal, d Deps) int {
+// exit status. signals is read by serve only. A panic on Main's goroutine or in
+// Run is recovered: one line on stderr, the lease is not released, and the
+// status is ExitFail, not Go's own 2 (which is ExitUsage). A panic on another
+// goroutine (a session, the keeper) cannot be recovered here and still ends
+// the process with Go's status 2.
+func Main(args []string, stdout, stderr io.Writer, signals <-chan Signal, d Deps) (code int) {
+	defer func() {
+		if p := recover(); p != nil {
+			panicLine(stderr, p)
+			code = ExitFail
+		}
+	}()
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
 		return ExitUsage
@@ -133,6 +152,16 @@ func summary(w io.Writer, cfg *relayconf.Config) {
 	default:
 		fmt.Fprintln(w, "DERP region not pinned: the address may change at a restart ([derp_region] pins it)")
 	}
+	// the store and the hash of the configuration in force (ADR 0015 decision 9)
+	fmt.Fprintln(w, cfg.Describe("relays/<node key>/"))
+	if cfg.StoreKind() == relayconf.StoreS3 {
+		sts := "the public STS endpoint of " + cfg.Object.Region
+		if cfg.Object.STSEndpoint != "" {
+			sts = cfg.Object.STSEndpoint
+		}
+		fmt.Fprintf(w, "credentials: web identity exchanged at %s for short-lived credentials (no static key)\n", sts)
+	}
+	fmt.Fprintf(w, "configuration hash %s\n", cfg.HashTag())
 }
 
 func checkConfig(cfg *relayconf.Config, stdout, stderr io.Writer, d Deps) int {
@@ -154,6 +183,9 @@ func checkConfig(cfg *relayconf.Config, stdout, stderr io.Writer, d Deps) int {
 		return ExitFail
 	}
 	fmt.Fprintf(stdout, "relay node key %s\n", hex.EncodeToString(pub[:]))
+	if cfg.StoreKind() == relayconf.StoreS3 {
+		fmt.Fprintf(stdout, "store prefix relays/%s/ in both buckets\n", hex.EncodeToString(pub[:]))
+	}
 	return ExitOK
 }
 
@@ -168,7 +200,14 @@ func serve(path string, cfg *relayconf.Config, printAddr bool, stdout, stderr io
 		return ExitFail
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	defer func() {
+		if p := recover(); p != nil {
+			// to Main without cancelling ctx: a cancel would make a running Run
+			// stop as planned and release the lease
+			panic(p)
+		}
+		cancel()
+	}()
 	// the signals are watched during the start too: the lease may be held by
 	// another process for a while, and SIGTERM must end the wait as a planned
 	// stop (SPO-Xmailbox-OUT-132); a reload has nothing to reload yet
@@ -225,11 +264,21 @@ func serve(path string, cfg *relayconf.Config, printAddr bool, stdout, stderr io
 		}
 	}
 	done := make(chan error, 1)
-	go func() { done <- r.Run(ctx) }()
+	go func() {
+		defer func() {
+			if p := recover(); p != nil {
+				panicLine(stderr, p)
+				done <- errPanic
+			}
+		}()
+		done <- r.Run(ctx)
+	}()
 	for {
 		select {
 		case err := <-done:
 			switch {
+			case errors.Is(err, errPanic):
+				return ExitFail
 			case errors.Is(err, ErrTeardownStuck):
 				fmt.Fprintln(stderr, "spo-relay: tunnel did not stop: the tunnel engine may still be up and registered; this process exits now so that its supervisor can restart it")
 				return ExitStuck

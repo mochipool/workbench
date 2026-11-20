@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/mochipool/workbench/spo/internal/app/relay"
+	"github.com/mochipool/workbench/spo/internal/domain/relayconf"
+	"github.com/mochipool/workbench/spo/internal/domain/relayregistry"
 	"github.com/mochipool/workbench/spo/internal/ports/relayport"
 )
 
@@ -46,19 +48,37 @@ const (
 // StoreKind is the kind of a relay's stores.
 type StoreKind uint8
 
-// The store kinds. Only the directory kind is built; the object store is ADR
-// 0015 work packages 6 to 8 and 10, and comes with its own kind.
+// The store kinds: the two directories of a host, and the two buckets of an
+// S3-compatible object store (ADR 0015 work package 10).
 const (
 	StoreDirectory StoreKind = iota + 1
+	StoreObject
 )
 
 // StoreSpec says where one store of a relay is. For StoreDirectory, Dir is the
-// absolute directory of the configuration (mailbox_dir or registry_dir).
+// absolute directory of the configuration (mailbox_dir or registry_dir); for
+// StoreObject, Object is the configuration's [store] (both buckets).
 //
-// spec: SPO-Xmailbox-IF-034
+// spec: SPO-Xmailbox-IF-034, SPO-Xobjstore-IF-303
 type StoreSpec struct {
-	Kind StoreKind
-	Dir  string
+	Kind   StoreKind
+	Dir    string
+	Object *relayconf.ObjectStore
+}
+
+// ObjectStore is an opened object store (Deps.OpenObjectStore): its lease and
+// the opening of its two stores, which Start calls in its order, and Close,
+// which drops what the store holds (its clients' connections) once the stores
+// are closed and the lease released or left to lapse. Notes go to the
+// operator log.
+//
+// spec: SPO-Xobjstore-IF-303
+type ObjectStore struct {
+	Lease        relayport.Lease
+	OpenMailbox  func(ctx context.Context, env StoreEnv) (relayport.MailboxStore, []string, error)
+	OpenRegistry func(ctx context.Context, cfg relayregistry.Config, env StoreEnv) (relayport.Registry, []string, error)
+	Close        func()
+	Notes        []string
 }
 
 // StoreEnv is what a store is opened with: the relay's clock, and the lease that
@@ -187,16 +207,104 @@ func newKeeper(l relayport.Lease, clock relayport.Clock, every time.Duration) *k
 		}
 	}
 	if term > 0 {
-		k.guard = term / 8
-		k.minRequest = min(MinRenewRequest, term/16)
+		k.guard, k.minRequest = guardOf(term), minRequestOf(term)
 		if k.every <= 0 {
-			k.every = term / 4
+			k.every = everyOf(term)
 		}
 	}
 	if k.every <= 0 {
 		k.every = DefaultRenewEvery
 	}
 	return k
+}
+
+// The keeper's figures of a term: renewed every quarter, the loss declared an
+// eighth before the end, no renewal sent with less than MinRenewRequest (or a
+// sixteenth of a short term) before that.
+func everyOf(term time.Duration) time.Duration      { return term / 4 }
+func guardOf(term time.Duration) time.Duration      { return term / 8 }
+func minRequestOf(term time.Duration) time.Duration { return min(MinRenewRequest, term/16) }
+
+// Outage is what a store outage does to a lease of a given term (the figures
+// the operator documentation states; SPO-Xobjstore-OUT-304). There are two
+// kinds, told apart by how long a renewal sent into the outage takes to fail.
+//
+// An outage of fast failures: the store refuses the renewal without applying
+// it (429 SlowDown, 403, or no credentials can be had so nothing is sent), or
+// answers it 5xx at once. A 5xx makes the renewal's outcome unknown; its
+// read-back fails as well, and the object lease keeps it pending (it does not
+// give the lease up; adapters/objlease, "Pending writes"), so the keeper
+// retries it exactly as it retries a refusal: the next renewal sends the same
+// bytes again, and the lease is not extended until one copy is confirmed.
+// RiddenOut, MayEnd and AlwaysEnds bound such an outage. The client's own
+// attempts (three, 50 and 100 ms apart) are inside these figures' slack.
+//
+// An outage in which the store does not answer at all (a hung connection):
+// each renewal waits for its deadline, the keeper's request timeout or the
+// guard, whichever is earlier, before it fails, so one renewal eats much of the
+// window. HungRiddenOut and HungAlwaysEnds bound it; a hung outage longer than
+// HungRiddenOut can end the lease when it starts just before a renewal is due.
+type Outage struct {
+	// RiddenOut: a fast-failure outage up to this long never ends the lease,
+	// wherever in the renewal cycle it starts.
+	RiddenOut time.Duration
+	// MayEnd: from this long a fast-failure outage can end the lease, when it
+	// starts just before a renewal is due.
+	MayEnd time.Duration
+	// AlwaysEnds: a fast-failure outage this long or longer always ends the
+	// lease.
+	AlwaysEnds time.Duration
+	// HungRiddenOut: an outage of no answers up to this long never ends the
+	// lease; a longer one can.
+	HungRiddenOut time.Duration
+	// HungAlwaysEnds: an outage of no answers this long or longer always ends
+	// the lease.
+	HungAlwaysEnds time.Duration
+}
+
+// OutageBounds is Outage for a lease of term kept with the default figures and
+// the default request timeout (at the default term of 20 s: 10 s, 12.5 s and
+// 17.5 s for fast failures, 10.25 s and 15.25 s for no answers).
+func OutageBounds(term time.Duration) Outage {
+	return outageOf(term, everyOf(term), guardOf(term), minRequestOf(term), RetryMin, RetryMax, DefaultRequestTimeout)
+}
+
+// outageOf derives the bounds. A confirmed renewal sent at s holds the lease to
+// s + term (the term counts from the sending), and the loss is declared at
+// s + term - guard. The next renewal is due at s + every.
+//
+// Fast failures: an outage that starts just before s + every leaves
+// term - every - guard until the loss (MayEnd), and one that starts just after
+// s leaves term - guard (AlwaysEnds). After the outage the keeper's next try
+// comes at most min(retryMax, every) after its last failure (its back-off), and
+// it must be sent at least minRequest before the loss: so RiddenOut is MayEnd
+// less both.
+//
+// No answers: the renewal due at s + every, sent into the outage, fails only
+// at its deadline, hang = min(timeout, term - guard - every) later; the next
+// try follows retryMin after (the back-off starts again at its least), at
+// retry = every + hang + retryMin, and it is answered if the outage is over by
+// then and at least minRequest is left before the loss. An outage that starts
+// just before s + every and ends by retry is ridden out (HungRiddenOut =
+// retry - every); one that starts just after s and lasts past retry always
+// ends the lease (HungAlwaysEnds = retry). When no try fits after the hang,
+// any outage that meets a renewal ends the lease: HungRiddenOut is zero and
+// HungAlwaysEnds the interval.
+func outageOf(term, every, guard, minRequest, retryMin, retryMax, timeout time.Duration) Outage {
+	mayEnd := term - every - guard
+	o := Outage{RiddenOut: mayEnd - minRequest - min(retryMax, every), MayEnd: mayEnd, AlwaysEnds: term - guard}
+	retry := every + min(timeout, mayEnd) + retryMin
+	if term-guard-retry >= minRequest {
+		o.HungRiddenOut, o.HungAlwaysEnds = retry-every, retry
+	} else {
+		o.HungRiddenOut, o.HungAlwaysEnds = 0, every
+	}
+	return o
+}
+
+// outage is outageOf with this keeper's own figures (a test's scaled ones).
+func (k *keeper) outage(term time.Duration) Outage {
+	return outageOf(term, k.every, k.guard, k.minRequest, k.retryMin, k.retryMax, k.timeout)
 }
 
 // lose declares the loss once: the lease is told (relayport.Lose), so that a

@@ -4,10 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/xml"
+	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"regexp"
 	"sort"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
+	"github.com/mochipool/workbench/spo/internal/platform/stsweb"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -81,10 +81,8 @@ func (c *awsCreds) destroy() {
 }
 
 var (
-	kmsARN     = regexp.MustCompile(`^arn:(aws|aws-cn|aws-us-gov):kms:([a-z]{2}(-[a-z]+)+-[0-9]):([0-9]{12}):key/([A-Za-z0-9-]{1,128})$`)
-	awsKeyID   = regexp.MustCompile(`^[A-Z0-9]{16,128}$`)
-	roleARN    = regexp.MustCompile(`^arn:(aws|aws-cn|aws-us-gov):iam::[0-9]{12}:role/[\x21-\x7e]{1,512}$`)
-	sessionTxt = regexp.MustCompile(`^[A-Za-z0-9_=,.@-]{2,64}$`)
+	kmsARN   = regexp.MustCompile(`^arn:(aws|aws-cn|aws-us-gov):kms:([a-z]{2}(-[a-z]+)+-[0-9]):([0-9]{12}):key/([A-Za-z0-9-]{1,128})$`)
+	awsKeyID = regexp.MustCompile(`^[A-Z0-9]{16,128}$`)
 )
 
 // parseARN returns the partition and region of a KMS key ARN. An alias, a key
@@ -99,11 +97,7 @@ func parseARN(arn string) (partition, region string, err error) {
 }
 
 func endpointFor(partition, service, region string) string {
-	suffix := ".amazonaws.com"
-	if partition == "aws-cn" {
-		suffix = ".amazonaws.com.cn"
-	}
-	return "https://" + service + "." + region + suffix
+	return stsweb.EndpointFor(partition, service, region)
 }
 
 // DefaultKMSEndpoint is the public KMS endpoint of the key's region.
@@ -231,7 +225,7 @@ func (k *KMS) credentials(ctx context.Context) (*awsCreds, error) {
 // assumeRole is STS AssumeRoleWithWebIdentity (an unsigned call: the web
 // identity token is the credential).
 func (k *KMS) assumeRole(ctx context.Context, file, role string) (*awsCreds, error) {
-	if !roleARN.MatchString(role) {
+	if !stsweb.ValidRoleARN(role) {
 		return nil, fmt.Errorf("%w: the role is not an IAM role ARN", ports.ErrBackendCredential)
 	}
 	name := k.o.RoleSessionName
@@ -241,14 +235,14 @@ func (k *KMS) assumeRole(ctx context.Context, file, role string) (*awsCreds, err
 	if name == "" {
 		name = "spo-unlock"
 	}
-	if !sessionTxt.MatchString(name) {
+	if !stsweb.ValidSessionName(name) {
 		return nil, fmt.Errorf("%w: the role session name is 2 to 64 of [A-Za-z0-9_=,.@-]", ports.ErrBackendCredential)
 	}
 	sts, err := newConn(k.sts, k.stsCA, k.o.Timeout, k.stsHTTP)
 	if err != nil {
 		return nil, err
 	}
-	raw, err := readSmallFile(file, maxSecretFile, true)
+	raw, err := readToken(file)
 	if err != nil {
 		return nil, fmt.Errorf("%w: the web identity token file %s %v", ports.ErrBackendCredential, file, err)
 	}
@@ -257,19 +251,9 @@ func (k *KMS) assumeRole(ctx context.Context, file, role string) (*awsCreds, err
 	if !printableToken(jwt, maxSecretFile) {
 		return nil, fmt.Errorf("%w: the web identity token file %s does not hold a token", ports.ErrBackendCredential, file)
 	}
-	// one buffer of its final size (a percent escape is three bytes), the token
-	// escaped by hand, so no copy of it is left in a grown or discarded buffer
-	head := "Action=AssumeRoleWithWebIdentity&DurationSeconds=900&RoleArn=" + url.QueryEscape(role) + "&RoleSessionName=" + url.QueryEscape(name) + "&Version=2011-06-15&WebIdentityToken="
-	b := make([]byte, 0, len(head)+3*len(jwt))
-	b = append(b, head...)
-	const hexDigits = "0123456789ABCDEF"
-	for _, c := range jwt {
-		if ('A' <= c && c <= 'Z') || ('a' <= c && c <= 'z') || ('0' <= c && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~' {
-			b = append(b, c)
-		} else {
-			b = append(b, '%', hexDigits[c>>4], hexDigits[c&15])
-		}
-	}
+	// one buffer of its final size, the token escaped by hand (platform/stsweb),
+	// so no copy of it is left in a grown or discarded buffer
+	b := stsweb.Request(role, name, 900, jwt)
 	status, resp, err := sts.call(ctx, http.MethodPost, "/", http.Header{"Content-Type": {"application/x-www-form-urlencoded"}}, b)
 	wipe(b)
 	if err != nil {
@@ -289,55 +273,20 @@ func (k *KMS) assumeRole(ctx context.Context, file, role string) (*awsCreds, err
 // parseSTS reads the credentials of an AssumeRoleWithWebIdentity answer. They
 // must be temporary (an ASIA key id, a session token) and not expired.
 //
-// The secret key and the session token are taken from the answer's own bytes
-// into guarded memory: each element must occur exactly once, as plain text (no
-// markup, entity or CDATA inside). The structure (the root, the nesting, the
-// key id and the expiry) is then checked by the strict XML decoder on a copy
-// in which those two texts are blanked, so the decoder, whose buffers cannot
-// be zeroed, never holds them.
+// The reading is platform/stsweb's (shared with the relay's provider): the
+// secret key and the session token are spans of the answer's own bytes, each
+// one element of plain text, the structure checked on a blanked copy. They are
+// copied from the answer into guarded memory here.
 func parseSTS(body []byte, now time.Time) (*awsCreds, error) {
-	ska, skz, ok1 := xmlTextSpan(body, "SecretAccessKey", 256)
-	sta, stz, ok2 := xmlTextSpan(body, "SessionToken", 8192)
-	if !ok1 || !ok2 {
-		return nil, fmt.Errorf("%w: STS returned no usable secret key or session token", ports.ErrBackendCredential)
-	}
-	red := bytes.Clone(body)
-	defer wipe(red)
-	for _, sp := range [][2]int{{ska, skz}, {sta, stz}} {
-		for i := sp[0]; i < sp[1]; i++ {
-			red[i] = 'x'
-		}
-	}
-	var r struct {
-		XMLName xml.Name `xml:"AssumeRoleWithWebIdentityResponse"`
-		Result  struct {
-			Credentials struct {
-				AccessKeyID     string `xml:"AccessKeyId"`
-				SecretAccessKey string `xml:"SecretAccessKey"`
-				SessionToken    string `xml:"SessionToken"`
-				Expiration      string `xml:"Expiration"`
-			} `xml:"Credentials"`
-		} `xml:"AssumeRoleWithWebIdentityResult"`
-	}
-	dec := xml.NewDecoder(bytes.NewReader(red))
-	dec.Strict = true
-	dec.Entity = map[string]string{}
-	if err := dec.Decode(&r); err != nil {
-		return nil, fmt.Errorf("%w: the STS answer is not the XML of AssumeRoleWithWebIdentity", ports.ErrBackendResponse)
-	}
-	c := r.Result.Credentials
-	// the blanked texts are the ones the structure holds, in Credentials
-	if c.SecretAccessKey != strings.Repeat("x", skz-ska) || c.SessionToken != strings.Repeat("x", stz-sta) {
-		return nil, fmt.Errorf("%w: STS returned no usable secret key or session token", ports.ErrBackendCredential)
-	}
-	exp, err := time.Parse(time.RFC3339, strings.TrimSpace(c.Expiration))
+	a, err := stsweb.Parse(body, now)
 	switch {
-	case !strings.HasPrefix(c.AccessKeyID, "ASIA") || !awsKeyID.MatchString(c.AccessKeyID):
-		return nil, fmt.Errorf("%w: STS returned a key id that is not a temporary one", ports.ErrBackendCredential)
-	case err != nil || !exp.After(now.Add(time.Minute)):
-		return nil, fmt.Errorf("%w: STS returned credentials that are expired or have no expiry", ports.ErrBackendCredential)
+	case errors.Is(err, stsweb.ErrNotXML):
+		return nil, fmt.Errorf("%w: %v", ports.ErrBackendResponse, err)
+	case err != nil:
+		return nil, fmt.Errorf("%w: %v", ports.ErrBackendCredential, err)
 	}
-	out := &awsCreds{keyID: c.AccessKeyID, expires: exp}
+	ska, skz, sta, stz := a.Secret[0], a.Secret[1], a.Token[0], a.Token[1]
+	out := &awsCreds{keyID: a.KeyID, expires: a.Expires}
 	if out.secret, err = secret.Fill(skz-ska, func(d []byte) error { copy(d, body[ska:skz]); return nil }); err != nil {
 		return nil, err
 	}
@@ -346,27 +295,6 @@ func parseSTS(body []byte, now time.Time) (*awsCreds, error) {
 		return nil, err
 	}
 	return out, nil
-}
-
-// xmlTextSpan finds the text of the one element <name>...</name> in body: the
-// element must occur exactly once (no other "<name" or "</name" anywhere), and
-// its text must be 1..max printable characters without '<' or '&'.
-func xmlTextSpan(body []byte, name string, max int) (start, end int, ok bool) {
-	open, closing := []byte("<"+name+">"), []byte("</"+name+">")
-	if bytes.Count(body, []byte("<"+name)) != 1 || bytes.Count(body, closing) != 1 {
-		return 0, 0, false
-	}
-	a := bytes.Index(body, open)
-	z := bytes.Index(body, closing)
-	if a < 0 || z < a+len(open) {
-		return 0, 0, false
-	}
-	start, end = a+len(open), z
-	text := body[start:end]
-	if !printableToken(text, max) || bytes.ContainsAny(text, "<&") {
-		return 0, 0, false
-	}
-	return start, end, true
 }
 
 // do signs and sends one KMS call.

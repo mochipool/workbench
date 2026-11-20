@@ -40,6 +40,7 @@ Operator workflows:
 * [Unlock with a Vault or KMS key](./how-to/unlock-with-vault-or-kms.md)
 * [Back up to a sink: a directory or an S3 bucket](./how-to/back-up-to-a-sink.md)
 * [Run a relay](./how-to/run-a-relay.md) and [run a relay on Kubernetes](./how-to/run-a-relay-on-kubernetes.md)
+* [Initialise, verify, repair and migrate a relay store](./how-to/initialise-and-migrate-a-relay-store.md)
 * [Convert a workspace to a sealed layout](./how-to/convert-to-a-sealed-layout.md)
 * [Claim rewards air-gapped](./how-to/claim-rewards-air-gapped.md)
 * [Update pool parameters](./how-to/update-pool-parameters.md)

@@ -596,8 +596,9 @@ func TestCredentialsAreShortLivedAndNeverShown(t *testing.T) {
 	cl2 := e.client(t, workBucket, func(cfg *Config) { cfg.Credentials = p })
 	_, _ = cl2.Get(ctx5(t), GetInput{Key: prefix + "x", MaxBytes: 1})
 	_, _ = cl2.Get(ctx5(t), GetInput{Key: prefix + "x", MaxBytes: 1})
+	idle(t, cl2) // the refresh runs behind the request that used the valid set
 	if p.n.Load() != 3 {
-		t.Errorf("a set within five minutes of its expiry was reused: %d", p.n.Load())
+		t.Errorf("a set within five minutes of its expiry was not refreshed: %d", p.n.Load())
 	}
 	p.err = errors.New("provider down")
 	cl3 := e.client(t, workBucket, func(cfg *Config) { cfg.Credentials = p })

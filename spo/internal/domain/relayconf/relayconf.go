@@ -79,10 +79,19 @@ type Config struct {
 	// Wallets is the allow-list (admission "allow-list" only), in file order.
 	Wallets []Wallet
 	// KeyFile holds the relay's node key and pre-shared key; MailboxDir and
-	// RegistryDir are the two stores. All three are absolute and clean.
+	// RegistryDir are the two stores of a directory relay (empty for an object
+	// store). All are absolute and clean.
 	KeyFile, MailboxDir, RegistryDir string
-	Port                             uint16
-	DERPMapURL                       string
+	// Store is the store's kind ("" is StoreDirectory; StoreKind reads it);
+	// Object the settings of an object store, nil for a directory store
+	// (store.go).
+	Store  StoreKind
+	Object *ObjectStore
+	// FileHash is the Blake2b-256 of the configuration file's bytes, set by the
+	// reader (ADR 0015 decision 9). It is not compared by SameExceptDevices.
+	FileHash   [32]byte
+	Port       uint16
+	DERPMapURL string
 	// DERPRegionID pins a region of the fetched DERP map; DERPRegion pins a
 	// full region (no map is fetched). At most one is set; neither leaves the
 	// choice to the tunnel library at each start (region.go).
@@ -144,6 +153,9 @@ func (c *Config) Check() error {
 	if err := c.checkRegionPin(); err != nil {
 		return err
 	}
+	if err := c.checkStore(); err != nil {
+		return err
+	}
 	for k := range c.Limits {
 		if !slices.Contains(LimitKeys, k) {
 			return Bad("%q is not a key of [limits]", k)
@@ -179,7 +191,7 @@ func (c *Config) SameExceptDevices(o *Config) bool {
 		return false
 	}
 	return c.Admission == o.Admission && slices.Equal(c.Wallets, o.Wallets) &&
-		c.KeyFile == o.KeyFile && c.MailboxDir == o.MailboxDir && c.RegistryDir == o.RegistryDir &&
+		c.KeyFile == o.KeyFile && c.MailboxDir == o.MailboxDir && c.RegistryDir == o.RegistryDir && c.sameStore(o) &&
 		c.Port == o.Port && c.DERPMapURL == o.DERPMapURL &&
 		c.DERPRegionID == o.DERPRegionID && c.DERPRegion.Equal(o.DERPRegion) &&
 		sameRegistry(c.Registry, o.Registry) && c.Quota == o.Quota && maps.Equal(c.Limits, o.Limits) &&

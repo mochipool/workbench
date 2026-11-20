@@ -47,6 +47,16 @@ var relayRoots = []string{
 	module + "/internal/app/relayhost",
 	tunnelPkg,
 	module + "/cmd/spo-relay",
+	// the object store (ADR 0015 work packages 2 and 6 to 10): reached from
+	// cmd/spo-relay, listed so that a rename cannot leave them unchecked
+	module + "/internal/adapters/objstore/s3client",
+	module + "/internal/platform/sigv4",
+	module + "/internal/adapters/objlease",
+	module + "/internal/adapters/objmailbox",
+	module + "/internal/adapters/objregistry",
+	module + "/internal/adapters/webidentity",
+	module + "/internal/platform/stsweb",
+	module + "/internal/platform/mountfile",
 }
 
 // relayHardBans are the import-path fragments that nothing in the closure of a
@@ -168,10 +178,59 @@ func hardBanViolations(g importGraph, roots []string) []string {
 }
 
 // primitiveBanViolations is part 2: the walk from the roots that does not
-// descend into the tunnel adapter.
+// descend into the tunnel adapter, nor (since ADR 0015 work package 10,
+// concern S22) into the standard library's TLS stack, crypto/tls and
+// crypto/x509 (tlsStack), which the store client links for its connection to
+// the object store and STS. Every package the walk reaches, each relay
+// package's own direct imports included, is still checked: only what lies
+// below those three packages and is reached through them alone is let through.
+//
+// What the rule does not see (the residual of the exception): it is a rule on
+// imports, and values cross packages without one. crypto/x509 hands out values
+// of crypto/ecdh's types (ParsePKIXPublicKey returns an *ecdh.PublicKey for an
+// X25519 key; from memory of the standard library, not checked here), and
+// relay code could call their methods through an interface or reflect with no
+// import of crypto/ecdh, which this walk cannot tell from the TLS stack's own
+// use. crypto/cipher and crypto/aes were never in relayPrimitiveBans (the list
+// is key agreement, HPKE, ML-KEM, HKDF and x/crypto's curve25519,
+// chacha20poly1305 and nacl), so an AES-GCM in relay code is not caught here
+// either.
+// Neither is checked by a cheaper honest rule (banning reflect is not one: the
+// standard library uses it everywhere); review and SPO-Xmailbox-SEC-009 part 1
+// (no age anywhere) cover them.
 func primitiveBanViolations(g importGraph, roots []string, tunnel string) []string {
 	out := missingRoots(g, roots)
-	return append(out, banViolations(walkImports(g, roots, tunnel), relayPrimitiveBans)...)
+	stops := map[string]bool{tunnel: true}
+	for p := range tlsStack {
+		stops[p] = true
+	}
+	return append(out, banViolations(walkStops(g, roots, stops), relayPrimitiveBans)...)
+}
+
+// walkStops is walkImports with a set of packages it neither enters nor
+// returns (a root in the set included).
+func walkStops(g importGraph, roots []string, stops map[string]bool) map[string]string {
+	via := map[string]string{}
+	var queue []string
+	for _, r := range roots {
+		if _, seen := via[r]; seen || stops[r] {
+			continue
+		}
+		via[r] = ""
+		queue = append(queue, r)
+	}
+	for len(queue) > 0 {
+		p := queue[0]
+		queue = queue[1:]
+		for _, imp := range g[p] {
+			if _, seen := via[imp]; seen || stops[imp] {
+				continue
+			}
+			via[imp] = p
+			queue = append(queue, imp)
+		}
+	}
+	return via
 }
 
 // tunnelDirectImports is part 3: the direct, non-test imports of the tunnel
@@ -319,13 +378,19 @@ func TestRelaySideReachesNoHardBannedPackage(t *testing.T) {
 	}
 }
 
-// Part 2 on the real tree.
+// Part 2 on the real tree. Since ADR 0015 work package 10 the relay binary
+// reaches crypto/tls through its store client, and the TLS stack's own key
+// agreement and AEAD are what the stop set lets through: without it the walk
+// fails (the bite check below).
 //
 // spec: SPO-Xmailbox-SEC-009
 func TestRelaySideUsesNoPrimitiveOutsideTheTunnelAdapter(t *testing.T) {
 	g := realRelayGraph(t)
 	for _, v := range primitiveBanViolations(g, relayRoots, tunnelPkg) {
 		t.Error(v)
+	}
+	if v := banViolations(walkImports(g, relayRoots, tunnelPkg), relayPrimitiveBans); len(v) == 0 {
+		t.Error("the bite check: the walk without the TLS stop reaches no primitive, so the stop set is untested")
 	}
 }
 
@@ -468,6 +533,40 @@ func TestTunnelRuleBitesOnSyntheticGraphs(t *testing.T) {
 		}
 		if v := hardBanViolations(g, []string{R}); len(v) != 0 {
 			t.Errorf("reported %v", v)
+		}
+	})
+	// ADR 0015 work package 10 (concern S22): the store connection's TLS is the
+	// second transport whose primitives are allowed below it only.
+	t.Run("a primitive below crypto/tls or crypto/x509 is allowed", func(t *testing.T) {
+		for _, stop := range []string{"crypto/tls", "crypto/x509"} {
+			for _, b := range primitives {
+				g := importGraph{R: {stop}, stop: {"mid"}, "mid": {b}, b: nil, T: nil}
+				if v := primitiveBanViolations(g, []string{R, T}, T); len(v) != 0 {
+					t.Errorf("%s below %s is reported: %v", b, stop, v)
+				}
+			}
+		}
+	})
+	t.Run("a direct use of a primitive is caught beside crypto/tls", func(t *testing.T) {
+		for _, b := range primitives {
+			// the relay package imports TLS and the primitive itself
+			g := importGraph{R: {"crypto/tls", b}, "crypto/tls": {b}, b: nil, T: nil}
+			if v := primitiveBanViolations(g, []string{R, T}, T); len(v) != 1 {
+				t.Errorf("%s imported directly next to crypto/tls: %v", b, v)
+			}
+			// a package of the relay that reaches it other than through TLS
+			g = importGraph{R: {"crypto/tls", "mid"}, "crypto/tls": {"mid"}, "mid": {b}, b: nil, T: nil}
+			if v := primitiveBanViolations(g, []string{R, T}, T); len(v) != 1 {
+				t.Errorf("%s through a package that TLS shares: %v", b, v)
+			}
+		}
+	})
+	t.Run("only the two TLS packages are stops", func(t *testing.T) {
+		for _, near := range []string{"crypto/tlsx", "crypto/x509/pkix", "net/http", "vendor/golang.org/x/net/http2", "crypto/internal/fips140/tls13"} {
+			g := importGraph{R: {near}, near: {"crypto/ecdh"}, "crypto/ecdh": nil, T: nil}
+			if v := primitiveBanViolations(g, []string{R, T}, T); len(v) != 1 {
+				t.Errorf("%s is treated as a stop: %v", near, v)
+			}
 		}
 	})
 	t.Run("a root that is not in the graph is a violation", func(t *testing.T) {

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mochipool/workbench/spo/internal/adapters/objstore/s3client"
 	"github.com/mochipool/workbench/spo/internal/ports/relayport"
 	"github.com/mochipool/workbench/spo/test/s3stand"
 )
@@ -50,15 +51,6 @@ func arrives(t *testing.T, done <-chan error, what string) {
 }
 
 func held(l *Lease) bool { _, ok := l.Until(); return ok }
-
-func isClosed(c <-chan struct{}) bool {
-	select {
-	case <-c:
-		return true
-	default:
-		return false
-	}
-}
 
 func wantLost(t *testing.T, l *Lease, err error, what string) {
 	t.Helper()
@@ -232,11 +224,15 @@ func TestRenewalUnderFaults(t *testing.T) {
 		{name: "412", faults: put(s3stand.Fault{Kind: s3stand.FaultStatus, Status: 412, Code: "PreconditionFailed", Count: 1}), want: "lost", next: "lost"},
 		{name: "404", faults: put(s3stand.Fault{Kind: s3stand.FaultStatus, Status: 404, Code: "NoSuchKey", Count: 1}), want: "lost", next: "lost"},
 		{name: "409", faults: put(s3stand.Fault{Kind: s3stand.FaultStatus, Status: 409, Code: "ConditionalRequestConflict", Count: 1}), want: "lost", next: "lost"},
-		{name: "a storm of 503", faults: put(s3stand.Fault{Kind: s3stand.FaultStatus, Status: 503, Code: "SlowDown"}), want: "lost", next: "lost"},
+		// the outcome is unknown and the read-back shows the previous record:
+		// the renewal stays pending, and the next one sends its bytes again
+		{name: "a storm of 503", faults: put(s3stand.Fault{Kind: s3stand.FaultStatus, Status: 503, Code: "SlowDown"}), want: "error", next: "held"},
 		{name: "a storm of 429", faults: put(s3stand.Fault{Kind: s3stand.FaultStatus, Status: 429, Code: "SlowDown"}), want: "error", next: "held"},
 		{name: "403", faults: put(s3stand.Fault{Kind: s3stand.FaultStatus, Status: 403, Code: "AccessDenied", Count: 1}), want: "error", next: "held"},
+		// pending: the next renewal resends the bytes, is refused (412, the first
+		// copy landed), and its read-back settles it as applied
 		{name: "a lost response whose read-back cannot tell", faults: append(put(s3stand.Fault{Kind: s3stand.FaultLoseResponse, Count: 1}),
-			s3stand.Fault{Kind: s3stand.FaultStatus, Op: s3stand.OpGet, Key: leaseKey, Status: 403, Code: "AccessDenied", Count: 1}), want: "lost", next: "lost"},
+			s3stand.Fault{Kind: s3stand.FaultStatus, Op: s3stand.OpGet, Key: leaseKey, Status: 403, Code: "AccessDenied", Count: 1}), want: "error", next: "held"},
 		// a store that answers success with a wrong ETag: the next If-Match is
 		// refused, a spurious exit
 		{name: "wrong ETag in the answer", faults: put(s3stand.Fault{Kind: s3stand.FaultWrongETag, Count: 1}), want: "held", next: "lost"},
@@ -667,12 +663,14 @@ func TestAHolderThatCannotRenewStopsAtItsEnd(t *testing.T) {
 
 // Every request of the holder has a deadline at its lease end at the latest:
 // a renewal sent 200 ms before the end, to a store that stalls, gives up after
-// those 200 ms (not the 10 s request bound), and the holder is lost.
+// those 200 ms (not the 10 s request bound) for each copy it sends. Its outcome
+// is unknown, so it is pending, and the lease is lost at its end (here the
+// lease clock is moved there by hand; in production the deadline is that end).
 //
 // spec: SPO-Xobjstore-IF-104
 func TestARenewalEndsAtTheLeaseEnd(t *testing.T) {
 	e := newInitEnv(t, false)
-	a, _ := e.lease(nil)
+	a, aid := e.lease(nil)
 	acquire(t, a)
 	e.clock.Advance(DefaultTimes().Term() - 200*time.Millisecond)
 	e.srv.Inject(s3stand.Fault{Kind: s3stand.FaultStallBeforeHeaders, Op: s3stand.OpPut, Key: leaseKey, Delay: 5 * time.Second})
@@ -681,7 +679,15 @@ func TestARenewalEndsAtTheLeaseEnd(t *testing.T) {
 	if took := time.Since(start); took > 2*time.Second {
 		t.Fatalf("the renewal took %v, past the lease end", took)
 	}
-	wantLost(t, a, err, "a renewal that stalled to the lease end")
+	if err == nil || errors.Is(err, relayport.ErrAuthorityLost) || !held(a) {
+		t.Fatalf("a renewal that stalled: %v, held %v; want pending", err, held(a))
+	}
+	e.clock.Advance(200 * time.Millisecond)
+	n := len(e.requests(aid))
+	wantLost(t, a, a.Renew(t.Context()), "a renewal at the lease end")
+	if len(e.requests(aid)) != n {
+		t.Fatal("a request was sent at the lease end")
+	}
 }
 
 // A waiter whose reads lag (a stale view of a lease that its holder renews)
@@ -914,8 +920,10 @@ func TestAWaiterHonoursALongerRecordedDuration(t *testing.T) {
 }
 
 // A take whose outcome is unknown: read back, equal bytes is success (a take
-// whose answer was lost); a read-back that does not show it is a loss, and
-// the waiter never writes again, also when its take lands late.
+// whose answer was lost); a read-back that does not show it leaves the take
+// pending: the waiter holds nothing, and while the object is unchanged it sends
+// only the same take again (the same bytes, the same If-Match). Whichever copy
+// lands, the other is refused; the lease is held after the drain.
 //
 // spec: SPO-Xobjstore-PRE-101, SPO-Xobjstore-IF-103, SPO-Xobjstore-INV-101
 func TestATakeWhoseOutcomeIsUnknown(t *testing.T) {
@@ -937,24 +945,39 @@ func TestATakeWhoseOutcomeIsUnknown(t *testing.T) {
 		times := DefaultTimes()
 		a, _ := e.lease(nil)
 		acquire(t, a)
-		b, bid := e.lease(func(c *Config) { c.Times.RequestTimeout = 100 * time.Millisecond })
+		b, pl, bid := e.logged(func(c *Config) { c.Times.RequestTimeout = 100 * time.Millisecond })
 		done := background(ctxT(t, 10*time.Second), b)
 		waitFor(t, "the first look", func() bool { return b.looks.Load() >= 1 })
 		e.srv.Inject(s3stand.Fault{Kind: s3stand.FaultApplyLate, Op: s3stand.OpPut, Key: leaseKey, Delay: 400 * time.Millisecond, Count: 1})
+		from := len(e.requests(bid))
 		e.clock.Advance(times.TakeAfter())
-		select {
-		case err := <-done:
-			wantLost(t, b, err, "a take whose outcome is unknown")
-		case <-time.After(5 * time.Second):
-			t.Fatal("Acquire did not return")
+		waitFor(t, "the take", func() bool { return e.stored().Holder == b.holder })
+		if !quiet(done) || heldBy(a, b) > 1 {
+			t.Fatal("Acquire returned before the drain, or both hold")
 		}
-		n := len(e.requests(bid))
-		waitFor(t, "the late take", func() bool { return e.stored().Holder == b.holder })
 		e.clock.Advance(times.Drain)
-		_ = b.Renew(t.Context())
-		_ = b.Release(t.Context())
-		if len(e.requests(bid)) != n {
-			t.Fatal("a waiter whose take's outcome was unknown wrote again")
+		arrives(t, done, "the taker after the drain")
+		if !held(b) {
+			t.Fatal("the taker does not hold")
+		}
+		waitFor(t, "the late copy's answer", func() bool {
+			for _, r := range e.leasePuts(bid, from) {
+				if r.Status == http.StatusPreconditionFailed {
+					return true
+				}
+			}
+			return false
+		})
+		var takes []s3client.PutInput
+		for _, p := range pl.from(0) {
+			if p.IfMatch != pl.from(0)[0].IfMatch {
+				break // the drain's renewals
+			}
+			takes = append(takes, p)
+		}
+		oneWrite(t, takes, 2)
+		if got := e.stored(); got.Holder != b.holder || got.Generation != 3 {
+			t.Fatalf("stored %+v", got)
 		}
 	})
 }

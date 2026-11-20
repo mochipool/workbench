@@ -67,6 +67,15 @@ const (
 	maxKeyLen = 1024
 	// credRefresh is how long before its expiry a cached credential is renewed.
 	credRefresh = 5 * time.Minute
+	// credRetryMin and credRetryMax bound the delay before a failed background
+	// refresh is tried again: it doubles from the one to the other.
+	credRetryMin = time.Second
+	credRetryMax = 30 * time.Second
+	// credSlack is what a cached set must have left beyond the request's own
+	// time to be used while a refresh is outstanding (clock skew, a slow store).
+	credSlack = time.Minute
+	// closeWait bounds how long Close waits for a fetch it cancelled.
+	closeWait   = 2 * time.Second
 	dialTimeout = 10 * time.Second
 )
 
@@ -91,8 +100,11 @@ func (Credentials) GoString() string { return "s3client.Credentials{redacted}" }
 //
 // Retrieve is called by one fetch at a time on behalf of every request that
 // needs a set; its context carries the values of the request that started the
-// fetch but not its cancellation, and ends after CredentialFetchTimeout. Each
-// waiting request gives up at its own deadline.
+// fetch but not its cancellation, and ends after CredentialFetchTimeout or at
+// Client.Close, whichever is first; Retrieve must return when it ends. Each
+// waiting request gives up at its own deadline. Inside the refresh window the
+// fetch runs in the background while the cached set is still used (see
+// Client.credentials).
 type Provider interface {
 	Retrieve(ctx context.Context) (Credentials, error)
 }
@@ -155,6 +167,15 @@ type Client struct {
 	mu       sync.Mutex
 	cache    *Credentials
 	fetching *credFetch // the Retrieve in progress, nil when none
+	// the back-off of background refreshes: failures in a row, and the time
+	// (on c.now) before which none is started again
+	failures int
+	retryAt  time.Time
+	closed   bool
+	// bg ends every fetch at Close; fetches counts them so that Close waits
+	bg       context.Context
+	bgCancel context.CancelFunc
+	fetches  sync.WaitGroup
 }
 
 // New checks the configuration and builds a client. It makes no request.
@@ -220,11 +241,29 @@ func New(cfg Config) (*Client, error) {
 	if c.now == nil {
 		c.now = time.Now
 	}
+	c.bg, c.bgCancel = context.WithCancel(context.Background())
 	return c, nil
 }
 
-// Close drops idle connections.
-func (c *Client) Close() { c.hc.CloseIdleConnections() }
+// Close ends a credential fetch in progress (its context is cancelled) and
+// waits for it at most closeWait, and drops idle connections. After Close no
+// fetch runs (one started is cancelled at once): a request made then works
+// only while the cached set does.
+func (c *Client) Close() {
+	c.mu.Lock()
+	c.closed = true
+	c.mu.Unlock()
+	c.bgCancel()
+	done := make(chan struct{})
+	go func() { c.fetches.Wait(); close(done) }()
+	t := time.NewTimer(closeWait)
+	select {
+	case <-done:
+	case <-t.C: // a Provider that ignores its context; its fetch ends at CredentialFetchTimeout
+	}
+	t.Stop()
+	c.hc.CloseIdleConnections()
+}
 
 // Bucket is the bucket name.
 func (c *Client) Bucket() string { return c.bucket }
@@ -285,22 +324,36 @@ func printable(s string, max int) bool {
 // The secret is a copy the caller wipes. The mutex is never held across
 // Provider.Retrieve: one fetch runs for every caller that needs a set, and each
 // caller waits for it only until its own context ends.
+//
+// A set with more than credRefresh left is used as it is. Inside the refresh
+// window, a set that still outlives the request (its deadline) by credSlack is
+// used at once and the refresh runs in the background: a provider that fails
+// for a while (an STS outage, a token rotation) does not fail a request, a
+// lease renewal among them, while the set is valid. A background refresh that
+// fails is tried again after credRetryMin, doubling to credRetryMax, not at
+// every request. A caller blocks on the fetch only when there is no set or the
+// set is nearly expired; an expired set is never used.
 func (c *Client) credentials(ctx context.Context) (keyID, token string, secret []byte, err error) {
+	need := credSlack
+	if dl, ok := ctx.Deadline(); ok {
+		need += max(time.Until(dl), 0)
+	}
 	c.mu.Lock()
-	if c.cache != nil && c.cache.Expires.Sub(c.now()) > credRefresh {
-		keyID, token, secret = c.cache.AccessKeyID, c.cache.SessionToken, bytes.Clone(c.cache.Secret)
-		c.mu.Unlock()
-		return keyID, token, secret, nil
+	now := c.now()
+	if c.cache != nil {
+		left := c.cache.Expires.Sub(now)
+		if left > credRefresh || left > need {
+			if left <= credRefresh && c.fetching == nil && !c.closed && !now.Before(c.retryAt) {
+				c.startFetchLocked(ctx, true)
+			}
+			keyID, token, secret = c.cache.AccessKeyID, c.cache.SessionToken, bytes.Clone(c.cache.Secret)
+			c.mu.Unlock()
+			return keyID, token, secret, nil
+		}
 	}
 	f := c.fetching
 	if f == nil {
-		f = &credFetch{done: make(chan struct{})}
-		c.fetching = f
-		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), CredentialFetchTimeout)
-		go func() {
-			defer cancel()
-			c.fetch(fctx, f)
-		}()
+		f = c.startFetchLocked(ctx, false)
 	}
 	c.mu.Unlock()
 	select {
@@ -321,8 +374,35 @@ func (c *Client) credentials(ctx context.Context) (keyID, token string, secret [
 	return c.cache.AccessKeyID, c.cache.SessionToken, bytes.Clone(c.cache.Secret), nil
 }
 
+// startFetchLocked starts one Provider.Retrieve on its own goroutine, with the
+// values of ctx but not its cancellation (one caller giving up does not end
+// the fetch others wait for), bounded by CredentialFetchTimeout and ended by
+// Close. A background fetch (refresh) that fails moves the back-off on; any
+// fetch that succeeds resets it. c.mu is held.
+func (c *Client) startFetchLocked(ctx context.Context, refresh bool) *credFetch {
+	f := &credFetch{done: make(chan struct{})}
+	c.fetching = f
+	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), CredentialFetchTimeout)
+	stop := context.AfterFunc(c.bg, cancel)
+	tracked := !c.closed
+	if tracked {
+		c.fetches.Add(1)
+	}
+	go func() {
+		defer func() {
+			stop()
+			cancel()
+			if tracked {
+				c.fetches.Done()
+			}
+		}()
+		c.fetch(fctx, f, refresh)
+	}()
+	return f
+}
+
 // fetch runs one Provider.Retrieve and stores a set that passes the checks.
-func (c *Client) fetch(ctx context.Context, f *credFetch) {
+func (c *Client) fetch(ctx context.Context, f *credFetch, refresh bool) {
 	err := func() error {
 		cr, err := c.provider.Retrieve(ctx)
 		if err != nil {
@@ -351,6 +431,13 @@ func (c *Client) fetch(ctx context.Context, f *credFetch) {
 	c.mu.Lock()
 	f.err = err
 	c.fetching = nil
+	switch {
+	case err == nil:
+		c.failures, c.retryAt = 0, time.Time{}
+	case refresh:
+		c.failures++
+		c.retryAt = c.now().Add(min(credRetryMin<<min(c.failures-1, 16), credRetryMax))
+	}
 	c.mu.Unlock()
 	close(f.done)
 }

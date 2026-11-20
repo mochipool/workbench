@@ -13,8 +13,9 @@ import (
 	"github.com/mochipool/workbench/spo/test/s3stand"
 )
 
-// flakyProvider gives one set inside the refresh window (so every attempt asks
-// again), then fails.
+// flakyProvider gives one set that is nearly expired (less left than a
+// request's time and credSlack, so every attempt waits for a fetch), then
+// fails.
 type flakyProvider struct {
 	mu sync.Mutex
 	n  int
@@ -27,7 +28,7 @@ func (p *flakyProvider) Retrieve(context.Context) (Credentials, error) {
 	if p.n > 1 {
 		return Credentials{}, errors.New("provider down")
 	}
-	return Credentials{AccessKeyID: testKeyID, Secret: []byte(testSecret), SessionToken: testToken, Expires: time.Now().Add(4 * time.Minute)}, nil
+	return Credentials{AccessKeyID: testKeyID, Secret: []byte(testSecret), SessionToken: testToken, Expires: time.Now().Add(credSlack / 2)}, nil
 }
 
 // Every attempt of a write that may have been applied makes the outcome

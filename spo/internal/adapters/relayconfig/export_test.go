@@ -14,6 +14,22 @@ func SetEuid(f func() int) (restore func()) {
 	return func() { geteuid = old }
 }
 
+// SetRootUID replaces the uid that counts as root for the key file's form and
+// returns the func that puts it back.
+func SetRootUID(uid int) (restore func()) {
+	old := rootUID
+	rootUID = uid
+	return func() { rootUID = old }
+}
+
+// SetReadMounted replaces the reader of a root-owned key file (the Secret
+// volume's rules, platform/mountfile) and returns the func that puts it back.
+func SetReadMounted(f func(path string) ([]byte, error)) (restore func()) {
+	old := readMounted
+	readMounted = f
+	return func() { readMounted = old }
+}
+
 // OwnerOK is ownerOK for a file owned by uid.
 func OwnerOK(uid, euid int) bool { return ownerOK(fakeInfo{uid}, euid) }
 

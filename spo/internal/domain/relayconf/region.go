@@ -181,18 +181,20 @@ func famOK(s string, four bool) bool {
 // either form.
 func (c *Config) RegionPinned() bool { return c.DERPRegionID != 0 || c.DERPRegion != nil }
 
-// RegionPinRequired is the hook of ADR 0015 decision 7: the pin is required when
-// the store is an object store, and allowed on a host. This build has only the
-// directory stores, so it is never required; the object-store mode, when it is
-// added, makes it true for that mode and requires the full region (the only form
-// whose address does not follow the DERP map).
-func (c *Config) RegionPinRequired() bool { return false }
+// RegionPinRequired is the rule of ADR 0015 decision 7: the pin is required when
+// the store is an object store (a disposable pod restarts and moves), and only
+// the full region satisfies it, the one form whose address does not follow the
+// DERP map; derp_region_id is then refused. On a host (the directory store)
+// the pin is allowed in either form.
+func (c *Config) RegionPinRequired() bool { return c.StoreKind() == StoreS3 }
 
 // checkRegionPin is the part of Check for the pin (SPO-Xmailbox-PRE-068).
 func (c *Config) checkRegionPin() error {
 	switch {
 	case c.DERPRegionID != 0 && c.DERPRegion != nil:
 		return Bad("derp_region_id and [derp_region] are two forms of one pin: give one")
+	case c.RegionPinRequired() && c.DERPRegionID != 0:
+		return Bad("[relay] derp_region_id is refused with the object store: a region of the DERP map gives an address that follows the map; pin the region in full with [derp_region] and [[derp_node]]")
 	case c.DERPRegionID < 0 || c.DERPRegionID > MaxDERPRegionID:
 		return Bad("[relay] derp_region_id %d is not 1 to %d", c.DERPRegionID, MaxDERPRegionID)
 	case c.DERPRegion != nil && c.DERPMapURL != "":

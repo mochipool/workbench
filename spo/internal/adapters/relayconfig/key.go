@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/mochipool/workbench/spo/internal/domain/relayconf"
+	"github.com/mochipool/workbench/spo/internal/platform/mountfile"
 )
 
 // The relay's key file (SPO-Xmailbox-SEC-077): three lines,
@@ -85,11 +86,38 @@ func lowerHex(src, dst []byte) bool {
 	return err == nil
 }
 
-// LoadKey reads the relay's key file. It is refused unless it is a regular file
-// owned by the effective user with no group or other permission bit and of
+// rootUID is the uid of a root-owned key (a test's seam); readMounted reads one
+// by the rules of a mounted Secret (platform/mountfile Key).
+var (
+	rootUID     = 0
+	readMounted = func(path string) ([]byte, error) { return mountfile.Read(path, mountfile.Key(int64(KeyFileBytes))) }
+)
+
+// rootOwned reports whether a key file is the Secret volume's form (ADR 0015
+// decision 6, source 1): owned by root while the relay is not root.
+func rootOwned(st os.FileInfo) bool { return fileUID(st) == rootUID && rootUID != geteuid() }
+
+// loadMounted reads a root-owned key file by the mounted-Secret rules.
+func loadMounted(path string) (*relayconf.Key, error) {
+	b, err := readMounted(path)
+	if err != nil {
+		return nil, fmt.Errorf("%w: key_file: %w", ErrConfig, err)
+	}
+	defer clear(b)
+	return DecodeKey(b)
+}
+
+// LoadKey reads the relay's key file. A file of the effective user is refused
+// unless it is a regular file with no group or other permission bit and of
 // exactly KeyFileBytes, checked on the opened descriptor before it is read; a
-// link is followed, a FIFO is refused without being waited on. A missing file is
-// an error that satisfies os.ErrNotExist.
+// link is followed, a FIFO is refused without being waited on. A file of root
+// is the Secret volume of a cluster (ADR 0015 decision 6, source 1) and is
+// read by platform/mountfile's Key rule instead: only through kubelet's layout
+// (a link only to "..<date>/<name>" in the same directory; a plain root-owned
+// file on a host, or a subPath mount, is refused with the remedy: chown it to
+// the relay's user, mode 0400), mode 0400 or 0440 with the group the relay's
+// effective group, the directory root's (sticky if others may write it). A
+// missing file is an error that satisfies os.ErrNotExist.
 func LoadKey(path string) (*relayconf.Key, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
@@ -99,6 +127,10 @@ func LoadKey(path string) (*relayconf.Key, error) {
 	st, err := f.Stat()
 	if err != nil {
 		return nil, err
+	}
+	if rootOwned(st) {
+		f.Close()
+		return loadMounted(path)
 	}
 	if err := keyMode(path, st); err != nil {
 		return nil, err

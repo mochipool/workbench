@@ -6,31 +6,46 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/mochipool/workbench/spo/internal/adapters/bindingstore"
 	"github.com/mochipool/workbench/spo/internal/adapters/mailboxstore"
+	"github.com/mochipool/workbench/spo/internal/adapters/objstore/s3client"
 	"github.com/mochipool/workbench/spo/internal/adapters/relayconfig"
+	"github.com/mochipool/workbench/spo/internal/adapters/relaydir"
+	"github.com/mochipool/workbench/spo/internal/adapters/relaystore"
 	"github.com/mochipool/workbench/spo/internal/adapters/tailcat/stream"
+	"github.com/mochipool/workbench/spo/internal/adapters/webidentity"
 	"github.com/mochipool/workbench/spo/internal/app/relayhost"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/domain/relayconf"
 	"github.com/mochipool/workbench/spo/internal/domain/relayregistry"
+	"github.com/mochipool/workbench/spo/internal/platform/stsweb"
 	"github.com/mochipool/workbench/spo/internal/ports/relayport"
 )
 
 // deps are the production adapters, with the operator log on log.
-func deps(log io.Writer) relayhost.Deps {
+func deps(log io.Writer) relayhost.Deps { return depsWith(log, storeOptions{}) }
+
+// depsWith are the production adapters with a test's store options.
+func depsWith(log io.Writer, o storeOptions) relayhost.Deps {
 	return relayhost.Deps{
-		LoadConfig: relayconfig.Load,
-		LoadKey:    relayconfig.LoadKey,
-		CreateKey:  func(p string) (*relayconf.Key, error) { return relayconfig.CreateKey(p, rand.Reader) },
+		// the object store ([store] kind = "s3"): web identity, both buckets, the
+		// lease, the object mailbox and registry (store.go)
+		OpenObjectStore: o.openObjectStore,
+		LoadConfig:      relayconfig.Load,
+		LoadKey:         relayconfig.LoadKey,
+		CreateKey:       func(p string) (*relayconf.Key, error) { return relayconfig.CreateKey(p, rand.Reader) },
 		PublicKey: func(k *relayconf.Key) (party.NodeKey, error) {
 			return stream.PublicKey(stream.KeyBytes(k.Node))
 		},
@@ -110,7 +125,89 @@ func signals(raw <-chan os.Signal) <-chan relayhost.Signal {
 	return sig
 }
 
+// storeTool is the command line of the store tools (ADR 0015 work package 9,
+// internal/adapters/relaystore): the clients are built from [store] as
+// openObjectStore builds them, the node key from the key file, and a
+// confirmation is read from the terminal, never from standard input.
+func storeTool() relaystore.CLI {
+	open := func(path string) (relaystore.Deps, func(), error) {
+		var none relaystore.Deps
+		cfg, err := relayconfig.Load(path)
+		if err != nil {
+			return none, nil, err
+		}
+		c := cfg.Object
+		if cfg.StoreKind() != relayconf.StoreS3 || c == nil {
+			return none, nil, errors.New("the configuration's [store] is not kind = \"s3\": the store commands are for an object store")
+		}
+		k, err := relayconfig.LoadKey(cfg.KeyFile)
+		if err != nil {
+			return none, nil, fmt.Errorf("the key file: %w", err)
+		}
+		pub, err := stream.PublicKey(stream.KeyBytes(k.Node))
+		k.Destroy()
+		if err != nil {
+			return none, nil, fmt.Errorf("the key file: %w", err)
+		}
+		endpoint := c.Endpoint
+		if endpoint == "" {
+			if endpoint, err = stsweb.RegionEndpoint("s3", c.Region); err != nil {
+				return none, nil, err
+			}
+		}
+		prov, err := webidentity.New(webidentity.Config{Region: c.Region, RoleARN: c.RoleARN, TokenFile: c.TokenFile,
+			Endpoint: c.STSEndpoint, AllowLoopbackHTTP: c.LoopbackHTTP && c.STSEndpoint != ""})
+		if err != nil {
+			return none, nil, err
+		}
+		var cs [2]*s3client.Client
+		for i, b := range []string{c.RegistryBucket, c.WorkingBucket} {
+			if cs[i], err = s3client.New(s3client.Config{Endpoint: endpoint, Region: c.Region, Bucket: b, PathStyle: c.PathStyle,
+				Credentials: prov, AllowLoopbackHTTP: c.LoopbackHTTP}); err != nil {
+				return none, nil, fmt.Errorf("the bucket %s: %w", b, err)
+			}
+		}
+		mode := s3client.Compliance
+		if c.LockMode == relayconf.LockGovernance {
+			mode = s3client.Governance
+		}
+		return relaystore.Deps{Registry: cs[0], Working: cs[1], NodeKey: pub, Mode: mode, Clock: toolClock{},
+			RequestTimeout: c.RequestTimeout, Core: cfg.Registry}, func() { cs[0].Close(); cs[1].Close() }, nil
+	}
+	return relaystore.CLI{Open: open, Stdout: os.Stdout, Stderr: os.Stderr,
+		OpenDir: func(m, r string) (relaystore.DirSource, func() error, error) {
+			s, err := relaydir.Open(m, r)
+			if err != nil {
+				return nil, nil, err
+			}
+			return s, s.Close, nil
+		},
+		Confirm: func(q string) (bool, error) {
+			tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+			if err != nil {
+				return false, fmt.Errorf("there is no terminal to confirm on (%v)", err)
+			}
+			defer tty.Close()
+			fmt.Fprintf(tty, "%s [y/N] ", q)
+			line, _ := bufio.NewReader(io.LimitReader(tty, 64)).ReadString('\n')
+			a := strings.ToLower(strings.TrimSpace(line))
+			return a == "y" || a == "yes", nil
+		},
+	}
+}
+
+// toolClock is time.Now, whose readings carry the monotonic part the lease needs.
+type toolClock struct{}
+
+func (toolClock) Now() time.Time { return time.Now() }
+
 func main() {
+	if len(os.Args) > 1 && relaystore.IsCommand(os.Args[1]) {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		code := relaystore.Main(ctx, os.Args[1:], storeTool())
+		stop()
+		os.Exit(code)
+	}
 	raw := make(chan os.Signal, 4)
 	signal.Notify(raw, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	os.Exit(relayhost.Main(os.Args[1:], os.Stdout, os.Stderr, signals(raw), deps(os.Stderr)))
