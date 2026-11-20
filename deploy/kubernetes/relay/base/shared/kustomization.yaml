@@ -1,0 +1,10 @@
+# What every relay of the namespace shares: the namespace, the service account,
+# the network policies and one disruption budget over all relays. Include it
+# once, whatever the number of relays.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - networkpolicy.yaml
+  - poddisruptionbudget.yaml

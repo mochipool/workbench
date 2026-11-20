@@ -48,6 +48,7 @@ func scratchPresented(t *testing.T) (s *Store, path string, recoveryText string)
 // the passphrase opened.
 func scratchUnpresented(t *testing.T) (s *Store, path string, recoveryText string) {
 	t.Helper()
+	noLeakedBuffers(t)
 	path = filepath.Join(t.TempDir(), "ws.db")
 	p1, p2 := pw(), pw()
 	defer p1.Destroy()
@@ -66,7 +67,7 @@ func scratchUnpresented(t *testing.T) (s *Store, path string, recoveryText strin
 	return s, path, recoveryText
 }
 
-func passphrase(p string) *secret.Buffer { return secret.Take([]byte(p)) }
+func passphrase(p string) *secret.Buffer { return owned(secret.Take([]byte(p))) }
 
 func rawDB(t *testing.T, p string) *sql.DB {
 	t.Helper()
@@ -123,7 +124,7 @@ func TestInitFromScratch(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.Close()
-	r, err := OpenWithRecovery(path, secret.Take([]byte(rec)))
+	r, err := OpenWithRecovery(path, passphrase(rec))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +247,7 @@ func TestRekeyRevokesOldSlotsEvenIfPutBack(t *testing.T) {
 	for name, open := range map[string]func() error{
 		"old passphrase":        func() error { _, err := Open(path, passphrase("old-pass")); return err },
 		"original passphrase":   func() error { _, err := Open(path, pw()); return err },
-		"original recovery key": func() error { _, err := OpenWithRecovery(path, secret.Take([]byte(oldRecovery))); return err },
+		"original recovery key": func() error { _, err := OpenWithRecovery(path, passphrase(oldRecovery)); return err },
 	} {
 		if err := open(); !errors.Is(err, ErrWrongCredential) {
 			t.Errorf("%s: %v", name, err)
@@ -298,7 +299,7 @@ func TestRekeyRevokesOldSlotsEvenIfPutBack(t *testing.T) {
 		t.Errorf("%q", b)
 	}
 	n.Close()
-	r, err := OpenWithRecovery(path, secret.Take([]byte(newRecovery)))
+	r, err := OpenWithRecovery(path, passphrase(newRecovery))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,10 +344,10 @@ func TestRekeyNeedsExactlyOnePassphrase(t *testing.T) {
 	before := readAll(t, path)
 	for name, keep := range map[string][]Credential{
 		"none":     nil,
-		"empty":    {PassphraseCredential(secret.Take(nil))},
+		"empty":    {PassphraseCredential(owned(secret.Take(nil)))},
 		"two":      {PassphraseCredential(passphrase("a")), PassphraseCredential(passphrase("b"))},
-		"recovery": {{Kind: seal.SlotRecovery, Secret: secret.New(32)}},
-		"mixed":    {PassphraseCredential(passphrase("a")), {Kind: seal.SlotRecovery, Secret: secret.New(32)}},
+		"recovery": {{Kind: seal.SlotRecovery, Secret: owned(secret.New(32))}},
+		"mixed":    {PassphraseCredential(passphrase("a")), {Kind: seal.SlotRecovery, Secret: owned(secret.New(32))}},
 	} {
 		if _, err := s.Rekey(ctx, keep); !errors.Is(err, ErrRekeyCredentials) {
 			t.Errorf("%s: %v", name, err)
@@ -776,7 +777,7 @@ func TestManyOpenSecretsEndInAnErrorNotAPanic(t *testing.T) {
 	if _, err := get(s, counter); !errors.Is(err, ports.ErrNotFound) {
 		t.Errorf("store after the limit: %v", err)
 	}
-	if err := s.Update(ctx, func(w ports.Writer) error { return putKeyW(w, skey0, secret.Take([]byte("again"))) }); err != nil {
+	if err := s.Update(ctx, func(w ports.Writer) error { return putKeyW(w, skey0, owned(secret.Take([]byte("again")))) }); err != nil {
 		t.Errorf("update after the limit: %v", err)
 	}
 }
@@ -816,8 +817,10 @@ func TestNestedCallsReturnErrReentrant(t *testing.T) {
 	if !errors.Is(got, ErrReentrant) {
 		t.Errorf("Update inside View: %v", got)
 	}
-	if _, err := s.Open(ctx, skey0); err != nil {
+	if b, err := s.Open(ctx, skey0); err != nil {
 		t.Errorf("store after nested calls: %v", err)
+	} else {
+		b.Destroy()
 	}
 }
 
@@ -885,7 +888,7 @@ func TestOpenSecretInsideAnUpdate(t *testing.T) {
 		})
 		b.Destroy()
 		// And it sees this update's own writes.
-		putKeyW(w, skey0, secret.Take([]byte("staged")))
+		putKeyW(w, skey0, owned(secret.Take([]byte("staged"))))
 		b, err = o.OpenSecret(skey0)
 		if err != nil {
 			return err
@@ -1169,7 +1172,7 @@ func TestSlotCommitmentIsStoredAndChecked(t *testing.T) {
 	}
 	db.Exec(`UPDATE keyslots SET key_commit = zeroblob(32) WHERE kind='recovery'`)
 	db.Close()
-	if _, err := OpenWithRecovery(p, secret.Take([]byte(rec))); !errors.Is(err, ErrWrongCredential) {
+	if _, err := OpenWithRecovery(p, passphrase(rec)); !errors.Is(err, ErrWrongCredential) {
 		t.Errorf("slot with a wrong commitment: %v", err)
 	}
 }
@@ -1238,7 +1241,7 @@ func TestErrorsDoNotContainOperatorNames(t *testing.T) {
 	}
 	// Secrets, sealing failures and PutSecret errors too.
 	sref := rf(name, ports.KesSKey)
-	empty := secret.Take(nil)
+	empty := owned(secret.Take(nil))
 	err = s.Update(ctx, func(w ports.Writer) error { return putKeyW(w, sref, empty) })
 	if err == nil || strings.Contains(err.Error(), name) {
 		t.Errorf("PutSecret error: %v", err)

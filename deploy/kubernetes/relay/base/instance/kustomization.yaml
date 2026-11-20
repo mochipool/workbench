@@ -1,0 +1,17 @@
+# One relay instance: its StatefulSet (one pod, its own claim) and its
+# configuration. Every instance needs its own key Secret; an overlay that adds
+# instances gives each a nameSuffix and a patch that names its Secret.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - statefulset.yaml
+configMapGenerator:
+  - name: spo-relay-config
+    namespace: spo-relay
+    files:
+      - relay.toml
+# A fixed name: a changed relay.toml reaches the running pod in place, and a
+# SIGHUP reloads its device list without a restart. A hashed name would restart
+# the pod at every change instead.
+generatorOptions:
+  disableNameSuffixHash: true

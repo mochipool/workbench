@@ -1,0 +1,25 @@
+# The spo-relay image: one static binary on a distroless base, run as uid 10001.
+#
+# Not built yet. Before a build, replace each sha256:FILL_IN_... with the
+# digest of the image named before it (for example the "Digest" that
+# `skopeo inspect docker://NAME:TAG` prints), and check it against the
+# publisher's own list. A placeholder is not a valid
+# reference, so an unfilled file fails at once instead of pulling something
+# unpinned.
+#
+# Build from the root of the repository:
+#   podman build -f deploy/kubernetes/relay/Containerfile -t spo-relay .
+# The Nix route is in docs/how-to/run-a-relay-on-kubernetes.md.
+
+FROM docker.io/library/golang:1.27-bookworm@sha256:FILL_IN_DIGEST_OF_THE_BUILD_IMAGE AS build
+WORKDIR /src
+COPY spo/go.mod spo/go.sum ./
+RUN go mod download && go mod verify
+COPY spo/ ./
+ENV CGO_ENABLED=0 GOFLAGS=-trimpath
+RUN go build -ldflags="-s -w" -o /out/spo-relay ./cmd/spo-relay
+
+FROM gcr.io/distroless/static-debian12@sha256:FILL_IN_DIGEST_OF_THE_RUNTIME_IMAGE
+COPY --from=build /out/spo-relay /usr/local/bin/spo-relay
+USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/spo-relay"]

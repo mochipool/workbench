@@ -105,7 +105,7 @@ func TestAKeptEncryptedColdKeyIsSealedColdOrRefused(t *testing.T) {
 	nref := ports.NamedRef{Name: "pool.node", Kind: ports.UpstreamEncryptedSKey}
 	put := func() error {
 		return n.Update(ctx, func(w ports.NamedWriter) error {
-			return w.PutSecret(nref, secret.Take(append([]byte(nil), enc...)))
+			return w.PutSecret(nref, owned(secret.Take(append([]byte(nil), enc...))))
 		})
 	}
 	// no verification key beside it: refused, not stored hot
@@ -141,6 +141,7 @@ func TestAKeptEncryptedColdKeyIsSealedColdOrRefused(t *testing.T) {
 	}
 	s.SetColdSource(coldPass("sub-key passphrase one"))
 	b, err := n.Open(ctx, nref)
+	owned(b)
 	if err != nil || string(secretBytes(b)) != string(enc) {
 		t.Fatalf("%v", err)
 	}
@@ -149,7 +150,7 @@ func TestAKeptEncryptedColdKeyIsSealedColdOrRefused(t *testing.T) {
 		if err := w.Put(ports.NamedRef{Name: "w", Kind: ports.AddrVKey}, vkeyEnvelope("payment")); err != nil {
 			return err
 		}
-		return w.PutSecret(ports.NamedRef{Name: "w.payment", Kind: ports.UpstreamEncryptedSKey}, secret.Take(append([]byte(nil), enc...)))
+		return w.PutSecret(ports.NamedRef{Name: "w.payment", Kind: ports.UpstreamEncryptedSKey}, owned(secret.Take(append([]byte(nil), enc...))))
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +229,7 @@ func TestTheRecoveryPresentationDoesNotOutliveTheOperationItAuthorises(t *testin
 	// operation and nothing else
 	s2, path, rec2 := scratch(t)
 	s2.Close()
-	r, err := OpenWithRecovery(path, secret.Take([]byte(rec2)))
+	r, err := OpenWithRecovery(path, passphrase(rec2))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,18 +318,18 @@ func TestAnEnvelopeTypeThatDoesNotMatchTheRecordKindIsRefused(t *testing.T) {
 // spec: SPO-Xcustody-PRE-028
 func TestNoColdRecordIsBoundToTheRecoveryAuthenticator(t *testing.T) {
 	_, path, f, rec := hwCold(t)
-	raw, err := seal.DecodeRecoveryKey(secret.Take([]byte(rec)))
+	raw, err := decodeRecovery(rec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	in := f.inputs("devB", "5678")
+	in := f.inputs("devB", pinB)
 	in.Recovery = func(context.Context) (*secret.Buffer, error) { return secret.Take(rawBytes(raw)), nil }
 	r, err := OpenWithFactors(path, in, OpenOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer r.Close()
-	cin := f.inputs("devB", "5678")
+	cin := f.inputs("devB", pinB)
 	r.SetColdSource(&ColdSource{Factors: &cin, Deriver: fakeDeriver{}})
 	k := secret.Take([]byte("a second cold key"))
 	defer k.Destroy()
@@ -435,7 +436,7 @@ func TestMigrationRecordsMissingRoleHistoriesFromTheStoredVerificationKeys(t *te
 	for _, r := range []ports.Ref{ccSKey, ccWords, coldRef} {
 		r := r
 		forgeRow(t, s, r, func(m seal.RecordMeta) seal.SealedRecord {
-			sealed, err := s.keys.SealSecret(m, secret.Take([]byte(hotSecrets[r])))
+			sealed, err := s.keys.SealSecret(m, owned(secret.Take([]byte(hotSecrets[r]))))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -495,7 +496,7 @@ func TestMigrationRecordsMissingRoleHistoriesFromTheStoredVerificationKeys(t *te
 func TestNoReadPathReleasesAColdRecordReplacedByAHotForm(t *testing.T) {
 	s, path, _ := stdCold(t, "sub-key passphrase one")
 	forgeRow(t, s, coldRef, func(m seal.RecordMeta) seal.SealedRecord {
-		r, err := s.keys.SealSecret(m, secret.Take([]byte("attacker chosen")))
+		r, err := s.keys.SealSecret(m, owned(secret.Take([]byte("attacker chosen"))))
 		if err != nil {
 			t.Fatal(err)
 		}

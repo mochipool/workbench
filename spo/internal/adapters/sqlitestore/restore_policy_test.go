@@ -35,10 +35,11 @@ func standardThenRotated(t *testing.T, to unlock.Policy) (path, backup string, f
 		t.Fatal(err)
 	}
 	f = newFake()
-	fa, _, err := EnrolFactor(ctx, f.inputs("devA", "1234"), s.ws, nil)
+	fa, _, err := enrolOwned(ctx, f.inputs("devA", pinA), s.ws, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer fa.Output.Destroy() // the caller's (EnrolFactor)
 	if to == unlock.Strict {
 		text, _, err := s.Rotate(ctx, RotatePlan{Policy: unlock.Strict, Proof: presentStd(t, s, rec0), Slots: []SlotPlan{{Kind: seal.SlotFIDO2HMAC, Factors: []FactorPlan{fa}}}})
 		if err != nil || text != nil {
@@ -47,10 +48,11 @@ func standardThenRotated(t *testing.T, to unlock.Policy) (path, backup string, f
 		s.Close()
 		return path, backup, f, ""
 	}
-	fb, _, err := EnrolFactor(ctx, f.inputs("devB", "5678"), s.ws, nil)
+	fb, _, err := enrolOwned(ctx, f.inputs("devB", pinB), s.ws, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer fb.Output.Destroy()
 	text, _, err := s.Rotate(ctx, RotatePlan{Policy: unlock.Hardware, Proof: presentStd(t, s, rec0), Slots: []SlotPlan{
 		{Kind: seal.SlotFIDO2HMAC, Factors: []FactorPlan{fa}},
 		{Kind: seal.SlotComposite, Factors: []FactorPlan{{Params: seal.FactorParams{Kind: seal.FactorRecovery}}, fb}},
@@ -67,7 +69,7 @@ func standardThenRotated(t *testing.T, to unlock.Policy) (path, backup string, f
 
 func recoveryRaw(t *testing.T, text string) func(context.Context) (*secret.Buffer, error) {
 	t.Helper()
-	raw, err := seal.DecodeRecoveryKey(secret.Take([]byte(text)))
+	raw, err := decodeRecovery(text)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +106,7 @@ func TestRestoreRefusesABackupWithAWeakerPolicy(t *testing.T) {
 	})
 	t.Run("hardware, a wrong recovery key", func(t *testing.T) {
 		path, backup, f, _ := standardThenRotated(t, unlock.Hardware)
-		in := f.inputs("devB", "5678")
+		in := f.inputs("devB", pinB)
 		in.Recovery = func(context.Context) (*secret.Buffer, error) { return secret.Take(make([]byte, 32)), nil }
 		err := RestoreWithOptions(backup, path, pw(), RestoreOptions{Overwrite: true, AllowOlder: true, AllowWeakerPolicy: true, CurrentRecovery: &in})
 		if !errors.Is(err, ErrWrongRecovery) && !errors.Is(err, ErrWrongCredential) {
@@ -116,7 +118,7 @@ func TestRestoreRefusesABackupWithAWeakerPolicy(t *testing.T) {
 	})
 	t.Run("hardware, the recovery credential presented: restored", func(t *testing.T) {
 		path, backup, f, rec := standardThenRotated(t, unlock.Hardware)
-		in := f.inputs("devB", "5678")
+		in := f.inputs("devB", pinB)
 		in.Recovery = recoveryRaw(t, rec)
 		if err := RestoreWithOptions(backup, path, pw(), RestoreOptions{Overwrite: true, AllowOlder: true, AllowWeakerPolicy: true, CurrentRecovery: &in}); err != nil {
 			t.Fatal(err)
@@ -127,7 +129,7 @@ func TestRestoreRefusesABackupWithAWeakerPolicy(t *testing.T) {
 	})
 	t.Run("strict is never loosened, even with a recovery key", func(t *testing.T) {
 		path, backup, f, _ := standardThenRotated(t, unlock.Strict)
-		in := f.inputs("devA", "1234")
+		in := f.inputs("devA", pinA)
 		in.Recovery = func(context.Context) (*secret.Buffer, error) { return secret.Take(make([]byte, 32)), nil }
 		err := RestoreWithOptions(backup, path, pw(), RestoreOptions{Overwrite: true, AllowOlder: true, AllowWeakerPolicy: true, CurrentRecovery: &in})
 		refusedUnchanged(t, path, err, ErrNoRecoveryPath)
@@ -153,7 +155,7 @@ func TestRestoreRefusesABackupWithAWeakerPolicy(t *testing.T) {
 // spec: SPO-Xunlock-PRE-034
 func TestRestoreOfAHardwareBackupWorksThroughFactors(t *testing.T) {
 	path, f, _ := hardwareWS(t)
-	s, err := openHW(path, f, "devA", "1234")
+	s, err := openHW(path, f, "devA", pinA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,20 +171,20 @@ func TestRestoreOfAHardwareBackupWorksThroughFactors(t *testing.T) {
 	if exists(dest) {
 		t.Error("a failed restore left a file")
 	}
-	if err := RestoreWithFactors(bk, dest, f.inputs("devA", "1234"), RestoreOptions{}); err != nil {
+	if err := RestoreWithFactors(bk, dest, f.inputs("devA", pinA), RestoreOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if pol, _, err := Describe(dest); err != nil || pol != unlock.Hardware {
 		t.Errorf("%q %v", pol, err)
 	}
-	r, err := openHW(dest, f, "devA", "1234")
+	r, err := openHW(dest, f, "devA", pinA)
 	if err != nil {
 		t.Fatal(err)
 	}
 	r.Close()
 	// a wrong PIN verifies nothing
 	dest2 := filepath.Join(t.TempDir(), "r2.db")
-	if err := RestoreWithFactors(bk, dest2, f.inputs("devA", "0000"), RestoreOptions{}); err == nil || exists(dest2) {
+	if err := RestoreWithFactors(bk, dest2, f.inputs("devA", pinWrong), RestoreOptions{}); err == nil || exists(dest2) {
 		t.Errorf("a wrong PIN restored: %v", err)
 	}
 }
@@ -197,7 +199,7 @@ func TestRotationLeavesNoTraceOfTheThrowawayPassphrase(t *testing.T) {
 	if _, err := Open(path, pw()); !errors.Is(err, ErrWrongCredential) {
 		t.Fatalf("the first passphrase still opens the workspace: %v", err)
 	}
-	if o, err := OpenWithRecoveryOptions(path, secret.Take([]byte(firstRecovery)), OpenOptions{}); err == nil {
+	if o, err := OpenWithRecoveryOptions(path, passphrase(firstRecovery), OpenOptions{}); err == nil {
 		o.Close()
 		t.Error("the first recovery key still opens the workspace")
 	}
@@ -222,7 +224,7 @@ func TestRotationLeavesNoTraceOfTheThrowawayPassphrase(t *testing.T) {
 	if err := db.QueryRow(`SELECT cleanup_pending FROM meta`).Scan(&pending); err != nil || pending != 0 {
 		t.Errorf("cleanup_pending %d %v", pending, err)
 	}
-	h, err := openHW(path, f, "devA", "1234")
+	h, err := openHW(path, f, "devA", pinA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +269,7 @@ func slotRemovedEvents(t *testing.T, s *Store) map[string]string {
 func TestRotationAndSlotRemovalNameTheRemovedSlotsInTheAuditTrail(t *testing.T) {
 	t.Run("a strict rotation names every slot of the old table", func(t *testing.T) {
 		path, _, f, _ := standardThenRotated(t, unlock.Hardware)
-		s, err := openHW(path, f, "devA", "1234")
+		s, err := openHW(path, f, "devA", pinA)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -278,7 +280,7 @@ func TestRotationAndSlotRemovalNameTheRemovedSlotsInTheAuditTrail(t *testing.T) 
 		}
 		// a strict rotation by the daily factor: the recovery composite of another
 		// holder is removed too
-		plan := strictPlan(t, s, f, "devA", "1234")
+		plan := strictPlan(t, s, f, "devA", pinA)
 		plan.Proof = presentHW(t, s, f, firstHardwareRecovery)
 		if txt, _, err := s.Rotate(ctx, plan); err != nil || txt != nil {
 			t.Fatalf("%v", err)
@@ -300,7 +302,7 @@ func TestRotationAndSlotRemovalNameTheRemovedSlotsInTheAuditTrail(t *testing.T) 
 		s, _, rec := scratch(t)
 		put(t, s, counter, "1")
 		f := newFake()
-		fa, _, err := EnrolFactor(ctx, f.inputs("devA", "1234"), s.ws, nil)
+		fa, _, err := enrolOwned(ctx, f.inputs("devA", pinA), s.ws, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -309,7 +311,7 @@ func TestRotationAndSlotRemovalNameTheRemovedSlotsInTheAuditTrail(t *testing.T) 
 			t.Fatal(err)
 		}
 		fa.Output.Destroy()
-		req := RemoveRequest{SlotID: id, Daily: f.inputs("devA", "1234"), Proof: presentStd(t, s, rec)}
+		req := RemoveRequest{SlotID: id, Daily: f.inputs("devA", pinA), Proof: presentStd(t, s, rec)}
 		req.Daily.Passphrase = pinOf(string(rawBytes(pw())))
 		if txt, _, err := s.RemoveSlotByRotation(ctx, req); err != nil {
 			t.Fatal(err)
@@ -331,51 +333,51 @@ func TestRotationAndSlotRemovalNameTheRemovedSlotsInTheAuditTrail(t *testing.T) 
 func TestSlotRemovalChecksTheKeptSlotsWithTheirOldOutputs(t *testing.T) {
 	impostorOf := func(f *fakeSource) *fakeSource {
 		g := newFake()
-		g.auths["devA"] = &fakeAuth{f.auths["devA"].id, "an impostor seed", "1234"}
+		g.auths["devA"] = &fakeAuth{f.auths["devA"].id, "an impostor seed", pinA}
 		return g
 	}
 	t.Run("hardware", func(t *testing.T) {
 		path, _, f, rec := standardThenRotated(t, unlock.Hardware)
-		s, err := openHW(path, f, "devA", "1234")
+		s, err := openHW(path, f, "devA", pinA)
 		if err != nil {
 			t.Fatal(err)
 		}
-		fx, _, _ := EnrolFactor(ctx, f.inputs("devA", "1234"), s.ws, nil)
+		fx, _, _ := enrolOwned(ctx, f.inputs("devA", pinA), s.ws, nil)
 		id, err := s.AddFactorSlot(ctx, []FactorPlan{fx})
 		if err != nil {
 			t.Fatal(err)
 		}
-		req := RemoveRequest{SlotID: id, Proof: presentHW(t, s, f, rec), Daily: impostorOf(f).inputs("devA", "1234"), Recovery: f.inputs("devB", "5678")}
+		req := RemoveRequest{SlotID: id, Proof: presentHW(t, s, f, rec), Daily: impostorOf(f).inputs("devA", pinA), Recovery: f.inputs("devB", pinB)}
 		req.Recovery.Recovery = recoveryRaw(t, rec)
 		if _, _, err := s.RemoveSlotByRotation(ctx, req); !errors.Is(err, ErrWrongCredential) {
 			t.Fatalf("an impostor authenticator re-created the daily slot: %v", err)
 		}
 		s.Close()
-		h, err := openHW(path, f, "devA", "1234")
+		h, err := openHW(path, f, "devA", pinA)
 		if err != nil {
 			t.Fatalf("the real authenticator no longer opens: %v", err)
 		}
 		h.Close()
-		if _, err := openHW(path, impostorOf(f), "devA", "1234"); err == nil {
+		if _, err := openHW(path, impostorOf(f), "devA", pinA); err == nil {
 			t.Error("the impostor opens the workspace")
 		}
 	})
 	t.Run("strict", func(t *testing.T) {
 		path, _, f, _ := standardThenRotated(t, unlock.Strict)
-		s, err := openHW(path, f, "devA", "1234")
+		s, err := openHW(path, f, "devA", pinA)
 		if err != nil {
 			t.Fatal(err)
 		}
-		fx, _, _ := EnrolFactor(ctx, f.inputs("devA", "1234"), s.ws, nil)
+		fx, _, _ := enrolOwned(ctx, f.inputs("devA", pinA), s.ws, nil)
 		id, err := s.AddFactorSlot(ctx, []FactorPlan{fx})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := s.RemoveSlotByRotation(ctx, RemoveRequest{SlotID: id, Daily: impostorOf(f).inputs("devA", "1234")}); !errors.Is(err, ErrWrongCredential) {
+		if _, _, err := s.RemoveSlotByRotation(ctx, RemoveRequest{SlotID: id, Daily: impostorOf(f).inputs("devA", pinA)}); !errors.Is(err, ErrWrongCredential) {
 			t.Fatalf("a wrong-secret authenticator was accepted under strict: %v", err)
 		}
 		s.Close()
-		h, err := openHW(path, f, "devA", "1234")
+		h, err := openHW(path, f, "devA", pinA)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -383,11 +385,11 @@ func TestSlotRemovalChecksTheKeptSlotsWithTheirOldOutputs(t *testing.T) {
 	})
 	t.Run("the honest authenticator still works", func(t *testing.T) {
 		path, _, f, _ := standardThenRotated(t, unlock.Strict)
-		s, _ := openHW(path, f, "devA", "1234")
+		s, _ := openHW(path, f, "devA", pinA)
 		defer s.Close()
-		fx, _, _ := EnrolFactor(ctx, f.inputs("devA", "1234"), s.ws, nil)
+		fx, _, _ := enrolOwned(ctx, f.inputs("devA", pinA), s.ws, nil)
 		id, _ := s.AddFactorSlot(ctx, []FactorPlan{fx})
-		if _, _, err := s.RemoveSlotByRotation(ctx, RemoveRequest{SlotID: id, Daily: f.inputs("devA", "1234")}); err != nil {
+		if _, _, err := s.RemoveSlotByRotation(ctx, RemoveRequest{SlotID: id, Daily: f.inputs("devA", pinA)}); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -401,17 +403,17 @@ func TestKeepRecoveryKeepsOnlyThePresentedKey(t *testing.T) {
 	presentStd(t, s, rec)
 	other := make([]byte, 32)
 	other[0] = 1
-	if err := s.RekeyKeepRecovery(ctx, passphrase("brand new passphrase"), secret.Take(other)); !errors.Is(err, ErrWrongRecovery) {
+	if err := s.RekeyKeepRecovery(ctx, passphrase("brand new passphrase"), owned(secret.Take(other))); !errors.Is(err, ErrWrongRecovery) {
 		t.Fatalf("a recovery key other than the presented one was kept: %v", err)
 	}
 	// the refused attempt consumed the presentation, whatever its outcome
 	presentStd(t, s, rec)
-	raw, _ := seal.DecodeRecoveryKey(secret.Take([]byte(rec)))
+	raw, _ := decodeRecovery(rec)
 	if err := s.RekeyKeepRecovery(ctx, passphrase("brand new passphrase"), raw); err != nil {
 		t.Fatal(err)
 	}
 	// the presentation does not outlive the rekey
-	raw2, _ := seal.DecodeRecoveryKey(secret.Take([]byte(rec)))
+	raw2, _ := decodeRecovery(rec)
 	if err := s.RekeyKeepRecovery(ctx, passphrase("another new passphrase"), raw2); !errors.Is(err, ErrRecoveryNotPresented) {
 		t.Errorf("a second rekey without a new presentation: %v", err)
 	}
@@ -431,13 +433,13 @@ func TestRestoreRechecksUnderTheLockAndRefusesAnUnreadableDestination(t *testing
 		s.Close()
 		afterPolicyCheck = func() {
 			afterPolicyCheck = nil
-			o, err := OpenWithRecovery(path, secret.Take([]byte(rec)))
+			o, err := OpenWithRecovery(path, passphrase(rec))
 			if err != nil {
 				t.Error(err)
 				return
 			}
 			f := newFake()
-			fa, _, _ := EnrolFactor(ctx, f.inputs("devA", "1234"), o.ws, nil)
+			fa, _, _ := enrolOwned(ctx, f.inputs("devA", pinA), o.ws, nil)
 			if _, _, err := o.Rotate(ctx, RotatePlan{Policy: unlock.Strict, Slots: []SlotPlan{{Kind: seal.SlotFIDO2HMAC, Factors: []FactorPlan{fa}}}}); err != nil {
 				t.Error(err)
 			}
@@ -483,7 +485,7 @@ func TestRestoreRechecksUnderTheLockAndRefusesAnUnreadableDestination(t *testing
 // spec: SPO-Xunlock-PRE-032
 func TestStrictRotationRechecksTheConfirmedSlotsInTheTransaction(t *testing.T) {
 	path, _, f, _ := standardThenRotated(t, unlock.Strict)
-	s, err := openHW(path, f, "devA", "1234")
+	s, err := openHW(path, f, "devA", pinA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,16 +496,16 @@ func TestStrictRotationRechecksTheConfirmedSlotsInTheTransaction(t *testing.T) {
 		confirmed[hex.EncodeToString(sl.ID)] = true
 	}
 	// another holder adds a slot after the operator confirmed
-	fx, _, _ := EnrolFactor(ctx, f.inputs("devA", "1234"), s.ws, nil)
+	fx, _, _ := enrolOwned(ctx, f.inputs("devA", pinA), s.ws, nil)
 	if _, err := s.AddFactorSlot(ctx, []FactorPlan{fx}); err != nil {
 		t.Fatal(err)
 	}
-	plan := strictPlan(t, s, f, "devA", "1234")
+	plan := strictPlan(t, s, f, "devA", pinA)
 	plan.ConfirmRemoved = confirmed
 	if _, _, err := s.Rotate(ctx, plan); !errors.Is(err, ErrRemovalNotConfirmed) {
 		t.Fatalf("a slot that appeared after the confirmation was removed: %v", err)
 	}
-	if _, _, err := s.Rotate(ctx, strictPlan(t, s, f, "devA", "1234")); err != nil {
+	if _, _, err := s.Rotate(ctx, strictPlan(t, s, f, "devA", pinA)); err != nil {
 		t.Errorf("without a confirmation set (an API caller) the rotation is unchanged: %v", err)
 	}
 }

@@ -1,0 +1,8 @@
+# One relay: the namespace's shared objects and one relay instance.
+# The example overlay (../overlays/example) runs two independent relays.
+# How to use it: docs/how-to/run-a-relay-on-kubernetes.md.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - shared
+  - instance

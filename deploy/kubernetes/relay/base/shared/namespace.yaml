@@ -1,0 +1,11 @@
+# The relays' namespace. It enforces the restricted Pod Security Standard, so
+# that a pod that weakens the security context is refused at admission.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: spo-relay
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

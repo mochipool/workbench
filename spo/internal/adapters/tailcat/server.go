@@ -15,6 +15,7 @@ import (
 
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
+	"github.com/mochipool/workbench/spo/internal/platform/tunnelenv"
 	"github.com/mochipool/workbench/spo/internal/ports"
 
 	tc "github.com/tailscale/tailcat"
@@ -43,7 +44,9 @@ type ServerConfig struct {
 	// NodeKey and PSK are the persistent node private key and pre-shared
 	// key, 32 bytes each, from Secret records. When nil a random one is
 	// generated: read it back with Keys and store it, or the address changes
-	// at the next start. The server takes ownership of the buffers.
+	// at the next start. The server takes ownership of the buffers at the
+	// call: NewServer destroys them when it fails, and Close destroys them
+	// (SPO-Xparty-SEC-005).
 	NodeKey, PSK *secret.Buffer
 	// Allowed is the node keys of the enrolled signer and machine parties.
 	// It must not be empty (T2) and is set on the tailcat server before it
@@ -74,6 +77,9 @@ type Stats struct {
 	Accepted int64 // TCP connections that reached our listener
 	Refused  int64 // closed before or at the first frame
 	Frames   int64 // frames passed to Receive
+	// PeerPanics is the connections closed unserved because the tunnel
+	// library panicked while it named the peer: a library bug, not a refusal.
+	PeerPanics int64
 }
 
 type peerConn struct {
@@ -99,8 +105,14 @@ type Server struct {
 	// once started, replaceable in tests.
 	peerKey func(net.Conn) (party.NodeKey, bool)
 
-	ts *tc.Server
-	ln net.Listener
+	// ts and ln are set once, by the Start that wins, under mu. starting and
+	// closing (under mu too) make Start run at most once and never after Close,
+	// and make a Start that a Close overtook tear its engine down.
+	ts       *tc.Server
+	ln       net.Listener
+	starting bool
+	closing  bool
+	keyMu    sync.Mutex // Start's read of nodeK and pskK against Close's Destroy
 
 	mu      sync.Mutex
 	allowed map[party.NodeKey]bool
@@ -110,7 +122,23 @@ type Server struct {
 	active  int
 	recent  map[party.NodeKey][]time.Time
 
-	accepted, refused, frames atomic.Int64
+	accepted, refused, frames, panics atomic.Int64
+
+	testKeyCopies   func(*key.NodePrivate, *tc.PresharedKey) // test seam: Start's local key copies
+	testDuringStart func(net.Listener)                       // test seam: the engine is up, not yet installed
+}
+
+// peerPanics counts, for the whole process, the panics of the tunnel library
+// that a peer lookup swallowed; only the first is logged.
+var peerPanics atomic.Int64
+
+// notePeerPanic counts a swallowed panic of the peer lookup for this server and
+// the process, and logs the first of the process (SPO-Xparty-SEC-004).
+func (s *Server) notePeerPanic() {
+	s.panics.Add(1)
+	if n := peerPanics.Add(1); n == 1 && s.cfg.Logf != nil {
+		s.cfg.Logf("tailcat: the tunnel library panicked while naming the peer of a connection; the connection was closed unserved. Only the first such panic of this process is logged; Stats.PeerPanics counts each")
+	}
 }
 
 var (
@@ -125,7 +153,20 @@ func (s *Server) Transport() ports.Transport { return ports.NetworkTransport(s) 
 
 // NewServer checks the configuration. It does not touch the network: the
 // refusal for an empty allow-list is here, before anything exists to start.
-func NewServer(cfg ServerConfig) (*Server, error) {
+func NewServer(cfg ServerConfig) (_ *Server, err error) {
+	// The buffers are the server's from here: on every error they are
+	// destroyed, with any key generated below (SPO-Xparty-SEC-005).
+	nodeK, pskK := cfg.NodeKey, cfg.PSK
+	defer func() {
+		if err != nil {
+			nodeK.Destroy()
+			pskK.Destroy()
+		}
+	}()
+	// no tunnel library debug knob, and its global log goes nowhere (SPO-Xmailbox-SEC-085)
+	if err := tunnelenv.Prepare(); err != nil {
+		return nil, fmt.Errorf("tailcat: %w", err)
+	}
 	if len(cfg.Allowed) == 0 {
 		return nil, ErrEmptyAllowList
 	}
@@ -162,17 +203,17 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		}
 		s.allowed[k] = true
 	}
-	var err error
-	if s.nodeK = cfg.NodeKey; s.nodeK == nil {
-		if s.nodeK, err = NewKey(); err != nil {
+	if nodeK == nil {
+		if nodeK, err = NewKey(); err != nil {
 			return nil, err
 		}
 	}
-	if s.pskK = cfg.PSK; s.pskK == nil {
-		if s.pskK, err = NewKey(); err != nil {
+	if pskK == nil {
+		if pskK, err = NewKey(); err != nil {
 			return nil, err
 		}
 	}
+	s.nodeK, s.pskK = nodeK, pskK
 	if s.pskK.Len() != KeyLen || s.nodeK.Len() != KeyLen {
 		return nil, errors.New("tailcat: node key and pre-shared key are 32 bytes")
 	}
@@ -180,25 +221,60 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 }
 
 // Keys returns the node private key and the pre-shared key, so the caller can
-// store generated ones. The server keeps ownership: do not destroy them.
+// store generated ones before Close. The server keeps ownership: do not
+// destroy them; Close does.
 func (s *Server) Keys() (nodeKey, psk *secret.Buffer) { return s.nodeK, s.pskK }
 
 // Start brings the server up. The allow-list, the served port and the keys
 // are set on the tailcat server before it starts (concern T2), and it
 // listens on the one port with no other handler: a connection to any other
 // port gets nothing.
-func (s *Server) Start(ctx context.Context) error {
-	priv, err := nodePrivate(s.nodeK)
-	if err != nil {
-		return err
+//
+// It runs once: a second Start, and a Start after Close, are refused. A Close
+// while Start is bringing the engine up returns at once, and the Start then
+// tears the engine down and returns ErrClosed. The local copies of the keys
+// that Start hands to tailcat are cleared when it returns (tailcat's own copies
+// cannot be wiped; keys.go).
+func (s *Server) Start(ctx context.Context) (err error) {
+	s.mu.Lock()
+	switch {
+	case s.closing:
+		s.mu.Unlock()
+		return fmt.Errorf("tailcat: the server is closed: %w", ports.ErrClosed)
+	case s.starting:
+		s.mu.Unlock()
+		return errors.New("tailcat: the server is already started")
 	}
-	var psk tc.PresharedKey
-	if err := s.pskK.Use(func(b []byte) error { copy(psk[:], b); return nil }); err != nil {
-		return err
-	}
+	s.starting = true
+	defer func() {
+		if err != nil { // a Start that failed may be tried again (unless closed)
+			s.mu.Lock()
+			s.starting = false
+			s.mu.Unlock()
+		}
+	}()
 	allowed := make([]key.NodePublic, 0, len(s.allowed))
+	listed := make(map[party.NodeKey]bool, len(s.allowed))
 	for k := range s.allowed {
 		allowed = append(allowed, nodePublic(k))
+		listed[k] = true
+	}
+	s.mu.Unlock()
+	var priv key.NodePrivate
+	var psk tc.PresharedKey
+	defer func() { priv, psk = key.NodePrivate{}, tc.PresharedKey{} }()
+	if s.testKeyCopies != nil {
+		s.testKeyCopies(&priv, &psk)
+	}
+	// the buffers are read under keyMu, which Close's Destroy takes too
+	s.keyMu.Lock()
+	priv, err = nodePrivate(s.nodeK)
+	if err == nil {
+		err = s.pskK.Use(func(b []byte) error { copy(psk[:], b); return nil })
+	}
+	s.keyMu.Unlock()
+	if err != nil {
+		return err
 	}
 	ts := &tc.Server{
 		Key:            priv,
@@ -218,28 +294,79 @@ func (s *Server) Start(ctx context.Context) error {
 		ts.Close()
 		return err
 	}
+	if s.testDuringStart != nil {
+		s.testDuringStart(ln)
+	}
+	s.mu.Lock()
+	if s.closing {
+		// a Close overtook this Start: the engine is not left running
+		s.mu.Unlock()
+		ln.Close()
+		ts.Close()
+		return fmt.Errorf("tailcat: the server was closed while it started: %w", ports.ErrClosed)
+	}
 	s.ts, s.ln = ts, ln
-	s.peerKey = func(c net.Conn) (party.NodeKey, bool) {
-		for _, kv := range ts.PeerEnv(c.LocalAddr(), c.RemoteAddr()) {
+	s.peerKey = peerFunc(ts.PeerEnv, s.notePeerPanic)
+	s.wg.Add(1) // under mu: Close's Wait comes after closing is set
+	// keys allowed while the engine was being built
+	var missing []party.NodeKey
+	for k := range s.allowed {
+		if !listed[k] {
+			missing = append(missing, k)
+		}
+	}
+	s.mu.Unlock()
+	for _, k := range missing {
+		ts.AddAllowedClient(nodePublic(k))
+	}
+	go s.acceptLoop()
+	return nil
+}
+
+// peerFunc names the tunnel peer of an accepted connection from tailcat's
+// PeerEnv (SPO-Xparty-SEC-004). A connection that was reset before it got here
+// has no address (gonet's RemoteAddr and LocalAddr return nil once the
+// endpoint is gone), and PeerEnv calls String on both, so such a connection is
+// unidentified and never reaches PeerEnv. Any other panic in the library call
+// is contained the same way: the lookup runs on the accept loop of a process
+// that holds keys, and an unidentified connection is only refused.
+func peerFunc(env func(local, remote net.Addr) []string, onPanic func()) func(net.Conn) (party.NodeKey, bool) {
+	return func(c net.Conn) (k party.NodeKey, ok bool) {
+		local, remote := c.LocalAddr(), c.RemoteAddr()
+		if local == nil || remote == nil {
+			return party.NodeKey{}, false
+		}
+		defer func() {
+			if recover() != nil {
+				k, ok = party.NodeKey{}, false
+				if onPanic != nil {
+					onPanic()
+				}
+			}
+		}()
+		for _, kv := range env(local, remote) {
 			if k, ok := parsePeer(kv); ok {
 				return k, true
 			}
 		}
 		return party.NodeKey{}, false
 	}
-	s.wg.Add(1)
-	go s.acceptLoop()
-	return nil
 }
 
 // Address is the tailcat address clients dial. It is a Secret
 // (SPO-Xparty-SEC-001): it contains the pre-shared key. The text also
 // exists as an ordinary string inside tailcat that cannot be wiped.
 func (s *Server) Address() (*secret.Buffer, error) {
-	if s.ts == nil {
+	s.mu.Lock()
+	ts, closing := s.ts, s.closing
+	s.mu.Unlock()
+	switch {
+	case closing:
+		return nil, fmt.Errorf("tailcat: the server is closed: %w", ports.ErrClosed)
+	case ts == nil:
 		return nil, errors.New("tailcat: not started")
 	}
-	return secret.TryTake([]byte(s.ts.TailcatAddr()))
+	return secret.TryTake([]byte(ts.TailcatAddr()))
 }
 
 // Allow adds an enrolled node key while running. tailcat cannot remove a key
@@ -248,9 +375,10 @@ func (s *Server) Address() (*secret.Buffer, error) {
 func (s *Server) Allow(k party.NodeKey) {
 	s.mu.Lock()
 	s.allowed[k] = true
+	ts := s.ts
 	s.mu.Unlock()
-	if s.ts != nil {
-		s.ts.AddAllowedClient(nodePublic(k))
+	if ts != nil {
+		ts.AddAllowedClient(nodePublic(k))
 	}
 }
 
@@ -270,7 +398,7 @@ func (s *Server) Revoke(k party.NodeKey) {
 
 // Stats returns the counters.
 func (s *Server) Stats() Stats {
-	return Stats{s.accepted.Load(), s.refused.Load(), s.frames.Load()}
+	return Stats{s.accepted.Load(), s.refused.Load(), s.frames.Load(), s.panics.Load()}
 }
 
 func (s *Server) acceptLoop() {
@@ -280,7 +408,15 @@ func (s *Server) acceptLoop() {
 		if err != nil {
 			return // closed
 		}
+		// only this loop names peers, so a change of the panic count is this
+		// connection's: a library bug, counted on its own, not a refusal
+		before := s.panics.Load()
 		peer, known := s.peerKey(c)
+		if s.panics.Load() != before {
+			s.accepted.Add(1)
+			c.Close()
+			continue
+		}
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
@@ -481,26 +617,39 @@ func (s *Server) Peers() []party.Fingerprint {
 // Close stops accepting, closes every connection, waits for the handlers,
 // then drains tailcat's TCP stack as its documentation requires (the stack
 // runs in this process, so closing and exiting can lose the last FIN) with a
-// short bound, and shuts tailcat down. The keys stay with the caller's
-// buffers; Close does not destroy them.
+// short bound, and shuts tailcat down.
+//
+// It destroys the node key and pre-shared key buffers (SPO-Xparty-SEC-005),
+// and does so before tailcat is shut down: tailcat took its own heap copies at
+// Start (nodePrivate, the PresharedKey value) and never reads the buffers, so
+// a teardown that fails, panics or never returns cannot keep them alive. The
+// copies inside tailcat cannot be wiped (keys.go).
 func (s *Server) Close() error {
 	var err error
 	s.closed.Do(func() {
 		close(s.done)
-		if s.ln != nil {
-			s.ln.Close()
-		}
 		s.mu.Lock()
+		s.closing = true // a Start now refuses, and one under way tears its engine down
+		ts, ln := s.ts, s.ln
 		for c := range s.conns {
 			c.Close()
 		}
 		s.mu.Unlock()
+		if ln != nil {
+			ln.Close()
+		}
 		s.wg.Wait()
-		if s.ts != nil {
+		// a Start under way reads the buffers only before its engine exists,
+		// and a Start that has not begun refuses: Destroy waits for neither
+		s.keyMu.Lock()
+		s.nodeK.Destroy()
+		s.pskK.Destroy()
+		s.keyMu.Unlock()
+		if ts != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			s.ts.DrainTCP(ctx) // a peer that is gone never acknowledges: bounded, error ignored
+			ts.DrainTCP(ctx) // a peer that is gone never acknowledges: bounded, error ignored
 			cancel()
-			err = s.ts.Close()
+			err = ts.Close()
 		}
 	})
 	return err

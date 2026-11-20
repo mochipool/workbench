@@ -11,6 +11,7 @@ import (
 
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/platform/secret"
+	"github.com/mochipool/workbench/spo/internal/platform/tunnelenv"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -74,6 +75,10 @@ var (
 // NewClient checks the configuration and builds the tailcat client. It does
 // not dial.
 func NewClient(cfg ClientConfig) (*Client, error) {
+	// no tunnel library debug knob, and its global log goes nowhere (SPO-Xmailbox-SEC-085)
+	if err := tunnelenv.Prepare(); err != nil {
+		return nil, fmt.Errorf("tailcat: %w", err)
+	}
 	if cfg.Hello == nil {
 		return nil, errors.New("tailcat: a Hello builder is required: every connection starts with a fresh Hello")
 	}

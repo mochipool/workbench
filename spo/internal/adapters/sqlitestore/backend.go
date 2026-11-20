@@ -95,7 +95,7 @@ func backendOutput(ctx context.Context, spec seal.SlotSpec, f seal.FactorParams,
 		defer c.Close()
 	}
 	if in.Notify != nil {
-		in.Notify(fmt.Sprintf("asking %s at %s to unwrap the factor secret", ref.Kind, ref.Address))
+		in.Notify(fmt.Sprintf("asking %s at %s to unwrap the factor secret (backend fingerprint %s)", ref.Kind, ref.Address, ports.FingerprintOf(kb)))
 	}
 	b, err := kb.Unwrap(ctx, f.BackendBlob, ports.WrapContext{GenesisNonce: spec.GenesisNonce, SlotID: spec.SlotID})
 	if err != nil {

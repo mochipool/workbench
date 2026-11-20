@@ -943,6 +943,14 @@ func openFile(path string, cred credential, readOnly bool, o OpenOptions) (st *S
 			st.recSecret = &recoveryKey{secret: cp}
 		}
 	}
+	// every failure from here on drops the handle: its copy of the recovery key
+	// goes with the master key and the derived keys (st is nil once returned)
+	built := st
+	defer func() {
+		if err != nil {
+			built.recSecret.destroy()
+		}
+	}()
 	// The full verification, still on the read-only connection. (With
 	// SkipVerify the handle builds the same knowledge at its first use.)
 	if !o.SkipVerify {

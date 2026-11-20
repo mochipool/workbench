@@ -249,7 +249,7 @@ func loadConfig(dir string) (cli.WorkspaceConfig, error) {
 	if err != nil {
 		return cli.WorkspaceConfig{}, err
 	}
-	out := cli.WorkspaceConfig{Network: c.Network, Mode: c.Mode}
+	out := cli.WorkspaceConfig{Network: c.Network, Mode: c.Mode, BackendRefusal: c.Untrusted, RewriteRefusal: c.RewriteRefusal()}
 	if c.Koios != nil {
 		out.Koios = &cli.KoiosConfig{URL: c.Koios.URL}
 	}

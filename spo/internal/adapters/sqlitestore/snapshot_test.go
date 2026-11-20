@@ -54,19 +54,19 @@ func passOpen(p string) func(*testing.T, string) *Store {
 func hwFix(name, path string, f *fakeSource) snapFix {
 	return snapFix{name: name, path: path, fake: f,
 		cred: func() SnapshotCredential {
-			in := f.inputs("devA", "1234")
+			in := f.inputs("devA", pinA)
 			return SnapshotCredential{Factors: &in}
 		},
 		open: func(t *testing.T, p string) *Store {
 			t.Helper()
-			s, err := openHW(p, f, "devA", "1234")
+			s, err := openHW(p, f, "devA", pinA)
 			if err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { s.Close() })
 			return s
 		},
-		secrets: []string{"seed-a", "seed-b", "1234", "5678"}}
+		secrets: []string{"seed-a", "seed-b", pinA, pinB}}
 }
 
 func stdFix(name, path, pass string, rec string) snapFix {
@@ -134,11 +134,11 @@ func snapBuilders() []snapBuilder {
 		}},
 		{"strict cold record", func(t *testing.T) snapFix {
 			path, _, f, _ := standardThenRotated(t, unlock.Strict)
-			s, err := openHW(path, f, "devA", "1234")
+			s, err := openHW(path, f, "devA", pinA)
 			if err != nil {
 				t.Fatal(err)
 			}
-			in := f.inputs("devA", "1234")
+			in := f.inputs("devA", pinA)
 			s.SetColdSource(&ColdSource{Factors: &in, Deriver: fakeDeriver{}})
 			putSecret(t, s, coldRef, "cold-secret-strict")
 			s.Close()
@@ -158,7 +158,7 @@ func snapBuilders() []snapBuilder {
 			s, path, rec := scratch(t)
 			put(t, s, counter, "1")
 			f := newFake()
-			fa, _, err := EnrolFactor(ctx, f.inputs("devA", "1234"), s.ws, nil)
+			fa, _, err := EnrolFactor(ctx, f.inputs("devA", pinA), s.ws, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -167,7 +167,7 @@ func snapBuilders() []snapBuilder {
 				t.Fatal(err)
 			}
 			fa.Output.Destroy()
-			req := RemoveRequest{SlotID: id, Daily: f.inputs("devA", "1234"), Proof: presentStd(t, s, rec)}
+			req := RemoveRequest{SlotID: id, Daily: f.inputs("devA", pinA), Proof: presentStd(t, s, rec)}
 			req.Daily.Passphrase = pinOf(testPass)
 			txt, _, err := s.RemoveSlotByRotation(ctx, req)
 			if err != nil {
@@ -587,8 +587,10 @@ func TestSnapshotHoldsNoKeyAndAsksNothingBeyondTheVerification(t *testing.T) {
 				secrets = append(secrets, testPass, "the new passphrase")
 			}
 			for _, s := range secrets {
-				if bytes.Contains(all.Bytes(), []byte(s)) {
-					t.Errorf("the snapshot holds %q", s)
+				for _, form := range secretForms(s) { // as it is (8 bytes or more) and in the forms a write would take
+					if bytes.Contains(all.Bytes(), form) {
+						t.Errorf("the snapshot holds %q (as %q)", s, form)
+					}
 				}
 				if raw := []byte(s); len(raw) == 32 && bytes.Contains(all.Bytes(), raw) {
 					t.Errorf("the snapshot holds a 32-byte key")
@@ -626,7 +628,7 @@ func TestSnapshotHardwareIsReadAndWrittenThroughFactorsOnly(t *testing.T) {
 			for _, wrong := range []SnapshotCredential{
 				{Passphrase: pw()},
 				{Passphrase: passphrase("")},
-				{Recovery: secret.Take([]byte(tmplRecovery))},
+				{Recovery: recovery()},
 			} {
 				if _, _, err := ReadSnapshot(ctx, fx.path, wrong); err == nil {
 					t.Error("a credential without factors read a factor workspace")
@@ -640,7 +642,7 @@ func TestSnapshotHardwareIsReadAndWrittenThroughFactorsOnly(t *testing.T) {
 				}
 			}
 			// the wrong authenticator is refused too
-			in := fx.fake.inputs("devB", "5678")
+			in := fx.fake.inputs("devB", pinB)
 			if _, _, err := ReadSnapshot(ctx, fx.path, SnapshotCredential{Factors: &in}); err == nil && name == "workspace rotated to strict (a policy change)" {
 				t.Error("the second authenticator opened a strict workspace")
 			}
@@ -653,7 +655,7 @@ func TestSnapshotHardwareIsReadAndWrittenThroughFactorsOnly(t *testing.T) {
 // spec: SPO-Xsnapshot-IF-001
 func TestSnapshotNeedsExactlyOneCredential(t *testing.T) {
 	fx := snapBuilders()[0].build(t)
-	in := newFake().inputs("devA", "1234")
+	in := newFake().inputs("devA", pinA)
 	template(t)
 	for _, c := range []SnapshotCredential{{}, {Passphrase: pw(), Recovery: recovery()}, {Passphrase: pw(), Factors: &in}} {
 		if _, _, err := ReadSnapshot(ctx, fx.path, c); !errors.Is(err, ErrSnapshotCredential) {
@@ -667,12 +669,12 @@ func TestSnapshotNeedsExactlyOneCredential(t *testing.T) {
 	s, path, rec := scratch(t)
 	put(t, s, counter, "1")
 	s.Close()
-	snap, _, err := ReadSnapshot(ctx, path, SnapshotCredential{Recovery: secret.Take([]byte(rec))})
+	snap, _, err := ReadSnapshot(ctx, path, SnapshotCredential{Recovery: passphrase(rec)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	dest := filepath.Join(newDir(t), "ws.db")
-	if err := WriteSnapshotFile(ctx, dest, snap, SnapshotCredential{Recovery: secret.Take([]byte(rec))}); err != nil {
+	if err := WriteSnapshotFile(ctx, dest, snap, SnapshotCredential{Recovery: passphrase(rec)}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1348,14 +1350,14 @@ func TestSnapshotRowsAreInTheDefinedOrder(t *testing.T) {
 // cold factor on request.
 func leftFixture(t *testing.T) snapFix {
 	s, path, rec := stdCold(t, "sub-key passphrase one")
-	k := secret.Take([]byte("cold key two"))
+	k := owned(secret.Take([]byte("cold key two")))
 	if err := s.Update(ctx, func(w ports.Writer) error { return putKeyW(w, rf("pool2", ports.NodeSKey), k) }); err != nil {
 		t.Fatal(err)
 	}
 	two := rf("pool2", ports.NodeSKey)
 	forgeColdNoWrap(t, s, two, "sub-key passphrase one", "cold key two")
 	s.Close()
-	r, err := OpenWithRecovery(path, secret.Take([]byte(rec)))
+	r, err := OpenWithRecovery(path, passphrase(rec))
 	if err != nil {
 		t.Fatal(err)
 	}

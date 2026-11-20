@@ -2,6 +2,8 @@ package ports
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -96,6 +98,61 @@ func (r BackendRef) String() string {
 		s += " namespace " + r.Namespace
 	}
 	return s + " " + r.Key
+}
+
+// Fingerprint is a short digest of the whole reference (kind, address,
+// namespace, key): the first 8 bytes of SHA-256 over a label and each field
+// with its 4-byte length, as 16 hex digits. It is ClientFingerprint with every
+// client-side setting at its default (SPO-Xunlock-OUT-023). It is public, as
+// the reference is.
+func (r BackendRef) Fingerprint() string { return r.ClientFingerprint(nil) }
+
+// BackendSetting is one client-side setting of spo.toml that decides where a
+// credential goes or which identity is asked for (a CA file, a token or JWT
+// file, a private endpoint, plain http to loopback), by its key name in the
+// file and its value as written: a path, not the file's contents.
+type BackendSetting struct{ Name, Value string }
+
+// ClientFingerprint is the fingerprint an operator compares: the reference and
+// the client-side settings given, in the order given, each name and value
+// preceded by its 4-byte length after the four fields of the reference. With no
+// setting it is the reference's own fingerprint. Enrolment prints it, slot list
+// and every unlock notice show it, so a change of spo.toml's client settings,
+// or of both spo.toml and the slot, is visible to an operator who compares it
+// with the one noted at enrolment (SPO-Xunlock-OUT-023). It covers paths and
+// flags, not what the files hold: a CA or token file replaced in place keeps it.
+func (r BackendRef) ClientFingerprint(settings []BackendSetting) string {
+	h := sha256.New()
+	h.Write([]byte("spo/backend-ref\x00"))
+	put := func(f string) {
+		var n [4]byte
+		binary.BigEndian.PutUint32(n[:], uint32(len(f)))
+		h.Write(n[:])
+		h.Write([]byte(f))
+	}
+	for _, f := range []string{string(r.Kind), r.Address, r.Namespace, r.Key} {
+		put(f)
+	}
+	for _, s := range settings {
+		put(s.Name)
+		put(s.Value)
+	}
+	return hex.EncodeToString(h.Sum(nil)[:8])
+}
+
+// A BackendFingerprinter is a client that knows the fingerprint of the
+// reference and the client-side settings it was built with; the unlock notice
+// shows it (SPO-Xunlock-OUT-023). A client without it shows the reference's.
+type BackendFingerprinter interface {
+	BackendFingerprint() string
+}
+
+// FingerprintOf is the fingerprint the notice before an unwrap through kb shows.
+func FingerprintOf(kb KeyWrapBackend) string {
+	if f, ok := kb.(BackendFingerprinter); ok {
+		return f.BackendFingerprint()
+	}
+	return kb.Ref().Fingerprint()
 }
 
 // WrapContext is what a wrap is bound to at the backend: the workspace's

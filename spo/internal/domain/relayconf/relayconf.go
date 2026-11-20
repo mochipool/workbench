@@ -83,6 +83,11 @@ type Config struct {
 	KeyFile, MailboxDir, RegistryDir string
 	Port                             uint16
 	DERPMapURL                       string
+	// DERPRegionID pins a region of the fetched DERP map; DERPRegion pins a
+	// full region (no map is fetched). At most one is set; neither leaves the
+	// choice to the tunnel library at each start (region.go).
+	DERPRegionID int
+	DERPRegion   *DERPRegion
 	// Devices is the tunnel's allow-list, in file order: at least one.
 	Devices []Device
 	// Registry is the registry's configuration: bounds, policy and allow-list.
@@ -136,6 +141,9 @@ func (c *Config) Check() error {
 	case c.Port == 0:
 		return Bad("the tunnel port is 0")
 	}
+	if err := c.checkRegionPin(); err != nil {
+		return err
+	}
 	for k := range c.Limits {
 		if !slices.Contains(LimitKeys, k) {
 			return Bad("%q is not a key of [limits]", k)
@@ -173,6 +181,7 @@ func (c *Config) SameExceptDevices(o *Config) bool {
 	return c.Admission == o.Admission && slices.Equal(c.Wallets, o.Wallets) &&
 		c.KeyFile == o.KeyFile && c.MailboxDir == o.MailboxDir && c.RegistryDir == o.RegistryDir &&
 		c.Port == o.Port && c.DERPMapURL == o.DERPMapURL &&
+		c.DERPRegionID == o.DERPRegionID && c.DERPRegion.Equal(o.DERPRegion) &&
 		sameRegistry(c.Registry, o.Registry) && c.Quota == o.Quota && maps.Equal(c.Limits, o.Limits) &&
 		c.RetentionSeconds == o.RetentionSeconds && c.SweepInterval == o.SweepInterval
 }

@@ -49,17 +49,20 @@ func TestMain(m *testing.M) {
 	}
 	// A waiting writer gives up quickly in tests.
 	busyTimeoutMS = 300
-	code := m.Run()
+	liveAtStart = secret.Budget().Live
+	code := checkNoLeakAtExit(m.Run())
 	if tmplDir != "" {
 		os.RemoveAll(tmplDir)
 	}
 	os.Exit(code)
 }
 
-func pw() *secret.Buffer { return secret.Take([]byte(testPass)) }
+// pw, passphrase and recovery make buffers the test owns (leakcheck_test.go).
+func pw() *secret.Buffer { return owned(secret.Take([]byte(testPass))) }
 
 func template(t *testing.T) {
 	t.Helper()
+	noLeakedBuffers(t)
 	tmplOnce.Do(func() {
 		dir, err := os.MkdirTemp("", "sqlitestore-tmpl-")
 		if err != nil {
@@ -67,7 +70,9 @@ func template(t *testing.T) {
 		}
 		tmplDir = dir
 		tmplPath = filepath.Join(dir, "ws.db")
-		rk, err := Init(tmplPath, pw())
+		p := pw()
+		defer p.Destroy()
+		rk, err := Init(tmplPath, p)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -79,7 +84,7 @@ func template(t *testing.T) {
 	}
 }
 
-func recovery() *secret.Buffer { return secret.Take([]byte(tmplRecovery)) }
+func recovery() *secret.Buffer { return owned(secret.Take([]byte(tmplRecovery))) }
 
 func copyFile(t *testing.T, from, to string) {
 	t.Helper()
@@ -111,7 +116,9 @@ func fresh(t *testing.T) string {
 
 func openAt(t *testing.T, path string) *Store {
 	t.Helper()
-	s, err := OpenWithRecovery(path, recovery())
+	rk := recovery()
+	defer rk.Destroy()
+	s, err := OpenWithRecovery(path, rk)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +171,7 @@ func count(t *testing.T, s *Store, table string) int {
 func TestFailedUpdateWritesNothing(t *testing.T) {
 	s, _ := newStore(t)
 	boom := errors.New("boom")
-	k := secret.Take([]byte("sk"))
+	k := owned(secret.Take([]byte("sk")))
 	err := s.Update(ctx, func(w ports.Writer) error {
 		w.Put(counter, []byte("000\n"))
 		putKeyW(w, skey0, k)
@@ -328,7 +335,7 @@ func TestVersionsAndAuditRows(t *testing.T) {
 		t.Fatalf("version %d, want 2", v)
 	}
 	// One update touching three records: one audit row listing three entries.
-	k := secret.Take([]byte("k"))
+	k := owned(secret.Take([]byte("k")))
 	s.Update(ctx, func(w ports.Writer) error {
 		w.Put(counter, []byte("3"))
 		w.Put(rf("p", ports.KesVKey, 1), []byte("v"))
@@ -723,7 +730,7 @@ func TestChainsStayValidAcrossHandles(t *testing.T) {
 
 func TestWrongPassphraseAndRecovery(t *testing.T) {
 	path := fresh(t)
-	if _, err := Open(path, secret.Take([]byte("wrong"))); !errors.Is(err, ErrWrongCredential) {
+	if _, err := Open(path, passphrase("wrong")); !errors.Is(err, ErrWrongCredential) {
 		t.Fatalf("wrong passphrase: %v", err)
 	}
 	s, err := Open(path, pw())
@@ -747,12 +754,13 @@ func TestWrongPassphraseAndRecovery(t *testing.T) {
 	} else {
 		bad[3] = 'A'
 	}
-	if _, err := OpenWithRecovery(path, secret.Take(bad)); !errors.Is(err, seal.ErrRecoveryChecksum) {
+	if _, err := OpenWithRecovery(path, owned(secret.Take(bad))); !errors.Is(err, seal.ErrRecoveryChecksum) {
 		t.Errorf("typo: %v", err)
 	}
 	// A well-formed but different recovery key.
-	other := secret.New(seal.KeySize)
+	other := owned(secret.New(seal.KeySize))
 	txt, _ := seal.EncodeRecoveryKey(other)
+	owned(txt)
 	if _, err := OpenWithRecovery(path, txt); !errors.Is(err, ErrWrongCredential) {
 		t.Errorf("other recovery key: %v", err)
 	}
@@ -828,12 +836,12 @@ func TestSlotManagement(t *testing.T) {
 		t.Fatalf("%v %v", infos, err)
 	}
 	put(t, s, counter, "x")
-	id, err := s.AddPassphraseSlot(ctx, secret.Take([]byte("second passphrase")))
+	id, err := s.AddPassphraseSlot(ctx, passphrase("second passphrase"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	s.Close()
-	s2, err := Open(path, secret.Take([]byte("second passphrase")))
+	s2, err := Open(path, passphrase("second passphrase"))
 	if err != nil {
 		t.Fatalf("second passphrase: %v", err)
 	}
@@ -845,7 +853,7 @@ func TestSlotManagement(t *testing.T) {
 	if err := s2.RemoveSlot(ctx, id); !errors.Is(err, ErrUseRekey) {
 		t.Errorf("RemoveSlot: %v", err)
 	}
-	if _, err := s2.ChangePassphrase(ctx, id, secret.Take([]byte("changed"))); !errors.Is(err, ErrUseRekey) {
+	if _, err := s2.ChangePassphrase(ctx, id, passphrase("changed")); !errors.Is(err, ErrUseRekey) {
 		t.Errorf("ChangePassphrase: %v", err)
 	}
 	infos, _ = s2.Slots(ctx)
@@ -896,7 +904,7 @@ func TestBackupVerifyRestoreSignsWithRestoredKey(t *testing.T) {
 	if err := VerifyFileWithRecovery(bk, recovery()); err != nil {
 		t.Fatalf("VerifyFileWithRecovery: %v", err)
 	}
-	if err := VerifyFile(bk, secret.Take([]byte("wrong"))); !errors.Is(err, ErrWrongCredential) {
+	if err := VerifyFile(bk, passphrase("wrong")); !errors.Is(err, ErrWrongCredential) {
 		t.Errorf("wrong passphrase: %v", err)
 	}
 	empty := filepath.Join(t.TempDir(), "restored", "ws.db")
@@ -912,6 +920,7 @@ func TestBackupVerifyRestoreSignsWithRestoredKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer k.Destroy()
 	k.Use(func(b []byte) error {
 		if string(b) != "the-signing-key" {
 			t.Errorf("restored key %q", b)

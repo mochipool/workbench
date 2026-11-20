@@ -180,17 +180,22 @@ func primitiveBanViolations(g importGraph, roots []string, tunnel string) []stri
 var tunnelDirectImports = []string{
 	// standard library
 	"context", "crypto/rand", "errors", "fmt", "io", "net", "os", "reflect",
-	"strings", "sync", "sync/atomic", "time", "unsafe",
+	"slices", "strings", "sync", "sync/atomic", "time", "unsafe",
 	// the tunnel library and the packages of it the adapter uses
 	"github.com/tailscale/tailcat",
 	"go4.org/mem",
 	"gvisor.dev/gvisor/pkg/tcpip",
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet",
+	"tailscale.com/derp/derphttp",
+	"tailscale.com/net/netmon",
+	"tailscale.com/net/netns",
 	"tailscale.com/tailcfg",
 	"tailscale.com/types/key",
 	"tailscale.com/wgengine/filter",
 	// this module
 	module + "/internal/domain/party",
+	module + "/internal/domain/relayconf",
+	module + "/internal/platform/tunnelenv",
 	module + "/internal/ports/relayport",
 }
 
@@ -500,7 +505,7 @@ func TestTunnelAllowListBitesOnSyntheticImports(t *testing.T) {
 	for _, extra := range []string{
 		"net/http", "os/exec", "crypto/cipher", "filippo.io/age",
 		module + "/internal/adapters/envelope", module + "/internal/platform/secret",
-		"tailscale.com/net/netmon", "gvisor.dev/gvisor/pkg/tcpip/stack",
+		"tailscale.com/net/netcheck", "gvisor.dev/gvisor/pkg/tcpip/stack",
 	} {
 		got := append(slices.Clone(tunnelDirectImports), extra)
 		if v := allowListViolations(got, tunnelDirectImports); len(v) != 1 || !strings.Contains(v[0], extra) {

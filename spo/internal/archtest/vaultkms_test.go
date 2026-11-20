@@ -22,6 +22,8 @@ var vaultkmsAllowed = map[string]bool{
 	"syscall":                            true,
 	module + "/internal/ports":           true,
 	module + "/internal/platform/secret": true,
+	// the shared Signature Version 4 (ADR 0015 work package 2)
+	module + "/internal/platform/sigv4": true,
 }
 
 const vaultkmsPkg = module + "/internal/adapters/vaultkms"

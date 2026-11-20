@@ -277,7 +277,7 @@ func TestBackendSlotPolicyIsCheckedBeforeTheBackendIsAsked(t *testing.T) {
 	}
 
 	path, f, _ := hardwareWS(t)
-	h, err := openHW(path, f, "devA", "1234")
+	h, err := openHW(path, f, "devA", pinA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,8 +289,8 @@ func TestBackendSlotPolicyIsCheckedBeforeTheBackendIsAsked(t *testing.T) {
 		t.Errorf("the backend was asked %d times", kb.Calls)
 	}
 	// a FIDO2 credential of its own on a third authenticator
-	f.auths["devC"] = &fakeAuth{3, "seed-c", "9999"}
-	fc, _, err := EnrolFactor(ctx, f.inputs("devC", "9999"), h.ws, nil)
+	f.auths["devC"] = &fakeAuth{3, "seed-c", pinC}
+	fc, _, err := EnrolFactor(ctx, f.inputs("devC", pinC), h.ws, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,19 +299,19 @@ func TestBackendSlotPolicyIsCheckedBeforeTheBackendIsAsked(t *testing.T) {
 		t.Fatalf("hardware, backend and FIDO2: %v", err)
 	}
 	h.Close()
-	in := f.inputs("devC", "9999")
+	in := f.inputs("devC", pinC)
 	in.Backend, in.BackendCheck = resolver(kb), localConfig(kb.Ref())
 	s2, err := OpenWithFactors(path, in, OpenOptions{})
 	if err != nil {
 		t.Fatalf("FIDO2 and the backend: %v", err)
 	}
 	s2.Close()
-	if _, err := OpenWithFactors(path, f.inputs("devC", "9999"), OpenOptions{}); !errors.Is(err, ErrNoFactorSlot) {
+	if _, err := OpenWithFactors(path, f.inputs("devC", pinC), OpenOptions{}); !errors.Is(err, ErrNoFactorSlot) {
 		t.Errorf("the composite's authenticator without the backend: %v", err)
 	}
 	// the daily authenticator's own credential is not accepted in a backend
 	// composite: it would also be a standalone slot
-	h2, _ := openHW(path, f, "devA", "1234")
+	h2, _ := openHW(path, f, "devA", pinA)
 	defer h2.Close()
 	t2, _ := h2.currentTable(ctx)
 	var daily seal.FactorParams
@@ -321,7 +321,7 @@ func TestBackendSlotPolicyIsCheckedBeforeTheBackendIsAsked(t *testing.T) {
 		}
 	}
 	calls := kb.Calls
-	if _, err := h2.AddBackendSlot(ctx, kb, []FactorPlan{{Params: daily, Output: secret.Take(make([]byte, 32))}}); !errors.Is(err, ErrPolicyViolated) {
+	if _, err := h2.AddBackendSlot(ctx, kb, []FactorPlan{{Params: daily, Output: owned(secret.Take(make([]byte, 32)))}}); !errors.Is(err, ErrPolicyViolated) {
 		t.Errorf("the daily credential in a backend composite: %v", err)
 	}
 	if kb.Calls != calls {
@@ -364,7 +364,7 @@ func TestRemovingABackendSlot(t *testing.T) {
 	}
 	rec := heldRecoveryOf(t, path)
 	proof := presentStd(t, s, rec)
-	text, _, err := s.RemoveSlotByRotation(ctx, RemoveRequest{SlotID: id, Proof: proof, Daily: FactorInputs{Passphrase: func(context.Context) (*secret.Buffer, error) { return pw(), nil }}})
+	text, _, err := s.RemoveSlotByRotation(ctx, RemoveRequest{SlotID: id, Proof: proof, Daily: FactorInputs{Passphrase: pinOf(testPass)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -391,17 +391,17 @@ func TestRemovingAnotherSlotBesideABackendSlotIsRefused(t *testing.T) {
 	if _, err := s.AddBackendSlot(ctx, kb, []FactorPlan{passFactor(t, compositePass)}); err != nil {
 		t.Fatal(err)
 	}
-	extra, err := s.AddPassphraseSlot(ctx, secret.Take([]byte("a second passphrase")))
+	extra, err := s.AddPassphraseSlot(ctx, passphrase("a second passphrase"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	proof := presentStd(t, s, rec)
-	_, _, err = s.RemoveSlotByRotation(ctx, RemoveRequest{SlotID: extra, Proof: proof, Daily: FactorInputs{Passphrase: func(context.Context) (*secret.Buffer, error) { return pw(), nil }}})
+	_, _, err = s.RemoveSlotByRotation(ctx, RemoveRequest{SlotID: extra, Proof: proof, Daily: FactorInputs{Passphrase: pinOf(testPass)}})
 	if err == nil || !strings.Contains(err.Error(), "backend") {
 		t.Errorf("removal beside a backend slot: %v", err)
 	}
 	s.Close()
-	if _, err := OpenWithFactors(path, backendInputs(kb, compositePass), OpenOptions{}); err != nil {
+	if err := closed(OpenWithFactors(path, backendInputs(kb, compositePass), OpenOptions{})); err != nil {
 		t.Errorf("the backend slot no longer opens: %v", err)
 	}
 }

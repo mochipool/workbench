@@ -166,7 +166,7 @@ func TestR5CommitRunsDetachedFromTheCallersContext(t *testing.T) {
 	if !seen || !detached {
 		t.Fatalf("COMMIT ran (%v) under a cancellable context (detached: %v)", seen, detached)
 	}
-	if _, err := s.ChangePassphraseRekey(cctx, passT(t, "np")); err != nil {
+	if err := dropped(s.ChangePassphraseRekey(cctx, passT(t, "np"))); err != nil {
 		t.Fatal(err)
 	}
 	if !detached {

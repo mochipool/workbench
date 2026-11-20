@@ -17,22 +17,22 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 | `BackupToSink` | [`Xbackup`](../extensions/Xbackup.md) | 67 |
 | `ConvertKeptKey` | [`Xcustody`](../extensions/Xcustody.md) | 100 |
 | `DiscoverSources` | [`Xmulti`](../extensions/Xmulti.md) | 55 |
-| `EnrolFactor` | [`Xunlock`](../extensions/Xunlock.md) | 112 |
-| `EnrollParty` | [`Xparty`](../extensions/Xparty.md) | 76 |
+| `EnrolFactor` | [`Xunlock`](../extensions/Xunlock.md) | 115 |
+| `EnrollParty` | [`Xparty`](../extensions/Xparty.md) | 78 |
 | `ExportNodeKeys` | [`Xcustody`](../extensions/Xcustody.md) | 100 |
 | `ExportWorkspace` | [`Xcustody`](../extensions/Xcustody.md) | 100 |
-| `ImportSigningResponse` | [`Xparty`](../extensions/Xparty.md) | 76 |
+| `ImportSigningResponse` | [`Xparty`](../extensions/Xparty.md) | 78 |
 | `ImportWorkspace` | [`Pfiles`](../upstream/patterns/Pfiles.md), [`Xmulti`](../extensions/Xmulti.md) | 106 |
 | `ProtectSigningKey` | [`01protectKey`](../upstream/scripts/01_protectKey.md) | 29 |
-| `RequestSignatures` | [`Xparty`](../extensions/Xparty.md) | 76 |
+| `RequestSignatures` | [`Xparty`](../extensions/Xparty.md) | 78 |
 | `RestoreFromSink` | [`Xbackup`](../extensions/Xbackup.md) | 67 |
-| `ReviewSigningRequest` | [`Xparty`](../extensions/Xparty.md) | 76 |
-| `RevokeParty` | [`Xparty`](../extensions/Xparty.md) | 76 |
-| `RotateParty` | [`Xparty`](../extensions/Xparty.md) | 76 |
+| `ReviewSigningRequest` | [`Xparty`](../extensions/Xparty.md) | 78 |
+| `RevokeParty` | [`Xparty`](../extensions/Xparty.md) | 78 |
+| `RotateParty` | [`Xparty`](../extensions/Xparty.md) | 78 |
 | `SealKey` | [`Pfiles`](../upstream/patterns/Pfiles.md) | 51 |
 | `SnapshotWorkspace` | [`Xsnapshot`](../extensions/Xsnapshot.md) | 18 |
 | `StoreArtefact` | [`Pfiles`](../upstream/patterns/Pfiles.md) | 51 |
-| `UnlockWorkspace` | [`Xunlock`](../extensions/Xunlock.md) | 112 |
+| `UnlockWorkspace` | [`Xunlock`](../extensions/Xunlock.md) | 115 |
 | `UnprotectSigningKey` | [`01protectKey`](../upstream/scripts/01_protectKey.md) | 29 |
 
 ## `transaction-construction`
@@ -232,4 +232,4 @@ Every use case the corpus names, grouped by the bounded context of the spec that
 | [`25a_genAction`](../upstream/scripts/25a_genAction.md) | Generate a governance action file | governance | 75 | draft |
 | [`25b_regAction`](../upstream/scripts/25b_regAction.md) | Submit governance actions | governance, transaction-construction | 71 | draft |
 
-Totals: 78 specs, 3296 requirements, 96 use cases.
+Totals: 79 specs, 3331 requirements, 96 use cases.

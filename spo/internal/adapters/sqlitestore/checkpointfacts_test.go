@@ -38,11 +38,11 @@ func TestInspectBackupFactsReadsHeadAndSlotTableWithoutAKey(t *testing.T) {
 	// a rotation changes it
 	path, _, f, _ := standardThenRotated(t, unlock.Strict)
 	before, _ := InspectBackupFacts(path)
-	st, err := openHW(path, f, "devA", "1234")
+	st, err := openHW(path, f, "devA", pinA)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := st.Rotate(ctx, strictPlan(t, st, f, "devB", "5678")); err != nil {
+	if _, _, err := st.Rotate(ctx, strictPlan(t, st, f, "devB", pinB)); err != nil {
 		t.Fatal(err)
 	}
 	st.Close()
@@ -58,7 +58,7 @@ func TestInspectBackupFactsReadsHeadAndSlotTableWithoutAKey(t *testing.T) {
 // spec: SPO-Xbackup-PRE-016
 func TestDailyCredentialIDsExcludeTheRecoveryComposite(t *testing.T) {
 	path, f, _ := hardwareWS(t)
-	s, err := openHW(path, f, "devA", "1234")
+	s, err := openHW(path, f, "devA", pinA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestARotationKeepsTheCheckpointKeyRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := newFake()
-	fa, _, err := EnrolFactor(ctx, f.inputs("devA", "1234"), s.ws, nil)
+	fa, _, err := enrolOwned(ctx, f.inputs("devA", pinA), s.ws, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestARotationKeepsTheCheckpointKeyRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.Close()
-	r, err := openHW(path, f, "devA", "1234")
+	r, err := openHW(path, f, "devA", pinA)
 	if err != nil {
 		t.Fatal(err)
 	}

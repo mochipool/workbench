@@ -1,0 +1,16 @@
+# Relay a. The same devices as relay b: each device lists both relays.
+# Replace the example node keys with your devices' (spo party show).
+
+[relay]
+admission    = "open"
+key_file     = "/run/spo-relay/key/relay.key"
+mailbox_dir  = "/data/state/mailbox"
+registry_dir = "/data/state/registry"
+
+[[device]]
+label    = "alice laptop (example)"
+node_key = "2222222222222222222222222222222222222222222222222222222222222222"
+
+[[device]]
+label    = "bob server (example)"
+node_key = "3333333333333333333333333333333333333333333333333333333333333333"

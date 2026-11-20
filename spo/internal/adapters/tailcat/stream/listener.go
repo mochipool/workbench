@@ -14,6 +14,7 @@ import (
 	"tailscale.com/wgengine/filter"
 
 	"github.com/mochipool/workbench/spo/internal/domain/party"
+	"github.com/mochipool/workbench/spo/internal/platform/tunnelenv"
 	"github.com/mochipool/workbench/spo/internal/ports/relayport"
 
 	tc "github.com/tailscale/tailcat"
@@ -57,8 +58,21 @@ type ListenerConfig struct {
 	Allowed []party.NodeKey
 	// Port is the one TCP port served inside the tunnel; zero means DefaultPort.
 	Port uint16
-	// Region is the DERP region of a self-hosted relay (concern T5). When nil,
-	// DERPMapURL (or tailcat's default) is fetched and the nearest region used.
+	// The DERP region (region.go). At most one of the three is set; none: at
+	// every build tailcat fetches DERPMapURL (or its default) and picks the
+	// nearest region, so the address may change at a restart and a rebuild may
+	// fail.
+	//
+	// Pin is a configured full region: no map is fetched, the address is the
+	// same at every start with the same keys, and the start fails when the
+	// region answers no probe. RegionID is a region of the map fetched once at
+	// Listen (probed the same way): it fixes which region is used, but the
+	// address embeds the map's description of it, so a change of the map changes
+	// the address. Region is a full tailcat region used as given, not probed:
+	// the in-process test rig's form (it may carry InsecureForTests, which
+	// nothing from the configuration can).
+	Pin        *RegionPin
+	RegionID   int
 	Region     *tailcfg.DERPRegion
 	DERPMapURL string
 	// Backlog is the streams held for Accept; zero means DefaultBacklog.
@@ -103,6 +117,9 @@ type Stats struct {
 	Refused int64
 	// Unidentified is the connections tailcat could not name a peer key for.
 	Unidentified int64
+	// PeerPanics is the connections closed unserved because the tunnel
+	// library panicked while it named the peer: a library bug, counted apart.
+	PeerPanics int64
 	// Shed is the connections closed because the backlog or the stream cap was
 	// full.
 	Shed int64
@@ -119,10 +136,21 @@ type accepted struct {
 // replaces its engine when it rebuilds the tunnel.
 type engine struct {
 	ts      *tc.Server // nil when built over a bare net.Listener (tests)
+	want    string     // the address the pinned region gives; empty when unpinned
 	ln      net.Listener
 	peerKey func(net.Conn) (party.NodeKey, bool)
 	addKey  func(party.NodeKey) // adds a key to the tunnel's allow-list
+	// panics counts the lookups of this engine that panicked; only its pump
+	// names peers, so a change across one lookup is that connection's
+	panics atomic.Int64
 }
+
+// notePanic is the peer lookup's onPanic for this engine.
+func (e *engine) notePanic() { e.panics.Add(1) }
+
+// peerPanicsTotal counts, for the whole process, the panics of the tunnel
+// library that a peer lookup swallowed; only the first is logged.
+var peerPanicsTotal atomic.Int64
 
 // Listener implements relayport.StreamListener over one tailcat server.
 type Listener struct {
@@ -161,7 +189,7 @@ type Listener struct {
 	torn    chan struct{} // closed when the teardown has finished
 
 	accepted, refused, unidentified, shed atomic.Int64
-	rebuilds                              atomic.Int64
+	rebuilds, peerPanics                  atomic.Int64
 
 	testBeforeEngineClose func() // test seam: a teardown calls it before closing the engine
 	testAcceptRace        func() // test seam: Accept calls it between its two selects
@@ -196,13 +224,20 @@ func checkKeys(keys []party.NodeKey) error {
 }
 
 // Listen starts a tailcat server that serves one port inside the tunnel and
-// returns the listener. ctx bounds the startup (fetching the DERP map and
-// picking a region) and has no effect afterwards; Close ends the listener.
+// returns the listener. ctx bounds the startup (fetching the DERP map, probing a
+// pinned region or picking one) and has no effect afterwards; Close ends the
+// listener. A pinned region that the map lacks, that answers no probe, or whose
+// encoding the built address is not, fails it (ErrRegionNotInMap,
+// ErrRegionUnreachable, ErrRegionMismatch).
 //
 // The tunnel's allow-list is cfg.Allowed plus one key that nobody holds (a
 // fresh random node key, discarded). tailcat admits every client when its list
 // is empty, so without that key an empty Allowed would admit everyone.
 func Listen(ctx context.Context, cfg ListenerConfig) (*Listener, error) {
+	// no tunnel library debug knob, and its global log goes nowhere (SPO-Xmailbox-SEC-085)
+	if err := tunnelenv.Prepare(); err != nil {
+		return nil, fmt.Errorf("tailcat stream: %w", err)
+	}
 	if err := checkKeys(cfg.Allowed); err != nil {
 		return nil, err
 	}
@@ -223,7 +258,16 @@ func Listen(ctx context.Context, cfg ListenerConfig) (*Listener, error) {
 	if l.port == 0 {
 		l.port = DefaultPort
 	}
-	l.region, l.derpURL, l.pub, l.canRebuild = cfg.Region, cfg.DERPMapURL, pub, true
+	reg, probe, err := resolveRegion(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if probe {
+		if err := probeRegion(ctx, reg); err != nil {
+			return nil, err
+		}
+	}
+	l.region, l.derpURL, l.pub, l.canRebuild = reg, cfg.DERPMapURL, pub, true
 	if cfg.Logf != nil {
 		l.logf = cfg.Logf
 	}
@@ -251,8 +295,15 @@ func Listen(ctx context.Context, cfg ListenerConfig) (*Listener, error) {
 	if err != nil {
 		return nil, err
 	}
+	addr := string(e.ts.TailcatAddr())
+	if e.want != "" {
+		if err := checkPinnedAddr(addr, e.want); err != nil {
+			l.teardown(e, nil)
+			return nil, err
+		}
+	}
 	l.eng = e
-	l.addr = string(e.ts.TailcatAddr())
+	l.addr = addr
 	go l.pumpEngine(e)
 	return l, nil
 }
@@ -293,10 +344,14 @@ func (l *Listener) build(ctx context.Context, allowed []party.NodeKey) (*engine,
 		clients = append(clients, nodePublic(k))
 	}
 	clients = append(clients, key.NewNode().Public()) // nobody holds its private half
+	var want string
+	if l.region != nil {
+		want = pinnedAddr(priv, psk, l.region)
+	}
 	ts := &tc.Server{
 		Key:            priv,
 		PresharedKey:   psk,
-		Region:         l.region,
+		Region:         l.region.Clone(), // tailcat keeps it: every build gets its own copy
 		DERPMapURL:     l.derpURL,
 		AllowedClients: clients,
 		// An empty, non-nil list: the packet filter admits only the port that
@@ -310,15 +365,40 @@ func (l *Listener) build(ctx context.Context, allowed []party.NodeKey) (*engine,
 		ts.Close()
 		return nil, fmt.Errorf("tailcat stream: listen: %w", err)
 	}
-	peer := func(c net.Conn) (party.NodeKey, bool) {
-		for _, kv := range ts.PeerEnv(c.LocalAddr(), c.RemoteAddr()) {
+	e := &engine{ts: ts, want: want, ln: tl, addKey: func(k party.NodeKey) { ts.AddAllowedClient(nodePublic(k)) }}
+	e.peerKey = peerFunc(ts.PeerEnv, e.notePanic)
+	return e, nil
+}
+
+// peerFunc names the tunnel peer of an accepted connection from tailcat's
+// PeerEnv. A connection that was reset before it got here has no address
+// (gonet's RemoteAddr returns nil once the endpoint is gone), and PeerEnv
+// dereferences it, so such a connection is unidentified and never reaches
+// PeerEnv (SPO-Xmailbox-SEC-086). The lookup runs on untrusted input on the
+// accept path, so a panic inside the library is also an unidentified
+// connection, never the end of the relay: onPanic (if not nil) is called, and
+// the listener counts it apart (Stats.PeerPanics).
+func peerFunc(env func(local, remote net.Addr) []string, onPanic func()) func(net.Conn) (party.NodeKey, bool) {
+	return func(c net.Conn) (k party.NodeKey, ok bool) {
+		local, remote := c.LocalAddr(), c.RemoteAddr()
+		if local == nil || remote == nil {
+			return party.NodeKey{}, false
+		}
+		defer func() {
+			if recover() != nil {
+				k, ok = party.NodeKey{}, false
+				if onPanic != nil {
+					onPanic()
+				}
+			}
+		}()
+		for _, kv := range env(local, remote) {
 			if k, ok := parsePeer(kv); ok {
 				return k, true
 			}
 		}
 		return party.NodeKey{}, false
 	}
-	return &engine{ts: ts, ln: tl, peerKey: peer, addKey: func(k party.NodeKey) { ts.AddAllowedClient(nodePublic(k)) }}, nil
 }
 
 // NodeKey is the relay's node public key: what clients pin.
@@ -347,7 +427,8 @@ func (l *Listener) server() *tc.Server {
 
 // Stats returns the counters.
 func (l *Listener) Stats() Stats {
-	return Stats{l.accepted.Load(), l.refused.Load(), l.unidentified.Load(), l.shed.Load(), l.rebuilds.Load()}
+	return Stats{Accepted: l.accepted.Load(), Refused: l.refused.Load(), Unidentified: l.unidentified.Load(), PeerPanics: l.peerPanics.Load(),
+		Shed: l.shed.Load(), Rebuilds: l.rebuilds.Load()}
 }
 
 // Done is closed when Close has finished tearing the tunnel down. Close itself
@@ -547,7 +628,7 @@ func (l *Listener) install(ne *engine, built []party.NodeKey) bool {
 		l.teardown(ne, nil)
 		return false
 	}
-	if got := string(ne.ts.TailcatAddr()); got != l.addr {
+	if got := string(ne.ts.TailcatAddr()); got != l.addr || (ne.want != "" && checkPinnedAddr(got, ne.want) != nil) {
 		l.mu.Unlock()
 		l.teardown(ne, nil)
 		l.fail(errors.New("tailcat stream: the rebuilt tunnel has another address: the pinned relay address no longer works"))
@@ -681,9 +762,17 @@ func (l *Listener) isClosed() bool {
 // closed with a reset at once, so that a peer that keeps its end open leaves
 // no endpoint behind.
 func (l *Listener) admit(e *engine, c net.Conn) {
+	before := e.panics.Load()
 	k, ok := e.peerKey(c)
 	if !ok {
-		l.unidentified.Add(1)
+		if e.panics.Load() != before {
+			l.peerPanics.Add(1)
+			if peerPanicsTotal.Add(1) == 1 {
+				l.logf("tailcat stream: the tunnel library panicked while naming the peer of a connection; the connection was closed unserved. Only the first such panic of this process is logged; Stats.PeerPanics counts each")
+			}
+		} else {
+			l.unidentified.Add(1)
+		}
 		abortConn(c)
 		return
 	}

@@ -65,6 +65,10 @@ func nodePrivate(r SecretReader) (key.NodePrivate, error) {
 	if err != nil {
 		return key.NodePrivate{}, err
 	}
+	if raw == ([KeyLen]byte{}) {
+		// the zero key has no public half: tailcat would panic on it
+		return key.NodePrivate{}, errors.New("tailcat stream: the node key is all zero")
+	}
 	return key.NodePrivateFromRaw32(mem.B(raw[:])), nil
 }
 

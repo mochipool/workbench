@@ -1,0 +1,15 @@
+# The relay's configuration (docs/reference/relay-config.md), mounted at
+# /etc/spo-relay/relay.toml. The paths are the pod's: the key in the memory
+# volume the init container fills, the stores on the pod's own claim.
+# Replace the example [[device]] with the node keys of your devices
+# (spo party show prints one). Nobody holds the example key.
+
+[relay]
+admission    = "open"
+key_file     = "/run/spo-relay/key/relay.key"
+mailbox_dir  = "/data/state/mailbox"
+registry_dir = "/data/state/registry"
+
+[[device]]
+label    = "example, replace"
+node_key = "1111111111111111111111111111111111111111111111111111111111111111"

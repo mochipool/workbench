@@ -11,7 +11,6 @@ import (
 
 	"github.com/mochipool/workbench/spo/internal/domain/pool"
 	"github.com/mochipool/workbench/spo/internal/domain/unlock"
-	"github.com/mochipool/workbench/spo/internal/platform/secret"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -250,6 +249,7 @@ func TestRestoreDestinationOpensWithADifferentCredential(t *testing.T) {
 	}
 	var newText string
 	newRec.Use(func(b []byte) error { newText = string(b); return nil })
+	newRec.Destroy()
 	s.Close()
 	_ = rec
 	before, _ := os.ReadFile(path)
@@ -372,7 +372,7 @@ var _ = context.Background
 // spec: SPO-Xbackup-PRE-011, SPO-Xbackup-PRE-012
 func TestCounterRuleThroughFactors(t *testing.T) {
 	path, f, _ := hardwareWS(t)
-	s, err := openHW(path, f, "devA", "1234")
+	s, err := openHW(path, f, "devA", pinA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -384,13 +384,13 @@ func TestCounterRuleThroughFactors(t *testing.T) {
 	putCounters(t, s, "poolA", cstate{issue: 6, kesCur: 3, kesNext: 4})
 	s.Close()
 	var rep RestoreReport
-	if err := RestoreWithFactors(bk, path, f.inputs("devA", "1234"), RestoreOptions{Overwrite: true, AllowOlder: true, Report: &rep}); err != nil {
+	if err := RestoreWithFactors(bk, path, f.inputs("devA", pinA), RestoreOptions{Overwrite: true, AllowOlder: true, Report: &rep}); err != nil {
 		t.Fatal(err)
 	}
 	if len(rep.Carried) != 2 {
 		t.Fatalf("%+v", rep)
 	}
-	r, err := openHW(path, f, "devA", "1234")
+	r, err := openHW(path, f, "devA", pinA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,7 +399,7 @@ func TestCounterRuleThroughFactors(t *testing.T) {
 		t.Fatalf("%+v", got)
 	}
 	// a wrong PIN is not "the destination cannot be opened": it is refused as it is
-	if err := RestoreWithFactors(bk, path, f.inputs("devA", "0000"), RestoreOptions{Overwrite: true, AllowOlder: true, AcceptLowerCounters: true}); err == nil {
+	if err := RestoreWithFactors(bk, path, f.inputs("devA", pinWrong), RestoreOptions{Overwrite: true, AllowOlder: true, AcceptLowerCounters: true}); err == nil {
 		t.Fatal("a wrong PIN restored")
 	}
 }
@@ -608,7 +608,7 @@ func TestACredentialProblemNeverSuggestsOrHonoursTheFlag(t *testing.T) {
 	backup := filepath.Join(t.TempDir(), "b.bak")
 	s.Backup(ctx, backup)
 	putCounters(t, s, "poolA", cstate{issue: 11, kesCur: 1, kesNext: 2})
-	if _, err := s.ChangePassphraseRekey(ctx, passphrase("changed after the backup")); err != nil {
+	if err := dropped(s.ChangePassphraseRekey(ctx, passphrase("changed after the backup"))); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()
@@ -685,7 +685,7 @@ func TestCarryThroughARecoveryUnlockedCopy(t *testing.T) {
 	putCounters(t, s, "poolA", cstate{issue: 9, kesCur: 1, kesNext: 2})
 	s.Close()
 	var rep RestoreReport
-	if err := RestoreWithRecoveryOptions(backup, path, secret.Take([]byte(rec)), RestoreOptions{Overwrite: true, AllowOlder: true, Report: &rep}); err != nil {
+	if err := RestoreWithRecoveryOptions(backup, path, passphrase(rec), RestoreOptions{Overwrite: true, AllowOlder: true, Report: &rep}); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := readC(t, openPlain(t, path), "poolA"); got.issue != 9 || len(rep.Carried) != 1 {
@@ -699,7 +699,7 @@ func TestCarryThroughARecoveryUnlockedCopy(t *testing.T) {
 // spec: SPO-Xbackup-PRE-012
 func TestADestinationFactorThatFailsIsReturnedAsItIs(t *testing.T) {
 	path, f, _ := hardwareWS(t)
-	s, err := openHW(path, f, "devA", "1234")
+	s, err := openHW(path, f, "devA", pinA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -710,17 +710,17 @@ func TestADestinationFactorThatFailsIsReturnedAsItIs(t *testing.T) {
 	s.Close()
 	// how many assertions does verifying the backup take? a restore into a fresh file
 	before := f.asserts
-	if err := RestoreWithFactors(bk, filepath.Join(t.TempDir(), "fresh.db"), f.inputs("devA", "1234"), RestoreOptions{}); err != nil {
+	if err := RestoreWithFactors(bk, filepath.Join(t.TempDir(), "fresh.db"), f.inputs("devA", pinA), RestoreOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	verifyAsserts := f.asserts - before
 	b := &budgetSource{FactorSource: f, left: verifyAsserts}
-	in := FactorInputs{Source: b, Device: "devA", PIN: pinOf("1234")}
+	in := FactorInputs{Source: b, Device: "devA", PIN: pinOf(pinA)}
 	err = RestoreWithFactors(bk, path, in, RestoreOptions{Overwrite: true, AllowOlder: true, AcceptLowerCounters: true})
 	if !errors.Is(err, ports.ErrFactorTimeout) {
 		t.Fatalf("the destination's factor failure was not returned as it is: %v", err)
 	}
-	if got, _ := readC(t, func() *Store { r, _ := openHW(path, f, "devA", "1234"); t.Cleanup(func() { r.Close() }); return r }(), "poolA"); got.issue != 6 {
+	if got, _ := readC(t, func() *Store { r, _ := openHW(path, f, "devA", pinA); t.Cleanup(func() { r.Close() }); return r }(), "poolA"); got.issue != 6 {
 		t.Fatalf("the destination changed: %+v", got)
 	}
 }
@@ -752,7 +752,7 @@ func TestCredentialProblemRefusesEvenForABackupThatContainsTheHead(t *testing.T)
 	s = openPlain(t, path)
 	presentStd(t, s, rec)
 	putCounters(t, s, "poolA", cstate{issue: 1, kesCur: 1, kesNext: 2}) // lowered by --counter 0
-	if _, err := s.ChangePassphraseRekey(ctx, passphrase("changed after the clone")); err != nil {
+	if err := dropped(s.ChangePassphraseRekey(ctx, passphrase("changed after the clone"))); err != nil {
 		t.Fatal(err)
 	}
 	backup := filepath.Join(t.TempDir(), "b.bak")
@@ -913,7 +913,7 @@ func TestAWaitingKesKeyWithOtherMaterialIsNotHeld(t *testing.T) {
 // spec: SPO-Xbackup-PRE-015
 func TestStrictDestinationWhoseDailySlotChangedHasNoRecoveryAdvice(t *testing.T) {
 	path, _, f, _ := standardThenRotated(t, unlock.Strict)
-	s, err := openHW(path, f, "devA", "1234")
+	s, err := openHW(path, f, "devA", pinA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -923,13 +923,13 @@ func TestStrictDestinationWhoseDailySlotChangedHasNoRecoveryAdvice(t *testing.T)
 		t.Fatal(err)
 	}
 	putCounters(t, s, "poolA", cstate{issue: 11, kesCur: 1, kesNext: 2})
-	if _, _, err := s.Rotate(ctx, strictPlan(t, s, f, "devB", "5678")); err != nil {
+	if _, _, err := s.Rotate(ctx, strictPlan(t, s, f, "devB", pinB)); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()
 	before, _ := os.ReadFile(path)
 	for _, accept := range []bool{false, true} {
-		err := RestoreWithFactors(backup, path, f.inputs("devA", "1234"), RestoreOptions{Overwrite: true, AllowOlder: true, AcceptLowerCounters: accept})
+		err := RestoreWithFactors(backup, path, f.inputs("devA", pinA), RestoreOptions{Overwrite: true, AllowOlder: true, AcceptLowerCounters: accept})
 		if !errors.Is(err, ErrCountersNeedCredential) || errors.Is(err, ErrCountersUnknown) {
 			t.Fatalf("accept=%v: %v", accept, err)
 		}

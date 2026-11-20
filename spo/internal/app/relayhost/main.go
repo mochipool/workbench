@@ -115,6 +115,14 @@ func summary(w io.Writer, cfg *relayconf.Config) {
 	}
 	fmt.Fprintf(w, "; tunnel restricted to %d device node key(s); at most %d bound devices; retention %d s\n",
 		len(cfg.Devices), cfg.Registry.MaxBoundDevices, cfg.RetentionSeconds)
+	switch {
+	case cfg.DERPRegion != nil:
+		fmt.Fprintf(w, "DERP region pinned in full: region %d, %d node(s); the address is the same at every start with this key\n", cfg.DERPRegion.ID, len(cfg.DERPRegion.Nodes))
+	case cfg.DERPRegionID != 0:
+		fmt.Fprintf(w, "DERP region %d of the map: the address follows the map's description of that region\n", cfg.DERPRegionID)
+	default:
+		fmt.Fprintln(w, "DERP region not pinned: the address may change at a restart ([derp_region] pins it)")
+	}
 }
 
 func checkConfig(cfg *relayconf.Config, stdout, stderr io.Writer, d Deps) int {

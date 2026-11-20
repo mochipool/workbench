@@ -1,0 +1,11 @@
+# Two independent relays, a and b, in one namespace. Each has its own key
+# Secret (spo-relay-key-a, spo-relay-key-b), configuration, pod and claim; they
+# share nothing but the namespace's objects. Devices list both and send to
+# both. For more availability, put them on different nodes or in different
+# clusters: two relays on one node fall together.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base/shared
+  - relay-a
+  - relay-b
