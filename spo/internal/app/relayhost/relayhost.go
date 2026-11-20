@@ -265,10 +265,15 @@ func Start(ctx context.Context, cfg *relayconf.Config, key *relayconf.Key, d Dep
 	}
 	var undo []func()
 	var stuckClose error // the tunnel's close in the undo did not finish
+	loadFailed := false  // a store's open failed: what it sent may still land
+	lapseWhy := ""       // why a failed start lets the lease lapse, read before the stores close
 	defer func() {
 		if err != nil {
 			if r.keep != nil && !r.keep.held() {
 				err = fmt.Errorf("%w: %w", err, ErrAuthorityLost)
+			}
+			if r.keep != nil {
+				lapseWhy = r.startLapse(loadFailed)
 			}
 			for i := len(undo) - 1; i >= 0; i-- {
 				undo[i]()
@@ -290,7 +295,9 @@ func Start(ctx context.Context, cfg *relayconf.Config, key *relayconf.Key, d Dep
 
 	// 0. the lease, before anything is loaded and before the tunnel (ADR 0015
 	// decision 5): a taker of a lapsed lease waits out the drain inside Acquire.
-	// It is renewed from here on; a failed start releases it unless it was lost.
+	// It is renewed from here on; a failed start releases it unless it was lost
+	// or a request of the load may still land (startLapse), as a planned stop
+	// does (SPO-Xmailbox-OUT-129).
 	openLease := d.OpenLease
 	if openLease == nil {
 		openLease = func(party.NodeKey, relayport.Clock) (relayport.Lease, error) { return SingleHostLease(), nil }
@@ -311,7 +318,11 @@ func Start(ctx context.Context, cfg *relayconf.Config, key *relayconf.Key, d Dep
 	undo = append(undo, func() {
 		kstop()
 		<-r.keep.done
-		if r.keep.held() {
+		switch {
+		case !r.keep.held():
+		case lapseWhy != "":
+			r.log.line("start_failed lease=lapses reason=" + lapseWhy)
+		default:
 			rctx, cancel := context.WithTimeout(context.Background(), DefaultRequestTimeout)
 			lease.Release(rctx) //nolint:errcheck // a lease that is not released lapses
 			cancel()
@@ -328,6 +339,7 @@ func Start(ctx context.Context, cfg *relayconf.Config, key *relayconf.Key, d Dep
 	// 1. the mailbox store
 	store, notes, err := d.OpenMailbox(StoreSpec{Kind: StoreDirectory, Dir: cfg.MailboxDir}, env)
 	if err != nil {
+		loadFailed = true
 		return nil, fmt.Errorf("relay: the mailbox store: %w", err)
 	}
 	undo = append(undo, func() { store.Close() })
@@ -341,6 +353,7 @@ func Start(ctx context.Context, cfg *relayconf.Config, key *relayconf.Key, d Dep
 	regCfg.Evictable = guard.Evictable
 	reg, notes, err := d.OpenRegistry(StoreSpec{Kind: StoreDirectory, Dir: cfg.RegistryDir}, regCfg, env)
 	if err != nil {
+		loadFailed = true
 		return nil, fmt.Errorf("relay: the registry: %w", err)
 	}
 	undo = append(undo, func() { reg.Close() })
@@ -420,6 +433,32 @@ func Start(ctx context.Context, cfg *relayconf.Config, key *relayconf.Key, d Dep
 		RelayKey: pub,
 	}
 	return r, nil
+}
+
+// startLapse is why a failed start must let its lease lapse rather than
+// release it (SPO-Xmailbox-IF-034, OUT-129), read before the stores close: a
+// store whose open failed (its writes' outcomes cannot be known), a store call
+// of the server that was not answered, an operation the registry holds that
+// storage has not confirmed, or statistics that cannot be read. "" releases.
+func (r *Relay) startLapse(loadFailed bool) string {
+	switch {
+	case loadFailed:
+		return "load"
+	case r.srv != nil && r.srv.Unanswered() > 0:
+		return "unanswered"
+	case r.reg == nil:
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), r.reqTime)
+	defer cancel()
+	st, err := r.reg.Stats(ctx)
+	switch {
+	case err != nil:
+		return "registry"
+	case st.Unconfirmed > 0:
+		return "unconfirmed"
+	}
+	return ""
 }
 
 func (r *Relay) markStuck(err error) {

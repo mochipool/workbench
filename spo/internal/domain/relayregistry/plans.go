@@ -74,6 +74,9 @@ func (c *Core) PlanRegister(p Presented, now int64) (Plan[RegisterResult], error
 	if !c.cfg.allows(key) {
 		return none, ErrNotAllowed
 	}
+	if _, pending := c.unconfirmed[delKey(dev)]; pending {
+		return none, ErrDeletePending
+	}
 	old := c.dev[dev]
 	if old != nil && old.StatementID == vb.StatementID() {
 		rec := old.clone()
@@ -233,10 +236,13 @@ func cmp64(a, b int64) int {
 // lever of a flood, because anyone can make it with a throwaway key before
 // authenticating.
 //
-//   - A non-invalidating revoke that raises a stored tombstone needs no room. One
-//     that would add a tombstone may use only the lower half of MaxTombstones
-//     (ErrTombstoneFull otherwise) and takes a token of the relay-wide revoke cap
-//     (ErrRevokeRate). A replay records nothing and costs nothing.
+//   - A non-invalidating revoke that raises a stored tombstone needs no room; it
+//     takes a token of the relay-wide revoke cap (ErrRevokeRate) and draws on
+//     the name's own budget, MaxRaisesPerName in RaiseWindowSeconds
+//     (ErrNameRaiseRate), so one name cannot gain a version a minute. One that
+//     would add a tombstone may use only the lower half of MaxTombstones
+//     (ErrTombstoneFull otherwise) and takes a token of the revoke cap. A replay
+//     records nothing and costs nothing.
 //   - An invalidating revoke is never refused and never rate limited. Its
 //     tombstone goes into the table up to MaxTombstones, then into the headroom
 //     above it (Config.TombstoneHeadroom). When the headroom is spent too, the
@@ -279,6 +285,9 @@ func (c *Core) PlanRevoke(r RevokeRecord, now int64) (Plan[RevokeResult], error)
 	if sh.raised {
 		switch {
 		case sh.have:
+			if !sh.invalidating && !c.mayRaise(sh.tk, now) {
+				return none, ErrNameRaiseRate
+			}
 			if !sh.invalidating && !c.revRate.has(now) {
 				return none, ErrRevokeRate
 			}
@@ -356,6 +365,20 @@ func (c *Core) PlanRoom(r RevokeRecord, now int64) []Op {
 		return nil
 	}
 	return drop
+}
+
+// mayRaise reports whether the stored tombstone k may take one more raise that
+// invalidates nothing at now: fewer than MaxRaisesPerName in the last
+// RaiseWindowSeconds. A time after now (a clock that stepped back) counts as
+// inside the window, so it gains nothing.
+func (c *Core) mayRaise(k TombKey, now int64) bool {
+	n := 0
+	for _, at := range c.raises[k] {
+		if now-at < RaiseWindowSeconds {
+			n++
+		}
+	}
+	return n < MaxRaisesPerName
 }
 
 // hardSize is the bound of the table with its headroom.
@@ -557,7 +580,11 @@ func PartialRevoke(plan Plan[RevokeResult], applied, unknown []Op) RevokeResult 
 		}
 	}
 	if planned && !wrote {
-		res.Recorded, res.Raised = plan.Result.hadStored && !plan.Result.hadUnconfirmed, false
+		// the write the revoke needed did not take: storage holds at most the
+		// value from before, which is lower than the revoke's (a raise) or
+		// unconfirmed (a replay), so the revoke is not recorded and the client
+		// sends it again (SPO-Xobjstore-OUT-807)
+		res.Recorded, res.Raised = false, false
 		res.NotBefore = plan.Result.before
 		res.Unconfirmed = enforced || plan.Result.hadUnconfirmed
 	}

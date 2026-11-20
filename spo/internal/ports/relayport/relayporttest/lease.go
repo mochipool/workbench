@@ -30,6 +30,9 @@ type LeaseFixture struct {
 	Steal func()
 	// Late, when set, makes storage answer renewals after the lease end.
 	Late func(on bool)
+	// Remove, when set, deletes the lease record, as a principal that ignored
+	// the rules would; an absent record is lapsed, not free.
+	Remove func()
 }
 
 // LeaseFactory makes a lease under test.
@@ -38,7 +41,11 @@ type LeaseFactory func(t *testing.T) LeaseFixture
 // RunLease is the contract of relayport.Lease (ADR 0015 decision 5): two
 // holders never both hold it, a confirmed renewal holds it from its sending, a
 // late or refused renewal is a loss, a released lease is taken at once and a
-// lapsed one only after the wait and the drain.
+// lapsed or absent one only after the wait and the drain; a lease reports its
+// term (relayport.LeaseTerm) and can be ended on the holder's side
+// (relayport.LeaseLoser). The cases that race sample "both hold" after every
+// step of the lease clock; that the storage's conditional writes are atomic is
+// the assumption of the lease, not something the contract shows.
 //
 // spec: SPO-Xmailbox-IF-031, SPO-Xmailbox-INV-042
 func RunLease(t *testing.T, mk LeaseFactory) {
@@ -57,6 +64,9 @@ func RunLease(t *testing.T, mk LeaseFactory) {
 		{"LapsedIsTakenAfterTheWaitAndTheDrain", leaseLapsedTaken},
 		{"TheftIsALoss", leaseTheft},
 		{"LateAnswerIsALoss", leaseLateAnswer},
+		{"AbsentIsLapsed", leaseAbsentIsLapsed},
+		{"TermIsReported", leaseTermReported},
+		{"LoseEndsIt", leaseLoseEnds},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) { tc.run(t, mk) })
@@ -70,6 +80,13 @@ func acquire(t *testing.T, l relayport.Lease) {
 	if err := l.Acquire(ctx); err != nil {
 		t.Fatalf("Acquire: %v", err)
 	}
+}
+
+// holds reports whether l gives the authority at now: held, and its end (if it
+// has one) not reached, as a holder judges it (relayport.Lease, Lost).
+func holds(l relayport.Lease, now time.Time) bool {
+	until, ok := l.Until()
+	return ok && (until.IsZero() || now.Before(until))
 }
 
 func isClosed(c <-chan struct{}) bool {
@@ -346,6 +363,91 @@ func leaseTheft(t *testing.T, mk LeaseFactory) {
 	acquire(t, fx.Lease)
 	fx.Steal()
 	wantLost(t, fx.Lease.Renew(t.Context()), fx.Lease, "Renew after a theft")
+}
+
+// leaseAbsentIsLapsed: the record removed under a holder that no longer
+// renews. The contender does not hold before it saw the record absent for the
+// take-after time, and at no sampled instant (one per second of the lease
+// clock) do both hold; it holds after the drain, and the old holder's renewal
+// is a loss.
+func leaseAbsentIsLapsed(t *testing.T, mk LeaseFactory) {
+	fx := mk(t)
+	if fx.Remove == nil || fx.Contender == nil {
+		t.Skip("this lease's record cannot be removed in a test, or it has no second holder")
+	}
+	acquire(t, fx.Lease)
+	b := fx.Contender(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	done := background(b, ctx)
+	if !quiet(done) {
+		t.Fatal("a second holder took a lease that is held")
+	}
+	fx.Remove()
+	removed := fx.Clock.Now()
+	var first time.Duration
+	for i := 1; time.Duration(i)*time.Second <= fx.TakeAfter+fx.Drain+5*time.Second; i++ {
+		fx.Clock.Advance(time.Second)
+		time.Sleep(15 * time.Millisecond)
+		now := fx.Clock.Now()
+		aHolds, bHolds := holds(fx.Lease, now), holds(b, now)
+		if aHolds && bHolds {
+			t.Fatalf("%v after the removal both hold", fx.Clock.Now().Sub(removed))
+		}
+		if bHolds && first == 0 {
+			first = fx.Clock.Now().Sub(removed)
+		}
+	}
+	if first < fx.TakeAfter {
+		t.Fatalf("the contender held %v after the removal, before the take-after time %v", first, fx.TakeAfter)
+	}
+	arrives(t, done, "the taker of an absent lease")
+	if _, ok := b.Until(); !ok {
+		t.Fatal("the taker of an absent lease does not hold it")
+	}
+	wantLost(t, fx.Lease.Renew(t.Context()), fx.Lease, "the old holder's renewal")
+}
+
+// leaseTermReported: a lease with an end reports its term; one without
+// reports none.
+func leaseTermReported(t *testing.T, mk LeaseFactory) {
+	fx := mk(t)
+	tl, ok := fx.Lease.(relayport.LeaseTerm)
+	switch {
+	case fx.Bounded && !ok:
+		t.Fatal("a lease with an end does not report its term (relayport.LeaseTerm)")
+	case fx.Bounded && tl.Term() != fx.Term:
+		t.Fatalf("Term = %v, want %v", tl.Term(), fx.Term)
+	case !fx.Bounded && ok && tl.Term() != 0:
+		t.Fatalf("a lease without an end reports the term %v", tl.Term())
+	}
+	if got := relayport.TermOf(fx.Lease); fx.Bounded && got != fx.Term {
+		t.Fatalf("TermOf = %v", got)
+	}
+}
+
+// leaseLoseEnds: Lose ends the lease on the holder's side: Until is not held,
+// Lost is closed, a renewal is a loss, a request context is refused, and a
+// release is no error.
+func leaseLoseEnds(t *testing.T, mk LeaseFactory) {
+	fx := mk(t)
+	acquire(t, fx.Lease)
+	if !relayport.Lose(fx.Lease) {
+		t.Fatal("the lease cannot be lost on the holder's side (relayport.LeaseLoser)")
+	}
+	if _, ok := fx.Lease.Until(); ok {
+		t.Fatal("held after Lose")
+	}
+	if !isClosed(fx.Lease.Lost()) {
+		t.Fatal("Lost is not closed after Lose")
+	}
+	if _, _, err := relayport.RequestContext(t.Context(), fx.Lease, fx.Clock.Now(), time.Second); !errors.Is(err, relayport.ErrAuthorityLost) {
+		t.Fatalf("a request after Lose: %v", err)
+	}
+	wantLost(t, fx.Lease.Renew(t.Context()), fx.Lease, "Renew after Lose")
+	if err := fx.Lease.Release(t.Context()); err != nil {
+		t.Fatalf("Release after Lose: %v", err)
+	}
 }
 
 func leaseLateAnswer(t *testing.T, mk LeaseFactory) {

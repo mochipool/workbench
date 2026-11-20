@@ -61,6 +61,48 @@ type Lease interface {
 	Lost() <-chan struct{}
 }
 
+// LeaseTerm is implemented by a lease that reports its term: how long a
+// confirmed renewal holds it from its sending (the duration minus the margin),
+// zero for a lease without an end. The holder sizes its renewals from it (a
+// quarter of the term) and never from the time left at Acquire, which a renewal
+// that failed after a drain makes short. Every lease with an end in this
+// module implements it; relayporttest.RunLease checks it. It is a separate
+// interface so that a Lease written before it still compiles.
+//
+// spec: SPO-Xmailbox-IF-031
+type LeaseTerm interface {
+	Term() time.Duration
+}
+
+// LeaseLoser is implemented by a lease that the holder can end on its own
+// side: Lose makes Until not held and closes Lost for good, so that a renewal
+// still in flight (one the holder abandoned) cannot extend the lease, and
+// RequestContext refuses from then on. It sends nothing. The relay calls it
+// when it declares the loss itself (its guard before the lease end passed).
+//
+// spec: SPO-Xmailbox-IF-031
+type LeaseLoser interface {
+	Lose()
+}
+
+// TermOf is l's term (LeaseTerm), or zero when l does not report one.
+func TermOf(l Lease) time.Duration {
+	if t, ok := l.(LeaseTerm); ok {
+		return t.Term()
+	}
+	return 0
+}
+
+// Lose ends l on the holder's side (LeaseLoser) and reports whether l could
+// be told; a lease without Lose is left to its own end.
+func Lose(l Lease) bool {
+	if lo, ok := l.(LeaseLoser); ok {
+		lo.Lose()
+		return true
+	}
+	return false
+}
+
 // RequestContext is the context of one store request under l: ctx with a
 // deadline at the earlier of max from now and the lease end, now being the
 // lease's clock. It returns an error wrapping ErrAuthorityLost when the lease is

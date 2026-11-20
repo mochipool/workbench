@@ -29,8 +29,10 @@ var (
 	// that is the stricter state (a tombstone written, a binding deleted) and
 	// keeps it unconfirmed until a read-back settles it (Core.Settle, run by the
 	// adapter's Sweep and RefreshTombstones) or its bound passes (then
-	// ErrAuthorityLost); a mailbox adapter does not count an entry it could not
-	// confirm, and the next load finds it if it is there. A directory adapter
+	// ErrAuthorityLost); an object-store mailbox adapter holds the key of an entry it
+	// could not confirm (counted in every quota, listed nowhere, deleted again by
+	// each sweep until the request can no longer land), and a load that happens
+	// meanwhile lists it as an ordinary entry if it is there. A directory adapter
 	// returns it, wrapped with the cause, for a file renamed into place whose
 	// directory sync then failed.
 	ErrOutcomeUnknown = errors.New("the store did not confirm the request; its effect is unknown")

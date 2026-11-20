@@ -126,6 +126,10 @@ type Core struct {
 	// until which they are left out of the expired set (Hold). Only stored
 	// tombstones are held; a tombstone that is raised or goes loses its hold.
 	holds map[TombKey]int64
+	// raises are the relay times of the latest raises of each stored tombstone
+	// that invalidated nothing, at most MaxRaisesPerName, oldest first
+	// (mayRaise). In memory only; a tombstone that goes loses them.
+	raises map[TombKey][]int64
 	// versions counts the tombstone versions loaded (LoadTombstoneVersion).
 	versions int
 	// unconfirmed are the operations applied to memory whose outcome storage did
@@ -156,6 +160,7 @@ func NewCore(cfg Config) (*Core, error) {
 		revRate:     newBucket(cfg.RevokesPerHour, cfg.RevokeBurst),
 		tombDays:    map[int64]int{},
 		holds:       map[TombKey]int64{},
+		raises:      map[TombKey][]int64{},
 		unconfirmed: map[unconfKey]Unconfirmed{},
 		refused:     map[string]uint64{},
 	}, nil
@@ -249,6 +254,11 @@ type MergeResult struct {
 	// sessions. They are not deleted; no reader serves them, and a sweep removes
 	// them (SPO-Xmailbox-OUT-081). Never nil.
 	Invalidated []Entry
+	// Unreadable and Foreign are set by an adapter, not by the merge: versions
+	// it could not read and merged at the strictest reading, and objects among
+	// the tombstones that are not tombstones and were ignored
+	// (SPO-Xobjstore-PRE-809). The host logs them.
+	Unreadable, Foreign int
 }
 
 // MergeTombstones merges tombstones that storage holds and this writer did not
@@ -457,6 +467,8 @@ func (c *Core) CountRefusal(err error) {
 		key = "key_change"
 	case errors.Is(err, ErrOlderBinding):
 		key = "older"
+	case errors.Is(err, ErrDeletePending):
+		key = "delete_pending"
 	case errors.Is(err, relaybind.ErrLifetimePolicy):
 		key = "lifetime"
 	case errors.Is(err, relaybind.ErrRevoked):
@@ -508,6 +520,13 @@ func (c *Core) apply(op Op) {
 		c.setTomb(op.Tomb, op.NotBefore)
 		if op.Charge {
 			c.revRate.take(op.Now)
+			if op.Replaces {
+				rs := append(c.raises[op.Tomb], op.Now)
+				if len(rs) > MaxRaisesPerName {
+					rs = rs[len(rs)-MaxRaisesPerName:]
+				}
+				c.raises[op.Tomb] = rs
+			}
 		}
 	case OpDeleteTombstone:
 		c.delTomb(op.Tomb)
@@ -592,6 +611,7 @@ func (c *Core) dayDown(notBefore int64) {
 
 func (c *Core) delTomb(k TombKey) {
 	delete(c.holds, k)
+	delete(c.raises, k)
 	if old, ok := c.getTomb(k); ok {
 		c.dayDown(old)
 	}
