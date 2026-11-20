@@ -3,8 +3,12 @@ package sigv4
 import (
 	"encoding/hex"
 	"errors"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/mochipool/workbench/spo/test/s3stand"
 )
 
 func lendString(s string) SecretLender {
@@ -59,6 +63,105 @@ func TestPublishedVectors(t *testing.T) {
 	}
 	if hex.EncodeToString(key) != "f4780e2d9f65fa895f9c67b32ce1baf0b0d8a43505a000a1a9e090d414db404d" {
 		t.Errorf("signing key %x", key)
+	}
+}
+
+// The two other S3 examples of the "Signature Calculations for the
+// Authorization Header" page: PUT Object (a body, a Date header, a storage
+// class, a '$' in the key percent-encoded in the path) and GET Bucket
+// Lifecycle (an empty-value query parameter, ?lifecycle). Published figures,
+// recalled from memory: the page could not be fetched when they were added (it
+// renders client-side). An HMAC that matches a recalled 64-digit figure
+// exactly is itself the check that the recall is right.
+//
+// spec: SPO-Xobjstore-IF-010
+func TestPublishedS3PutAndLifecycleVectors(t *testing.T) {
+	s3at := time.Date(2013, 5, 24, 0, 0, 0, 0, time.UTC)
+	s3Key := lendString("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+	putHash := "44ce7dd67c959e0d3524ffac1771dfbba87d2b6b4b4e99e42034a8b803f8b072" // SHA-256 of "Welcome to Amazon S3."
+	for _, c := range []struct {
+		name string
+		in   Request
+		want string
+	}{
+		{"s3 PUT object", Request{Method: "PUT", Host: "examplebucket.s3.amazonaws.com", Path: "/test%24file.text",
+			Headers:     map[string]string{"date": "Fri, 24 May 2013 00:00:00 GMT", "x-amz-storage-class": "REDUCED_REDUNDANCY", "x-amz-content-sha256": putHash},
+			PayloadHash: putHash, Region: "us-east-1", Service: "s3", Time: s3at, KeyID: "AKIAIOSFODNN7EXAMPLE"},
+			"AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=date;host;x-amz-content-sha256;x-amz-date;x-amz-storage-class, Signature=98ad721746da40c64f1a55b78f14c238d841ea1380cd77a1b5971af0ece108bd"},
+		{"s3 GET ?lifecycle", Request{Method: "GET", Host: "examplebucket.s3.amazonaws.com", Path: "/", Query: "lifecycle",
+			Headers: map[string]string{"x-amz-content-sha256": emptyHash}, PayloadHash: emptyHash, Region: "us-east-1", Service: "s3", Time: s3at, KeyID: "AKIAIOSFODNN7EXAMPLE"},
+			"AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=fea454ca298b7da1c68078a5d1bdbfbbe0d65c699e0f91ac7a200a0136783543"},
+	} {
+		got, _, err := Sign(c.in, s3Key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != c.want {
+			t.Errorf("%s:\n got %s\nwant %s", c.name, got, c.want)
+		}
+	}
+}
+
+type derivedCase struct {
+	in    Request
+	names []string // the signed headers, sorted
+	want  string   // the signature, derived with s3stand.RefSign
+}
+
+// derivedCases are the requests with no published figure: a session token,
+// and the client's conditional and checksum headers.
+func derivedCases() map[string]derivedCase {
+	s3at := time.Date(2013, 5, 24, 0, 0, 0, 0, time.UTC)
+	bodyHash := "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881" // SHA-256 of "x"
+	return map[string]derivedCase{
+		"session token": {Request{Method: "GET", Host: "examplebucket.s3.amazonaws.com", Path: "/test.txt",
+			Headers: map[string]string{"x-amz-content-sha256": emptyHash}, PayloadHash: emptyHash, Region: "us-east-1", Service: "s3", Time: s3at,
+			KeyID: "AKIAIOSFODNN7EXAMPLE", Token: "FQoGZXIvYXdzEXAMPLE//token+with=reserved"},
+			[]string{"host", "x-amz-content-sha256", "x-amz-date", "x-amz-security-token"}, "4895d8981c7b958979998fa1e01b9a91429ddc57b02fca562029714b11e7c8d3"},
+		"create-only put with a checksum and a retention": {Request{Method: "PUT", Host: "examplebucket.s3.amazonaws.com", Path: "/relays/k/registry/tombstones/a-1",
+			Headers: map[string]string{"if-none-match": "*", "x-amz-checksum-sha256": "LXEWQrcmsEQBYnyp+6wy9chTD7GQPMTbAiWHF5IaSIE=", "x-amz-sdk-checksum-algorithm": "SHA256",
+				"x-amz-object-lock-mode": "COMPLIANCE", "x-amz-object-lock-retain-until-date": "2013-05-25T00:00:00Z", "x-amz-content-sha256": bodyHash},
+			PayloadHash: bodyHash, Region: "us-east-1", Service: "s3", Time: s3at, KeyID: "AKIAIOSFODNN7EXAMPLE", Token: "tok"},
+			[]string{"host", "if-none-match", "x-amz-checksum-sha256", "x-amz-content-sha256", "x-amz-date", "x-amz-object-lock-mode", "x-amz-object-lock-retain-until-date", "x-amz-sdk-checksum-algorithm", "x-amz-security-token"}, "cb5dfa202d3ae3a9575b6b22b33925efb123d5b793ba19de3d9b532e7d754d16"},
+		"overwrite with If-Match": {Request{Method: "PUT", Host: "examplebucket.s3.amazonaws.com", Path: "/relays/k/lease",
+			Headers:     map[string]string{"if-match": `"0123456789abcdef0123456789abcdef"`, "x-amz-content-sha256": bodyHash},
+			PayloadHash: bodyHash, Region: "us-east-1", Service: "s3", Time: s3at, KeyID: "AKIAIOSFODNN7EXAMPLE", Token: "tok"},
+			[]string{"host", "if-match", "x-amz-content-sha256", "x-amz-date", "x-amz-security-token"}, "f6831790afab3cfffd0855adfe11d8c31a9b32d60d02b22175df73be9eeaccda"},
+	}
+}
+
+// Requests with no published figure, whose expected signatures were derived
+// once with the stand-in's independent Signature Version 4 (s3stand.RefSign,
+// which shares no code with this package) and written here: a session token
+// with reserved characters, a create-only put with the checksum and retention
+// headers, and an overwrite with If-Match. Both implementations must give the
+// written figure.
+//
+// spec: SPO-Xobjstore-IF-010
+func TestDerivedVectors(t *testing.T) {
+	key := "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+	for name, c := range derivedCases() {
+		got, date, err := Sign(c.in, lendString(key))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=" + strings.Join(c.names, ";") + ", Signature=" + c.want
+		if got != want {
+			t.Errorf("%s: sigv4\n got %s\nwant %s", name, got, want)
+		}
+		h := http.Header{}
+		for k, v := range c.in.Headers {
+			h.Set(k, v)
+		}
+		h.Set("x-amz-date", date)
+		if c.in.Token != "" {
+			h.Set("x-amz-security-token", c.in.Token)
+		}
+		ref, ok := s3stand.RefSign(s3stand.RefRequest{Method: c.in.Method, EscapedPath: c.in.Path, RawQuery: c.in.Query, Host: c.in.Host, Header: h,
+			SignedHeaders: c.names, PayloadHash: c.in.PayloadHash, AmzDate: date, Region: c.in.Region, Service: c.in.Service, Secret: key})
+		if !ok || ref != c.want {
+			t.Errorf("%s: the reference gives %s (%v), the written figure is %s", name, ref, ok, c.want)
+		}
 	}
 }
 

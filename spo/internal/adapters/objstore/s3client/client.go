@@ -86,21 +86,25 @@ func (Credentials) String() string { return "s3client.Credentials{redacted}" }
 func (Credentials) GoString() string { return "s3client.Credentials{redacted}" }
 
 // Provider supplies credentials. Web identity (IRSA, Workload Identity) is a
-// later package; StaticProvider is for tests.
+// later package; tests write their own (there is no fixed-set provider in this
+// package, so none can be configured in a release build).
+//
+// Retrieve is called by one fetch at a time on behalf of every request that
+// needs a set; its context carries the values of the request that started the
+// fetch but not its cancellation, and ends after CredentialFetchTimeout. Each
+// waiting request gives up at its own deadline.
 type Provider interface {
 	Retrieve(ctx context.Context) (Credentials, error)
 }
 
-// StaticProvider returns one fixed set. It is for tests: the set must still be
-// short-lived (a session token and an expiry within 12 hours) or the client
-// refuses it.
-type StaticProvider struct{ Creds Credentials }
+// CredentialFetchTimeout bounds one Provider.Retrieve.
+const CredentialFetchTimeout = 30 * time.Second
 
-// Retrieve returns a copy of the set.
-func (p StaticProvider) Retrieve(context.Context) (Credentials, error) {
-	c := p.Creds
-	c.Secret = bytes.Clone(c.Secret)
-	return c, nil
+// credFetch is one Provider.Retrieve in progress; done is closed when err and
+// the cache are set.
+type credFetch struct {
+	done chan struct{}
+	err  error
 }
 
 // Config is the store a Client talks to.
@@ -148,8 +152,9 @@ type Client struct {
 	page         int
 	now          func() time.Time
 
-	mu    sync.Mutex
-	cache *Credentials
+	mu       sync.Mutex
+	cache    *Credentials
+	fetching *credFetch // the Retrieve in progress, nil when none
 }
 
 // New checks the configuration and builds a client. It makes no request.
@@ -277,33 +282,77 @@ func printable(s string, max int) bool {
 }
 
 // credentials returns the cached set or a new one, checked to be short-lived.
-// The secret is a copy the caller wipes.
+// The secret is a copy the caller wipes. The mutex is never held across
+// Provider.Retrieve: one fetch runs for every caller that needs a set, and each
+// caller waits for it only until its own context ends.
 func (c *Client) credentials(ctx context.Context) (keyID, token string, secret []byte, err error) {
 	c.mu.Lock()
+	if c.cache != nil && c.cache.Expires.Sub(c.now()) > credRefresh {
+		keyID, token, secret = c.cache.AccessKeyID, c.cache.SessionToken, bytes.Clone(c.cache.Secret)
+		c.mu.Unlock()
+		return keyID, token, secret, nil
+	}
+	f := c.fetching
+	if f == nil {
+		f = &credFetch{done: make(chan struct{})}
+		c.fetching = f
+		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), CredentialFetchTimeout)
+		go func() {
+			defer cancel()
+			c.fetch(fctx, f)
+		}()
+	}
+	c.mu.Unlock()
+	select {
+	case <-ctx.Done():
+		return "", "", nil, fmt.Errorf("cannot get store credentials: %w", ctx.Err())
+	case <-f.done:
+	}
+	if f.err != nil {
+		return "", "", nil, f.err
+	}
+	// the fetch this caller waited for stored a set: use it even inside the
+	// refresh window (a provider may only have short sets), never once expired
+	c.mu.Lock()
 	defer c.mu.Unlock()
-	now := c.now()
-	if c.cache == nil || c.cache.Expires.Sub(now) <= credRefresh {
+	if c.cache == nil || !c.cache.Expires.After(c.now()) {
+		return "", "", nil, ErrCredentialsExpired
+	}
+	return c.cache.AccessKeyID, c.cache.SessionToken, bytes.Clone(c.cache.Secret), nil
+}
+
+// fetch runs one Provider.Retrieve and stores a set that passes the checks.
+func (c *Client) fetch(ctx context.Context, f *credFetch) {
+	err := func() error {
 		cr, err := c.provider.Retrieve(ctx)
 		if err != nil {
-			return "", "", nil, fmt.Errorf("cannot get store credentials: %w", err)
+			return fmt.Errorf("cannot get store credentials: %w", err)
 		}
 		defer sigv4.Wipe(cr.Secret)
+		now := c.now()
 		switch {
 		case cr.SessionToken == "" || cr.Expires.IsZero():
-			return "", "", nil, ErrStaticCredentials
+			return ErrStaticCredentials
 		case !printable(cr.AccessKeyID, 128) || len(cr.Secret) == 0 || len(cr.Secret) > 256 || !printable(cr.SessionToken, 8192):
-			return "", "", nil, fmt.Errorf("%w: the credentials are malformed", ErrInvalidInput)
+			return fmt.Errorf("%w: the credentials are malformed", ErrInvalidInput)
 		case !cr.Expires.After(now):
-			return "", "", nil, ErrCredentialsExpired
+			return ErrCredentialsExpired
 		case cr.Expires.Sub(now) > MaxCredentialLife:
-			return "", "", nil, ErrCredentialsTooLong
+			return ErrCredentialsTooLong
 		}
+		c.mu.Lock()
 		if c.cache != nil {
 			sigv4.Wipe(c.cache.Secret)
 		}
 		c.cache = &Credentials{AccessKeyID: cr.AccessKeyID, Secret: bytes.Clone(cr.Secret), SessionToken: cr.SessionToken, Expires: cr.Expires}
-	}
-	return c.cache.AccessKeyID, c.cache.SessionToken, bytes.Clone(c.cache.Secret), nil
+		c.mu.Unlock()
+		return nil
+	}()
+	c.mu.Lock()
+	f.err = err
+	c.fetching = nil
+	c.mu.Unlock()
+	close(f.done)
 }
 
 // call is one request as the operations describe it.
@@ -315,7 +364,7 @@ type call struct {
 	header  []string // lower-case name, value pairs; all are signed
 	body    []byte
 	retry   bool  // idempotent, or conditional: may be sent again
-	write   bool  // may change the store: no answer means ErrOutcomeUnknown
+	write   bool  // may change the store: an attempt that may have been applied makes ErrOutcomeUnknown
 	maxBody int64 // bound of a success body; 0 for none expected
 }
 
@@ -343,6 +392,12 @@ func (c *Client) target(key string) (host, path string) {
 }
 
 // do sends k, with bounded retries that never run past the context's deadline.
+// It returns the reply of the last attempt whenever a status came back, also
+// with an error (a 2xx whose body fails the bounds). For a write, uncertain
+// records across every attempt whether one may have been applied
+// (mayHaveApplied); then the error that ends the loop, whatever it is, is
+// joined with ErrOutcomeUnknown, and a refusal's reply carries uncertain for
+// the *StatusError.
 func (c *Client) do(ctx context.Context, k call) (*reply, error) {
 	dl, ok := ctx.Deadline()
 	if !ok {
@@ -351,6 +406,9 @@ func (c *Client) do(ctx context.Context, k call) (*reply, error) {
 	uncertain := false
 	for attempt := 1; ; attempt++ {
 		rep, err := c.once(ctx, k)
+		if k.write && mayHaveApplied(rep, err) {
+			uncertain = true
+		}
 		if rep != nil {
 			rep.attempts, rep.uncertain = attempt, uncertain
 		}
@@ -373,21 +431,35 @@ func (c *Client) do(ctx context.Context, k call) (*reply, error) {
 		if !again {
 			if err != nil {
 				err = fmt.Errorf("s3 %s %s: %w", k.op, k.key, err)
-				if k.write && errors.Is(err, errNoAnswer) {
+				if k.write && uncertain {
 					err = errors.Join(ErrOutcomeUnknown, err)
 				}
-				return nil, err
+				return rep, err
 			}
 			return rep, nil
-		}
-		if k.write && (err != nil || (rep != nil && rep.status >= 500)) {
-			uncertain = true
 		}
 	}
 }
 
 // errNoAnswer marks a transport failure: the request may have reached the store.
 var errNoAnswer = errors.New("no answer from the store")
+
+// errNotSent marks an attempt that was never sent (its context was done first).
+var errNotSent = errors.New("the request was not sent")
+
+// mayHaveApplied reports whether one attempt of a write may have changed the
+// store: no answer (the request may have arrived), any 5xx (a proxy may answer
+// it after the backend committed), or a 2xx whose body failed the bounds (the
+// status says it committed). A 429 is a rate limit answered before the request
+// is processed, and every other 4xx and 3xx a refusal: not applied. An attempt
+// never sent (the context done before it, credentials or signing refused) was
+// not applied.
+func mayHaveApplied(rep *reply, err error) bool {
+	if rep != nil {
+		return rep.status >= 500 || (rep.status/100 == 2 && err != nil)
+	}
+	return err != nil && errors.Is(err, errNoAnswer)
+}
 
 func retryable(rep *reply, err error) bool {
 	if err != nil {
@@ -439,6 +511,9 @@ func (c *Client) once(ctx context.Context, k call) (*reply, error) {
 		req.Header.Set("X-Amz-Security-Token", token)
 	}
 	req.Header.Set("Authorization", auth)
+	if err := ctx.Err(); err != nil {
+		return nil, errors.Join(errNotSent, err)
+	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		return nil, errors.Join(errNoAnswer, scrub(err))
@@ -452,9 +527,11 @@ func (c *Client) once(ctx context.Context, k call) (*reply, error) {
 	if k.method == http.MethodHead {
 		return rep, nil
 	}
+	// A 2xx whose body fails the bounds comes back with its reply and the
+	// error: do marks a write's such attempt as possibly applied.
 	if resp.ContentLength > limit {
 		if resp.StatusCode/100 == 2 {
-			return nil, ErrTooLarge
+			return rep, ErrTooLarge
 		}
 		return rep, nil // a refusal with an oversized document: the status is enough
 	}
@@ -462,18 +539,18 @@ func (c *Client) once(ctx context.Context, k call) (*reply, error) {
 	if err != nil {
 		if errors.Is(err, io.ErrUnexpectedEOF) {
 			if resp.StatusCode/100 == 2 {
-				return nil, ErrTruncated
+				return rep, ErrTruncated
 			}
 			return rep, nil
 		}
 		if resp.StatusCode/100 == 2 {
-			return nil, errors.Join(errNoAnswer, scrub(err))
+			return rep, errors.Join(errNoAnswer, scrub(err))
 		}
 		return rep, nil
 	}
 	if int64(len(b)) > limit {
 		if resp.StatusCode/100 == 2 {
-			return nil, ErrTooLarge
+			return rep, ErrTooLarge
 		}
 		return rep, nil
 	}

@@ -9,6 +9,7 @@ import (
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/domain/relaybind"
 	"github.com/mochipool/workbench/spo/internal/domain/relayregistry"
+	"github.com/mochipool/workbench/spo/internal/ports/relayport"
 )
 
 // The revoke path (ADR 0014 decisions 7 and 8). A Revoke is self-authenticating
@@ -63,6 +64,14 @@ func (s *session) handleRevoke(m mailbox.Message, hsEnd time.Time) *end {
 		n := srv.afterRevoke(s.ctx, rec, view, res, err)
 		ev.Count = n
 		switch {
+		case errors.Is(err, relayport.ErrAuthorityLost):
+			// the relay is no longer the writer: nothing it did may be claimed, and
+			// the client keeps the revoke pending (SPO-Xmailbox-OUT-127)
+			ev.Reason = ReasonAuthority
+		case res.Unconfirmed:
+			// the tombstone is enforced here but storage did not confirm it: the
+			// client sends the revoke again, and that writes it (SPO-Xmailbox-OUT-128)
+			ev.Reason = ReasonStore
 		case err == nil, errors.Is(err, relayregistry.ErrTombstoneUnrecorded):
 			status, ev.Reason = mailbox.RevokeRecorded, ReasonNone
 			if errors.Is(err, relayregistry.ErrTombstoneUnrecorded) {
@@ -166,13 +175,22 @@ func noStorage(err error) bool {
 // arrives.
 //
 // spec: SPO-Xmailbox-SEC-067, SPO-Xmailbox-SEC-069
+//
+// After a lost authority (the revoke's own call reported it, or an earlier one
+// did) it touches no store: the invalidated devices' sessions end, which is
+// memory, and nothing is purged, looked up or forgotten (SPO-Xmailbox-SEC-088).
 func (s *Server) afterRevoke(ctx context.Context, rec relayregistry.RevokeRecord, view map[party.Fingerprint]relaybind.KeyHash, res relayregistry.RevokeResult, err error) int {
+	lost := s.lostNow() || errors.Is(err, relayport.ErrAuthorityLost)
 	done := map[party.Fingerprint]struct{}{}
 	for _, e := range res.Invalidated {
-		s.invalidated(e.Device)
+		if lost {
+			s.CloseDevice(e.Device)
+		} else {
+			s.invalidated(e.Device)
+		}
 		done[e.Device] = struct{}{}
 	}
-	if err == nil || errors.Is(err, relayregistry.ErrTombstoneUnrecorded) || noStorage(err) {
+	if lost || err == nil || errors.Is(err, relayregistry.ErrTombstoneUnrecorded) || noStorage(err) {
 		return len(done)
 	}
 	for d, served := range view {
@@ -181,6 +199,9 @@ func (s *Server) afterRevoke(ctx context.Context, rec relayregistry.RevokeRecord
 		}
 		if rec.Scope() != relaybind.ScopeDevice && served != rec.Key() {
 			continue // bound under another key than the one that revokes
+		}
+		if s.lostNow() {
+			break // an earlier step of this fallback lost the authority
 		}
 		lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), purgeTimeout)
 		_, found, lerr := s.reg.Lookup(lctx, d)
@@ -200,6 +221,9 @@ func (s *Server) afterRevoke(ctx context.Context, rec relayregistry.RevokeRecord
 // commit (SPO-Xmailbox-SEC-021).
 func (s *Server) invalidated(device party.Fingerprint) {
 	s.CloseDevice(device)
+	if s.lostNow() {
+		return // no store call after a lost authority (SPO-Xmailbox-SEC-088)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), purgeTimeout)
 	defer cancel()
 	if _, err := s.purge.RemoveMailbox(ctx, device); err != nil {

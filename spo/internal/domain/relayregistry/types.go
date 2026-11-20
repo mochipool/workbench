@@ -85,6 +85,18 @@ var (
 	ErrBadSenders = errors.New("relayregistry: the expected-sender list is not strictly ascending or has too many keys")
 	// ErrConfig: the configuration is outside its bounds.
 	ErrConfig = errors.New("relayregistry: configuration out of range")
+	// ErrTombstoneVersions: a load met more tombstone versions than
+	// MaxTombstoneVersions. The load fails closed (ADR 0015 decision 3).
+	ErrTombstoneVersions = errors.New("relayregistry: the store holds more tombstone versions than a load reads")
+	// ErrUnconfirmed: an operation applied to memory with an unknown outcome
+	// (Core.ApplyUnknown) has stayed unconfirmed for UnconfirmedSeconds. Storage
+	// does not show what memory enforces, and a read-back that does not show a
+	// write is a conflict (ADR 0015, "Changes after the review of the store
+	// client"): the adapter returns it wrapped with relayport.ErrAuthorityLost and
+	// the relay stops.
+	ErrUnconfirmed = errors.New("relayregistry: an operation stayed unconfirmed by storage past its bound")
+	// ErrRateState: a stored rate bucket is outside its bounds (Core.RestoreRates).
+	ErrRateState = errors.New("relayregistry: the stored rate state is out of range")
 )
 
 // Bounds and defaults.
@@ -119,6 +131,28 @@ const (
 	// the configurable bound plus the largest headroom (mailbox.MaxBoundDevices).
 	// Open bounds its scan by it, never by the configured values.
 	MaxTombstoneHard = MaxTombstoneCeiling + mailbox.MaxBoundDevices
+	// HoldSeconds is how long a drop that storage refused is held back before it
+	// is planned again (Core.Hold): a retention on the store's clock that has not
+	// ended is not tried again in a loop (ADR 0015 decision 3).
+	HoldSeconds int64 = 3600
+	// HoldErrorSeconds is how long a drop that failed for another reason than a
+	// refusal (an I/O error of the directory, a request without an answer) is
+	// held back: a failure is tried again soon, a retention much later.
+	HoldErrorSeconds int64 = 60
+	// UnconfirmedSeconds bounds how long an operation applied to memory with an
+	// unknown outcome may stay unconfirmed by storage (Core.ApplyUnknown,
+	// Core.Settle, Core.Overdue): three tombstone refresh periods (60 s each),
+	// each of which tries to confirm it. Past it the relay loses its authority
+	// (ErrUnconfirmed).
+	UnconfirmedSeconds int64 = 180
+	// MaxTombstoneVersions is the most tombstone versions a load reads. A raise is
+	// a new version of one name in a store that keeps versions, so the load bounds
+	// versions, not names. At both rate caps' full rates (60 an hour each and
+	// their bursts) over a tombstone's life (180 days and the skew) there are at
+	// most about 530 thousand; the ceiling is twice that, rounded up to a power of
+	// two (ADR 0015 decision 3, "A ceiling on versions"). The directory store has
+	// one version per name and bounds names by MaxTombstoneHard, far below it.
+	MaxTombstoneVersions = 1 << 20
 )
 
 // DefaultMaxTombstones is the default bound of the tombstone table for a
@@ -444,10 +478,17 @@ type RevokeResult struct {
 	// (relaybind.Invalidated) and the registry deleted: the caller closes their
 	// sessions and deletes their queued mail. Nothing else is deleted.
 	Invalidated []Entry
+	// Unconfirmed is true when the revoke's tombstone is enforced by memory but
+	// storage did not confirm it (an unknown outcome, Core.ApplyUnknown):
+	// Recorded is then false and the caller answers `refused`, so the client
+	// sends the revoke again.
+	Unconfirmed bool
 
-	// what the table held before the revoke, for PartialRevoke
-	hadStored bool
-	before    int64
+	// what the table held before the revoke, for PartialRevoke: hadUnconfirmed
+	// says that what it held was itself not confirmed by storage
+	hadStored      bool
+	hadUnconfirmed bool
+	before         int64
 }
 
 // SweepResult counts what a sweep dropped.
@@ -458,6 +499,10 @@ type SweepResult struct {
 	// (a delete that failed earlier): they are removed.
 	Invalidated []Entry
 	Tombstones  int // relaybind.TombstoneExpired, by a margin of the skew (SweepMargin)
+	// Held counts the expired tombstones whose drop storage refused in this sweep:
+	// they are skipped, kept and held back (Core.Hold). The adapter sets it, and
+	// Tombstones then counts only the drops that were made.
+	Held int
 }
 
 // Stats are counters for limits and logs. Nothing in it names a wallet key.
@@ -473,5 +518,11 @@ type Stats struct {
 	// Unrecorded counts revokes that deleted bindings and could not record their
 	// tombstone (ErrTombstoneUnrecorded).
 	Unrecorded uint64
-	Refused    map[string]uint64 // by reason: not_allowed, key_devices, registry_full, rate, tombstones, revoke_rate, key_change, older, revoked, lifetime, other
+	// HeldDrops counts the drops of tombstones that storage refused (Core.Hold).
+	HeldDrops uint64
+	// Unconfirmed is the number of operations memory holds whose outcome storage
+	// has not confirmed (Core.ApplyUnknown). A planned stop with any lets the
+	// lease lapse instead of releasing it.
+	Unconfirmed int
+	Refused     map[string]uint64 // by reason: not_allowed, key_devices, registry_full, rate, tombstones, revoke_rate, key_change, older, revoked, lifetime, other
 }

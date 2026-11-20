@@ -2,6 +2,7 @@ package archtest
 
 import (
 	"encoding/json"
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"io/fs"
@@ -167,12 +168,41 @@ func TestS3ClientIsLinkableByTheRelay(t *testing.T) {
 	}
 }
 
+// testImportViolation reports a file that may not import imp: a non-test file
+// outside spo/test/ importing a package of the module under spo/test/. The one
+// exception is cmd/spo/wiring_plain.go importing test/plainstore: it is built
+// only with -tags plainlayout, never in a release build, and custody_test.go
+// (TestReleaseBinaryHasNoPlainStore, TestOnlyTestsAndTheTaggedFileImportThePlainStore)
+// keeps it so.
+func testImportViolation(rel, imp string) bool {
+	if rel == "cmd/spo/"+plainFile && imp == plainstorePkg {
+		return false
+	}
+	return strings.HasPrefix(imp, module+"/test/") && !strings.HasSuffix(rel, "_test.go") && !strings.HasPrefix(rel, "test/")
+}
+
 // ADR 0015 work package 3: the S3 stand-in is test-only. No release binary
 // (cmd/spo, cmd/spo-relay) contains it, and only _test.go files and packages
-// under spo/test/ import it, whatever their build tags.
+// under spo/test/ import it or any other package under spo/test/. The file walk
+// parses every .go file whatever its build constraints (go/parser ignores
+// them), so a file behind a build tag the default listing skips is checked too.
+// The S3 client has no fixed-credential provider outside its tests.
 //
 // spec: SPO-Xobjstore-INV-002
 func TestNoReleaseBinaryLinksTheS3StandIn(t *testing.T) {
+	for rel, imp := range map[string]string{"internal/x/a.go": module + "/test/s3stand", "cmd/spo/b.go": module + "/test/other"} {
+		if !testImportViolation(rel, imp) {
+			t.Errorf("the bite check: %s importing %s passes", rel, imp)
+		}
+	}
+	if !testImportViolation("cmd/spo/other.go", plainstorePkg) || !testImportViolation("cmd/spo/"+plainFile, s3standPkg) {
+		t.Error("the bite check: the plain-store exception is wider than one file and one package")
+	}
+	for rel, imp := range map[string]string{"internal/x/a_test.go": module + "/test/s3stand", "test/multiparty/a.go": module + "/test/s3stand", "internal/x/a.go": module + "/internal/testutil"} {
+		if testImportViolation(rel, imp) {
+			t.Errorf("%s importing %s is refused", rel, imp)
+		}
+	}
 	for _, root := range []string{module + "/cmd/spo", module + "/cmd/spo-relay"} {
 		set := depsOf(t, root)
 		if !set[root] || len(set) < 20 {
@@ -184,7 +214,7 @@ func TestNoReleaseBinaryLinksTheS3StandIn(t *testing.T) {
 	}
 	root := moduleDir(t)
 	fset := token.NewFileSet()
-	importers := 0
+	importers, clientFiles := 0, 0
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -206,13 +236,30 @@ func TestNoReleaseBinaryLinksTheS3StandIn(t *testing.T) {
 			return nil
 		}
 		for _, imp := range f.Imports {
-			if strings.Trim(imp.Path.Value, `"`) != s3standPkg {
-				continue
+			p := strings.Trim(imp.Path.Value, `"`)
+			if p == s3standPkg {
+				importers++
 			}
-			importers++
-			if !strings.HasSuffix(rel, "_test.go") && !strings.HasPrefix(rel, "test/") {
-				t.Errorf("%s imports the S3 stand-in; only tests and spo/test/ may", rel)
+			if testImportViolation(rel, p) {
+				t.Errorf("%s imports %s; only tests and spo/test/ may import a package under spo/test/", rel, p)
 			}
+		}
+		if strings.HasPrefix(rel, "internal/adapters/objstore/s3client/") && !strings.HasSuffix(rel, "_test.go") {
+			full, err := parser.ParseFile(fset, path, nil, 0)
+			if err != nil {
+				t.Errorf("%s: %v", rel, err)
+				return nil
+			}
+			for _, d := range full.Decls {
+				if g, ok := d.(*ast.GenDecl); ok {
+					for _, s := range g.Specs {
+						if ts, ok := s.(*ast.TypeSpec); ok && ts.Name.Name == "StaticProvider" {
+							t.Errorf("%s declares StaticProvider: a fixed-credential provider belongs in tests", rel)
+						}
+					}
+				}
+			}
+			clientFiles++
 		}
 		return nil
 	})
@@ -221,5 +268,8 @@ func TestNoReleaseBinaryLinksTheS3StandIn(t *testing.T) {
 	}
 	if importers == 0 {
 		t.Error("the bite check: no file imports the stand-in, so the walk saw nothing")
+	}
+	if clientFiles == 0 {
+		t.Error("the bite check: no file of the S3 client was seen")
 	}
 }

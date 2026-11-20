@@ -19,12 +19,17 @@ import (
 // spec: SPO-Xmailbox-OUT-078, SPO-Xmailbox-PRE-044, SPO-Xmailbox-PRE-045, SPO-Xmailbox-PRE-046, SPO-Xmailbox-PRE-047
 // spec: SPO-Xmailbox-PRE-048, SPO-Xmailbox-PRE-049, SPO-Xmailbox-PRE-050, SPO-Xmailbox-PRE-051
 // spec: SPO-Xmailbox-SEC-044, SPO-Xmailbox-SEC-045, SPO-Xmailbox-SEC-046, SPO-Xmailbox-INV-034, SPO-Xmailbox-INV-035
+// spec: SPO-Xmailbox-OUT-124, SPO-Xmailbox-OUT-126, SPO-Xmailbox-IF-033, SPO-Xmailbox-PRE-040, SPO-Xmailbox-OUT-079
+// spec: SPO-Xmailbox-OUT-128, SPO-Xmailbox-INV-044, SPO-Xmailbox-IF-035
 func TestMemRegistryContract(t *testing.T) {
 	relayporttest.RunRegistry(t, func(t *testing.T, cfg relayregistry.Config, clock relayport.Clock) relayporttest.RegistryFixture {
 		reg, err := relayporttest.NewMemRegistry(cfg, clock)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return relayporttest.RegistryFixture{Registry: reg}
+		drops := &relayporttest.DropFaults{}
+		unknown := &relayporttest.UnknownFaults{}
+		reg.WithDropFaults(drops).WithUnknownFaults(unknown)
+		return relayporttest.RegistryFixture{Registry: reg, Drops: drops, Learn: reg.Learn, Unknown: unknown}
 	})
 }

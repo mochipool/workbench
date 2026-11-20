@@ -33,7 +33,7 @@ func TestConditionalPutsAndTheirTypedOutcomes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if a.ETag != md5ETag([]byte("one")) || a.Attempts != 1 {
+		if !e.etagIs(a.ETag, []byte("one")) || a.Attempts != 1 {
 			t.Errorf("%s: put result %+v", c.Bucket(), a)
 		}
 		if (a.VersionID != "") != (c == e.rc) {
@@ -260,7 +260,7 @@ func TestListingPagesWithSizes(t *testing.T) {
 		t.Fatalf("all: %d %v", len(all), err)
 	}
 	for i, o := range all {
-		if o.Key != want[i] || o.Size != int64(i) || o.ETag != md5ETag(bytes.Repeat([]byte("z"), i)) || o.LastModified.IsZero() {
+		if o.Key != want[i] || o.Size != int64(i) || !e.etagIs(o.ETag, bytes.Repeat([]byte("z"), i)) || o.LastModified.IsZero() {
 			t.Errorf("entry %d: %+v", i, o)
 		}
 	}
@@ -381,18 +381,21 @@ func TestReadBackTellsOwnWriteFromAnother(t *testing.T) {
 	if !errors.As(err, &se) || se.Status != 412 || !se.Uncertain || se.Attempts != 2 || e.srv.Fired(f) != 1 {
 		t.Fatalf("lost response then retry: %v", err)
 	}
-	info, same, err := e.wc.SameAsCurrent(ctx, key, []byte("mine"))
-	if err != nil || !same || info.ETag != md5ETag([]byte("mine")) {
-		t.Fatalf("read back: %+v %v %v", info, same, err)
+	if !errors.Is(err, ErrOutcomeUnknown) {
+		t.Errorf("a 412 after a lost attempt does not match ErrOutcomeUnknown: %v", err)
 	}
-	if _, same, err := e.wc.SameAsCurrent(ctx, key, []byte("theirs")); err != nil || same {
-		t.Errorf("other bytes: %v %v", same, err)
+	rb, err := e.wc.ReadBack(ctx, key, []byte("mine"))
+	if err != nil || rb.State != ReadBackApplied || !e.etagIs(rb.Info.ETag, []byte("mine")) {
+		t.Fatalf("read back: %+v %v", rb, err)
 	}
-	if _, same, err := e.wc.SameAsCurrent(ctx, key, []byte("mi")); err != nil || same {
-		t.Errorf("shorter bytes: %v %v", same, err)
+	if rb, err := e.wc.ReadBack(ctx, key, []byte("theirs")); err != nil || rb.State != ReadBackNotYet || rb.Info.ETag == "" {
+		t.Errorf("other bytes: %+v %v", rb, err)
 	}
-	if _, same, err := e.wc.SameAsCurrent(ctx, prefix+"gone", []byte("x")); err != nil || same {
-		t.Errorf("a missing key: %v %v", same, err)
+	if rb, err := e.wc.ReadBack(ctx, key, []byte("mi")); err != nil || rb.State != ReadBackNotYet {
+		t.Errorf("shorter bytes: %+v %v", rb, err)
+	}
+	if rb, err := e.wc.ReadBack(ctx, prefix+"gone", []byte("x")); err != nil || rb.State != ReadBackNotYet {
+		t.Errorf("a missing key: %+v %v", rb, err)
 	}
 }
 
@@ -426,17 +429,33 @@ func TestHonestStandInPassesTheSelfTest(t *testing.T) {
 	if err := SelfTest(ctx, e.wc, SelfTestOptions{Prefix: prefix}); err != nil {
 		t.Fatal(err)
 	}
-	if err := SelfTest(ctx, e.rc, SelfTestOptions{Prefix: prefix, Registry: true, Mode: Compliance}); err != nil {
-		t.Fatal(err)
-	}
 	if all, _ := e.wc.ListAll(ctx, prefix, 10); len(all) != 0 {
 		t.Errorf("the working self-test left %v", all)
+	}
+	// the start-up registry run leaves nothing: no version, no delete marker
+	for i := 0; i < 3; i++ {
+		if err := SelfTest(ctx, e.rc, SelfTestOptions{Prefix: prefix, Registry: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if vs, err := e.rc.ListAllVersions(ctx, prefix, 100); err != nil || len(vs) != 0 {
+		t.Errorf("three start-up registry runs left %v %v", vs, err)
+	}
+	// the retention run leaves exactly its one locked object
+	if err := SelfTest(ctx, e.rc, SelfTestOptions{Prefix: prefix, Registry: true, Retention: true, Mode: Compliance}); err != nil {
+		t.Fatal(err)
+	}
+	vs, err := e.rc.ListAllVersions(ctx, prefix, 100)
+	if err != nil || len(vs) != 1 || vs[0].DeleteMarker || !strings.HasSuffix(vs[0].Key, "-r") {
+		t.Errorf("the retention run left %+v %v", vs, err)
 	}
 	if n := len(e.srv.UnconditionalPuts()); n != 0 {
 		t.Errorf("%d unconditional puts", n)
 	}
-	if err := SelfTest(ctx, e.rc, SelfTestOptions{Prefix: prefix, Registry: true}); !errors.Is(err, ErrInvalidInput) {
-		t.Errorf("a registry self-test without a mode: %v", err)
+	for _, o := range []SelfTestOptions{{Prefix: prefix, Registry: true, Retention: true}, {Prefix: prefix, Retention: true, Mode: Compliance}} {
+		if err := SelfTest(ctx, e.rc, o); !errors.Is(err, ErrInvalidInput) {
+			t.Errorf("%+v: %v", o, err)
+		}
 	}
 }
 

@@ -112,8 +112,8 @@ func TestTheSweeperSweepsTheRegistryWhileServing(t *testing.T) {
 	d.SweepEvery = 10 * time.Millisecond
 	var sc *sweepCounter
 	open := d.OpenRegistry
-	d.OpenRegistry = func(dir string, c relayregistry.Config, clk relayport.Clock) (relayport.Registry, []string, error) {
-		reg, notes, err := open(dir, c, clk)
+	d.OpenRegistry = func(spec relayhost.StoreSpec, c relayregistry.Config, env relayhost.StoreEnv) (relayport.Registry, []string, error) {
+		reg, notes, err := open(spec, c, env)
 		if err != nil {
 			return nil, nil, err
 		}

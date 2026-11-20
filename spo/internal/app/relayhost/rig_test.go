@@ -102,6 +102,30 @@ type host struct {
 	log      bytes.Buffer
 	// limits replaces fastLimits for the clients made after it is set.
 	limits func() mailbox.Limits
+	// the lease and the refresh of the start order tests (nil and 0: the defaults)
+	openLease    func(party.NodeKey, relayport.Clock) (relayport.Lease, error)
+	renewEvery   time.Duration
+	refreshEvery time.Duration
+	wrapRegistry func(relayport.Registry) relayport.Registry
+	env          relayhost.StoreEnv
+	order        []string
+	// realClock gives the relay the system clock (a test of a lease on real
+	// time); requestTimeout replaces relayhost.DefaultRequestTimeout
+	realClock      bool
+	requestTimeout time.Duration
+}
+
+// trace records a step of the start.
+func (h *host) trace(step string) {
+	h.mu.Lock()
+	h.order = append(h.order, step)
+	h.mu.Unlock()
+}
+
+func (h *host) steps() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.order...)
 }
 
 func newHost(t *testing.T) *host {
@@ -173,28 +197,50 @@ func (h *host) config(text string) *relayconf.Config {
 
 // deps are the real stores and key file over this host's fake tunnel and clock.
 func (h *host) deps() relayhost.Deps {
+	d := h.baseDeps()
+	if h.realClock {
+		d.Clock = nil
+	}
+	d.RequestTimeout = h.requestTimeout
+	return d
+}
+
+func (h *host) baseDeps() relayhost.Deps {
 	return relayhost.Deps{
 		LoadConfig: relayconfig.Load,
 		LoadKey:    relayconfig.LoadKey,
 		CreateKey:  func(p string) (*relayconf.Key, error) { return relayconfig.CreateKey(p, seeded{}) },
 		PublicKey:  func(*relayconf.Key) (party.NodeKey, error) { return h.relay.Key, nil },
-		OpenMailbox: func(dir string, c relayport.Clock) (relayport.MailboxStore, []string, error) {
-			s, notes, err := mailboxstore.Open(dir, c)
+		OpenMailbox: func(spec relayhost.StoreSpec, env relayhost.StoreEnv) (relayport.MailboxStore, []string, error) {
+			h.trace("mailbox")
+			s, notes, err := mailboxstore.Open(spec.Dir, env.Clock)
 			if err != nil {
 				return nil, nil, err
 			}
 			h.mu.Lock()
 			h.store = s
+			h.env = env
 			h.mu.Unlock()
 			return s, notes, nil
 		},
-		OpenRegistry: func(dir string, cfg relayregistry.Config, c relayport.Clock) (relayport.Registry, []string, error) {
+		OpenRegistry: func(spec relayhost.StoreSpec, cfg relayregistry.Config, env relayhost.StoreEnv) (relayport.Registry, []string, error) {
+			h.trace("registry")
 			h.mu.Lock()
 			h.regCfg = cfg
 			h.mu.Unlock()
-			return bindingstore.Open(dir, cfg, c)
+			s, notes, err := bindingstore.Open(spec.Dir, cfg, env.Clock)
+			if err != nil || h.wrapRegistry == nil {
+				return s, notes, err
+			}
+			return h.wrapRegistry(s), notes, nil
 		},
-		Listen:   h.listen,
+		OpenLease:    h.openLease,
+		RenewEvery:   h.renewEvery,
+		RefreshEvery: h.refreshEvery,
+		Listen: func(ctx context.Context, spec relayhost.TunnelSpec) (relayhost.Tunnel, error) {
+			h.trace("tunnel")
+			return h.listen(ctx, spec)
+		},
 		Clock:    h.clock,
 		Rand:     seeded{},
 		Log:      &syncWriter{w: &h.log, mu: &h.mu},

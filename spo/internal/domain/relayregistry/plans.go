@@ -245,128 +245,158 @@ func cmp64(a, b int64) int {
 //     (the revoked binding could be presented again) but strictly better than
 //     refusing and leaving it live.
 //
-// A tombstone that is expired (past not-before + the maximum lifetime + the skew)
-// is dropped first when the table is at the limit that applies; a live one is
-// never dropped to make room.
+// ROOM IS PLANNED ON ITS OWN (ADR 0015 decision 3, "The registry core"). The
+// plan of a revoke holds no drop: an expired tombstone (past not-before + the
+// maximum lifetime + the skew) that must go to make room is planned by PlanRoom,
+// which the adapter calls and carries out first, each drop on its own. A drop
+// that storage refuses is held back (Hold) and the revoke is then planned with
+// the room that is really there, so a refused drop never fails a revoke and is
+// never the reason a revoked binding stays live. A live tombstone is never
+// dropped to make room.
 func (c *Core) PlanRevoke(r RevokeRecord, now int64) (Plan[RevokeResult], error) {
 	var none Plan[RevokeResult]
-	if !r.valid() {
-		return none, relaybind.ErrUnverified
+	sh, err := c.shape(r, now)
+	if err != nil {
+		return none, err
 	}
-	if r.notBefore < 0 || r.notBefore > relaybind.MaxTime {
-		return none, relaybind.ErrRange
-	}
-	tk := r.tombKey()
-	cur, have := c.getTomb(tk)
-	curv := relaybind.NoTombstone
-	if have {
-		curv = cur
-	}
-	merged := relaybind.MergeTombstone(curv, r.notBefore)
-	raised := merged > curv
-
-	var cand []*Record
-	switch r.scope {
-	case relaybind.ScopePair:
-		if rec := c.dev[r.device]; rec != nil && rec.Key == r.key {
-			cand = append(cand, rec)
-		}
-	case relaybind.ScopeAll:
-		for d := range c.byKey[r.key] {
-			cand = append(cand, c.dev[d])
-		}
-	case relaybind.ScopeDevice:
-		if rec := c.dev[r.device]; rec != nil {
-			cand = append(cand, rec)
-		}
-	}
-	slices.SortFunc(cand, func(a, b *Record) int { return bytes.Compare(a.Device[:], b.Device[:]) })
-	var inv []*Record
-	invalidating := false
-	for _, rec := range cand {
-		if !relaybind.Invalidated(rec.Binding, c.Tombstones(rec.Key, rec.Device).Merge(r.scope, r.notBefore)) {
-			continue
-		}
-		inv = append(inv, rec)
-		if c.held(rec, now) {
-			invalidating = true
-		}
-	}
-
-	res := RevokeResult{Recorded: have, NotBefore: curv, hadStored: have, before: curv}
+	unconf := c.unconfirmedTomb(sh.tk)
+	res := RevokeResult{Recorded: sh.have, NotBefore: sh.cur, hadStored: sh.have, hadUnconfirmed: unconf, before: sh.cur}
 	var ops []Op
 	var warn error
 	reason := ReasonInvalidated
-	if raised {
+	put := Op{Kind: OpPutTombstone, Tomb: sh.tk, NotBefore: sh.merged, Now: now, Replaces: sh.have, Retry: unconf}
+	if sh.have {
+		put.Prev = sh.cur
+	}
+	if !sh.raised && unconf {
+		// the stored value is memory's, not yet storage's: a replay writes it
+		// again, so the client's re-sent revoke is what confirms it (it costs no
+		// token: it was charged when it was first planned)
+		u := c.unconfirmed[putKey(sh.tk)].Op
+		u.Retry, u.Now, u.Charge = true, now, false
+		ops = append(ops, u)
+	}
+	if sh.raised {
 		switch {
-		case have:
-			if !invalidating && !c.revRate.has(now) {
+		case sh.have:
+			if !sh.invalidating && !c.revRate.has(now) {
 				return none, ErrRevokeRate
 			}
-			ops = append(ops, Op{Kind: OpPutTombstone, Tomb: tk, NotBefore: merged, Now: now, Charge: !invalidating})
-		case invalidating:
-			drop, ok := c.headroomRoom(now)
-			if !ok {
+			put.Charge = !sh.invalidating
+			ops = append(ops, put)
+		case sh.invalidating:
+			if c.tombCount() >= c.hardSize() {
 				warn, reason = ErrTombstoneUnrecorded, ReasonInvalidatedUnrecorded
 				res.TombstoneUnrecorded = true
 				break
 			}
-			ops = append(ops, drop...)
-			ops = append(ops, Op{Kind: OpPutTombstone, Tomb: tk, NotBefore: merged, Now: now})
+			ops = append(ops, put)
 		default:
-			drop, err := c.limitedRoom(now)
-			if err != nil {
-				return none, err
+			if c.tombCount() >= c.cfg.MaxTombstones/2 {
+				return none, ErrTombstoneFull
 			}
 			if !c.revRate.has(now) {
 				return none, ErrRevokeRate
 			}
-			ops = append(ops, drop...)
-			ops = append(ops, Op{Kind: OpPutTombstone, Tomb: tk, NotBefore: merged, Now: now, Charge: true})
+			put.Charge = true
+			ops = append(ops, put)
 		}
 		if !res.TombstoneUnrecorded {
-			res.Recorded, res.Raised, res.NotBefore = true, true, merged
+			res.Recorded, res.Raised, res.NotBefore = true, true, sh.merged
 		}
 	}
 	res.Invalidated = []Entry{}
-	for _, rec := range inv {
+	for _, rec := range sh.inv {
 		ops = append(ops, Op{Kind: OpDeleteBinding, Device: rec.Device, Reason: reason, Now: now})
 		res.Invalidated = append(res.Invalidated, rec.Entry())
 	}
 	return Plan[RevokeResult]{Ops: ops, Result: res, Warn: warn}, nil
 }
 
-// limitedRoom is the check of the bound for a new tombstone that invalidates
-// nothing: it may use only the lower half of the table. At that limit the expired
-// tombstones are dropped first; if that leaves no room, ErrTombstoneFull.
-func (c *Core) limitedRoom(now int64) ([]Op, error) {
-	limit := c.cfg.MaxTombstones / 2
+// PlanRoom is the first step of a revoke: the drops of expired tombstones that
+// make room for the new tombstone r would add, in a stable order, or none. It is
+// a plan of its own (ADR 0015 decision 3): the adapter carries out each drop and
+// applies it, holds back (Hold) one that storage refuses, and only then calls
+// PlanRevoke, which decides with the room that is really there. It plans the
+// drops when r adds a tombstone (it raises none that is stored) and the table is
+// at the limit that applies, and only when they would make room:
+//
+//   - an invalidating revoke may use the whole bound and then the headroom: the
+//     expired tombstones go whenever the table is at the bound, to keep the
+//     headroom for later, as long as dropping them leaves room under the hard
+//     size;
+//   - a revoke of nothing may use only the lower half: the expired ones go when
+//     that is full, when dropping them leaves room in it, and when the revoke cap
+//     has a token (a revoke that will be refused drops nothing).
+//
+// A held tombstone is not expired for this until its hold ends. PlanRoom
+// changes nothing.
+func (c *Core) PlanRoom(r RevokeRecord, now int64) []Op {
+	sh, err := c.shape(r, now)
+	if err != nil || !sh.raised || sh.have {
+		return nil
+	}
 	total := c.tombCount()
-	if total < limit {
-		return nil, nil
+	if sh.invalidating {
+		if total < c.cfg.MaxTombstones {
+			return nil
+		}
+		drop := c.expiredTombstones(now)
+		if total-len(drop) >= c.hardSize() {
+			return nil
+		}
+		return drop
+	}
+	limit := c.cfg.MaxTombstones / 2
+	if total < limit || !c.revRate.has(now) {
+		return nil
 	}
 	drop := c.expiredTombstones(now)
 	if total-len(drop) >= limit {
-		return nil, ErrTombstoneFull
+		return nil
 	}
-	return drop, nil
+	return drop
 }
 
-// headroomRoom is the check for a new tombstone of an invalidating revoke: the
-// whole bound, then the headroom above it. It reports false when the table is
-// full to its hard size (MaxTombstones plus the headroom) even after the expired
-// tombstones are dropped. The expired ones are dropped whenever the table is at
-// the configured bound, to keep the headroom for later.
-func (c *Core) headroomRoom(now int64) ([]Op, bool) {
-	total := c.tombCount()
-	var drop []Op
-	if total >= c.cfg.MaxTombstones {
-		drop = c.expiredTombstones(now)
+// hardSize is the bound of the table with its headroom.
+func (c *Core) hardSize() int { return c.cfg.MaxTombstones + c.cfg.TombstoneHeadroom() }
+
+// revokeShape is what a revoke would do to the state now: its tombstone (stored
+// or not, and the value after the merge) and the stored bindings it invalidates.
+type revokeShape struct {
+	tk           TombKey
+	have         bool
+	cur, merged  int64
+	raised       bool
+	inv          []*Record
+	invalidating bool // it invalidates a held binding
+}
+
+func (c *Core) shape(r RevokeRecord, now int64) (revokeShape, error) {
+	if !r.valid() {
+		return revokeShape{}, relaybind.ErrUnverified
 	}
-	if total-len(drop) < c.cfg.MaxTombstones+c.cfg.TombstoneHeadroom() {
-		return drop, true
+	if r.notBefore < 0 || r.notBefore > relaybind.MaxTime {
+		return revokeShape{}, relaybind.ErrRange
 	}
-	return nil, false
+	sh := revokeShape{tk: r.tombKey(), cur: relaybind.NoTombstone}
+	if v, ok := c.getTomb(sh.tk); ok {
+		sh.have, sh.cur = true, v
+	}
+	sh.merged = relaybind.MergeTombstone(sh.cur, r.notBefore)
+	sh.raised = sh.merged > sh.cur
+	cand := c.named(sh.tk)
+	slices.SortFunc(cand, func(a, b *Record) int { return bytes.Compare(a.Device[:], b.Device[:]) })
+	for _, rec := range cand {
+		if !relaybind.Invalidated(rec.Binding, c.Tombstones(rec.Key, rec.Device).Merge(r.scope, r.notBefore)) {
+			continue
+		}
+		sh.inv = append(sh.inv, rec)
+		if c.held(rec, now) {
+			sh.invalidating = true
+		}
+	}
+	return sh, nil
 }
 
 // tombExpired is relaybind.TombstoneExpired with a margin of the skew: a clock
@@ -398,7 +428,7 @@ func (c *Core) expiredTombstones(now int64) []Op {
 	}
 	var ops []Op
 	add := func(k TombKey, v int64) {
-		if c.tombExpired(v, now) {
+		if c.tombExpired(v, now) && !c.isHeld(k, now) {
 			ops = append(ops, Op{Kind: OpDeleteTombstone, Tomb: k, NotBefore: v, Now: now})
 		}
 	}
@@ -493,9 +523,17 @@ func (c *Core) PlanSetSenders(d party.Fingerprint, senders []mailbox.WalletKey, 
 // invalidated and no reader serves it, deleted or not; when it was to be written
 // and was not, nothing is. A revoke that could not record a tombstone (headroom
 // spent) has nothing to filter by, so only the bindings actually deleted count.
-func PartialRevoke(plan Plan[RevokeResult], applied []Op) RevokeResult {
+//
+// unknown lists the operations whose outcome storage did not confirm and that
+// the adapter applied with Core.ApplyUnknown. A tombstone among them is enforced
+// by memory, so the bindings it invalidates are not served and count as
+// invalidated; but it is not recorded: Recorded is false and Unconfirmed true,
+// and the caller answers `refused` so that the client sends the revoke again
+// (SPO-Xmailbox-OUT-128). A revoke whose tombstone was already unconfirmed and
+// whose write again failed is not recorded either.
+func PartialRevoke(plan Plan[RevokeResult], applied, unknown []Op) RevokeResult {
 	res := plan.Result
-	wrote, planned := false, false
+	wrote, planned, enforced := false, false, false
 	deleted := map[party.Fingerprint]bool{}
 	for _, op := range plan.Ops {
 		if op.Kind == OpPutTombstone {
@@ -510,9 +548,18 @@ func PartialRevoke(plan Plan[RevokeResult], applied []Op) RevokeResult {
 			deleted[op.Device] = true
 		}
 	}
+	for _, op := range unknown {
+		switch op.Kind {
+		case OpPutTombstone:
+			enforced = true
+		case OpDeleteBinding:
+			deleted[op.Device] = true
+		}
+	}
 	if planned && !wrote {
-		res.Recorded, res.Raised = plan.Result.hadStored, false
+		res.Recorded, res.Raised = plan.Result.hadStored && !plan.Result.hadUnconfirmed, false
 		res.NotBefore = plan.Result.before
+		res.Unconfirmed = enforced || plan.Result.hadUnconfirmed
 	}
 	var inv []Entry
 	for _, e := range plan.Result.Invalidated {
@@ -521,7 +568,7 @@ func PartialRevoke(plan Plan[RevokeResult], applied []Op) RevokeResult {
 			if deleted[e.Device] {
 				inv = append(inv, e)
 			}
-		case !planned || wrote:
+		case !planned || wrote || enforced || plan.Result.hadUnconfirmed:
 			inv = append(inv, e)
 		}
 	}

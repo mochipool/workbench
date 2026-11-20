@@ -183,6 +183,13 @@ func (s *session) run(parent context.Context) {
 		s.srv.emit(e)
 	}()
 	s.result = s.serve()
+	if s.srv.lostNow() {
+		// a store call of this session, or of another, reported that the relay is
+		// no longer the writer: whatever ended the session, it is told "shutting
+		// down", and every other session ends too (SPO-Xmailbox-OUT-127)
+		s.srv.LoseAuthority()
+		s.result = authorityEnd
+	}
 	if s.result.reply {
 		s.sendError(s.result.code)
 	}
@@ -229,14 +236,23 @@ func (s *session) serve() end {
 		if e != nil {
 			return *e
 		}
+		if s.srv.lostNow() {
+			return authorityEnd // the request was answered; nothing more is served
+		}
 	}
 }
+
+// authorityEnd is the end of every session once the authority is lost.
+var authorityEnd = end{mailbox.CodeShuttingDown, true, ReasonAuthority}
 
 // classify turns an error of the stream or of the codec into the end of the
 // session. A shutdown and a revocation come first, whatever the error looks
 // like, because they are what set the deadline that caused it.
 func (s *session) classify(err error, writing bool) *end {
 	switch {
+	case s.parent.Err() != nil && s.srv.lostNow():
+		e := authorityEnd
+		return &e
 	case s.parent.Err() != nil:
 		return &end{mailbox.CodeShuttingDown, true, ReasonShutdown}
 	case s.revoked():
@@ -332,7 +348,16 @@ func (s *session) send(m mailbox.Message, t time.Time) *end {
 	return nil
 }
 
-func (s *session) reply(m mailbox.Message) *end { return s.send(m, s.dl(s.srv.lim.WriteTimeout)) }
+// reply writes one answer under the write timeout; after a lost authority under
+// the short bound of a closing session's last frame, so that the session that
+// reported the loss ends soon after its answer (SPO-Xmailbox-OUT-127).
+func (s *session) reply(m mailbox.Message) *end {
+	d := s.srv.lim.WriteTimeout
+	if s.srv.lostNow() {
+		d = min(d, rejectWrite)
+	}
+	return s.send(m, s.dl(d))
+}
 
 // sendError is the one frame a closing session may still send: a fresh write
 // deadline, set after the shutdown watcher can no longer overwrite it.
@@ -384,6 +409,10 @@ func (s *session) handshake() *end {
 			if e := s.handleRevoke(m, hsEnd); e != nil {
 				return e
 			}
+			if srv.lostNow() {
+				e := authorityEnd
+				return &e
+			}
 		default:
 			return &end{mailbox.CodeProtocol, true, ReasonProtocol}
 		}
@@ -411,6 +440,11 @@ func (s *session) loginFail(code mailbox.Code, r Reason) *end {
 //   - the answer carries the binding's `until` as the registry recorded it.
 func (s *session) login(a mailbox.AuthV2, nonce [mailbox.NonceSize]byte, relayTime int64, hsEnd time.Time) *end {
 	srv := s.srv
+	if srv.lostNow() {
+		// nothing is registered or replaced after a lost authority (SPO-Xmailbox-SEC-088)
+		e := authorityEnd
+		return &e
+	}
 	fp := a.Keys.Fingerprint()
 	if a.Fingerprint != fp {
 		return s.loginFail(mailbox.CodeAuth, ReasonFingerprint)
@@ -638,8 +672,12 @@ const compensateTimeout = 5 * time.Second
 // sender's own put (SPO-Xmailbox-OUT-031). It never deletes another sender's copy
 // of the same id. It runs on a context that is not cancelled with the session's:
 // the cases that need it are the ones where a revocation has just cancelled
-// that.
+// that. After a lost authority no compensation is attempted (it would be a
+// write): the entry stays, and the next writer's load finds it.
 func (s *session) retractOwn(to party.Fingerprint, mid mailbox.Hash) error {
+	if err := s.srv.gate(); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(s.ctx), compensateTimeout)
 	defer cancel()
 	_, err := s.srv.retract.Retract(ctx, to, s.fp, mid)
@@ -821,13 +859,18 @@ func (s *session) store(m mailbox.PutV2) (status mailbox.Status, reason Reason, 
 		pw.CloseWithError(err)
 		done <- err
 	}()
-	out, perr := srv.w.Put(s.ctx, relayport.MailboxPut{
+	// the put, a wait for a slot for its body included (relayport.MailboxWriter:
+	// an adapter that holds bodies whole), ends with the body's own deadline
+	// (SPO-Xmailbox-SEC-089)
+	pctx, pcancel := context.WithDeadline(s.ctx, s.dl(srv.lim.BodyTimeout))
+	out, perr := srv.w.Put(pctx, relayport.MailboxPut{
 		Recipient: m.To,
 		Sender:    s.fp, // the authenticated device, never anything the peer sent
 		Mid:       m.Mid,
 		Size:      m.Size,
 		Quota:     srv.storeQuota,
 	}, pr)
+	pcancel()
 	g.stop(pr)
 	rawErr := <-done
 

@@ -94,6 +94,22 @@ type Revoker interface {
 	// ON ANY ERROR THE RESULT STILL HOLDS WHAT WAS DONE (the bindings invalidated:
 	// no reader serves them): the caller acts on it, and re-checks Lookup. A
 	// binding whose file could not be deleted is removed by a later Sweep or Open.
+	//
+	// ROOM IS MADE FIRST AND NEVER BLOCKS (ADR 0015 decision 3). The drops of
+	// expired tombstones that make room (relayregistry.Core.PlanRoom) are carried
+	// out before the revoke's own plan, each on its own. A drop that storage
+	// refuses (ErrDeleteRefused) or that fails is not made, is held back for
+	// relayregistry.HoldSeconds when storage refused it and for
+	// relayregistry.HoldErrorSeconds when it failed otherwise
+	// (relayregistry.Core.Hold), and is no error of the revoke: the revoke is
+	// planned with the room that is really there. The revoke's own plan writes
+	// the tombstone before it deletes the bindings.
+	//
+	// A TOMBSTONE WHOSE OUTCOME IS UNKNOWN IS NOT RECORDED. When storage does not
+	// confirm the tombstone (ErrOutcomeUnknown, returned wrapped), memory enforces
+	// it (relayregistry.Core.ApplyUnknown) and the result has Recorded false and
+	// Unconfirmed true: the caller answers `refused`, and the client's re-sent
+	// revoke writes it again (the plan of a replay holds the write, Op.Retry).
 	Revoke(ctx context.Context, r relayregistry.RevokeRecord) (relayregistry.RevokeResult, error)
 }
 
@@ -125,13 +141,61 @@ type RegistryExpirer interface {
 	// relaybind.TombstoneExpired allows by a margin of the skew. Tombstones are
 	// dropped only here and to make room, never at load. It never deletes a binding
 	// with queued mail that is not expired or invalidated, and never a live
-	// tombstone. The session runs it periodically.
+	// tombstone. The session runs it periodically. A drop of a tombstone that
+	// storage refuses (ErrDeleteRefused) is skipped, held back
+	// (relayregistry.Core.Hold) and counted in SweepResult.Held; the sweep goes on
+	// and does not fail for it.
+	//
+	// It first settles the operations whose outcome storage did not confirm
+	// (relayregistry.Core.Unconfirmed): each is read back
+	// (relayregistry.ReadBack) and given to Core.Settle, which confirms it, has
+	// the same operation sent again, or keeps it. One unconfirmed for
+	// relayregistry.UnconfirmedSeconds returns an error that wraps both
+	// relayregistry.ErrUnconfirmed and ErrAuthorityLost.
 	Sweep(ctx context.Context) (relayregistry.SweepResult, error)
 }
 
 // RegistryStats reports counters for limits and logs. It names no wallet key.
 type RegistryStats interface {
 	Stats(ctx context.Context) (relayregistry.Stats, error)
+}
+
+// TombstoneRefresher brings into the registry's memory the tombstones its
+// storage holds and this process did not write (ADR 0015 decisions 3 and 5): a
+// tombstone that a stale writer's late request wrote after this writer loaded,
+// or, in a later stage, one that another identity of the operator recorded.
+//
+// spec: SPO-Xmailbox-IF-033
+type TombstoneRefresher interface {
+	// RefreshTombstones reads what storage holds that is new since the load or
+	// the last refresh and merges it into memory with
+	// relayregistry.Core.MergeTombstones: the maximum not-before wins and
+	// nothing is lowered. The result names the bindings that were served and
+	// that a merged tombstone invalidates now: the caller ends their sessions.
+	// The relay calls it every TombstoneRefreshEvery (60 s). A store that only
+	// this process writes (the directory store, under its lock) has nothing to
+	// find in it. An error leaves the memory as it was for what was not read;
+	// ErrAuthorityLost ends the relay.
+	//
+	// It settles the unconfirmed operations as Sweep does (the directory store
+	// syncs them again), so an unknown outcome is settled within one period, and
+	// one unconfirmed for relayregistry.UnconfirmedSeconds (three periods) ends
+	// the relay with an error that wraps ErrAuthorityLost.
+	RefreshTombstones(ctx context.Context) (relayregistry.MergeResult, error)
+}
+
+// RateSaver stores the registry's two rate buckets (relayregistry.Core.Rates)
+// so that a restart does not start them full (ADR 0015 decision 2, "Rate
+// state"). The adapter loads them at open with relayregistry.Core.RestoreRates,
+// which can only take tokens away. The relay calls SaveRates every
+// TombstoneRefreshEvery and once at a planned stop, before Close. A store
+// that keeps no rate state (the directory store: one host, restarted by its
+// operator) does nothing and returns nil; a closed registry answers
+// ErrRegistryClosed.
+//
+// spec: SPO-Xmailbox-IF-035
+type RateSaver interface {
+	SaveRates(ctx context.Context) error
 }
 
 // Registry is every capability of the registry adapter, for the composition
@@ -144,5 +208,7 @@ type Registry interface {
 	ExpectedSenderWriter
 	RegistryExpirer
 	RegistryStats
+	TombstoneRefresher
+	RateSaver
 	Close() error
 }

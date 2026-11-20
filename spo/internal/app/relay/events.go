@@ -27,6 +27,12 @@ const (
 	// bindings and tombstones it dropped.
 	EventRegistrySweep EventKind = "registry_sweep"
 	EventSweepErr      EventKind = "sweep_error"
+	// EventAuthorityLost reports that the relay is no longer the writer of its
+	// store (Server.LoseAuthority); it is logged once.
+	EventAuthorityLost EventKind = "authority_lost"
+	// EventTombstoneRefresh reports a re-read of the tombstones that found new
+	// ones (Count: the devices whose sessions it ended) or failed (Reason).
+	EventTombstoneRefresh EventKind = "tombstone_refresh"
 )
 
 // Reason is a fixed class, never text taken from the peer or from an error:
@@ -69,6 +75,7 @@ const (
 	ReasonEgress      Reason = "bytes_sent"  // too many bytes sent on a connection
 	ReasonVanished    Reason = "vanished"    // an announced entry was gone when its frame was due
 	ReasonUnrecorded  Reason = "unrecorded"  // a revoke deleted a binding but could not record its tombstone
+	ReasonAuthority   Reason = "authority"   // the relay is no longer the writer of its store
 )
 
 // Event is one structured record for the operator log (SPO-Xmailbox-IF-006).

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mochipool/workbench/spo/internal/domain/mailbox"
@@ -96,6 +97,15 @@ type Server struct {
 	notes      *notifier
 	book       *book
 
+	// lost is closed by LoseAuthority; suspect is set by a store call that
+	// reported relayport.ErrAuthorityLost (authority.go). unanswered counts the
+	// store calls that may have reached storage without an answer.
+	lost       context.Context // done once LoseAuthority ran
+	lostCancel context.CancelFunc
+	lostOnce   sync.Once
+	suspect    atomic.Bool
+	unanswered atomic.Int64
+
 	mu     sync.Mutex
 	live   int
 	unauth int // live connections that have not logged in
@@ -147,9 +157,8 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("%w: %w", ErrConfig, err)
 	}
 	lim := cfg.Limits.Limits()
-	return &Server{
-		w: cfg.Writer, rd: cfg.Reader, ack: cfg.Acker, retract: cfg.Retractor, purge: cfg.MailboxRevoker, usage: cfg.Usage,
-		reg: cfg.Registry, guard: cfg.Guard, clock: cfg.Clock, rand: cfg.Rand, key: cfg.RelayKey,
+	s := &Server{
+		guard: cfg.Guard, clock: cfg.Clock, rand: cfg.Rand, key: cfg.RelayKey,
 		quota: cfg.Quota, storeQuota: sq, policy: cfg.Policy, lim: lim, sink: cfg.Events,
 		notes:     newNotifier(lim.MaxConnections),
 		book:      newBook(),
@@ -161,7 +170,14 @@ func New(cfg Config) (*Server, error) {
 		inflight:  map[party.Fingerprint]int{},
 		sessions:  map[*session]struct{}{},
 		rejects:   map[party.NodeKey][]time.Time{},
-	}, nil
+	}
+	s.lost, s.lostCancel = context.WithCancel(context.Background())
+	// every store call is watched for a lost authority (authority.go): the
+	// purge of the revoke path and the eviction guard's read too
+	x := &watched{s: s, w: cfg.Writer, rd: cfg.Reader, ack: cfg.Acker, ret: cfg.Retractor, rev: cfg.MailboxRevoker, use: cfg.Usage, reg: cfg.Registry}
+	s.w, s.rd, s.ack, s.retract, s.purge, s.usage, s.reg = x, x, x, x, x, x, x
+	cfg.Guard.watch(x)
+	return s, nil
 }
 
 func (s *Server) emit(e Event) {
@@ -196,6 +212,10 @@ const sweepEvery = 5 * time.Second
 // peer's node key, requires the client's node key in the login to be that key,
 // and admits a device only with a valid binding.
 //
+// A lost authority (LoseAuthority, or a store call that reported
+// relayport.ErrAuthorityLost) ends every session with the "shutting down" code
+// and returns ErrAuthorityLost (SPO-Xmailbox-OUT-127).
+//
 // How an Accept error ends it (SPO-Xmailbox-INV-013): the context's end and a
 // closed listener (relayport.ErrListenerClosed) return nil; an error the listener
 // marked retryable (relayport.ErrAcceptRetry) is waited out for a delay that
@@ -212,11 +232,20 @@ func (s *Server) Serve(ctx context.Context, ln relayport.StreamListener) error {
 	var wg sync.WaitGroup
 	defer wg.Wait()
 	defer cancel() // runs first: the sessions end before they are waited for
+	// a lost authority ends the sessions and the accept loop. No goroutine waits
+	// for it: the cancel is registered on the lost context and unregistered when
+	// Serve returns, so nothing of Serve outlives it and Serve starts nothing
+	// but its sessions and reject writers (SPO-Xmailbox-INV-043)
+	unwatch := context.AfterFunc(s.lost, cancel)
+	defer unwatch()
 	var delay time.Duration
 	for {
 		st, peer, err := ln.Accept(sctx)
 		if err != nil {
 			switch {
+			case s.lostNow():
+				s.LoseAuthority()
+				return ErrAuthorityLost
 			case ctx.Err() != nil, errors.Is(err, relayport.ErrListenerClosed):
 				return nil
 			case errors.Is(err, relayport.ErrAcceptRetry):
@@ -253,8 +282,14 @@ func (s *Server) Serve(ctx context.Context, ln relayport.StreamListener) error {
 // nothing, so these bounds are no abuse bound by themselves (ADR 0014
 // decision 5); the slots and the budget are.
 //
+// A relay that has lost its authority admits nothing: the connection is
+// refused with the "shutting down" code (SPO-Xmailbox-SEC-088).
+//
 // spec: SPO-Xmailbox-PRE-021, SPO-Xmailbox-INV-012
 func (s *Server) admit(peer party.NodeKey) (mailbox.Code, Reason, bool) {
+	if s.lostNow() {
+		return mailbox.CodeShuttingDown, ReasonAuthority, false
+	}
 	now := s.clock.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()

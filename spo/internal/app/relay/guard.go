@@ -41,21 +41,32 @@ func NewGuard(rd relayport.MailboxReader) *Guard {
 	return &Guard{rd: rd, conn: map[party.Fingerprint]int{}}
 }
 
+// watch makes the guard read through the server's authority wrapper
+// (authority.go): once the authority is lost the read fails and the guard says
+// "not evictable" without reaching the store (SPO-Xmailbox-SEC-088). relay.New
+// calls it.
+func (g *Guard) watch(rd relayport.MailboxReader) {
+	g.mu.Lock()
+	g.rd = rd
+	g.mu.Unlock()
+}
+
 // Evictable reports whether the binding of device may be dropped: no session of
 // it is open and its queue is empty.
 func (g *Guard) Evictable(device party.Fingerprint) bool {
-	if g == nil || g.rd == nil {
+	if g == nil {
 		return false
 	}
 	g.mu.Lock()
 	connected := g.conn[device] > 0
+	rd := g.rd
 	g.mu.Unlock()
-	if connected {
+	if connected || rd == nil {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), guardTimeout)
 	defer cancel()
-	entries, _, err := g.rd.List(ctx, device, nil, 1)
+	entries, _, err := rd.List(ctx, device, nil, 1)
 	return err == nil && len(entries) == 0
 }
 
