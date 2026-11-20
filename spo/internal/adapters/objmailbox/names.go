@@ -62,6 +62,34 @@ func digits(s string) bool {
 // mailboxPrefix is the prefix of every entry of the relay whose node key is node.
 func mailboxPrefix(node string) string { return relaysDir + node + mailboxDir }
 
+// The layout for the store tools (adapters/relaystore, ADR 0015 work package
+// 9), which list, migrate and repair the mailbox without a Store: the
+// adapter's own functions, not copies.
+
+// MailboxPrefix is the prefix of every entry of the relay whose node key is
+// node (64 lower-case hex digits).
+func MailboxPrefix(node string) string { return mailboxPrefix(node) }
+
+// EntryKey is the object key of an entry under prefix (from MailboxPrefix).
+func EntryKey(prefix string, rcpt party.Fingerprint, arrival int64, mid mailbox.Hash, sender party.Fingerprint, nonce uint64) string {
+	return entryKey(prefix, rcpt, arrival, mid, sender, nonce)
+}
+
+// EntryName is a parsed entry key.
+type EntryName struct {
+	Recipient, Sender party.Fingerprint
+	Arrival           int64
+	Mid               mailbox.Hash
+	Nonce             uint64
+}
+
+// ParseEntryKey reads an entry key under prefix as a load does: exactly the
+// shape of EntryKey, lower-case hex, an arrival that fits an int64.
+func ParseEntryKey(prefix, key string) (EntryName, error) {
+	r, at, mid, s, n, err := parseKey(prefix, key)
+	return EntryName{Recipient: r, Sender: s, Arrival: at, Mid: mid, Nonce: n}, err
+}
+
 // entryKey is the object key of an entry under prefix (from mailboxPrefix).
 func entryKey(prefix string, rcpt party.Fingerprint, arrival int64, mid mailbox.Hash, sender party.Fingerprint, nonce uint64) string {
 	return fmt.Sprintf("%s%s/%020d-%s-%s-%016x", prefix, hex.EncodeToString(rcpt[:]), arrival, mid, hex.EncodeToString(sender[:]), nonce)

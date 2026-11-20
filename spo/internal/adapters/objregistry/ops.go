@@ -331,15 +331,7 @@ const maxLockAhead = relaybind.MaxLifetimeSeconds + 2*relaybind.SkewSeconds + 1 
 // longer one is refused with ErrLockTooLong, since a compliance lock cannot be
 // shortened (SPO-Xobjstore-PRE-808).
 func (s *Registry) retention(notBefore int64) (*s3client.Retention, error) {
-	now := s.clock.Now()
-	until := time.Unix(notBefore+relaybind.MaxLifetimeSeconds+relaybind.SkewSeconds+1, 0)
-	if floor := now.Add(minRetention).Truncate(time.Second); until.Before(floor) {
-		until = floor
-	}
-	if limit := now.Unix() + maxLockAhead; until.Unix() > limit {
-		return nil, fmt.Errorf("%w: not-before %d locks until %d, more than %d s ahead", ErrLockTooLong, notBefore, until.Unix(), maxLockAhead)
-	}
-	return &s3client.Retention{Mode: s.mode, Until: until.UTC()}, nil
+	return TombstoneRetention(notBefore, s.clock.Now(), s.mode)
 }
 
 // putTomb writes a tombstone version: create-only for a new name, an If-Match
@@ -365,7 +357,7 @@ func (s *Registry) putTomb(ctx context.Context, op relayregistry.Op) (outcome, e
 		case err != nil:
 			return unknown, fmt.Errorf("%w: the read-back of %s: %w", relayport.ErrOutcomeUnknown, key, err)
 		case rb.State == s3client.ReadBackApplied && lockedAsWanted(rb.Info.Retention, ret):
-			s.recordTomb(t, rb.Info.ETag, rb.Info.VersionID, op.NotBefore, untilOf(rb.Info.Retention))
+			s.recordTomb(t, rb.Info.ETag, rb.Info.VersionID, op.NotBefore, rb.Info.Retention)
 			return done, nil
 		case rb.Info.ETag != "":
 			t.etag, t.latestVID = rb.Info.ETag, rb.Info.VersionID
@@ -384,7 +376,7 @@ func (s *Registry) putTomb(ctx context.Context, op relayregistry.Op) (outcome, e
 			t.unsure = true
 			return unknown, fmt.Errorf("%w: put %s: the registry bucket gave no version id (is versioning on?)", relayport.ErrOutcomeUnknown, key)
 		}
-		s.recordTomb(t, res.ETag, res.VersionID, op.NotBefore, ret.Until.Unix())
+		s.recordTomb(t, res.ETag, res.VersionID, op.NotBefore, ret)
 	case unknown, conflicted:
 		t.unsure = true
 	}
@@ -398,7 +390,7 @@ func untilOf(r *s3client.Retention) int64 {
 	return r.Until.Unix()
 }
 
-func (s *Registry) recordTomb(t *tombObj, etag, vid string, nb, until int64) {
+func (s *Registry) recordTomb(t *tombObj, etag, vid string, nb int64, lock *s3client.Retention) {
 	t.etag, t.latestVID, t.unsure = etag, vid, false
 	if vid == "" {
 		return
@@ -406,7 +398,48 @@ func (s *Registry) recordTomb(t *tombObj, etag, vid string, nb, until int64) {
 	if _, seen := t.ids[vid]; !seen {
 		s.nversions++
 	}
-	t.ids[vid] = ver{nb: nb, until: until}
+	t.ids[vid] = s.verOf(nb, lock, false)
+}
+
+// covered reports whether the writer knows a version of k at nb or higher
+// whose lock protects its value for its whole life (ver.covers): what a
+// revoke may count as stored (PRE-811).
+func (s *Registry) covered(k relayregistry.TombKey, nb int64) bool {
+	t := s.tombs[k]
+	if t == nil {
+		return false
+	}
+	for _, v := range t.ids {
+		if v.covers && v.nb >= nb {
+			return true
+		}
+	}
+	return false
+}
+
+// relock writes the relay's own locked version of a tombstone that memory
+// holds at cur or higher while no version the writer knows at the revoke's
+// not-before nb or higher is locked for its life (a holder of the role wrote
+// a short-locked or governance-locked one, PRE-811): cur, the value enforced,
+// with the lock objregistry gives it, or nb when cur's lock would be refused
+// as too long (a far-future value someone else wrote). Memory is not changed:
+// it holds cur already, and a lower nb on top lowers nothing. It is a store
+// write like any other: If-Match on the current version, read back after an
+// unknown outcome, the writer ended by a conflict the read-back does not
+// explain.
+func (s *Registry) relock(ctx context.Context, k relayregistry.TombKey, nb, cur, now int64) error {
+	op := relayregistry.Op{Kind: relayregistry.OpPutTombstone, Tomb: k, NotBefore: cur, Now: now, Replaces: true, Prev: cur}
+	if _, err := s.retention(cur); err != nil {
+		op.NotBefore = nb
+	}
+	r, err := s.putTomb(ctx, op)
+	switch r {
+	case done:
+		return nil
+	case conflicted:
+		return s.loseAuthority(err)
+	}
+	return fmt.Errorf("the tombstone %s is stored only under a lock shorter than its life, and the relay's own locked version was not written: %w", tombName(k), err)
 }
 
 // dropTomb deletes every version of a tombstone the writer knows, by version
@@ -575,7 +608,7 @@ func (s *Registry) settle(ctx context.Context, now int64) error {
 			case err != nil:
 			case got.State == s3client.ReadBackApplied && (rerr != nil || lockedAsWanted(got.Info.Retention, want)):
 				rb = relayregistry.ReadBackApplied
-				s.recordTomb(s.tombObj(u.Op.Tomb), got.Info.ETag, got.Info.VersionID, u.Op.NotBefore, untilOf(got.Info.Retention))
+				s.recordTomb(s.tombObj(u.Op.Tomb), got.Info.ETag, got.Info.VersionID, u.Op.NotBefore, got.Info.Retention)
 			case got.State == s3client.ReadBackApplied, got.State == s3client.ReadBackNotYet:
 				rb = relayregistry.ReadBackNotYet
 			}
@@ -616,10 +649,11 @@ func (s *Registry) renewMarker(ctx context.Context, now int64) error {
 	if s.marker.until.Sub(t) > MarkerRenewBefore {
 		return nil
 	}
-	until := t.Add(MarkerRetention).UTC().Truncate(time.Second)
+	lock := MarkerLock(t, s.mode)
+	until := lock.Until
 	o := obj{etag: s.marker.etag}
 	res, r, err := s.putObject(ctx, s.rc, s3client.PutInput{Key: s.prefix + markerPath, Body: encodeMarker(s.node),
-		Retention: &s3client.Retention{Mode: s.mode, Until: until}, Checksum: true}, &o)
+		Retention: lock, Checksum: true}, &o)
 	switch r {
 	case done:
 		// every other entry is in old already (registryMarker); the version this

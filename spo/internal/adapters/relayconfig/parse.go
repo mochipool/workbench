@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/crypto/blake2b"
+
 	"github.com/mochipool/workbench/spo/internal/domain/mailbox"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
 	"github.com/mochipool/workbench/spo/internal/domain/relaybind"
@@ -46,6 +48,13 @@ var schema = map[string]map[string]kind{
 		"unsafe_open_tunnel": kBool, "derp_region_id": kInt,
 	},
 	"derp_region": {"region_id": kInt, "region_code": kString},
+	"store": {
+		"kind": kString, "region": kString, "registry_bucket": kString, "working_bucket": kString,
+		"endpoint": kString, "path_style": kBool, "unsafe_loopback_http_for_tests": kBool,
+		"object_lock_mode": kString, "test_deployment": kBool,
+		"role_arn": kString, "web_identity_token_file": kString, "sts_endpoint": kString,
+		"request_timeout_seconds": kInt,
+	},
 	"derp_node": {
 		"name": kString, "host_name": kString, "cert_name": kString, "ipv4": kString, "ipv6": kString,
 		"stun_port": kInt, "derp_port": kInt,
@@ -122,7 +131,7 @@ func parseFile(data []byte) (*rawFile, error) {
 		}
 		keys, known := schema[t.Name]
 		if !known || arrayTables[t.Name] != t.Array {
-			return nil, bad("line %d: %q is not a table of this file (only [relay], [registry], [quota], [limits], [derp_region], [[device]], [[wallet]] and [[derp_node]])", t.Line, t.Name)
+			return nil, bad("line %d: %q is not a table of this file (only [relay], [store], [registry], [quota], [limits], [derp_region], [[device]], [[wallet]] and [[derp_node]])", t.Line, t.Name)
 		}
 		v := newVals(t.Line)
 		switch t.Name {
@@ -180,8 +189,12 @@ func Parse(data []byte) (*relayconf.Config, error) {
 		MailboxDir:  rt.str["mailbox_dir"],
 		RegistryDir: rt.str["registry_dir"],
 		Port:        relayconf.DefaultPort,
+		FileHash:    blake2b.Sum256(data),
 	}
 	if err := relayTable(rt, c); err != nil {
+		return nil, err
+	}
+	if err := storeTable(f.tables["store"], c); err != nil {
 		return nil, err
 	}
 	if err := checkPathsText(c); err != nil {
@@ -269,6 +282,54 @@ func relayTable(rt *entryVals, c *relayconf.Config) error {
 		c.SweepInterval = time.Duration(s) * time.Second
 	}
 	return nil
+}
+
+// storeTable reads [store] (ADR 0015 work package 10): absent, or kind =
+// "directory" with no other key, is the directory store of [relay] mailbox_dir
+// and registry_dir; kind = "s3" is the object store, whose values relayconf
+// checks (ObjectStore.Check), with the defaults: compliance, a 10 s request
+// timeout, the public endpoints of the region.
+func storeTable(t *entryVals, c *relayconf.Config) error {
+	if t == nil {
+		c.Store = relayconf.StoreDirectory
+		return nil
+	}
+	kind, ok := t.str["kind"]
+	switch {
+	case !ok:
+		return bad("line %d: [store] kind is required: \"directory\" (the [relay] directories) or \"s3\" (an object store)", t.line)
+	case kind == string(relayconf.StoreDirectory):
+		if len(t.str)+len(t.num)+len(t.bol) != 1 {
+			return bad("line %d: [store] kind = \"directory\" takes no other key; the directories are [relay] mailbox_dir and registry_dir", t.line)
+		}
+		c.Store = relayconf.StoreDirectory
+		return nil
+	case kind != string(relayconf.StoreS3):
+		return bad("line %d: [store] kind %q is neither \"directory\" nor \"s3\"", t.line, kind)
+	}
+	o := &relayconf.ObjectStore{
+		Region: t.str["region"], RegistryBucket: t.str["registry_bucket"], WorkingBucket: t.str["working_bucket"],
+		Endpoint: t.str["endpoint"], PathStyle: t.bol["path_style"], LoopbackHTTP: t.bol["unsafe_loopback_http_for_tests"],
+		LockMode: relayconf.LockCompliance, TestDeployment: t.bol["test_deployment"],
+		RoleARN: t.str["role_arn"], TokenFile: t.str["web_identity_token_file"], STSEndpoint: t.str["sts_endpoint"],
+		RequestTimeout: relayconf.DefaultRequestTimeout,
+	}
+	for _, k := range []string{"region", "registry_bucket", "working_bucket", "endpoint", "object_lock_mode", "role_arn", "web_identity_token_file", "sts_endpoint"} {
+		if v, ok := t.str[k]; ok && (len(v) > 512 || tomlsubset.HasActive(v)) {
+			return bad("line %d: [store] %s is over 512 bytes or has a control character", t.line, k)
+		}
+	}
+	if m, ok := t.str["object_lock_mode"]; ok {
+		o.LockMode = relayconf.LockMode(m)
+	}
+	if s, ok := t.num["request_timeout_seconds"]; ok {
+		if s < 1 || s > uint64(relayconf.MaxRequestTimeout/time.Second) {
+			return bad("[store] request_timeout_seconds is %d; it must be 1 to 10", s)
+		}
+		o.RequestTimeout = time.Duration(s) * time.Second
+	}
+	c.Store, c.Object = relayconf.StoreS3, o
+	return o.Check()
 }
 
 // derpRegion reads the full region pin: [derp_region] with region_id (required)

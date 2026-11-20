@@ -10,6 +10,10 @@ import (
 	"time"
 )
 
+// selfTestCleanup bounds the cleanup of a self-test that failed or was stopped:
+// it runs on a context of its own, not on the caller's, which may have ended.
+const selfTestCleanup = 5 * time.Second
+
 // SelfTestOptions are the inputs of the self-test.
 type SelfTestOptions struct {
 	// Prefix is the identity's prefix ("relays/<key>/"); the test objects are
@@ -127,7 +131,11 @@ func SelfTest(ctx context.Context, c *Client, o SelfTestOptions) error {
 	var vids []string // versions this run created, for the registry cleanup
 	err = conditionalChecks(ctx, c, key, &vids)
 	if err != nil {
-		removeAll(ctx, c, key, o.Registry, vids)
+		// on a context of its own: a self-test stopped part-way still removes
+		// what it wrote
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), selfTestCleanup)
+		removeAll(cctx, c, key, o.Registry, vids)
+		cancel()
 		return err
 	}
 	if err := remove(ctx, c, key, o.Registry, vids); err != nil {
@@ -148,6 +156,8 @@ func denySimpleDelete(ctx context.Context, c *Client, key string) error {
 	if errors.Is(err, ErrAccessDenied) && !errors.Is(err, ErrOutcomeUnknown) {
 		return nil
 	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), selfTestCleanup)
+	defer cancel()
 	if vs, lerr := c.ListAllVersions(ctx, key, 16); lerr == nil {
 		for _, v := range vs {
 			if v.Key == key {

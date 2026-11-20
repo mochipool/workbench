@@ -2,12 +2,14 @@ package relayhost_test
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/mochipool/workbench/spo/internal/app/relayhost"
+	"github.com/mochipool/workbench/spo/internal/domain/relayconf"
 	"github.com/mochipool/workbench/spo/test/fakenet"
 )
 
@@ -83,6 +85,89 @@ func TestTheCommandLine(t *testing.T) {
 		t.Errorf("check-config with a readable key: %+v", r)
 	}
 	os.Chmod(h.dir+"/key/relay.key", 0o600)
+}
+
+// A panic in the relay's main path is not Go's exit status 2 (the usage
+// status): Main recovers it, writes one line without the panic's value (which
+// may hold anything), does not release the lease, and returns 1.
+//
+// spec: SPO-Xmailbox-OUT-101
+func TestAPanicExitsOneWithoutReleasingTheLease(t *testing.T) {
+	h := newHost(t)
+	a := newDevice(h.net, "alice", 1)
+	conf := h.write(h.text([]*fakenet.Node{a.node}))
+	if r := h.main(nil, "init-key", "--config", conf); r.code != 0 {
+		t.Fatal(r)
+	}
+	_, tl := withStandLease(h)
+	d := h.deps()
+	d.Listen = func(context.Context, relayhost.TunnelSpec) (relayhost.Tunnel, error) {
+		panic("SECRET-VALUE in the tunnel")
+	}
+	var out, errb bytes.Buffer
+	code := relayhost.Main([]string{"serve", "--config", conf}, &out, &errb, make(chan relayhost.Signal), d)
+	if code != relayhost.ExitFail || strings.Contains(errb.String(), "SECRET") || !strings.Contains(errb.String(), "internal error") ||
+		strings.Count(errb.String(), "\n") != 1 {
+		t.Fatalf("exit %d\n%s%s", code, out.String(), errb.String())
+	}
+	if tl.releases.Load() != 0 {
+		t.Fatalf("a panic released the lease (%d releases)", tl.releases.Load())
+	}
+	// a panic while serving (in the reload): the context is not cancelled on the
+	// way out, so the running Run does not stop as planned and release
+	// (on another host: the first process's panic left its stores open, as a
+	// process that exits would)
+	h = newHost(t)
+	a = newDevice(h.net, "alice", 1)
+	conf = h.write(h.text([]*fakenet.Node{a.node}))
+	if r := h.main(nil, "init-key", "--config", conf); r.code != 0 {
+		t.Fatal(r)
+	}
+	_, tl = withStandLease(h)
+	d = h.deps()
+	load := d.LoadConfig
+	calls := 0
+	d.LoadConfig = func(p string) (*relayconf.Config, error) {
+		if calls++; calls > 1 {
+			panic("SECRET-VALUE in the reload")
+		}
+		return load(p)
+	}
+	sig := make(chan relayhost.Signal)
+	got := make(chan int, 1)
+	errb.Reset()
+	go func() { got <- relayhost.Main([]string{"serve", "--config", conf}, &out, &errb, sig, d) }()
+	for i := 0; ; i++ {
+		h.mu.Lock()
+		tun := h.tun
+		h.mu.Unlock()
+		if tun != nil {
+			break
+		}
+		select {
+		case c := <-got:
+			t.Fatalf("serve exited %d: %s", c, errb.String())
+		default:
+		}
+		if i > 500 {
+			t.Fatal("the relay did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	sig <- relayhost.SignalReload
+	if c := <-got; c != relayhost.ExitFail || strings.Contains(errb.String(), "SECRET") {
+		t.Fatalf("a panic while serving: %d %s", c, errb.String())
+	}
+	time.Sleep(300 * time.Millisecond) // a planned stop would release by now
+	if tl.releases.Load() != 0 {
+		t.Fatalf("a panic while serving released the lease (%d releases)", tl.releases.Load())
+	}
+	d = h.deps()
+	d.LoadConfig = func(string) (*relayconf.Config, error) { panic("SECRET-VALUE in the config") }
+	errb.Reset()
+	if code := relayhost.Main([]string{"check-config", "--config", conf}, &out, &errb, nil, d); code != relayhost.ExitFail || strings.Contains(errb.String(), "SECRET") {
+		t.Fatalf("a panic in check-config: %d %s", code, errb.String())
+	}
 }
 
 // serve: prints the node key and, only on request, the address with a warning;

@@ -24,6 +24,12 @@ var vaultkmsAllowed = map[string]bool{
 	module + "/internal/platform/secret": true,
 	// the shared Signature Version 4 (ADR 0015 work package 2)
 	module + "/internal/platform/sigv4": true,
+	// the shared reading of an STS web-identity answer (ADR 0015 work package 10)
+	module + "/internal/platform/stsweb": true,
+	// the web identity token file as kubelet projects it, by the relay's own
+	// rule (a link into the timestamped directory, mode 0644); the package
+	// imports only the standard library
+	module + "/internal/platform/mountfile": true,
 }
 
 const vaultkmsPkg = module + "/internal/adapters/vaultkms"

@@ -109,6 +109,13 @@ type Deps struct {
 	// before the tunnel starts. nil: SingleHostLease, the lease of directory
 	// stores on one host.
 	OpenLease func(relay party.NodeKey, clock relayport.Clock) (relayport.Lease, error)
+	// OpenObjectStore is the first step of a start whose configuration's store
+	// is an object store ([store] kind = "s3"): it opens the store's clients,
+	// runs the start-up self-test of each bucket, refuses a store that was never
+	// initialised, and returns the lease and the openers of the two stores,
+	// which Start then uses in its order instead of OpenLease, OpenMailbox and
+	// OpenRegistry. nil: this build opens directory stores only.
+	OpenObjectStore func(ctx context.Context, spec StoreSpec, relay party.NodeKey, clock relayport.Clock) (*ObjectStore, error)
 	// RenewEvery replaces the quarter of the lease term; RefreshEvery replaces
 	// relayport.TombstoneRefreshEvery; RequestTimeout replaces
 	// DefaultRequestTimeout, the bound of one renewal and of one refresh (a
@@ -207,6 +214,9 @@ type Relay struct {
 	keep     *keeper
 	log      *logger
 	secrets  *relayconf.Key // the copy the tunnel reads from, cleared after the teardown
+	// closeStore drops an object store's clients after the stores are closed and
+	// the lease is released or left (nil for directory stores)
+	closeStore func()
 
 	stuckOnce sync.Once
 	stuck     chan struct{}
@@ -238,7 +248,13 @@ func Start(ctx context.Context, cfg *relayconf.Config, key *relayconf.Key, d Dep
 	if err := key.Valid(); err != nil {
 		return nil, err
 	}
-	if d.OpenMailbox == nil || d.OpenRegistry == nil || d.Listen == nil || d.PublicKey == nil || d.Rand == nil {
+	object := cfg.StoreKind() == relayconf.StoreS3
+	switch {
+	case d.Listen == nil || d.PublicKey == nil || d.Rand == nil:
+		return nil, errors.New("relay: the assembly is missing an adapter")
+	case object && d.OpenObjectStore == nil:
+		return nil, errors.New("relay: this build opens directory stores only, and the configuration names an object store")
+	case !object && (d.OpenMailbox == nil || d.OpenRegistry == nil):
 		return nil, errors.New("relay: the assembly is missing an adapter")
 	}
 	clock := d.Clock
@@ -257,6 +273,9 @@ func Start(ctx context.Context, cfg *relayconf.Config, key *relayconf.Key, d Dep
 		r.refresh = d.RefreshEvery
 	}
 	r.reqTime = DefaultRequestTimeout
+	if object {
+		r.reqTime = cfg.Object.RequestTimeout
+	}
 	if d.RequestTimeout > 0 {
 		r.reqTime = d.RequestTimeout
 	}
@@ -268,6 +287,12 @@ func Start(ctx context.Context, cfg *relayconf.Config, key *relayconf.Key, d Dep
 	loadFailed := false  // a store's open failed: what it sent may still land
 	lapseWhy := ""       // why a failed start lets the lease lapse, read before the stores close
 	defer func() {
+		if p := recover(); p != nil {
+			// a panic undoes nothing: above all it does not release the lease,
+			// since this process can no longer tell what it left in flight; Main
+			// reports it and the process exits 1 (SPO-Xmailbox-OUT-101)
+			panic(p)
+		}
 		if err != nil {
 			if r.keep != nil && !r.keep.held() {
 				err = fmt.Errorf("%w: %w", err, ErrAuthorityLost)
@@ -298,9 +323,35 @@ func Start(ctx context.Context, cfg *relayconf.Config, key *relayconf.Key, d Dep
 	// It is renewed from here on; a failed start releases it unless it was lost
 	// or a request of the load may still land (startLapse), as a planned stop
 	// does (SPO-Xmailbox-OUT-129).
+	r.log.line(startLine(cfg, pub))
 	openLease := d.OpenLease
 	if openLease == nil {
 		openLease = func(party.NodeKey, relayport.Clock) (relayport.Lease, error) { return SingleHostLease(), nil }
+	}
+	openMailbox := func(_ context.Context, env StoreEnv) (relayport.MailboxStore, []string, error) {
+		return d.OpenMailbox(StoreSpec{Kind: StoreDirectory, Dir: cfg.MailboxDir}, env)
+	}
+	openRegistry := func(_ context.Context, c relayregistry.Config, env StoreEnv) (relayport.Registry, []string, error) {
+		return d.OpenRegistry(StoreSpec{Kind: StoreDirectory, Dir: cfg.RegistryDir}, c, env)
+	}
+	if object {
+		// the object store first: its clients, the self-test of each bucket and
+		// the check that the identity was initialised, before the lease is asked
+		// for (SPO-Xobjstore-OUT-302)
+		ob, err := d.OpenObjectStore(ctx, StoreSpec{Kind: StoreObject, Object: cfg.Object}, pub, clock)
+		if err != nil {
+			return nil, fmt.Errorf("relay: the object store: %w", err)
+		}
+		if ob == nil || ob.Lease == nil || ob.OpenMailbox == nil || ob.OpenRegistry == nil {
+			return nil, errors.New("relay: the object store adapter gave no lease or no store")
+		}
+		r.log.notes("object store", ob.Notes)
+		if ob.Close != nil {
+			r.closeStore = ob.Close
+			undo = append(undo, ob.Close) // first in, so last out: after the lease
+		}
+		openLease = func(party.NodeKey, relayport.Clock) (relayport.Lease, error) { return ob.Lease, nil }
+		openMailbox, openRegistry = ob.OpenMailbox, ob.OpenRegistry
 	}
 	lease, err := openLease(pub, clock)
 	if err != nil {
@@ -337,7 +388,7 @@ func Start(ctx context.Context, cfg *relayconf.Config, key *relayconf.Key, d Dep
 	}
 
 	// 1. the mailbox store
-	store, notes, err := d.OpenMailbox(StoreSpec{Kind: StoreDirectory, Dir: cfg.MailboxDir}, env)
+	store, notes, err := openMailbox(ctx, env)
 	if err != nil {
 		loadFailed = true
 		return nil, fmt.Errorf("relay: the mailbox store: %w", err)
@@ -351,7 +402,7 @@ func Start(ctx context.Context, cfg *relayconf.Config, key *relayconf.Key, d Dep
 	guard := relay.NewGuard(store)
 	regCfg := cfg.Registry
 	regCfg.Evictable = guard.Evictable
-	reg, notes, err := d.OpenRegistry(StoreSpec{Kind: StoreDirectory, Dir: cfg.RegistryDir}, regCfg, env)
+	reg, notes, err := openRegistry(ctx, regCfg, env)
 	if err != nil {
 		loadFailed = true
 		return nil, fmt.Errorf("relay: the registry: %w", err)
@@ -433,6 +484,18 @@ func Start(ctx context.Context, cfg *relayconf.Config, key *relayconf.Key, d Dep
 		RelayKey: pub,
 	}
 	return r, nil
+}
+
+// startLine is the first line of a start (ADR 0015 decision 9): the hash of the
+// configuration in force and the store, with the buckets and the prefix of an
+// object store (names the operator chose and the relay's public key; nothing
+// secret).
+func startLine(cfg *relayconf.Config, pub party.NodeKey) string {
+	s := "start config=" + cfg.HashTag() + " store=" + string(cfg.StoreKind())
+	if o := cfg.Object; cfg.StoreKind() == relayconf.StoreS3 && o != nil {
+		s += fmt.Sprintf(" registry_bucket=%s working_bucket=%s prefix=relays/%x/", o.RegistryBucket, o.WorkingBucket, pub[:])
+	}
+	return s
 }
 
 // startLapse is why a failed start must let its lease lapse rather than
@@ -665,14 +728,25 @@ func (r *Relay) Run(ctx context.Context) error {
 	r.keep.stop()
 	<-r.keep.done
 	cerr := errors.Join(r.reg.Close(), r.store.Close())
+	if r.closeStore != nil {
+		defer r.closeStore() // after the release, or after the decision to let it lapse
+	}
 	if lost {
 		// the exit rule: the lease is not released, because this process cannot
 		// tell whether the lease it holds is still the one it wrote
 		r.log.line("stopped reason=authority_lost")
 		return fmt.Errorf("relay: %w", ErrAuthorityLost)
 	}
+	if lapse == "" {
+		// the close of the stores outlasted the lease end: there is nothing
+		// left to release (the lease would send nothing), and the log says so
+		if until, ok := r.lease.Until(); !ok || (!until.IsZero() && !r.keep.clock.Now().Before(until)) {
+			lapse = "late"
+		}
+	}
 	if lapse != "" {
-		// a planned stop whose requests may still land: no release
+		// a planned stop whose requests may still land, or one past its lease
+		// end: no release
 		r.log.line("stopped lease=lapses reason=" + lapse)
 		if serveErr != nil {
 			return serveErr

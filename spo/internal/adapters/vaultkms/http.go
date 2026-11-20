@@ -34,6 +34,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mochipool/workbench/spo/internal/platform/mountfile"
 	"github.com/mochipool/workbench/spo/internal/ports"
 )
 
@@ -198,6 +199,34 @@ func readSmallFile(path string, limit int64, secretFile bool) ([]byte, error) {
 		return nil, errors.New("grew while it was read")
 	}
 	return b[:n], nil
+}
+
+// readToken reads a web identity token file by platform/mountfile's Token rule,
+// the rule the relay reads its own token by: as kubelet projects it (a link
+// "token -> ..data/token" into the timestamped directory, mode 0644 or 0640,
+// owned by root), or a plain file; owned by root or this process's user, not
+// writable by group or others, every directory on its path (and those links
+// lead through) closed to other users, at most maxSecretFile bytes. A missing
+// file is errNoFile.
+//
+// It is looser than readSmallFile's rule for a secret file (a file of the
+// user's, mode 0600, no link) on purpose and only here: the token is not a
+// long-lived secret (kubelet rotates it within the hour, and it is worth
+// nothing without the role's trust policy), and a projected token is never
+// 0600 and never a plain file, so the stricter rule refused every real one. What
+// the token decides, which role is assumed and so which key may be used, is
+// kept from other users by the write rules, which are not loosened: nobody but
+// root and the user can put another token in its place. The Vault token and
+// JWT files keep readSmallFile's rule.
+func readToken(path string) ([]byte, error) {
+	b, err := mountfile.Read(path, mountfile.Token(maxSecretFile))
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil, errNoFile
+	case err != nil:
+		return nil, err
+	}
+	return b, nil
 }
 
 // call makes one request with the deadline of the connection and returns the

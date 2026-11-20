@@ -97,7 +97,11 @@ func Load(path string) (*relayconf.Config, error) {
 // their group or others; an existing key file has no group or other permission
 // bit and belongs to the user (its content is checked by LoadKey).
 func CheckPaths(c *relayconf.Config) error {
-	for _, d := range []struct{ what, path string }{{"mailbox_dir", c.MailboxDir}, {"registry_dir", c.RegistryDir}} {
+	dirs := []struct{ what, path string }{{"mailbox_dir", c.MailboxDir}, {"registry_dir", c.RegistryDir}}
+	if c.StoreKind() != relayconf.StoreDirectory {
+		dirs = nil // an object store has no directory; the token file is read at each exchange
+	}
+	for _, d := range dirs {
 		st, err := os.Stat(d.path)
 		switch {
 		case errors.Is(err, os.ErrNotExist):
@@ -114,6 +118,12 @@ func CheckPaths(c *relayconf.Config) error {
 		case st.Mode().Perm()&0o077 != 0:
 			return bad("%s %s has group or other permission bits (mode %o); the stores are the relay's alone. Run: chmod 700 %s", d.what, d.path, st.Mode().Perm(), d.path)
 		}
+	}
+	// a root-owned key is a mounted Secret: its own rules check its directory
+	if st, err := os.Stat(c.KeyFile); err == nil && rootOwned(st) {
+		k, err := loadMounted(c.KeyFile)
+		k.Destroy()
+		return err
 	}
 	if err := checkParent("key_file", filepath.Dir(c.KeyFile)); err != nil {
 		return err
@@ -177,6 +187,15 @@ func fileUID(st os.FileInfo) int {
 // clean, distinct and not inside one another.
 func checkPathsText(c *relayconf.Config) error {
 	paths := []struct{ what, p string }{{"key_file", c.KeyFile}, {"mailbox_dir", c.MailboxDir}, {"registry_dir", c.RegistryDir}}
+	if c.StoreKind() == relayconf.StoreS3 {
+		// the object store keeps no directory (relayconf's Check refuses the keys too)
+		for _, d := range paths[1:] {
+			if d.p != "" {
+				return bad("[relay] %s is a key of the directory store; the object store ([store] kind = \"s3\") keeps no directory: remove it", d.what)
+			}
+		}
+		paths = paths[:1]
+	}
 	for _, x := range paths {
 		switch {
 		case x.p == "":

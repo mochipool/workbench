@@ -54,8 +54,22 @@
 // marker over it hides nothing; it is locked for a year, a new locked version
 // is written by Sweep when the newest has less than MarkerRenewBefore left,
 // and Sweep deletes the versions whose lock has ended and the delete markers
-// under the current entry. Only InitIdentity, the option of init-store, writes
-// a missing marker, and only over a bucket that holds nothing of the identity.
+// under the current entry. Of this package only InitIdentity, the option of
+// init-store, writes a missing marker, and only over a bucket that holds
+// nothing of the identity; migrate-store (adapters/relaystore), which writes
+// the tombstones first, writes the markers itself with this package's bytes
+// and lock (EncodeMarker, MarkerLock), after its own checks.
+//
+// SHORT LOCKS. A version that holds a value but is not locked for that value's
+// life in the deployment's mode (LocksFor: a short lock, a governance lock in
+// a compliance deployment, none) is enforced while it exists, but is not
+// counted as stored: a revoke that finds memory at its not-before or higher
+// with no such version writes its own (relock, PRE-811), because whoever
+// wrote the weak one may delete it by its id once its lock ends.
+//
+// THE SELF-TEST'S OBJECTS. Sweep deletes, once a day, the registry bucket's
+// objects under selftest/ whose lock has ended (the retention self-test
+// leaves one locked for a day; OUT-809).
 //
 // UNKNOWN OUTCOMES. A write whose answer was lost is read back at once: the
 // same bytes is success. Otherwise a tombstone written or a binding deleted is
@@ -213,10 +227,18 @@ type obj struct {
 }
 
 // ver is what the writer knows of one tombstone version: its not-before (-1
-// for a delete marker) and the end of its lock in unix seconds (0 when not
-// known).
+// for a delete marker), the end of its lock in unix seconds (0 when not
+// known), and whether that lock protects the not-before for its whole life
+// in the deployment's mode (LocksFor; false for an unreadable version).
 type ver struct {
 	nb, until int64
+	covers    bool
+}
+
+// verOf is a readable version's entry from the lock a read or a write
+// reported for it.
+func (s *Registry) verOf(nb int64, lock *s3client.Retention, unreadable bool) ver {
+	return ver{nb: nb, until: untilOf(lock), covers: !unreadable && LocksFor(nb, lock, s.mode)}
 }
 
 // tombObj is what the writer knows of one tombstone name: its current version,
@@ -294,6 +316,9 @@ type Registry struct {
 	// store refused a delete.
 	cursor    scan
 	pruneHold map[relayregistry.TombKey]int64
+	// selftestNext is the relay time of the next pass over selftest/
+	// (sweepSelftest).
+	selftestNext int64
 
 	refreshPages, pageKeys, markerEntries, concurrency, prunePerSweep int
 }
@@ -349,6 +374,7 @@ func open(ctx context.Context, cfg Config, o options) (*Registry, []string, erro
 	if err := s.load(ctx, o.init); err != nil {
 		return nil, nil, err
 	}
+	s.selftestNext = s.clock.Now().Unix() + int64(time.Hour/time.Second)
 	return s, s.notes, nil
 }
 
@@ -563,7 +589,10 @@ func (s *Registry) Register(ctx context.Context, p relayregistry.Presented) (rel
 
 // Revoke implements relayport.Revoker. The drops that make room run first,
 // each on its own; a refused or failed one is held and never stops the
-// revoke (ADR 0015 decision 3). Only a lost authority does.
+// revoke (ADR 0015 decision 3). Only a lost authority does. A revoke the
+// stored value already covers writes its own locked version first when no
+// version the writer knows holds that value under a lock for its life
+// (relock, PRE-811); a failure of that write is returned with the result.
 func (s *Registry) Revoke(ctx context.Context, r relayregistry.RevokeRecord) (relayregistry.RevokeResult, error) {
 	now, err := s.begin(ctx)
 	if err != nil {
@@ -584,11 +613,39 @@ func (s *Registry) Revoke(ctx context.Context, r relayregistry.RevokeRecord) (re
 		s.refused(err)
 		return relayregistry.RevokeResult{}, err
 	}
+	// a value memory holds at the revoke's not-before or higher counts as
+	// stored only when a version locked for its life holds it (PRE-811): the
+	// relay writes its own first, before any binding is deleted
+	var relocked error
+	k := relayregistry.TombKey{Scope: r.Scope(), Key: r.Key(), Device: r.Device()}
+	if plan.Result.Recorded && !writesTomb(plan.Ops, k) && !s.covered(k, r.NotBefore()) {
+		if relocked = s.relock(ctx, k, r.NotBefore(), plan.Result.NotBefore, now); errors.Is(relocked, relayport.ErrAuthorityLost) {
+			return relayregistry.RevokeResult{}, relocked
+		}
+	}
 	applied, unknown, err := s.execute(ctx, plan.Ops)
 	if err != nil {
 		return relayregistry.PartialRevoke(plan, applied, unknown), err
 	}
+	if relocked != nil {
+		// memory enforces the value, but no version locked for its life holds
+		// it: the revoke is not recorded, and the client sends it again
+		// (SPO-Xmailbox-OUT-128), which writes the lock
+		res := plan.Result
+		res.Recorded, res.Unconfirmed = false, true
+		return res, relocked
+	}
 	return plan.Result, plan.Warn
+}
+
+// writesTomb reports whether a plan writes the tombstone k.
+func writesTomb(ops []relayregistry.Op, k relayregistry.TombKey) bool {
+	for _, op := range ops {
+		if op.Kind == relayregistry.OpPutTombstone && op.Tomb == k {
+			return true
+		}
+	}
+	return false
 }
 
 // SetExpectedSenders implements relayport.ExpectedSenderWriter.
@@ -638,8 +695,9 @@ func (s *Registry) checkFor(ctx context.Context, p relayregistry.Presented, now 
 // operations, carries out the core's sweep (a refused tombstone drop is held
 // and counted, and the sweep goes on), deletes superseded tombstone versions
 // whose lock has ended (prune), writes a new locked marker version when the
-// newest has less than MarkerRenewBefore left, and deletes the marker's
-// entries that no longer matter (pruneMarker).
+// newest has less than MarkerRenewBefore left, deletes the marker's entries
+// that no longer matter (pruneMarker), and once every SelftestEvery the
+// self-test's objects whose lock has ended (sweepSelftest).
 func (s *Registry) Sweep(ctx context.Context) (relayregistry.SweepResult, error) {
 	now, err := s.begin(ctx)
 	if err != nil {
@@ -669,7 +727,67 @@ func (s *Registry) Sweep(ctx context.Context) (relayregistry.SweepResult, error)
 	if err := s.renewMarker(ctx, now); err != nil {
 		return res, err
 	}
-	return res, s.pruneMarker(ctx, now)
+	if err := s.pruneMarker(ctx, now); err != nil {
+		return res, err
+	}
+	return res, s.sweepSelftest(ctx, now)
+}
+
+// SelftestEvery is how often Sweep looks for the self-test's objects whose
+// lock has ended (the first time an hour after Open).
+const SelftestEvery = 24 * time.Hour
+
+// sweepSelftest deletes, by version id, the self-test's objects in the
+// registry bucket whose lock has ended on the relay's clock by a margin of
+// the skew (OUT-809; ADR 0015 decision 2: the retention self-test leaves one
+// locked for a day). It runs once every SelftestEvery and reads one listing
+// page of at most SelftestPerSweep entries under selftest/, one head per
+// object version on it and one delete per version due. It never touches a
+// version without a lock (a run in progress, or a failed one's: store repair
+// --action selftest), a delete marker, or a key outside the identity's
+// selftest/. A failure leaves the rest to the next pass; only a lost
+// authority is returned.
+func (s *Registry) sweepSelftest(ctx context.Context, now int64) error {
+	if now < s.selftestNext {
+		return nil
+	}
+	s.selftestNext = now + int64(SelftestEvery/time.Second)
+	prefix := s.prefix + selftestPath
+	p, err := s.listVersions(ctx, s3client.VersionsInput{Prefix: prefix, MaxKeys: SelftestPerSweep})
+	if err != nil {
+		return lostOnly(err)
+	}
+	for i, v := range p.Versions {
+		if i >= SelftestPerSweep {
+			break // a store that does not honour the page size
+		}
+		if v.DeleteMarker || len(v.Key) <= len(prefix) || v.Key[:len(prefix)] != prefix {
+			continue
+		}
+		info, err := s.head(ctx, s.rc, v.Key, v.VersionID)
+		if err != nil {
+			if lostOnly(err) != nil {
+				return err
+			}
+			continue
+		}
+		// untilOf: 0 for no lock, read without a dereference of the store's answer
+		if until := untilOf(info.Retention); until == 0 || now-relaybind.SkewSeconds <= until {
+			continue
+		}
+		if err := s.deleteVersion(ctx, v.Key, v.VersionID); lostOnly(err) != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// lostOnly is err when it is a lost authority, else nil.
+func lostOnly(err error) error {
+	if errors.Is(err, relayport.ErrAuthorityLost) {
+		return err
+	}
+	return nil
 }
 
 // RefreshTombstones implements relayport.TombstoneRefresher: it settles the

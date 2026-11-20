@@ -92,7 +92,7 @@ You need Vault 1.13 or later, or OpenBao: Transit must support `associated_data`
    eval "$(aws configure export-credentials --format env)"
    ```
 
-   Only a temporary key id (`ASIA...`) with a session token is accepted. Static access keys (`AKIA...`) and any other key id are refused. The web identity token file follows the same file rules as the Vault token file.
+   Only a temporary key id (`ASIA...`) with a session token is accepted. Static access keys (`AKIA...`) and any other key id are refused. The web identity token file may be a kubelet-projected token (a link into its timestamped directory, mode 0644) or a plain file; it must be owned by you or root and not writable by anyone else, and so must every directory on its path (a root-owned directory with the sticky bit, such as `/tmp`, is fine). See `[kms]` in [spo.toml](../reference/spo-toml.md).
 
 4. Add the slot:
 
