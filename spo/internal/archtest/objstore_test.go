@@ -273,3 +273,58 @@ func TestNoReleaseBinaryLinksTheS3StandIn(t *testing.T) {
 		t.Error("the bite check: no file of the S3 client was seen")
 	}
 }
+
+// ---- ADR 0015 work package 8: the object-store registry adapter ----
+
+// The registry adapter over the object store (adapters/objregistry) is
+// linkable by the relay under the same rule as the S3 client: its closure
+// holds nothing the relay binary may not link and nothing relay-banned, the
+// key agreement and AEAD packages only below the TLS stack, no AWS SDK and no
+// test package; its direct imports are an exact allow-list.
+//
+// spec: SPO-Xobjstore-INV-801
+var objregistryPkg = module + "/internal/adapters/objregistry"
+
+var objregistryDirectImports = []string{
+	"bytes", "cmp", "context", "encoding/binary", "encoding/hex", "errors", "fmt", "regexp", "slices", "strings", "sync", "time",
+	s3clientPkg,
+	module + "/internal/domain/mailbox",
+	module + "/internal/domain/party",
+	module + "/internal/domain/relaybind",
+	module + "/internal/domain/relayregistry",
+	module + "/internal/ports/relayport",
+}
+
+func TestObjectRegistryIsLinkableByTheRelay(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("the go tool is absent")
+	}
+	roots := []string{objregistryPkg}
+	g := graphFor(t, roots...)
+	if len(g) < 20 {
+		t.Fatalf("a graph of %d packages is not a listing", len(g))
+	}
+	for _, v := range s3clientViolations(g, roots) {
+		t.Error(v)
+	}
+	// the bite check: an adapter that reached the workspace ports or the stand-in fails
+	for _, bad := range []string{module + "/internal/ports", s3standPkg} {
+		syn := importGraph{objregistryPkg: {bad}, bad: nil}
+		if v := s3clientViolations(syn, roots); len(v) != 1 {
+			t.Errorf("the bite check: an import of %s gave %v", bad, v)
+		}
+	}
+	seen := 0
+	for _, p := range load(t) {
+		if p.ImportPath != objregistryPkg {
+			continue
+		}
+		seen++
+		for _, v := range allowListViolations(p.Imports, objregistryDirectImports) {
+			t.Errorf("%s %s", p.ImportPath, v)
+		}
+	}
+	if seen != 1 {
+		t.Fatalf("found %d of the object registry package", seen)
+	}
+}

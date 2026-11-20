@@ -60,6 +60,18 @@ var (
 	// ErrRevokeRate: the relay-wide cap on recorded revokes that invalidate nothing
 	// is spent.
 	ErrRevokeRate = fmt.Errorf("%w: too many revokes of nothing that is bound", ErrLimit)
+	// ErrNameRaiseRate: one stored tombstone has been raised MaxRaisesPerName
+	// times in RaiseWindowSeconds by revokes that invalidate nothing. It wraps
+	// ErrRevokeRate (the `limit` outcome, counted as revoke_rate). A revoke that
+	// invalidates a binding is never refused for it.
+	ErrNameRaiseRate = fmt.Errorf("%w: the tombstone was raised too often", ErrRevokeRate)
+	// ErrDeletePending: the device's binding was deleted with an outcome storage
+	// has not confirmed (Core.ApplyUnknown), and that delete may still land: a
+	// new binding written now could be removed by it (SPO-Xobjstore-PRE-003). The
+	// registration is refused with a limit until the delete is confirmed (Settle,
+	// Apply) or the bound of UnconfirmedSeconds ends the writer. The client tries
+	// again.
+	ErrDeletePending = fmt.Errorf("%w: a delete of the device's binding is not yet confirmed by storage", ErrLimit)
 	// ErrKeyChangeRate: the device has had its key-change budget (KeyChangesPerDevice
 	// in KeyChangeWindow).
 	ErrKeyChangeRate = fmt.Errorf("%w: the device changed its wallet key too often", ErrLimit)
@@ -147,12 +159,32 @@ const (
 	UnconfirmedSeconds int64 = 180
 	// MaxTombstoneVersions is the most tombstone versions a load reads. A raise is
 	// a new version of one name in a store that keeps versions, so the load bounds
-	// versions, not names. At both rate caps' full rates (60 an hour each and
-	// their bursts) over a tombstone's life (180 days and the skew) there are at
-	// most about 530 thousand; the ceiling is twice that, rounded up to a power of
-	// two (ADR 0015 decision 3, "A ceiling on versions"). The directory store has
-	// one version per name and bounds names by MaxTombstoneHard, far below it.
+	// versions, not names. A version is locked until at most its write time plus
+	// the maximum lifetime, twice the skew and a second, and the adapter deletes a
+	// superseded one within VersionLagSeconds after that. In that window the relay
+	// writes at most one version per token of the revoke cap and one per binding
+	// it admitted or held (an invalidating revoke needs a held binding); past it
+	// at most two versions of each name stay (its highest and its current). From
+	// the constants that is at most 667 660 versions (TestTheWorstCaseVersionCountFitsTheCeiling;
+	// ADR 0015 decision 3, "A ceiling on versions", changed after the review of
+	// work package 8); the ceiling is more than half again as many. The
+	// directory store has one version per name and bounds names by
+	// MaxTombstoneHard, far below it.
 	MaxTombstoneVersions = 1 << 20
+	// VersionLagSeconds bounds how long a superseded tombstone version whose lock
+	// has ended stays in the store: a sweep at least once a day (the longest
+	// sweep interval), a delete the store refused tried again a day later at the
+	// latest. It enters the arithmetic of MaxTombstoneVersions.
+	VersionLagSeconds int64 = 2 * 86400
+	// MaxRaisesPerName and RaiseWindowSeconds are the budget of one stored
+	// tombstone for raises that invalidate nothing: at most 4 in any 24 hours
+	// (ErrNameRaiseRate), so one name gains at most 733 such versions in a
+	// lock's life. They also draw on the relay-wide revoke cap. The times are in
+	// memory: a restart starts the budget again, and the relay-wide cap, which is
+	// durable, still bounds the total. A raise that invalidates a binding is
+	// never limited by it.
+	MaxRaisesPerName         = 4
+	RaiseWindowSeconds int64 = 86400
 )
 
 // DefaultMaxTombstones is the default bound of the tombstone table for a
@@ -524,5 +556,5 @@ type Stats struct {
 	// has not confirmed (Core.ApplyUnknown). A planned stop with any lets the
 	// lease lapse instead of releasing it.
 	Unconfirmed int
-	Refused     map[string]uint64 // by reason: not_allowed, key_devices, registry_full, rate, tombstones, revoke_rate, key_change, older, revoked, lifetime, other
+	Refused     map[string]uint64 // by reason: not_allowed, key_devices, registry_full, rate, tombstones, revoke_rate (ErrNameRaiseRate too), key_change, older, delete_pending, revoked, lifetime, other
 }

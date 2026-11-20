@@ -8,9 +8,9 @@ import (
 )
 
 // The in-memory lease passes the lease contract with every hostile hook: a
-// second holder, a theft and late answers.
+// second holder, a theft, late answers and a removed record.
 //
-// spec: SPO-Xmailbox-IF-031, SPO-Xmailbox-INV-042
+// spec: SPO-Xmailbox-IF-031, SPO-Xmailbox-INV-042, SPO-Xobjstore-IF-103
 func TestFakeLeaseContract(t *testing.T) {
 	relayporttest.RunLease(t, func(t *testing.T) relayporttest.LeaseFixture {
 		clock := relayporttest.NewManualClock(relayporttest.RegT0)
@@ -22,6 +22,7 @@ func TestFakeLeaseContract(t *testing.T) {
 			Contender: func(*testing.T) relayport.Lease { return stand.Lease("b") },
 			Steal:     stand.Steal,
 			Late:      stand.Late,
+			Remove:    stand.Remove,
 		}
 	})
 }

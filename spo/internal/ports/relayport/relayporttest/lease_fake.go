@@ -30,7 +30,7 @@ func (t LeaseTimes) TakeAfter() time.Duration { return t.Duration + t.Margin }
 // write, as the lease object in a bucket would be. Every write raises the
 // counter, a take raises the generation. It is the reference of the lease
 // rules for the tests of the relay host and of the object-store lease; its hooks
-// make the record stolen or the answers late.
+// make the record stolen, removed or the answers late.
 type LeaseStand struct {
 	mu    sync.Mutex
 	clock *ManualClock
@@ -42,9 +42,19 @@ type LeaseStand struct {
 	late             bool
 }
 
-// NewLeaseStand makes an empty lease record on clock.
+// NewLeaseStand makes a lease record on clock in the state the store
+// initialisation leaves it (objlease.Init): released, so the first take is at
+// once. An absent record (Remove) is lapsed, as in the object store.
 func NewLeaseStand(clock *ManualClock, times LeaseTimes) *LeaseStand {
-	return &LeaseStand{clock: clock, times: times}
+	return &LeaseStand{clock: clock, times: times, exists: true, released: true}
+}
+
+// Remove deletes the record, as a principal that ignores the rules (and the
+// bucket policy's deny) would.
+func (s *LeaseStand) Remove() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.exists, s.released, s.holder = false, false, ""
 }
 
 // Lease is a lease of this record for the holder id.
@@ -84,7 +94,21 @@ type FakeLease struct {
 	lostOnce sync.Once
 }
 
-var _ relayport.Lease = (*FakeLease)(nil)
+var (
+	_ relayport.Lease      = (*FakeLease)(nil)
+	_ relayport.LeaseTerm  = (*FakeLease)(nil)
+	_ relayport.LeaseLoser = (*FakeLease)(nil)
+)
+
+// Term implements relayport.LeaseTerm.
+func (l *FakeLease) Term() time.Duration { return l.s.times.Term() }
+
+// Lose implements relayport.LeaseLoser.
+func (l *FakeLease) Lose() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lose()
+}
 
 func (l *FakeLease) lose() {
 	l.held = false
@@ -106,7 +130,7 @@ func (l *FakeLease) Acquire(ctx context.Context) error {
 	l.mu.Unlock()
 	var seenGen, seenCounter uint64
 	var seenAt time.Time
-	seen := false
+	seen, seenAbsent := false, false
 	for {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("the lease was not taken: %w", err)
@@ -116,10 +140,11 @@ func (l *FakeLease) Acquire(ctx context.Context) error {
 		now := s.clock.Now()
 		take, lapsed := false, false
 		switch {
-		case !s.exists || s.released:
+		case s.exists && s.released:
 			take = true
-		case !seen || s.gen != seenGen || s.counter != seenCounter:
-			seen, seenGen, seenCounter, seenAt = true, s.gen, s.counter, now
+		case !seen || seenAbsent != !s.exists || (s.exists && (s.gen != seenGen || s.counter != seenCounter)):
+			// an absent record is watched as a held one is: it is lapsed, not free
+			seen, seenAbsent, seenGen, seenCounter, seenAt = true, !s.exists, s.gen, s.counter, now
 		case now.Sub(seenAt) >= s.times.TakeAfter():
 			take, lapsed = true, true
 		}

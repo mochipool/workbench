@@ -168,9 +168,15 @@ func TestUnconfirmedWritesAreConfirmedByWhatSupersedesThem(t *testing.T) {
 	if _, ok := r.core.Lookup(d, r.now); ok {
 		t.Fatal("a binding deleted with an unknown outcome is served")
 	}
+	// a new binding of the device waits for the delete (it may still land and
+	// remove the new one, SPO-Xobjstore-PRE-807); a later delete confirms it
+	if _, err := r.register(r.present(w, d)); !errors.Is(err, relayregistry.ErrDeletePending) {
+		t.Fatalf("a new binding over an unconfirmed delete: %v, want ErrDeletePending", err)
+	}
+	r.core.Apply(del)
 	plan, err := r.register(r.present(w, d))
 	if err != nil || r.core.Stats(r.now).Unconfirmed != 0 {
-		t.Fatalf("a new binding of the device did not confirm the delete: %v, %+v", err, plan.Ops)
+		t.Fatalf("a new binding after the delete was confirmed: %v, %+v", err, plan.Ops)
 	}
 	k := devTomb(2)
 	unknownRevoke(t, r, relayporttest.DeviceRevoke(t, relayporttest.Device(2), t0-60))

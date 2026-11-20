@@ -126,7 +126,12 @@ type MailboxReader interface {
 	List(ctx context.Context, recipient party.Fingerprint, after *mailbox.Hash, limit int) (entries []MailboxEntry, more bool, err error)
 	// Open streams one entry. The reader yields exactly Size bytes. When
 	// several senders put the same bytes, the first stored is the one opened;
-	// the bytes are the same.
+	// the bytes are the same. An adapter whose store cannot be trusted to serve
+	// the bytes that hash to the id may read the body whole and check it before
+	// a byte is served; it then holds at most MaxHeldBodies such bodies
+	// (MaxHeldBodyBytes) for the whole store, each until its reader is closed,
+	// and an Open that finds no room waits for one until ctx ends. The caller
+	// closes the reader promptly.
 	Open(ctx context.Context, recipient party.Fingerprint, mid mailbox.Hash) (io.ReadCloser, error)
 }
 
