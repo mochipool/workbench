@@ -59,7 +59,7 @@ func TestStaleHandleAfterRekeyDoesNothing(t *testing.T) {
 	if err := b.Update(ctx, func(w ports.Writer) error { return w.Put(counter, []byte("2")) }); err != nil {
 		t.Fatalf("handle b after a refused rekey: %v", err)
 	}
-	if _, err := Open(path, pw()); err != nil { // shared lock still held by a and b: more shared opens work
+	if err := closed(Open(path, pw())); err != nil { // shared lock still held by a and b: more shared opens work
 		t.Fatalf("open after a refused rekey: %v", err)
 	}
 
@@ -254,7 +254,7 @@ func TestRekeyHeadFileFailureStillReturnsTheRecoveryKey(t *testing.T) {
 	}
 	a.Close()
 	// The file is ahead of the head file; opening accepts that and catches up.
-	if _, err := Open(path, passphrase("np")); err != nil {
+	if err := closed(Open(path, passphrase("np"))); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -171,15 +171,30 @@ func (a *app) factorOpenFor(fresh bool) FactorOpen {
 // with both values shown, before any credential is loaded, any other factor is
 // asked for, or any call is made.
 func (a *app) backendCheck(claim ports.BackendRef) error {
-	cfg := WorkspaceConfig{}
-	if a.d.Config.Load != nil {
-		c, err := a.d.Config.Load(a.workspace)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		if err == nil {
-			cfg = c
-		}
+	cfg, err := a.backendConfig()
+	if err != nil {
+		return err
+	}
+	return checkClaim(claim, cfg)
+}
+
+// backendConfig reads spo.toml for a backend; a missing file names none.
+func (a *app) backendConfig() (WorkspaceConfig, error) {
+	if a.d.Config.Load == nil {
+		return WorkspaceConfig{}, nil
+	}
+	c, err := a.d.Config.Load(a.workspace)
+	if errors.Is(err, os.ErrNotExist) {
+		return WorkspaceConfig{}, nil
+	}
+	return c, err
+}
+
+// checkClaim compares the backend a slot claims with what cfg names. A file
+// that cannot name a backend (SPO-Xunlock-PRE-050) refuses every claim.
+func checkClaim(claim ports.BackendRef, cfg WorkspaceConfig) error {
+	if cfg.BackendRefusal != nil {
+		return cfg.BackendRefusal
 	}
 	kind := ""
 	switch claim.Kind {
@@ -258,24 +273,95 @@ func (a *app) backendResolver() func(ctx context.Context, ref ports.BackendRef) 
 		return nil
 	}
 	return func(ctx context.Context, ref ports.BackendRef) (ports.KeyWrapBackend, error) {
-		if err := a.backendCheck(ref); err != nil {
+		// one read of the file: the client is built from the settings checked
+		cfg, err := a.backendConfig()
+		if err != nil {
 			return nil, err
 		}
-		var vc *VaultConfig
-		var kc *KMSConfig
-		if a.d.Config.Load != nil {
-			if c, err := a.d.Config.Load(a.workspace); err == nil {
-				vc, kc = c.Vault, c.KMS
-			} else if !errors.Is(err, os.ErrNotExist) {
-				return nil, err
-			}
+		if err := checkClaim(ref, cfg); err != nil {
+			return nil, err
 		}
-		return a.d.KeyWrap(ref, vc, kc)
+		kb, err := a.d.KeyWrap(ref, cfg.Vault, cfg.KMS)
+		if err != nil || kb == nil {
+			return kb, err
+		}
+		return fingerprinted{kb, backendFingerprint(ref, cfg)}, nil
 	}
 }
 
+// fingerprinted is a backend client with the fingerprint of the settings it was
+// built from (SPO-Xunlock-OUT-023): the notice before the unwrap shows it.
+// Close reaches the client's own, which ends the credential's life.
+type fingerprinted struct {
+	ports.KeyWrapBackend
+	fp string
+}
+
+func (f fingerprinted) BackendFingerprint() string { return f.fp }
+
+func (f fingerprinted) Close() {
+	if c, ok := f.KeyWrapBackend.(interface{ Close() }); ok {
+		c.Close()
+	}
+}
+
+// backendSettings are the client-side settings of [vault] or [kms] that decide
+// where a credential goes or which identity is asked for, by key name and value
+// (a path, not the file's contents), in a fixed order; a setting at its default
+// is left out. The timeouts and role_session_name are not among them; the
+// address, namespace, mount, key and the KMS endpoint are in the reference.
+func backendSettings(kind ports.BackendKind, c WorkspaceConfig) []ports.BackendSetting {
+	var out []ports.BackendSetting
+	add := func(name, value string) {
+		if value != "" {
+			out = append(out, ports.BackendSetting{Name: name, Value: value})
+		}
+	}
+	flag := func(name string, on bool) {
+		if on {
+			add(name, "true")
+		}
+	}
+	switch {
+	case kind == ports.BackendVaultTransit && c.Vault != nil:
+		v := c.Vault
+		add("ca_file", v.CAFile)
+		if v.Auth != "token" {
+			add("auth", v.Auth)
+		}
+		add("token_file", v.TokenFile)
+		add("jwt_mount", v.JWTMount)
+		add("jwt_role", v.JWTRole)
+		add("jwt_file", v.JWTFile)
+		flag("allow_loopback_http", v.AllowLoopbackHTTP)
+	case kind == ports.BackendAWSKMS && c.KMS != nil:
+		k := c.KMS
+		add("private_ca_file", k.PrivateCAFile)
+		add("private_sts_endpoint", k.PrivateSTSEndpoint)
+		add("private_sts_ca_file", k.PrivateSTSCAFile)
+		add("role_arn", k.RoleARN)
+		add("web_identity_token_file", k.WebIdentityTokenFile)
+		flag("allow_loopback_http", k.AllowLoopbackHTTP)
+	}
+	return out
+}
+
+// backendFingerprint is the fingerprint of ref with spo.toml's client settings.
+func backendFingerprint(ref ports.BackendRef, c WorkspaceConfig) string {
+	return ref.ClientFingerprint(backendSettings(ref.Kind, c))
+}
+
+// enrolmentLine is what add-backend prints for a new slot.
+func enrolmentLine(id []byte, ref ports.BackendRef, fp, with string) string {
+	return fmt.Sprintf("added composite slot %x: %s (fingerprint %s) AND a %s factor. Unlock with --unlock backend.\nNote the fingerprint: slot list and every unlock through this slot show it; it changes when the backend or a client setting of [vault] or [kms] changes.\n", id, ref, fp, with)
+}
+
 // backendRefFromConfig is the backend [vault] or [kms] names, for a new slot.
+// A file that cannot name a backend (SPO-Xunlock-PRE-050) names none.
 func backendRefFromConfig(kind string, c WorkspaceConfig) (ports.BackendRef, error) {
+	if c.BackendRefusal != nil && (kind == "vault" || kind == "kms") {
+		return ports.BackendRef{}, c.BackendRefusal
+	}
 	switch kind {
 	case "vault":
 		v := c.Vault
@@ -408,7 +494,7 @@ so this slot adds a way in, not strength. Remove it with workspace slot remove.`
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(a.d.Out, "added composite slot %x: %s AND a %s factor. Unlock with --unlock backend.\n", id, ref, with)
+			fmt.Fprint(a.d.Out, enrolmentLine(id, ref, backendFingerprint(ref, cfg), with))
 			return nil
 		},
 	}
@@ -432,7 +518,9 @@ func (a *app) workspaceSlotCommand() *cobra.Command {
 	return c
 }
 
-func slotDetail(s Slot) string {
+// slotDetail is a slot's line of slot list. fp gives the fingerprint shown with
+// a backend factor's reference (SPO-Xunlock-OUT-023).
+func slotDetail(s Slot, fp func(ports.BackendRef) string) string {
 	d := ""
 	for i, f := range s.Factors {
 		if i > 0 {
@@ -443,7 +531,11 @@ func slotDetail(s Slot) string {
 			d += " (" + s.Touch[i] + ")"
 		}
 		if i < len(s.Backend) && s.Backend[i] != "" {
-			d += " (" + s.Backend[i] + ")"
+			d += " (" + s.Backend[i]
+			if i < len(s.BackendRef) && s.BackendRef[i].Kind != "" {
+				d += ", fingerprint " + fp(s.BackendRef[i])
+			}
+			d += ")"
 		}
 	}
 	if s.Legacy {
@@ -468,10 +560,19 @@ func (a *app) slotList() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// the fingerprint with spo.toml's client settings when spo.toml names
+			// the slot's backend; the reference's own, and a note, when it does not
+			cfg, cerr := a.backendConfig()
+			fp := func(ref ports.BackendRef) string {
+				if cerr == nil && checkClaim(ref, cfg) == nil {
+					return backendFingerprint(ref, cfg)
+				}
+				return ref.Fingerprint() + "; spo.toml does not name it"
+			}
 			w := a.d.Out
 			fmt.Fprintf(w, "policy: %s\n", info.Policy)
 			for _, s := range info.Slots {
-				fmt.Fprintf(w, "%-10s %x  %s\n", s.Kind, s.ID, slotDetail(s))
+				fmt.Fprintf(w, "%-10s %x  %s\n", s.Kind, s.ID, slotDetail(s, fp))
 			}
 			if info.Policy == "standard" {
 				fmt.Fprintln(w, "note: under standard a passphrase slot and a recovery slot open the workspace alone, so a FIDO2 slot is a convenience, not a strengthening. Keep a standard workspace on this machine.")

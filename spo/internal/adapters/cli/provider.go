@@ -97,7 +97,7 @@ to agree. The two must be different providers.`,
 			} else {
 				cfg.Koios = &KoiosConfig{URL: target}
 			}
-			if err := a.d.Config.Save(a.workspace, cfg); err != nil {
+			if err := a.saveConfig(cfg); err != nil {
 				return err
 			}
 			fmt.Fprintf(a.d.Out, "%s (%s) is a chain provider of this workspace.\n", args[0], target)
@@ -128,7 +128,7 @@ need corroboration. Without the name, no address leaves the machine.`,
 				return err
 			}
 			cfg.Order = args
-			if err := a.d.Config.Save(a.workspace, cfg); err != nil {
+			if err := a.saveConfig(cfg); err != nil {
 				return err
 			}
 			fmt.Fprintf(a.d.Out, "Order of preference: %s.\n", strings.Join(args, ", "))
@@ -234,7 +234,7 @@ func (a *app) setNodeProvider(cmd *cobra.Command, args []string, timeout int) er
 		return err
 	}
 	cfg.Node = &NodeConfig{Address: addr, TimeoutSeconds: timeout}
-	if err := a.d.Config.Save(a.workspace, cfg); err != nil {
+	if err := a.saveConfig(cfg); err != nil {
 		return err
 	}
 	fmt.Fprintf(a.d.Out, "The node at %s is a chain provider of this workspace. It is not contacted until a command reads the chain.\n", addr)
@@ -324,7 +324,7 @@ func (a *app) modeCommand() *cobra.Command {
 				return fmt.Errorf("mode %q is not one of online, light, offline", args[0])
 			}
 			cfg.Mode = args[0]
-			if err := a.d.Config.Save(a.workspace, cfg); err != nil {
+			if err := a.saveConfig(cfg); err != nil {
 				return err
 			}
 			fmt.Fprintf(a.d.Out, "Mode is now %s.\n", cfg.Mode)

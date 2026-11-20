@@ -1,0 +1,15 @@
+# One budget over every relay of the namespace: a drain takes at most one relay
+# at a time, so devices that list two or more relays keep a working one. Each
+# relay has one pod, so a budget per relay could only allow or block its one
+# pod. Two budgets over one pod make every eviction of it fail; keep this one
+# only.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: spo-relay
+  namespace: spo-relay
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: spo-relay

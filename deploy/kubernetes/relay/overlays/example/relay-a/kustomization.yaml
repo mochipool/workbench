@@ -1,0 +1,20 @@
+# Relay a: the base instance with its own name, configuration and key Secret.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../base/instance
+nameSuffix: "-a"
+labels:
+  - pairs:
+      app.kubernetes.io/instance: spo-relay-a
+    includeSelectors: true
+configMapGenerator:
+  - name: spo-relay-config
+    namespace: spo-relay
+    behavior: replace
+    files:
+      - relay.toml
+generatorOptions:
+  disableNameSuffixHash: true
+patches:
+  - path: key-secret.yaml

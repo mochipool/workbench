@@ -19,7 +19,7 @@ import (
 
 const legacyPass = "legacy fixture passphrase"
 
-func legacyPW() *secret.Buffer { return secret.Take([]byte(legacyPass)) }
+func legacyPW() *secret.Buffer { return owned(secret.Take([]byte(legacyPass))) }
 
 // legacyCopy copies a committed fixture of a store of format 1, built by the code
 // of that format (legacyfixture_gen_test.go), into a temporary directory.
@@ -158,7 +158,7 @@ func TestMigrateTheOldFormatFixture(t *testing.T) {
 	if len(bk) == 0 || len(orig) == 0 {
 		t.Fatal("empty backup")
 	}
-	if _, err := OpenLegacy(rep.Backup, legacyPW()); err != nil {
+	if err := closed(OpenLegacy(rep.Backup, legacyPW())); err != nil {
 		t.Errorf("the backup does not open as the old format: %v", err)
 	}
 

@@ -158,6 +158,19 @@ type WorkspaceConfig struct {
 	// 0011 decision 5). They never hold a credential.
 	Vault *VaultConfig
 	KMS   *KMSConfig
+	// BackendRefusal is non-nil when the file these settings came from cannot
+	// name a Vault or KMS backend (SPO-Xunlock-PRE-050: a symbolic link, another
+	// user's file, a file group or others can write, an open directory). It
+	// names the file and the remedy. Every other setting is used; any unlock
+	// through a backend and any enrolment of one is refused with it. It is
+	// never written back.
+	BackendRefusal error
+	// RewriteRefusal is non-nil when the file these settings came from was
+	// untrusted for a reason of its own (not only because this platform cannot
+	// check it): every command that writes spo.toml back refuses with it and
+	// writes nothing (SPO-Xunlock-PRE-051), since a rewrite would make another
+	// user's [vault] and [kms] the user's own, trusted file.
+	RewriteRefusal error
 }
 
 // VaultConfig is the [vault] section. Its address, namespace, mount and key
@@ -620,11 +633,14 @@ type Slot struct {
 	// enrolment touch probe as a phrase ("touch not enforced"), else "".
 	Touch []string
 	// Backend is parallel to Factors: for a Vault or KMS factor its public
-	// reference (kind, address, namespace, key), else "".
-	Backend []string
-	ID      []byte
-	Kind    string // "passphrase" or "recovery"
-	Detail  string // key-derivation parameters of a passphrase slot
+	// reference (kind, address, namespace, key), else "". BackendRef is parallel
+	// too: the reference itself (zero for another factor), from which slot list
+	// shows the fingerprint with spo.toml's client settings (SPO-Xunlock-OUT-023).
+	Backend    []string
+	BackendRef []ports.BackendRef
+	ID         []byte
+	Kind       string // "passphrase" or "recovery"
+	Detail     string // key-derivation parameters of a passphrase slot
 }
 
 // SealedStore is an unlocked sealed workspace.

@@ -477,7 +477,7 @@ func TestDifferentialStandardWorkspace(t *testing.T) {
 		putSecret(t, s, rf("alpha", ports.KesSKey, 0), "kes-secret-0")
 		putSecret(t, s, rf("zed", ports.PolicySKey), "policy-secret")
 		must(t, s.Update(ctx, func(wr ports.Writer) error {
-			return wr.PutSecret(rf("koios", ports.ProviderToken), secret.Take([]byte("a provider token")))
+			return wr.PutSecret(rf("koios", ports.ProviderToken), owned(secret.Take([]byte("a provider token"))))
 		}))
 	})
 	w.step("put, update", func(s *Store) {
@@ -498,14 +498,14 @@ func TestDifferentialStandardWorkspace(t *testing.T) {
 	f := newFake()
 	var slotID []byte
 	w.step("slot added (a fido2-hmac slot under standard)", func(s *Store) {
-		fa, _, err := EnrolFactor(ctx, f.inputs("devA", "1234"), s.ws, nil)
+		fa, _, err := enrolOwned(ctx, f.inputs("devA", pinA), s.ws, nil)
 		must(t, err)
 		slotID, err = s.AddFactorSlot(ctx, []FactorPlan{fa})
 		must(t, err)
 		fa.Output.Destroy()
 	})
 	w.step("slot removed (a rotation with the recovery proof)", func(s *Store) {
-		req := RemoveRequest{SlotID: slotID, Daily: f.inputs("devA", "1234"), Proof: presentStd(t, s, rec)}
+		req := RemoveRequest{SlotID: slotID, Daily: f.inputs("devA", pinA), Proof: presentStd(t, s, rec)}
 		req.Daily.Passphrase = pinOf(w.pass)
 		txt, _, err := s.RemoveSlotByRotation(ctx, req)
 		must(t, err)
@@ -604,7 +604,7 @@ func TestDifferentialColdRolesAndPolicyChanges(t *testing.T) {
 		txt, _, err := s.Rotate(ctx, plan)
 		must(t, err)
 		rec = takeText(txt)
-		w.fake, w.dev, w.pin = f, "devA", "1234"
+		w.fake, w.dev, w.pin = f, "devA", pinA
 	})
 	w.step("a write under hardware", func(s *Store) {
 		put(t, s, rf("pool", ports.AddrFile), "addr_test1pool\n")
@@ -622,9 +622,9 @@ func TestDifferentialColdRolesAndPolicyChanges(t *testing.T) {
 		}
 	})
 	w.step("workspace policy set strict (a rotation, no recovery path)", func(s *Store) {
-		fa, _, err := EnrolFactor(ctx, f.inputs("devA", "1234"), s.ws, nil)
+		fa, _, err := enrolOwned(ctx, f.inputs("devA", pinA), s.ws, nil)
 		must(t, err)
-		in := f.inputs("devA", "1234")
+		in := f.inputs("devA", pinA)
 		txt, _, err := s.Rotate(ctx, RotatePlan{Policy: unlock.Strict, Proof: presentHW(t, s, f, rec),
 			Slots:   []SlotPlan{{Kind: seal.SlotFIDO2HMAC, Factors: []FactorPlan{fa}}},
 			ColdNew: &ColdSource{Factors: &in, Deriver: fakeDeriver{}, Mnemonic: fakeMnemonic{}}})

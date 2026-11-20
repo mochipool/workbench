@@ -9,6 +9,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -289,7 +290,40 @@ type Config struct {
 	// Vault and KMS are nil when the file has no [vault] or [kms] section.
 	Vault *Vault
 	KMS   *KMS
+	// Untrusted is set by Load when the file it read cannot be the authority
+	// for a Vault or KMS backend (SPO-Xunlock-PRE-050): it wraps
+	// ErrUntrustedFile and names the file, the reason and the remedy. Every
+	// other setting is used all the same. Parse leaves it nil; it is never
+	// written.
+	Untrusted error
 }
+
+// ErrUntrustedFile: spo.toml is a symbolic link, is owned by another user, can
+// be written by group or others, or is in a directory any user can write. Such
+// a file does not decide where a Vault token or an AWS identity goes.
+var ErrUntrustedFile = errors.New("spo.toml cannot name a Vault or KMS backend")
+
+// ErrPlatformUnchecked is the reason of an untrusted file that this platform
+// cannot check at all (no Unix owner, or an access control list the standard
+// library cannot read). Such a file names no backend, but its rewrite is not
+// refused: the new file is just as unchecked here, so a save trusts nothing.
+var ErrPlatformUnchecked = errors.New("this platform cannot check who can change the file")
+
+// RewriteRefusal is non-nil when Save must not write these settings back
+// (SPO-Xunlock-PRE-051): the file they were read from was untrusted for a reason
+// of its own (a link, a second name, another owner, a mode or a directory others
+// can change). A rewrite would replace it with a regular 0600 file of the
+// user's own and so make another user's [vault] and [kms] trusted. The error
+// wraps Untrusted (and so ErrUntrustedFile) with its file, reason and remedy.
+func (c Config) RewriteRefusal() error {
+	if c.Untrusted == nil || errors.Is(c.Untrusted, ErrPlatformUnchecked) {
+		return nil
+	}
+	return fmt.Errorf("%w. The file is not rewritten: a rewrite would make its settings trusted; nothing was changed", c.Untrusted)
+}
+
+// MaxFileSize bounds spo.toml: a larger file is refused before it is read.
+const MaxFileSize = 1 << 20
 
 var versionText = regexp.MustCompile(`^[0-9]+(\.[0-9]+){1,3}$`)
 
@@ -798,9 +832,10 @@ func Marshal(c Config) ([]byte, error) {
 
 // Load reads the configuration of a workspace directory. A missing file
 // returns an error satisfying errors.Is(err, os.ErrNotExist). Errors name the
-// file.
+// file. The file is read through one checked descriptor, and Untrusted says
+// whether it may name a Vault or KMS backend (SPO-Xunlock-PRE-050).
 func Load(dir string) (Config, error) {
-	data, err := os.ReadFile(Path(dir))
+	data, untrusted, err := readFile(dir)
 	if err != nil {
 		return Config{}, err
 	}
@@ -808,6 +843,7 @@ func Load(dir string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("%s: %w", Path(dir), err)
 	}
+	c.Untrusted = untrusted
 	return c, nil
 }
 
@@ -830,8 +866,24 @@ func Create(dir string, c Config) error {
 	return f.Close()
 }
 
-// Save replaces the configuration file atomically (write beside, rename).
+// Save replaces the configuration file atomically (write beside, rename). It
+// refuses settings read from an untrusted file (c.RewriteRefusal) and, checking
+// the file on disk again, a file that is untrusted now, whatever c says
+// (SPO-Xunlock-PRE-051): nothing is written then.
 func Save(dir string, c Config) error {
+	if err := c.RewriteRefusal(); err != nil {
+		return err
+	}
+	_, untrusted, err := readFile(dir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+	case err != nil:
+		return err
+	default:
+		if err := (Config{Untrusted: untrusted}).RewriteRefusal(); err != nil {
+			return err
+		}
+	}
 	data, err := Marshal(c)
 	if err != nil {
 		return err

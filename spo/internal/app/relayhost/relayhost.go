@@ -58,6 +58,13 @@ type TunnelSpec struct {
 	Allowed    []party.NodeKey
 	Port       uint16
 	DERPMapURL string
+	// Region pins a full DERP region (no map is fetched; the address is the
+	// same at every start with the same key); RegionID pins a region of the
+	// fetched map (its address follows the map). At most one is set; neither
+	// leaves the region to the tunnel library at each start (ADR 0015 decision
+	// 7, SPO-Xmailbox-IF-030). Region is the tunnel's own copy.
+	Region   *relayconf.DERPRegion
+	RegionID int
 	// OnTeardownStuck must be called when a teardown of the tunnel (a close or an
 	// old engine after a rebuild) does not finish: the relay then stops.
 	OnTeardownStuck func(error)
@@ -306,8 +313,18 @@ func Start(ctx context.Context, cfg *relayconf.Config, key *relayconf.Key, d Dep
 		Allowed:         cfg.NodeKeys(),
 		Port:            cfg.Port,
 		DERPMapURL:      cfg.DERPMapURL,
+		Region:          cfg.DERPRegion.Clone(),
+		RegionID:        cfg.DERPRegionID,
 		OnTeardownStuck: r.markStuck,
 		Logf:            r.log.tunnelf,
+	}
+	// once per start (SPO-Xmailbox-OUT-123); an object store will refuse the
+	// unpinned start in Prepare (relayconf.Config.RegionPinRequired)
+	switch {
+	case cfg.DERPRegionID != 0:
+		r.log.line(fmt.Sprintf("derp_region=map id=%d: the region is fixed, but the address embeds the DERP map's description of it and changes when the map does; pin it in full with [derp_region] for an address that does not", cfg.DERPRegionID))
+	case cfg.DERPRegion == nil:
+		r.log.line("derp_region=unpinned: the address names the DERP region picked at this start and may change at the next; pin it with [derp_region] (or [relay] derp_region_id)")
 	}
 	st := d.StartTimeout
 	if st <= 0 {

@@ -67,8 +67,23 @@ func listenerConfig(spec relayhost.TunnelSpec) stream.ListenerConfig {
 	return stream.ListenerConfig{
 		NodeKey: stream.SecretReader(spec.NodeKey), PSK: stream.SecretReader(spec.PSK),
 		Allowed: spec.Allowed, Port: spec.Port, DERPMapURL: spec.DERPMapURL,
+		Pin: regionPin(spec.Region), RegionID: spec.RegionID,
 		OnTeardownStuck: spec.OnTeardownStuck, Logf: spec.Logf,
 	}
+}
+
+// regionPin is the configured full region as the listener's type. It has no
+// InsecureForTests: the listener's raw Region (the test rig's) is never set here.
+func regionPin(r *relayconf.DERPRegion) *stream.RegionPin {
+	if r == nil {
+		return nil
+	}
+	p := &stream.RegionPin{ID: r.ID, Code: r.Code}
+	for _, n := range r.Nodes {
+		p.Nodes = append(p.Nodes, stream.RegionNode{Name: n.Name, HostName: n.HostName, CertName: n.CertName,
+			IPv4: n.IPv4, IPv6: n.IPv6, STUNPort: int(n.STUNPort), DERPPort: int(n.DERPPort)})
+	}
+	return p
 }
 
 // signals turns SIGHUP into SignalReload and SIGINT and SIGTERM into SignalStop.

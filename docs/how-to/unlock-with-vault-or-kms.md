@@ -23,6 +23,17 @@ The slot stores the backend's kind, address, namespace and key. That copy is onl
 
 Keep `spo.toml` as the record of your backend. If you move Vault to a new address, the old slots no longer open through it: open with `--unlock passphrase` (or `fido2`), remove the backend slot and add it again.
 
+Because `spo.toml` decides where your token goes, only you may be able to change it. The tool uses `[vault]` or `[kms]` only when `spo.toml` is a regular file (not a symbolic link) with one name (no second hard link), owned by you (or root), not writable by group or others, in a workspace directory that is yours (or root's) and that group and others cannot write. A world-writable directory such as `/tmp` is refused even with its sticky bit. On macOS and the BSDs the tool cannot read a file's access control list, so it never uses `[vault]` or `[kms]` there. Otherwise an unlock through the backend and `add-backend` stop before anything is read, asked or sent, and the error names the file, the reason and the fix. The fix is not only `chmod 600`: someone else may have written the file. Read it, above all `[vault]` and `[kms]`, then write a new file and move it into place:
+
+    umask 077
+    cp spo.toml spo.toml.new     # after you have read it
+    mv spo.toml.new spo.toml
+    chmod 700 .                  # the workspace directory
+
+Commands that do not use a backend keep working with such a file, without a warning. But no command rewrites it: `provider set`, `provider order` and `mode set` refuse with the same error and change nothing, because a rewrite would turn the file into your own and make its `[vault]` and `[kms]` trusted.
+
+When you add a slot, the tool prints a fingerprint of the backend (16 hex digits). `workspace slot list` shows it, and so does the notice before every backend call. Note it down. It covers the backend's kind, address, namespace and key, and the client settings that decide where your credential goes: `ca_file`, `auth`, `token_file`, the JWT mount, role and file, the private STS endpoint, the CA files, the role ARN and web identity token file, and `allow_loopback_http`. It covers the paths, not what the files hold. If someone changed one of those settings, or both `spo.toml` and the slot, to point at their own server, the fingerprint changes. The tool cannot catch that case by itself: it trusts `spo.toml`. The notice comes just before the call, so a changed fingerprint tells you after the fact that your token went somewhere else. If you change a client setting yourself, the fingerprint changes too: note the new one.
+
 ## Vault Transit
 
 You need Vault 1.13 or later, or OpenBao: Transit must support `associated_data`. An older server ignores the parameter. The tool refuses an encrypt or decrypt answer that warns about an ignored parameter, and when it adds a slot it checks that an unwrap under another slot id is refused. A server that ignores the binding is refused at that point and no slot is added.

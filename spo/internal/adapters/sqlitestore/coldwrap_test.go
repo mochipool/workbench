@@ -3,8 +3,6 @@ package sqlitestore
 import (
 	"errors"
 	"testing"
-
-	"github.com/mochipool/workbench/spo/internal/platform/secret"
 )
 
 // migratedColdWorkspace is the format 2 fixture, migrated with a sub-key
@@ -114,13 +112,15 @@ func TestARekeyAddsRecoveryWrapsToColdRecordsThatLackOne(t *testing.T) {
 		t.Fatal(err)
 	}
 	// the cold passphrase still opens it
-	if _, err := s.Open(ctx, c.ref); err != nil {
+	if b, err := s.Open(ctx, c.ref); err != nil {
 		t.Fatalf("the cold key does not open after the rekey: %v", err)
+	} else {
+		b.Destroy()
 	}
 	s.Close()
 	// and a recovery re-establishes it: opened through the recovery key, the new
 	// passphrase and recovery key carry the cold record (its wrap moves to the new key)
-	r, err := OpenWithRecovery(path, secret.Take([]byte(newKey)))
+	r, err := OpenWithRecovery(path, passphrase(newKey))
 	if err != nil {
 		t.Fatal(err)
 	}

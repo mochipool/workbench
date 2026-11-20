@@ -12,6 +12,7 @@ import (
 	"tailscale.com/types/key"
 
 	"github.com/mochipool/workbench/spo/internal/domain/party"
+	"github.com/mochipool/workbench/spo/internal/platform/tunnelenv"
 	"github.com/mochipool/workbench/spo/internal/ports/relayport"
 
 	tc "github.com/tailscale/tailcat"
@@ -131,6 +132,10 @@ var _ relayport.StreamDialer = (*Dialer)(nil)
 // pinned relay key, and builds the tailcat client. It does not dial and sends
 // no packet.
 func NewDialer(cfg DialerConfig) (*Dialer, error) {
+	// no tunnel library debug knob, and its global log goes nowhere (SPO-Xmailbox-SEC-085)
+	if err := tunnelenv.Prepare(); err != nil {
+		return nil, fmt.Errorf("tailcat stream: %w", err)
+	}
 	if cfg.ExpectServerKey == (party.NodeKey{}) {
 		return nil, errors.New("tailcat stream: the relay's node key is required")
 	}

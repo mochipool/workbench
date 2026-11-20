@@ -20,8 +20,9 @@ import (
 // of tables, unsigned integers and booleans:
 //
 //   - blank lines and '#' comments, a whole line or after a value
-//   - the tables [relay] (required), [registry], [quota], [limits], each at most
-//     once, and any number of [[device]] and [[wallet]] tables (4096 in all)
+//   - the tables [relay] (required), [registry], [quota], [limits],
+//     [derp_region], each at most once, any number of [[device]] and [[wallet]]
+//     tables (4096 in all) and at most 8 [[derp_node]] tables
 //   - key = value with bare keys; a basic string in double quotes with the
 //     escapes \" and \\, a decimal integer with no sign, no underscore and no
 //     leading zero, true or false
@@ -42,7 +43,12 @@ var schema = map[string]map[string]kind{
 	"relay": {
 		"admission": kString, "key_file": kString, "mailbox_dir": kString, "registry_dir": kString,
 		"port": kInt, "derp_map_url": kString, "retention_seconds": kInt, "sweep_seconds": kInt,
-		"unsafe_open_tunnel": kBool,
+		"unsafe_open_tunnel": kBool, "derp_region_id": kInt,
+	},
+	"derp_region": {"region_id": kInt, "region_code": kString},
+	"derp_node": {
+		"name": kString, "host_name": kString, "cert_name": kString, "ipv4": kString, "ipv6": kString,
+		"stun_port": kInt, "derp_port": kInt,
 	},
 	"registry": {
 		"max_bound_devices": kInt, "max_devices_per_key": kInt, "max_binding_days": kInt, "skew_seconds": kInt,
@@ -67,7 +73,7 @@ func limitSchema() map[string]kind {
 	return m
 }
 
-var arrayTables = map[string]bool{"device": true, "wallet": true}
+var arrayTables = map[string]bool{"device": true, "wallet": true, "derp_node": true}
 
 var (
 	nodeKeyRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -90,6 +96,7 @@ type rawFile struct {
 	tables  map[string]*entryVals
 	devices []*entryVals
 	wallets []*entryVals
+	nodes   []*entryVals // [[derp_node]]
 }
 
 func parseFile(data []byte) (*rawFile, error) {
@@ -100,7 +107,7 @@ func parseFile(data []byte) (*rawFile, error) {
 		ArrayTables:    true,
 		Unsigned:       true,
 		MaxLineBytes:   MaxLineBytes,
-		MaxArrayTables: MaxArrayTables,
+		MaxArrayTables: MaxArrayTables + relayconf.MaxDERPNodes, // each kind is also bounded below
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrConfig, err)
@@ -115,14 +122,24 @@ func parseFile(data []byte) (*rawFile, error) {
 		}
 		keys, known := schema[t.Name]
 		if !known || arrayTables[t.Name] != t.Array {
-			return nil, bad("line %d: %q is not a table of this file (only [relay], [registry], [quota], [limits], [[device]] and [[wallet]])", t.Line, t.Name)
+			return nil, bad("line %d: %q is not a table of this file (only [relay], [registry], [quota], [limits], [derp_region], [[device]], [[wallet]] and [[derp_node]])", t.Line, t.Name)
 		}
 		v := newVals(t.Line)
 		switch t.Name {
-		case "device":
-			f.devices = append(f.devices, v)
-		case "wallet":
-			f.wallets = append(f.wallets, v)
+		case "device", "wallet":
+			if len(f.devices)+len(f.wallets) == MaxArrayTables {
+				return nil, bad("line %d: more than %d [[device]] and [[wallet]] tables (the limit is %d)", t.Line, MaxArrayTables, MaxArrayTables)
+			}
+			if t.Name == "device" {
+				f.devices = append(f.devices, v)
+			} else {
+				f.wallets = append(f.wallets, v)
+			}
+		case "derp_node":
+			if len(f.nodes) == relayconf.MaxDERPNodes {
+				return nil, bad("line %d: more than %d [[derp_node]] tables; a region has at most %d nodes", t.Line, relayconf.MaxDERPNodes, relayconf.MaxDERPNodes)
+			}
+			f.nodes = append(f.nodes, v)
 		default:
 			f.tables[t.Name] = v
 		}
@@ -168,6 +185,9 @@ func Parse(data []byte) (*relayconf.Config, error) {
 		return nil, err
 	}
 	if err := checkPathsText(c); err != nil {
+		return nil, err
+	}
+	if c.DERPRegion, err = derpRegion(f.tables["derp_region"], f.nodes); err != nil {
 		return nil, err
 	}
 	if c.Devices, err = devices(f.devices); err != nil {
@@ -228,6 +248,12 @@ func relayTable(rt *entryVals, c *relayconf.Config) error {
 		}
 		c.DERPMapURL = u
 	}
+	if id, ok := rt.num["derp_region_id"]; ok {
+		if id == 0 || id > relayconf.MaxDERPRegionID {
+			return bad("[relay] derp_region_id is %d; it must be 1 to %d (a region of the DERP map)", id, relayconf.MaxDERPRegionID)
+		}
+		c.DERPRegionID = int(id)
+	}
 	c.RetentionSeconds = mailbox.DefaultRetentionSeconds
 	if r, ok := rt.num["retention_seconds"]; ok {
 		if r == 0 || r > mailbox.MaxRetentionSeconds {
@@ -243,6 +269,48 @@ func relayTable(rt *entryVals, c *relayconf.Config) error {
 		c.SweepInterval = time.Duration(s) * time.Second
 	}
 	return nil
+}
+
+// derpRegion reads the full region pin: [derp_region] with region_id (required)
+// and region_code, and its [[derp_node]] tables (1 to relayconf.MaxDERPNodes).
+// The string values are checked by relayconf (DERPNode.Check); the ports are
+// checked here before they are narrowed.
+func derpRegion(t *entryVals, nodes []*entryVals) (*relayconf.DERPRegion, error) {
+	if t == nil {
+		if len(nodes) > 0 {
+			return nil, bad("line %d: a [[derp_node]] without a [derp_region] table", nodes[0].line)
+		}
+		return nil, nil
+	}
+	id, ok := t.num["region_id"]
+	switch {
+	case !ok:
+		return nil, bad("line %d: [derp_region] region_id is required", t.line)
+	case id == 0 || id > relayconf.MaxDERPRegionID:
+		return nil, bad("[derp_region] region_id is %d; it must be 1 to %d", id, relayconf.MaxDERPRegionID)
+	case len(nodes) == 0:
+		return nil, bad("line %d: [derp_region] has no [[derp_node]]: a region needs at least one node", t.line)
+	}
+	r := &relayconf.DERPRegion{ID: int(id), Code: t.str["region_code"]}
+	for _, v := range nodes {
+		n := relayconf.DERPNode{Name: v.str["name"], HostName: v.str["host_name"], CertName: v.str["cert_name"], IPv4: v.str["ipv4"], IPv6: v.str["ipv6"]}
+		for _, p := range []struct {
+			key string
+			dst *uint16
+		}{{"stun_port", &n.STUNPort}, {"derp_port", &n.DERPPort}} {
+			if x, ok := v.num[p.key]; ok {
+				if x == 0 || x > math.MaxUint16 {
+					return nil, bad("line %d: [[derp_node]] %s is %d; it must be 1 to 65535 (leave it out for the default)", v.line, p.key, x)
+				}
+				*p.dst = uint16(x)
+			}
+		}
+		if err := n.Check(); err != nil {
+			return nil, fmt.Errorf("line %d: %w", v.line, err)
+		}
+		r.Nodes = append(r.Nodes, n)
+	}
+	return r, nil
 }
 
 func label(v *entryVals, what string) (string, error) {

@@ -100,6 +100,8 @@ type host struct {
 	regCfg   relayregistry.Config
 	listened int
 	log      bytes.Buffer
+	// limits replaces fastLimits for the clients made after it is set.
+	limits func() mailbox.Limits
 }
 
 func newHost(t *testing.T) *host {
@@ -315,6 +317,10 @@ func fastLimits() mailbox.Limits {
 func (h *host) client(d *device, days int64, ev mailbox.EventSink, all ...*device) *mailbox.Client {
 	h.t.Helper()
 	st := d.wallet.BindingStatement(d.fp, startTime-60, startTime-60+days*86400, false)
+	lim := fastLimits
+	if h.limits != nil {
+		lim = h.limits
+	}
 	c, err := mailbox.New(mailbox.Config{Dialer: h.net.Dialer(d.node, h.relay), RelayKey: h.relay.Key, NodeKey: d.node.Key,
 		Self: d.fp, Device: d.keys, Binding: mailbox.Binding{Statement: st.Sign1, Key: st.COSEKey},
 		Resolve: func(to party.Fingerprint) (mailbox.Route, bool) {
@@ -325,7 +331,7 @@ func (h *host) client(d *device, days int64, ev mailbox.EventSink, all ...*devic
 			}
 			return mailbox.Route{}, false
 		},
-		Signer: signer{priv: d.priv, fp: d.fp}, Clock: h.clock, Limits: fastLimits(), Events: ev})
+		Signer: signer{priv: d.priv, fp: d.fp}, Clock: h.clock, Limits: lim(), Events: ev})
 	if err != nil {
 		h.t.Fatal(err)
 	}

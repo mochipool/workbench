@@ -121,11 +121,11 @@ func hwCold(t *testing.T) (s *Store, path string, f *fakeSource, rec string) {
 	t.Helper()
 	path, f, rec = hardwareWS(t)
 	var err error
-	if s, err = openHW(path, f, "devA", "1234"); err != nil {
+	if s, err = openHW(path, f, "devA", pinA); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	in := f.inputs("devA", "1234")
+	in := f.inputs("devA", pinA)
 	s.SetColdSource(&ColdSource{Factors: &in, Deriver: fakeDeriver{}})
 	putSecret(t, s, coldRef, "cold-secret-hw")
 	return s, path, f, rec
@@ -155,7 +155,7 @@ func TestColdRecordOpensOnlyWithAFreshFactorAndRotatesItsSalt(t *testing.T) {
 	if hdr.Kind != seal.ColdPassphrase {
 		t.Fatalf("header %+v", hdr)
 	}
-	if _, err := oc.OpenSecret(secret.Take(bytes.Repeat([]byte{1}, 32))); err == nil {
+	if _, err := oc.OpenSecret(owned(secret.Take(bytes.Repeat([]byte{1}, 32)))); err == nil {
 		t.Fatal("a made-up sub-key opened a cold record")
 	}
 	if v, err := openString(t, s, rf("pool", ports.KesSKey, 1)); err != nil || v != "hot-secret" {
@@ -206,7 +206,7 @@ func TestColdRecordWithNoFactorSourceFailsBeforeAnyPrompt(t *testing.T) {
 	if _, err := s.Open(ctx, coldRef); !errors.Is(err, ErrColdFactorRequired) || asked != 0 {
 		t.Fatalf("a source without the factor of the policy: %v (asked %d)", err, asked)
 	}
-	k := secret.Take([]byte("another cold key"))
+	k := owned(secret.Take([]byte("another cold key")))
 	err := s.Update(ctx, func(w ports.Writer) error { return putKeyW(w, rf("pool2", ports.NodeSKey), k) })
 	if !errors.Is(err, ErrColdFactorRequired) {
 		t.Fatalf("a cold put with no source: %v", err)
@@ -341,7 +341,7 @@ func TestRelabellingAColdRecordIsRefused(t *testing.T) {
 	putSecret(t, s, kes, "hot")
 	// the cold record becomes a hot-form record, sealed under its own identity
 	forgeRow(t, s, coldRef, func(m seal.RecordMeta) seal.SealedRecord {
-		r, err := s.keys.SealSecret(m, secret.Take([]byte("attacker chosen")))
+		r, err := s.keys.SealSecret(m, owned(secret.Take([]byte("attacker chosen"))))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -377,7 +377,7 @@ func TestAMasterKeyHolderCannotReplaceAColdRecordByAHotOne(t *testing.T) {
 			return nil, err
 		}
 		meta := metaOf(s.ws, row.id, coldRef, seal.ClassSecret, row.version+1)
-		attacker := secret.Take([]byte("attacker chosen key"))
+		attacker := owned(secret.Take([]byte("attacker chosen key")))
 		hot, err := s.keys.SealSecret(meta, attacker)
 		if err != nil {
 			return nil, err
@@ -407,7 +407,7 @@ func TestTheSubKeyPassphraseMustDifferFromEverySlotPassphrase(t *testing.T) {
 	s, _, _ := scratch(t)
 	s.SetColdSource(coldPass(testPass))
 	before := fileState(t, s)
-	k := secret.Take([]byte("a cold key"))
+	k := owned(secret.Take([]byte("a cold key")))
 	err := s.Update(ctx, func(w ports.Writer) error { return putKeyW(w, coldRef, k) })
 	if !errors.Is(err, ErrColdPassphraseReuse) {
 		t.Fatalf("%v", err)
@@ -449,8 +449,8 @@ func TestHardwareColdRecordAsksTheAuthenticatorOncePerOperation(t *testing.T) {
 	weak := *f
 	weak.profile = &ports.FactorProfile{HMACSecret: true, CredProtect3: true, UserVerification: true, CTAP21: true}
 	pins := 0
-	in := weak.inputs("devA", "1234")
-	in.PIN = func(context.Context) (*secret.Buffer, error) { pins++; return secret.Take([]byte("1234")), nil }
+	in := weak.inputs("devA", pinA)
+	in.PIN = func(context.Context) (*secret.Buffer, error) { pins++; return secret.Take([]byte(pinA)), nil }
 	s.SetColdSource(&ColdSource{Factors: &in})
 	if _, err := s.Open(ctx, coldRef); !errors.Is(err, ports.ErrFactorCapability) || pins != 0 {
 		t.Fatalf("weak source: %v (pins %d)", err, pins)
@@ -459,7 +459,7 @@ func TestHardwareColdRecordAsksTheAuthenticatorOncePerOperation(t *testing.T) {
 	before := fileState(t, s)
 	imp := newFake()
 	imp.auths["devA"].seed = "an impostor"
-	iin := imp.inputs("devA", "1234")
+	iin := imp.inputs("devA", pinA)
 	s.SetColdSource(&ColdSource{Factors: &iin})
 	if _, err := s.Open(ctx, coldRef); !errors.Is(err, ErrColdFactorWrong) {
 		t.Fatalf("an impostor authenticator: want ErrColdFactorWrong, got %v", err)
@@ -468,7 +468,7 @@ func TestHardwareColdRecordAsksTheAuthenticatorOncePerOperation(t *testing.T) {
 		t.Error("a refused open changed the file")
 	}
 	// the real one
-	rin := f.inputs("devA", "1234")
+	rin := f.inputs("devA", pinA)
 	s.SetColdSource(&ColdSource{Factors: &rin})
 	if v, err := openString(t, s, coldRef); err != nil || v != "cold-secret-hw" {
 		t.Fatalf("%q %v", v, err)

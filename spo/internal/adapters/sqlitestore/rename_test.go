@@ -61,7 +61,7 @@ func TestRenameRewritesOneLabelRecordAndNothingElse(t *testing.T) {
 			return w.Put(ports.NamedRef{Name: "alice", Kind: ports.StakingVKey}, envKey("StakeVerificationKeyShelley_ed25519", "alice stake"))
 		},
 		func(w ports.NamedWriter) error {
-			return w.PutSecret(ports.NamedRef{Name: "alice.payment", Kind: ports.AddrSKey}, secret.Take([]byte(`{"cborHex":"5820aa"}`)))
+			return w.PutSecret(ports.NamedRef{Name: "alice.payment", Kind: ports.AddrSKey}, owned(secret.Take([]byte(`{"cborHex":"5820aa"}`))))
 		},
 		func(w ports.NamedWriter) error {
 			return w.Put(ports.NamedRef{Name: "alice.payment", Kind: ports.AddrFile}, []byte("addr_test1qz\n"))

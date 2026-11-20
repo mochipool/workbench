@@ -123,7 +123,7 @@ func TestVaultSlotThroughTheCommandLayer(t *testing.T) {
 	id := m[1]
 
 	out, err = exec(t, nil, "-C", dir, "workspace", "slot", "list")
-	if err != nil || !strings.Contains(out, id) || !strings.Contains(out, "passphrase + backend (vault-transit "+srv.URL+" transit/spo)") {
+	if err != nil || !strings.Contains(out, id) || !strings.Contains(out, "passphrase + backend (vault-transit "+srv.URL+" transit/spo, fingerprint ") {
 		t.Fatalf("slot list: %v\n%s", err, out)
 	}
 	if strings.Contains(out, v.token) {

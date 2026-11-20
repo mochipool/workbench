@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/mochipool/workbench/spo/internal/adapters/mailbox"
 	"github.com/mochipool/workbench/spo/internal/adapters/relayconfig"
 	"github.com/mochipool/workbench/spo/internal/app/relayhost"
 	"github.com/mochipool/workbench/spo/internal/domain/party"
@@ -177,19 +179,46 @@ func TestTheTunnelAdaptersLinesReachTheLogSafely(t *testing.T) {
 // removed (logged with the reason delisted), and its next dial is refused by the
 // tunnel. A device that stays keeps its session.
 //
+// Both sessions are held live across the reload: each device receives without
+// pause until the test stops it, and its client has no reason to drop the
+// connection in the test's time (a lifetime of minutes, an idle bound far above
+// its poll interval, a request budget it does not reach). With login's short
+// receive the client could end alice's session (close reason=peer) before the
+// reload, and then there was no live session for the reload to end.
+//
 // spec: SPO-Xmailbox-SEC-079, SPO-Xmailbox-OUT-102
 func TestAReloadDropsTheLiveSessionOfARemovedDevice(t *testing.T) {
 	h := newHost(t)
+	h.limits = func() mailbox.Limits {
+		l := fastLimits()
+		l.ConnLifetime, l.IdleTimeout, l.MinPoll = 10*time.Minute, 20*time.Second, 200*time.Millisecond
+		return l
+	}
 	a, b := newDevice(h.net, "alice", 1), newDevice(h.net, "bob", 2)
 	r, _ := h.start(h.config(h.text([]*fakenet.Node{a.node, b.node})))
 	ca, cb := h.client(a, 30, nil, a, b), h.client(b, 30, nil, a, b)
-	if err := login(ca); err != nil {
-		t.Fatal(err)
+	rctx, stopReceiving := context.WithCancel(context.Background())
+	var receivers sync.WaitGroup
+	defer func() { stopReceiving(); receivers.Wait() }()
+	for _, c := range []*mailbox.Client{ca, cb} {
+		receivers.Add(1)
+		go func() { defer receivers.Done(); c.Receive(rctx) }() //nolint:errcheck // ends with rctx or the delisting
 	}
-	if err := login(cb); err != nil {
-		t.Fatal(err)
+	// a fetch is answered only on a logged-in session, which CloseNode reaches
+	for _, n := range []*fakenet.Node{a.node, b.node} {
+		for i := 0; !contains(h.logText(), "fetch node="+hexKey(n.Key)); i++ {
+			if i > 500 {
+				t.Fatalf("%s did not log in:\n%s", n.Name, h.logText())
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if contains(h.logText(), "close reason=") {
+		t.Fatalf("a session ended before the reload, so the test would prove nothing:\n%s", h.logText())
 	}
 	logins := strings.Count(h.logText(), "auth_ok")
+	bobFetch := "fetch node=" + hexKey(b.node.Key)
+	bobFetches := strings.Count(h.logText(), bobFetch)
 	if changed, err := r.Reload(h.config(h.text([]*fakenet.Node{b.node}))); err != nil || !changed {
 		t.Fatalf("reload: %v %v", changed, err)
 	}
@@ -199,9 +228,22 @@ func TestAReloadDropsTheLiveSessionOfARemovedDevice(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if contains(h.logText(), "close reason=delisted node="+hexKey(b.node.Key)) {
-		t.Fatal("the session of a device that stays was ended")
+	// the survivor fetches again after the reload: its session is alive, and no
+	// line ends it for any reason (delisted, peer, idle, ...) before the
+	// receiving stops
+	for i := 0; strings.Count(h.logText(), bobFetch) <= bobFetches; i++ {
+		if i > 500 {
+			t.Fatalf("the device that stays did not fetch after the reload:\n%s", h.logText())
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
+	for _, line := range strings.Split(h.logText(), "\n") {
+		if strings.Contains(line, "close reason=") && strings.Contains(line, "node="+hexKey(b.node.Key)) {
+			t.Fatalf("the session of a device that stays was ended: %q", line)
+		}
+	}
+	stopReceiving()
+	receivers.Wait()
 	if _, _, err := h.net.Dialer(a.node, h.relay).Dial(context.Background()); !errors.Is(err, fakenet.ErrNotAllowed) {
 		t.Fatalf("the removed device's next dial: %v", err)
 	}

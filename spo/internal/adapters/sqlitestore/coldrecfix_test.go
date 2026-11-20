@@ -66,7 +66,7 @@ func putMnemonicAt(t *testing.T, s *Store, words string, account, index uint32, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	k := secret.Take([]byte(words))
+	k := owned(secret.Take([]byte(words)))
 	if meta {
 		k, err = ports.MnemonicFileWithDerivation(k, account, index)
 		if err != nil {
@@ -129,11 +129,11 @@ func forgeColdWith(t *testing.T, s *Store, ref ports.Ref, plain string, hdr seal
 			return nil, err
 		}
 		meta := metaOf(s.ws, row.id, ref, seal.ClassSecretCold, row.version+1)
-		cs := seal.ColdSeal{Sub: secret.Take(bytes.Repeat([]byte{7}, 32)), Header: hdr}
+		cs := seal.ColdSeal{Sub: owned(secret.Take(bytes.Repeat([]byte{7}, 32))), Header: hdr}
 		if wrap {
 			cs.Recovery = &seal.ColdRecovery{Pub: pub, Identity: ident}
 		}
-		sealed, err := s.keys.SealSecretCold(meta, secret.Take([]byte(plain)), cs)
+		sealed, err := s.keys.SealSecretCold(meta, owned(secret.Take([]byte(plain))), cs)
 		if err != nil {
 			return nil, err
 		}
@@ -159,11 +159,11 @@ func passHeader(salt byte) seal.ColdHeader {
 // daily authenticator was lost).
 func hardwarePlanFor(t *testing.T, s *Store, f *fakeSource, proof *RecoveryProof, dailyDev, dailyPIN string) (RotatePlan, FactorInputs) {
 	t.Helper()
-	fa, _, err := EnrolFactor(ctx, f.inputs(dailyDev, dailyPIN), s.ws, nil)
+	fa, _, err := enrolOwned(ctx, f.inputs(dailyDev, dailyPIN), s.ws, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fb, _, err := EnrolFactor(ctx, f.inputs("devB", "5678"), s.ws, nil)
+	fb, _, err := enrolOwned(ctx, f.inputs("devB", pinB), s.ws, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,10 +307,10 @@ func TestHardwareRecoveryReestablishesTheMnemonicOnANewAuthenticator(t *testing.
 	s, path, f, rec := hwCold(t)
 	putMnemonic(t, s, "alpha bravo charlie")
 	s.Close()
-	f.auths["devC"] = &fakeAuth{3, "seed-c", "9999"}
+	f.auths["devC"] = &fakeAuth{3, "seed-c", pinC}
 	r, proof := recoveryHandle(t, path, f, rec)
 	enrolsBefore := f.enrols
-	plan, inC := hardwarePlanFor(t, r, f, proof, "devC", "9999")
+	plan, inC := hardwarePlanFor(t, r, f, proof, "devC", pinC)
 	text, _, err := r.Rotate(ctx, plan)
 	if err != nil {
 		t.Fatal(err)
@@ -320,11 +320,11 @@ func TestHardwareRecoveryReestablishesTheMnemonicOnANewAuthenticator(t *testing.
 		t.Errorf("the recovery enrolled %d credentials, want the new daily and the recovery one", f.enrols-enrolsBefore)
 	}
 	r.Close()
-	if lost, err := openHW(path, f, "devA", "1234"); err == nil {
+	if lost, err := openHW(path, f, "devA", pinA); err == nil {
 		lost.Close()
 		t.Fatal("the lost authenticator still opens the workspace")
 	}
-	n, err := openHW(path, f, "devC", "9999")
+	n, err := openHW(path, f, "devC", pinC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +344,7 @@ func TestHardwareRecoveryReestablishesTheMnemonicOnANewAuthenticator(t *testing.
 func TestRecoveryRekeyReestablishesEveryRecordTheOldFactorOpened(t *testing.T) {
 	s, path, rec, two := stdTwoCold(t)
 	s.Close()
-	r, err := OpenWithRecovery(path, secret.Take([]byte(rec)))
+	r, err := OpenWithRecovery(path, passphrase(rec))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +382,7 @@ func TestAColdPassphraseThatOpensOnlySomeRecordsIsReportedAsASplit(t *testing.T)
 	// make the second record open with another passphrase: forge it with that passphrase
 	forgeColdNoWrap(t, s, two, "another passphrase", "cold key two")
 	err := s.Update(ctx, func(w ports.Writer) error {
-		return putKeyW(w, rf("pool3", ports.NodeSKey), secret.Take([]byte("cold key three")))
+		return putKeyW(w, rf("pool3", ports.NodeSKey), owned(secret.Take([]byte("cold key three"))))
 	})
 	if !errors.Is(err, ErrColdSplit) || !strings.Contains(err.Error(), "store verify") {
 		t.Fatalf("creating a cold record in a split workspace: %v", err)
@@ -410,7 +410,7 @@ func TestColdStatusNamesRecordsThatAreOutOfStep(t *testing.T) {
 	if !strings.Contains(got, nameOfRef(two)) || !strings.Contains(got, nameOfRef(three)) {
 		t.Errorf("problems %+v", st.Problems)
 	}
-	in := f.inputs("devA", "1234")
+	in := f.inputs("devA", pinA)
 	s.Close()
 	res, err := VerifyFileFactors(path, in, false)
 	if !errors.Is(err, ErrVerify) || !strings.Contains(err.Error(), nameOfRef(two)) {
@@ -442,7 +442,7 @@ func TestColdStatusShowsTheFallbackCounter(t *testing.T) {
 	if err != nil || len(st.Fallbacks) != 1 || st.Fallbacks[0].Count != 1 {
 		t.Fatalf("%+v %v", st, err)
 	}
-	in := f.inputs("devA", "1234")
+	in := f.inputs("devA", pinA)
 	s.Close()
 	res, err := VerifyFileFactors(path, in, false)
 	if err != nil || !strings.Contains(strings.Join(res.Notices, "\n"), "healed") {
@@ -481,7 +481,7 @@ func TestAColdRecordWrittenDuringTheGatherFailsTheRotation(t *testing.T) {
 	if after := fileState(t, s); after == before {
 		t.Fatal("the other handle's cold write is not in the file")
 	}
-	if _, err := Open(path, pw()); err != nil {
+	if err := closed(Open(path, pw())); err != nil {
 		t.Errorf("the old passphrase no longer opens the workspace after a refused rotation: %v", err)
 	}
 }
@@ -492,7 +492,7 @@ func TestAColdRecordWrittenDuringTheGatherFailsTheRotation(t *testing.T) {
 func TestOnlyAFactorErrorLetsARecoveryGoOnWithoutARecord(t *testing.T) {
 	s, path, rec, _ := stdTwoCold(t)
 	s.Close()
-	r, err := OpenWithRecovery(path, secret.Take([]byte(rec)))
+	r, err := OpenWithRecovery(path, passphrase(rec))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -515,7 +515,7 @@ func TestOnlyAFactorErrorLetsARecoveryGoOnWithoutARecord(t *testing.T) {
 func TestNoDailySlotIsAddedThroughTheRecoveryComposite(t *testing.T) {
 	_, path, f, rec := hwCold(t)
 	r, _ := recoveryHandle(t, path, f, rec)
-	fp, _, err := EnrolFactor(ctx, f.inputs("devB", "5678"), r.ws, nil)
+	fp, _, err := enrolOwned(ctx, f.inputs("devB", pinB), r.ws, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -524,7 +524,7 @@ func TestNoDailySlotIsAddedThroughTheRecoveryComposite(t *testing.T) {
 	}
 	r.Close()
 	// from the daily session: a plan that reuses a credential of the recovery composite
-	d, err := openHW(path, f, "devA", "1234")
+	d, err := openHW(path, f, "devA", pinA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -551,13 +551,13 @@ func TestNoDailySlotIsAddedThroughTheRecoveryComposite(t *testing.T) {
 	if len(recCred.CredentialID) == 0 {
 		t.Fatal("no recovery credential found")
 	}
-	out := secret.Take(bytes.Repeat([]byte{4}, 32))
+	out := owned(secret.Take(bytes.Repeat([]byte{4}, 32)))
 	if _, err := d.AddFactorSlot(ctx, []FactorPlan{{Params: recCred, Output: out}}); !errors.Is(err, ErrRecoveryCredentialAsDaily) {
 		t.Fatalf("a credential of the recovery composite added as a daily factor: %v", err)
 	}
 	// and a rotation whose daily slot carries it
 	proof := presentHW(t, d, f, rec)
-	plan, _ := hardwarePlanFor(t, d, f, proof, "devA", "1234")
+	plan, _ := hardwarePlanFor(t, d, f, proof, "devA", pinA)
 	plan.Slots[0].Factors[0].Params = recCred
 	if _, _, err := d.Rotate(ctx, plan); !errors.Is(err, ErrRecoveryCredentialAsDaily) {
 		t.Fatalf("a rotation whose daily factor is a recovery credential: %v", err)
@@ -573,7 +573,7 @@ func TestOpenKeyDispatchesOnTheHeaderKind(t *testing.T) {
 	if hdr.Kind != seal.ColdFIDO2 {
 		t.Fatal(hdr)
 	}
-	in := f.inputs("devA", "1234")
+	in := f.inputs("devA", pinA)
 	cs := s.newColdSession(unlock.Standard, &ColdSource{Factors: &in, Passphrase: func(context.Context, bool) (*secret.Buffer, error) {
 		return nil, errors.New("a passphrase is not what this record opens with")
 	}})

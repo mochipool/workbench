@@ -241,13 +241,10 @@ func TestExportOfEveryFixtureFamilyWithTheRealStore(t *testing.T) {
 			// SEC-006: no test secret and no record kind in any byte written
 			for p, bs := range tree {
 				for _, sec := range f.secrets {
-					// a head note is text of hex hashes: a four-digit PIN is in one by
-					// chance about one run in two hundred, so only a longer secret is looked for there
-					if strings.HasPrefix(p, "heads/") && len(sec) < 8 {
-						continue
-					}
-					if sec != "" && bytes.Contains(bs, []byte(sec)) {
-						t.Errorf("%s: %q is in %s", f.name, sec, p)
+					for _, form := range secretForms(sec) {
+						if bytes.Contains(bs, form) {
+							t.Errorf("%s: %q is in %s (as %q)", f.name, sec, p, form)
+						}
 					}
 				}
 				if strings.HasPrefix(p, "objects/") && bs[0] == layout.FormatSealed {
@@ -290,6 +287,61 @@ func TestExportOfEveryFixtureFamilyWithTheRealStore(t *testing.T) {
 			}
 			t.Logf("%s: %d objects (%d records, %d audit rows, %d cold-role), head 1", f.name, res.ObjectsWritten, recs, audits, cold)
 		})
+	}
+}
+
+// secretForms are the byte strings a search for the test secret sec looks for:
+// the secret as it is, and the forms a value written by the store would take (a
+// CBOR text and byte string with their header, and quoted as JSON or TOML
+// text). The raw form is searched for a secret of 8 bytes or more only. A
+// shorter one cannot be: the written bytes are mostly ciphertext and hex text,
+// and four given bytes occur in them by chance (once seen as a four-digit test
+// PIN "in objects/cc/…"), so a raw match could not tell a leak from noise. The
+// hardware fixtures' PINs (pinA, pinB, pinC) are long and not hex for that
+// reason; the short fixture seeds are searched in the framed forms only.
+func secretForms(sec string) [][]byte {
+	if sec == "" {
+		return nil
+	}
+	var forms [][]byte
+	if len(sec) >= 8 {
+		forms = append(forms, []byte(sec))
+	}
+	return append(forms,
+		append(cborHead(0x60, len(sec)), sec...), // CBOR text string
+		append(cborHead(0x40, len(sec)), sec...), // CBOR byte string
+		[]byte(`"`+sec+`"`),
+		[]byte(`'`+sec+`'`),
+	)
+}
+
+// cborHead is the header of a CBOR string of major type mt and length n < 256.
+func cborHead(mt byte, n int) []byte {
+	if n < 24 {
+		return []byte{mt | byte(n)}
+	}
+	return []byte{mt | 24, byte(n)}
+}
+
+// Every PIN of the hardware fixtures is searched for as it is: it is long
+// enough, and has bytes that are not hex digits, so a raw match is a leak.
+//
+// spec: SPO-Xsnapshot-SEC-002
+func TestTheFixturePINsAreSearchedForAsTheyAre(t *testing.T) {
+	for _, p := range []string{pinA, pinB, pinC} {
+		forms := secretForms(p)
+		if len(p) < 8 || len(forms) == 0 || string(forms[0]) != p {
+			t.Errorf("%q is not searched for raw", p)
+		}
+		nonHex := 0
+		for _, r := range p {
+			if !strings.ContainsRune("0123456789abcdefABCDEF", r) {
+				nonHex++
+			}
+		}
+		if nonHex < 4 {
+			t.Errorf("%q has %d bytes that are not hex digits", p, nonHex)
+		}
 	}
 }
 

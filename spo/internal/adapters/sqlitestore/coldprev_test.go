@@ -32,11 +32,11 @@ func TestAFaultyNextSaltOutputDoesNotStrandAColdRecord(t *testing.T) {
 				path, _, ff, _ := standardThenRotated(t, unlock.Strict)
 				f = ff
 				var err error
-				if s, err = openHW(path, f, "devA", "1234"); err != nil {
+				if s, err = openHW(path, f, "devA", pinA); err != nil {
 					t.Fatal(err)
 				}
 				t.Cleanup(func() { s.Close() })
-				in := f.inputs("devA", "1234")
+				in := f.inputs("devA", pinA)
 				s.SetColdSource(&ColdSource{Factors: &in, Deriver: fakeDeriver{}})
 				putSecret(t, s, coldRef, "cold-secret-hw")
 			}
@@ -132,7 +132,7 @@ func TestAnewColdRecordIsSealedWithAFactorGatheredBeforeTheTransaction(t *testin
 		wrote = b.Update(cctx, func(w ports.Writer) error { return w.Put(rf("other", ports.KesCounter), []byte("1")) })
 		return secret.Take([]byte("sub-key passphrase one")), nil
 	}})
-	k := secret.Take([]byte("a second cold key"))
+	k := owned(secret.Take([]byte("a second cold key")))
 	if err := s.Update(ctx, func(w ports.Writer) error { return putKeyW(w, rf("pool2", ports.NodeSKey), k) }); err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestAnewColdRecordIsSealedWithAFactorGatheredBeforeTheTransaction(t *testin
 	// a wrong passphrase (not the one of the existing cold record) is refused and writes nothing
 	before := fileState(t, s)
 	s.SetColdSource(coldPass("another passphrase"))
-	k3 := secret.Take([]byte("a third cold key"))
+	k3 := owned(secret.Take([]byte("a third cold key")))
 	if err := s.Update(ctx, func(w ports.Writer) error { return putKeyW(w, rf("pool3", ports.NodeSKey), k3) }); !errors.Is(err, ErrColdPassphraseDiffers) {
 		t.Fatalf("a second cold passphrase: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestAnewHardwareColdRecordsAreSealedWithAssertionsGatheredBeforeTheTransact
 	held, done := lockStates()
 	defer done()
 	n := f.asserts
-	k1, k2 := secret.Take([]byte("cold key two")), secret.Take([]byte("cold key three"))
+	k1, k2 := owned(secret.Take([]byte("cold key two"))), owned(secret.Take([]byte("cold key three")))
 	if err := s.Update(ctx, func(w ports.Writer) error {
 		if err := putKeyW(w, rf("pool2", ports.NodeSKey), k1); err != nil {
 			return err
@@ -203,7 +203,7 @@ func TestAColdRecordWithNoGatheredFactorFailsInsteadOfAsking(t *testing.T) {
 		t.Error("the passphrase was asked under the write lock")
 		return secret.Take([]byte("sub-key passphrase one")), nil
 	}})
-	k := secret.Take([]byte("a second cold key"))
+	k := owned(secret.Take([]byte("a second cold key")))
 	release, err := s.enter(ctx)
 	if err != nil {
 		t.Fatal(err)

@@ -48,10 +48,21 @@ type fakeSource struct {
 	corruptOnce bool
 }
 
+// The PINs of the fake authenticators (devA, devB, devC) and a wrong one. Each is
+// long and random-looking and has bytes that are not hex digits, so a search of
+// written bytes for it as it is (secretForms) cannot match ciphertext or hex
+// text by chance, as a four-digit PIN did.
+const (
+	pinA     = "Vq7#kPw2!tXz-devA"
+	pinB     = "Hm4%rYs9&cLb-devB"
+	pinC     = "Gz8*nQe5^wDj-devC"
+	pinWrong = "Kx3@uFo6~pRh-WRONG"
+)
+
 func newFake() *fakeSource {
 	return &fakeSource{credProtect: 3, auths: map[string]*fakeAuth{
-		"devA": {1, "seed-a", "1234"},
-		"devB": {2, "seed-b", "5678"},
+		"devA": {1, "seed-a", pinA},
+		"devB": {2, "seed-b", pinB},
 	}}
 }
 
@@ -141,13 +152,12 @@ func (f *fakeSource) Assert(ctx context.Context, req ports.AssertRequest) (ports
 		m2 := hmac.New(sha256.New, a.secretFor(req.CredentialID))
 		m2.Write([]byte(req.RPID))
 		m2.Write(req.NextSalt)
-		out.NextOutput = secret.Take(m2.Sum(nil))
+		next := m2.Sum(nil)
 		if f.corruptNext > 0 {
 			f.corruptNext--
-			bad := m2.Sum(nil)
-			bad[0] ^= 0xff
-			out.NextOutput = secret.Take(bad)
+			next[0] ^= 0xff
 		}
+		out.NextOutput = secret.Take(next)
 	}
 	return out, nil
 }
@@ -168,14 +178,16 @@ func hardwareWS(t *testing.T) (path string, f *fakeSource, recovery string) {
 	s, path, rec0 := scratch(t)
 	putSecret(t, s, skey0, "the-signing-key")
 	f = newFake()
-	fa, _, err := EnrolFactor(ctx, f.inputs("devA", "1234"), s.ws, nil)
+	fa, _, err := enrolOwned(ctx, f.inputs("devA", pinA), s.ws, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fb, _, err := EnrolFactor(ctx, f.inputs("devB", "5678"), s.ws, nil)
+	defer fa.Output.Destroy() // the caller's, as in cmd/spo's Rotate
+	fb, _, err := enrolOwned(ctx, f.inputs("devB", pinB), s.ws, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer fb.Output.Destroy()
 	text, _, err := s.Rotate(ctx, RotatePlan{Policy: unlock.Hardware, Proof: presentStd(t, s, rec0), Slots: []SlotPlan{
 		{Kind: seal.SlotFIDO2HMAC, Factors: []FactorPlan{fa}},
 		{Kind: seal.SlotComposite, Factors: []FactorPlan{{Params: seal.FactorParams{Kind: seal.FactorRecovery}}, fb}},
@@ -219,12 +231,14 @@ func rawBytes(b *secret.Buffer) []byte {
 // key and the second authenticator.
 func presentHW(t *testing.T, s *Store, f *fakeSource, rec string) *RecoveryProof {
 	t.Helper()
-	raw, err := seal.DecodeRecoveryKey(secret.Take([]byte(rec)))
+	text := secret.Take([]byte(rec))
+	defer text.Destroy()
+	raw, err := seal.DecodeRecoveryKey(text)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer raw.Destroy()
-	in := f.inputs("devB", "5678")
+	in := f.inputs("devB", pinB)
 	in.Recovery = func(context.Context) (*secret.Buffer, error) { return secret.Take(rawBytes(raw)), nil }
 	p, err := s.PresentRecovery(ctx, in)
 	if err != nil {
@@ -304,7 +318,7 @@ func TestOpenerRefusesFormat2BeforeDerivingAnyKey(t *testing.T) {
 	if called {
 		t.Error("a key was derived before the refusal")
 	}
-	if _, err := OpenWithFactors(p, newFake().inputs("devA", "1234"), OpenOptions{}); !errors.Is(err, ErrFormat2) {
+	if _, err := OpenWithFactors(p, newFake().inputs("devA", pinA), OpenOptions{}); !errors.Is(err, ErrFormat2) {
 		t.Errorf("OpenWithFactors: %v", err)
 	}
 	if !bytes.Equal(before, readAll(t, p)) {
@@ -388,7 +402,7 @@ func TestMigrate3FromFormat2(t *testing.T) {
 	if _, err := s.AddPassphraseSlot(ctx, passphrase("second")); err != nil {
 		t.Fatal(err)
 	}
-	fa, _, err := EnrolFactor(ctx, newFake().inputs("devA", "1234"), s.ws, nil)
+	fa, _, err := enrolOwned(ctx, newFake().inputs("devA", pinA), s.ws, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,7 +424,7 @@ func TestMigrate3FromFormat2(t *testing.T) {
 			t.Error("a rekey leaves a legacy slot")
 		}
 	}
-	fa, _, _ = EnrolFactor(ctx, newFake().inputs("devA", "1234"), s.ws, nil)
+	fa, _, _ = enrolOwned(ctx, newFake().inputs("devA", pinA), s.ws, nil)
 	if _, err := s.AddFactorSlot(ctx, []FactorPlan{fa}); err != nil {
 		t.Errorf("a FIDO2 slot after the rekey: %v", err)
 	}
@@ -451,7 +465,7 @@ func TestMigrate3IsOneTransaction(t *testing.T) {
 func TestOpenThroughAFido2Slot(t *testing.T) {
 	s, path, _ := scratch(t)
 	f := newFake()
-	fa, _, err := EnrolFactor(ctx, f.inputs("devA", "1234"), s.ws, nil)
+	fa, _, err := enrolOwned(ctx, f.inputs("devA", pinA), s.ws, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -459,24 +473,24 @@ func TestOpenThroughAFido2Slot(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.Close()
-	h, err := openHW(path, f, "devA", "1234")
+	h, err := openHW(path, f, "devA", pinA)
 	if err != nil {
 		t.Fatal(err)
 	}
 	h.Close()
 	// another authenticator holds no credential of this slot
-	if _, err := openHW(path, f, "devB", "5678"); !errors.Is(err, ErrNoFactorSlot) {
+	if _, err := openHW(path, f, "devB", pinB); !errors.Is(err, ErrNoFactorSlot) {
 		t.Errorf("wrong authenticator: %v", err)
 	}
 	// a wrong PIN stops the open at once (no retry through another slot)
-	if _, err := openHW(path, f, "devA", "0000"); !errors.Is(err, ports.ErrFactorPIN) {
+	if _, err := openHW(path, f, "devA", pinWrong); !errors.Is(err, ports.ErrFactorPIN) {
 		t.Errorf("wrong PIN: %v", err)
 	}
 	// a source without a capability is refused before the PIN is asked
 	f.profile = &ports.FactorProfile{HMACSecret: true}
 	asked := false
-	in := f.inputs("devA", "1234")
-	in.PIN = func(context.Context) (*secret.Buffer, error) { asked = true; return secret.Take([]byte("1234")), nil }
+	in := f.inputs("devA", pinA)
+	in.PIN = func(context.Context) (*secret.Buffer, error) { asked = true; return secret.Take([]byte(pinA)), nil }
 	asserts := f.asserts
 	if _, err := OpenWithFactors(path, in, OpenOptions{}); !errors.Is(err, ports.ErrFactorCapability) {
 		t.Errorf("a source that lacks credProtect 3: %v", err)
@@ -500,7 +514,7 @@ func TestHardwareWorkspaceOpensOnlyThroughHardware(t *testing.T) {
 	_ = p0
 	path, f, rec := hardwareWS(t)
 	if pol := func() unlock.Policy {
-		s, err := openHW(path, f, "devA", "1234")
+		s, err := openHW(path, f, "devA", pinA)
 		if err != nil {
 			t.Fatal(err)
 			return ""
@@ -514,15 +528,15 @@ func TestHardwareWorkspaceOpensOnlyThroughHardware(t *testing.T) {
 	if _, err := Open(path, pw()); !errors.Is(err, ErrWrongCredential) {
 		t.Errorf("a passphrase alone: %v", err)
 	}
-	if _, err := OpenWithRecovery(path, secret.Take([]byte(rec))); !errors.Is(err, ErrWrongCredential) {
+	if _, err := OpenWithRecovery(path, passphrase(rec)); !errors.Is(err, ErrWrongCredential) {
 		t.Errorf("the recovery key alone: %v", err)
 	}
 	// the recovery composite: the recovery key AND the second authenticator
-	raw, err := seal.DecodeRecoveryKey(secret.Take([]byte(rec)))
+	raw, err := decodeRecovery(rec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	in := f.inputs("devB", "5678")
+	in := f.inputs("devB", pinB)
 	in.Recovery = func(context.Context) (*secret.Buffer, error) { return raw, nil }
 	r, err := OpenWithFactors(path, in, OpenOptions{})
 	if err != nil {
@@ -530,10 +544,10 @@ func TestHardwareWorkspaceOpensOnlyThroughHardware(t *testing.T) {
 	}
 	r.Close()
 	// the second authenticator alone, the recovery key alone through a source
-	if _, err := openHW(path, f, "devB", "5678"); !errors.Is(err, ErrNoFactorSlot) {
+	if _, err := openHW(path, f, "devB", pinB); !errors.Is(err, ErrNoFactorSlot) {
 		t.Errorf("the recovery authenticator alone: %v", err)
 	}
-	s, err := openHW(path, f, "devA", "1234")
+	s, err := openHW(path, f, "devA", pinA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -569,7 +583,7 @@ func TestHardwareWorkspaceOpensOnlyThroughHardware(t *testing.T) {
 // spec: SPO-Xunlock-PRE-024
 func TestPolicyBoundsSlotAddRekeyAndRotation(t *testing.T) {
 	path, f, rec := hardwareWS(t)
-	s, err := openHW(path, f, "devA", "1234")
+	s, err := openHW(path, f, "devA", pinA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -581,14 +595,14 @@ func TestPolicyBoundsSlotAddRekeyAndRotation(t *testing.T) {
 	if _, err := s.Rekey(ctx, []Credential{PassphraseCredential(passphrase("x"))}); !errors.Is(err, ErrPolicyViolated) {
 		t.Errorf("a rekey under hardware: %v", err)
 	}
-	fa, _, _ := EnrolFactor(ctx, f.inputs("devA", "1234"), s.ws, nil)
+	fa, _, _ := enrolOwned(ctx, f.inputs("devA", pinA), s.ws, nil)
 	proof := presentHW(t, s, f, rec)
 	// a hardware table with no recovery composite
 	if _, _, err := s.Rotate(ctx, RotatePlan{Policy: unlock.Hardware, Proof: proof, Slots: []SlotPlan{{Kind: seal.SlotFIDO2HMAC, Factors: []FactorPlan{fa}}}}); !errors.Is(err, ErrPolicyViolated) {
 		t.Errorf("hardware without a recovery composite: %v", err)
 	}
 	// strict with a recovery slot
-	fa, _, _ = EnrolFactor(ctx, f.inputs("devA", "1234"), s.ws, nil)
+	fa, _, _ = enrolOwned(ctx, f.inputs("devA", pinA), s.ws, nil)
 	if _, _, err := s.Rotate(ctx, RotatePlan{Policy: unlock.Strict, Proof: proof, Slots: []SlotPlan{{Kind: seal.SlotFIDO2HMAC, Factors: []FactorPlan{fa}}, {Kind: seal.SlotRecovery}}}); !errors.Is(err, ErrPolicyViolated) {
 		t.Errorf("strict with a recovery slot: %v", err)
 	}
@@ -597,7 +611,7 @@ func TestPolicyBoundsSlotAddRekeyAndRotation(t *testing.T) {
 	}
 	_ = before
 	// strict with no recovery path is allowed and has no recovery key
-	fa, _, _ = EnrolFactor(ctx, f.inputs("devA", "1234"), s.ws, nil)
+	fa, _, _ = enrolOwned(ctx, f.inputs("devA", pinA), s.ws, nil)
 	text, _, err := s.Rotate(ctx, RotatePlan{Policy: unlock.Strict, Proof: proof, Slots: []SlotPlan{{Kind: seal.SlotFIDO2HMAC, Factors: []FactorPlan{fa}}}})
 	if err != nil || text != nil {
 		t.Fatalf("strict rotation: %v %v", text, err)
@@ -617,7 +631,7 @@ func TestPolicyBoundsSlotAddRekeyAndRotation(t *testing.T) {
 func TestEditedFilesNeverOpenWithAWeakerFactorSet(t *testing.T) {
 	assertRefused := func(t *testing.T, name, path string, f *fakeSource, want error) {
 		t.Helper()
-		s, err := openHW(path, f, "devA", "1234")
+		s, err := openHW(path, f, "devA", pinA)
 		if err == nil {
 			s.Close()
 			t.Fatalf("%s: the edited workspace opened", name)
@@ -634,7 +648,7 @@ func TestEditedFilesNeverOpenWithAWeakerFactorSet(t *testing.T) {
 		}
 	}
 	base, f, recBase := hardwareWS(t)
-	if s, err := openHW(base, f, "devA", "1234"); err != nil {
+	if s, err := openHW(base, f, "devA", pinA); err != nil {
 		t.Fatal(err)
 	} else {
 		s.Close()
@@ -677,7 +691,7 @@ func TestEditedFilesNeverOpenWithAWeakerFactorSet(t *testing.T) {
 			// the same one-factor list under the fido2-hmac kind passes the shape rule
 			// and still opens nothing: the kind and the list are bound in the key
 			p = edit(t, `UPDATE keyslots SET factors = ?, kind = 'fido2-hmac' WHERE kind = 'composite'`, nb)
-			if s, err := openHW(p, f, "devB", "5678"); err == nil {
+			if s, err := openHW(p, f, "devB", pinB); err == nil {
 				s.Close()
 				t.Error("a composite turned into a fido2-hmac slot opened")
 			}
@@ -741,12 +755,12 @@ func TestEditedFilesNeverOpenWithAWeakerFactorSet(t *testing.T) {
 		var ep, em []byte
 		old.QueryRow(`SELECT key_epoch, epoch_mac FROM meta`).Scan(&ep, &em)
 		old.Close()
-		s, err := openHW(p, f, "devA", "1234")
+		s, err := openHW(p, f, "devA", pinA)
 		if err != nil {
 			t.Fatal(err)
 		}
-		fa, _, _ := EnrolFactor(ctx, f.inputs("devA", "1234"), s.ws, nil)
-		fb, _, _ := EnrolFactor(ctx, f.inputs("devB", "5678"), s.ws, nil)
+		fa, _, _ := enrolOwned(ctx, f.inputs("devA", pinA), s.ws, nil)
+		fb, _, _ := enrolOwned(ctx, f.inputs("devB", pinB), s.ws, nil)
 		if txt, _, err := s.Rotate(ctx, RotatePlan{Policy: unlock.Hardware, Proof: presentHW(t, s, f, recBase), Slots: []SlotPlan{
 			{Kind: seal.SlotFIDO2HMAC, Factors: []FactorPlan{fa}},
 			{Kind: seal.SlotComposite, Factors: []FactorPlan{{Params: seal.FactorParams{Kind: seal.FactorRecovery}}, fb}},
@@ -785,13 +799,13 @@ func TestEditedFilesNeverOpenWithAWeakerFactorSet(t *testing.T) {
 // spec: SPO-Xunlock-OUT-012
 func TestHardwareRecoveryPublicKeyDerivesFromTheComposite(t *testing.T) {
 	path, f, rec := hardwareWS(t)
-	s, err := openHW(path, f, "devA", "1234")
+	s, err := openHW(path, f, "devA", pinA)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.Close()
 	infos, _ := s.Slots(ctx)
-	raw, _ := seal.DecodeRecoveryKey(secret.Take([]byte(rec)))
+	raw, _ := decodeRecovery(rec)
 	alone, err := seal.RecoveryPublicKeyHash(raw)
 	if err != nil {
 		t.Fatal(err)
@@ -813,7 +827,7 @@ func TestRotationThatStopsHalfWayLeavesTheFileUnchanged(t *testing.T) {
 	put(t, s, counter, "1")
 	before := ids(t, s)
 	f := newFake()
-	fa, _, err := EnrolFactor(ctx, f.inputs("devA", "1234"), s.ws, nil)
+	fa, _, err := enrolOwned(ctx, f.inputs("devA", pinA), s.ws, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

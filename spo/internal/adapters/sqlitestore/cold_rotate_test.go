@@ -17,15 +17,17 @@ import (
 
 func hardwarePlan(t *testing.T, s *Store, f *fakeSource, proof *RecoveryProof) (RotatePlan, FactorInputs) {
 	t.Helper()
-	fa, _, err := EnrolFactor(ctx, f.inputs("devA", "1234"), s.ws, nil)
+	fa, _, err := EnrolFactor(ctx, f.inputs("devA", pinA), s.ws, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fb, _, err := EnrolFactor(ctx, f.inputs("devB", "5678"), s.ws, nil)
+	t.Cleanup(func() { fa.Output.Destroy() }) // the caller's (EnrolFactor)
+	fb, _, err := EnrolFactor(ctx, f.inputs("devB", pinB), s.ws, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	inA := f.inputs("devA", "1234")
+	t.Cleanup(func() { fb.Output.Destroy() })
+	inA := f.inputs("devA", pinA)
 	return RotatePlan{Policy: unlock.Hardware, Proof: proof, Slots: []SlotPlan{
 		{Kind: seal.SlotFIDO2HMAC, Factors: []FactorPlan{fa}},
 		{Kind: seal.SlotComposite, Factors: []FactorPlan{{Params: seal.FactorParams{Kind: seal.FactorRecovery}}, fb}},
@@ -34,7 +36,7 @@ func hardwarePlan(t *testing.T, s *Store, f *fakeSource, proof *RecoveryProof) (
 
 func recPrivOf(t *testing.T, text string) *secretKey {
 	t.Helper()
-	raw, err := seal.DecodeRecoveryKey(secret.Take([]byte(text)))
+	raw, err := decodeRecovery(text)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +119,7 @@ func (k *secretKey) priv() *ecdh.PrivateKey { return k.p }
 // (the recovery key and the second authenticator) and presents it.
 func recoveryHandle(t *testing.T, path string, f *fakeSource, rec string) (*Store, *RecoveryProof) {
 	t.Helper()
-	in := f.inputs("devB", "5678")
+	in := f.inputs("devB", pinB)
 	in.Recovery = recoveryRaw(t, rec)
 	r, err := OpenWithFactors(path, in, OpenOptions{})
 	if err != nil {
@@ -149,7 +151,7 @@ func TestRecoveryCompositeReEstablishesColdRecordsWithoutTheDailyFactor(t *testi
 	}
 	text.Destroy()
 	r.Close()
-	n, err := openHW(path, f, "devA", "1234")
+	n, err := openHW(path, f, "devA", pinA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,8 +201,8 @@ func TestAPlantedColdRecordIsRefusedAtRecovery(t *testing.T) {
 		}
 		meta := metaOf(s.ws, row.id, coldRef, seal.ClassSecretCold, row.version+1)
 		hdr, _ := headerOf2(s, tx, coldRef, row)
-		sub := secret.Take(bytes.Repeat([]byte{7}, 32))
-		attacker := secret.Take([]byte("attacker chosen signing key"))
+		sub := owned(secret.Take(bytes.Repeat([]byte{7}, 32)))
+		attacker := owned(secret.Take([]byte("attacker chosen signing key")))
 		planted, err := s.keys.SealSecretCold(meta, attacker, seal.ColdSeal{Sub: sub, Header: hdr, Recovery: &seal.ColdRecovery{Pub: pub, Identity: ident}})
 		if err != nil {
 			return nil, err
@@ -243,12 +245,12 @@ func headerOf2(s *Store, tx *txn, ref ports.Ref, row *recRow) (seal.ColdHeader, 
 // spec: SPO-Xcustody-MODE-005
 func TestStrictColdRecordsCarryNoRecoveryWrap(t *testing.T) {
 	path, _, f, _ := standardThenRotated(t, unlock.Strict)
-	s, err := openHW(path, f, "devA", "1234")
+	s, err := openHW(path, f, "devA", pinA)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	in := f.inputs("devA", "1234")
+	in := f.inputs("devA", pinA)
 	s.SetColdSource(&ColdSource{Factors: &in})
 	putSecret(t, s, coldRef, "strict cold key")
 	if oc := mustOuter(t, s, coldRef); len(oc.RecoveryWrap()) != 0 {
@@ -274,7 +276,7 @@ func TestAReplacedRecoveryPublicKeyIsNotWrappedTo(t *testing.T) {
 	s, _, _ := stdCold(t, "sub-key passphrase one")
 	other := bytes.Repeat([]byte{9}, 32)
 	exec(t, s, `UPDATE meta SET recovery_pub = ?`, other)
-	k := secret.Take([]byte("a second cold key"))
+	k := owned(secret.Take([]byte("a second cold key")))
 	err := s.Update(ctx, func(w ports.Writer) error { return putKeyW(w, rf("pool2", ports.NodeSKey), k) })
 	if !errors.Is(err, ErrRecoveryKeyMismatch) {
 		t.Fatalf("%v", err)

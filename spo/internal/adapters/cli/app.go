@@ -358,6 +358,17 @@ func (a *app) loadConfig() (WorkspaceConfig, error) {
 	return c, err
 }
 
+// saveConfig writes spo.toml back. Every command that rewrites the file goes
+// through here: settings read from a file that was untrusted for a reason of
+// its own are refused and nothing is written (SPO-Xunlock-PRE-051). The
+// adapter's Save checks the file on disk again.
+func (a *app) saveConfig(cfg WorkspaceConfig) error {
+	if cfg.RewriteRefusal != nil {
+		return cfg.RewriteRefusal
+	}
+	return a.d.Config.Save(a.workspace, cfg)
+}
+
 const recoveryInstructions = `
 RECOVERY KEY. Write it down on paper now and keep it somewhere safe and
 separate from this machine. It is shown only once. It opens this workspace if

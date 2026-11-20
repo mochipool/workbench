@@ -161,7 +161,7 @@ func TestAnEditedBackendAddressIsRefusedBeforeAnyCredentialOrPrompt(t *testing.T
 // spec: SPO-Xunlock-PRE-044, SPO-Xunlock-PRE-043
 func TestCheckBackendSlotRefusesWithoutAnyCall(t *testing.T) {
 	path, f, _ := hardwareWS(t)
-	h, err := openHW(path, f, "devA", "1234")
+	h, err := openHW(path, f, "devA", pinA)
 	if err != nil {
 		t.Fatal(err)
 	}

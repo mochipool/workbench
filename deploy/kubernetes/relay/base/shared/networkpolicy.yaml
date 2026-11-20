@@ -1,0 +1,72 @@
+# Deny everything to every pod of the namespace, then allow the relay what its
+# tunnel needs. The relay opens no pod port: its tailcat tunnel dials out to a
+# DERP relay. So it needs no ingress at all; replies to its own connections are
+# allowed because network policies track connections.
+#
+# Egress of the tunnel (tailcat v0.7.0 over the Tailscale data plane):
+#   - DNS, to resolve the DERP map host and the DERP servers;
+#   - TCP 443: the DERP map (derp_map_url, by default https://tailcat.dev/derpmap.json)
+#     and the DERP relays themselves;
+#   - UDP 3478: STUN, which the region pick uses (it falls back to HTTPS probes).
+# A direct peer-to-peer UDP path is not allowed here: the traffic stays relayed
+# through DERP. To allow direct paths, add UDP to any port in an overlay.
+# Private, shared and link-local ranges are excluded, so the relay cannot reach
+# the cluster's own services or the cloud metadata address. A DERP server of
+# your own inside those ranges needs a rule of its own in an overlay.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: spo-relay
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: spo-relay-tunnel
+  namespace: spo-relay
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: spo-relay
+  policyTypes:
+    - Ingress
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: "0.0.0.0/0"
+            except:
+              - "10.0.0.0/8"
+              - "172.16.0.0/12"
+              - "192.168.0.0/16"
+              - "100.64.0.0/10"
+              - "169.254.0.0/16"
+              - "127.0.0.0/8"
+        - ipBlock:
+            cidr: "::/0"
+            except:
+              - "fc00::/7"
+              - "fe80::/10"
+              - "::1/128"
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: UDP
+          port: 3478

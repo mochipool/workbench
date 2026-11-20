@@ -23,24 +23,24 @@ func TestHardwareRecoveryReestablishesColdRecordsThroughTheWrapWithAColdSourceWi
 	s.Close()
 	// the daily authenticator (devA) is LOST: the recovery makes a new one (devC), it never
 	// enrols the lost one again
-	f.auths["devC"] = &fakeAuth{3, "seed-c", "9999"}
+	f.auths["devC"] = &fakeAuth{3, "seed-c", pinC}
 	r, proof := recoveryHandle(t, path, f, rec)
 	// the recovery authenticator wired as the cold source: it holds no credential of the
 	// record, and the old factor must not be consulted for a record that has a wrap
-	inB := f.inputs("devB", "5678")
+	inB := f.inputs("devB", pinB)
 	r.SetColdSource(&ColdSource{Factors: &inB, Deriver: fakeDeriver{}})
-	plan, inC := hardwarePlanFor(t, r, f, proof, "devC", "9999")
+	plan, inC := hardwarePlanFor(t, r, f, proof, "devC", pinC)
 	text, _, err := r.Rotate(ctx, plan)
 	if err != nil {
 		t.Fatalf("a recovery rotation with a cold source wired: %v", err)
 	}
 	text.Destroy()
 	r.Close()
-	if lost, err := openHW(path, f, "devA", "1234"); err == nil {
+	if lost, err := openHW(path, f, "devA", pinA); err == nil {
 		lost.Close()
 		t.Fatal("the lost authenticator still opens the workspace")
 	}
-	n, err := openHW(path, f, "devC", "9999")
+	n, err := openHW(path, f, "devC", pinC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestStandardRecoveryRotationWorksWhenTheColdPassphraseIsForgotten(t *testin
 	}
 	text.Destroy()
 	s.Close()
-	n, err := openHW(path, f, "devA", "1234")
+	n, err := openHW(path, f, "devA", pinA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestRecoveryRekeyReestablishesColdRecordsUnderANewColdPassphrase(t *testing
 	s, path, rec := stdCold(t, "sub-key passphrase one")
 	putMnemonic(t, s, "alpha bravo charlie")
 	s.Close()
-	r, err := OpenWithRecovery(path, secret.Take([]byte(rec)))
+	r, err := OpenWithRecovery(path, passphrase(rec))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +150,7 @@ func forgeColdNoWrap(t *testing.T, s *Store, ref ports.Ref, pass, plain string) 
 		}
 		meta := metaOf(s.ws, row.id, ref, seal.ClassSecretCold, row.version+1)
 		salt := bytes.Repeat([]byte{7}, seal.SaltSize)
-		pw := secret.Take([]byte(pass))
+		pw := owned(secret.Take([]byte(pass)))
 		out, err := seal.PassphraseFactorOutput(pw, salt, kdfForNewSlots)
 		if err != nil {
 			return nil, err
@@ -160,7 +160,8 @@ func forgeColdNoWrap(t *testing.T, s *Store, ref ports.Ref, pass, plain string) 
 		if err != nil {
 			return nil, err
 		}
-		sealed, err := s.keys.SealSecretCold(meta, secret.Take([]byte(plain)), seal.ColdSeal{Sub: sub, Header: seal.ColdHeader{Kind: seal.ColdPassphrase, KDF: kdfForNewSlots, Salt: salt}})
+		owned(sub)
+		sealed, err := s.keys.SealSecretCold(meta, owned(secret.Take([]byte(plain))), seal.ColdSeal{Sub: sub, Header: seal.ColdHeader{Kind: seal.ColdPassphrase, KDF: kdfForNewSlots, Salt: salt}})
 		if err != nil {
 			return nil, err
 		}
@@ -187,7 +188,7 @@ func forgeColdNoWrap(t *testing.T, s *Store, ref ports.Ref, pass, plain string) 
 // spec: SPO-Xcustody-PRE-030, SPO-Xcustody-IF-009
 func TestRecoveryRekeyLeavesRecordsItCannotReestablishOnlyOnRequest(t *testing.T) {
 	s, path, rec := stdCold(t, "sub-key passphrase one")
-	k := secret.Take([]byte("cold key two"))
+	k := owned(secret.Take([]byte("cold key two")))
 	if err := s.Update(ctx, func(w ports.Writer) error { return putKeyW(w, rf("pool2", ports.NodeSKey), k) }); err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +209,7 @@ func TestRecoveryRekeyLeavesRecordsItCannotReestablishOnlyOnRequest(t *testing.T
 	}
 	s.Close()
 	open := func() *Store {
-		r, err := OpenWithRecovery(path, secret.Take([]byte(rec)))
+		r, err := OpenWithRecovery(path, passphrase(rec))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -348,7 +349,7 @@ func TestAnInconsistentAnswerSealsNoNewColdRecord(t *testing.T) {
 	s, _, f, _ := hwCold(t)
 	before := fileState(t, s)
 	f.corruptOnce = true
-	k := secret.Take([]byte("cold key two"))
+	k := owned(secret.Take([]byte("cold key two")))
 	err := s.Update(ctx, func(w ports.Writer) error { return putKeyW(w, rf("pool2", ports.NodeSKey), k) })
 	if !errors.Is(err, ErrColdAnswerInconsistent) {
 		t.Fatalf("creation under an inconsistent answer: %v", err)

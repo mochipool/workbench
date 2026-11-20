@@ -37,6 +37,24 @@ The configuration and the commands are listed in the [reference](../reference/re
    node_key = "<bob's node key>"
    ```
 
+   Pin the DERP region in full, so that the address you hand out stays the same across restarts. The address embeds the region's nodes, so copy them from the DERP map you use (or from your own DERP server) into the file:
+
+   ```toml
+   [derp_region]
+   region_id = 900
+
+   [[derp_node]]
+   name      = "own-1"
+   host_name = "derp.example.org"
+   # cert_name = "sha256-raw:<64 hex digits>"   # for a self-signed certificate
+   ```
+
+   Without it the relay picks the nearest region at every start, logs `derp_region=unpinned`, and its address may change. `derp_region_id = N` in `[relay]` fixes the region but not the address, which then follows the public map, and it does not pin the DERP server: the map's operator chooses it. If you later edit a node, the address changes and every device needs the new one. See [the reference](../reference/relay-config.md#the-derp-region-derp_region-and-derp_node).
+
+   At start the relay connects to the pinned region over verified TLS and completes a DERP handshake. If `cert_name` (or its hash) is wrong, or the DERP port is down, `serve` stops with status 1 and says which; fix the node and start again. The DERP server's operator can see who connects and when, and can test whether a node key is listed, but cannot read the tunnel: pick a DERP server you trust with that metadata.
+
+   Do not set any `TS_DEBUG_*` variable in the relay's environment (unit file, container, shell). The relay refuses to start with one set: `TS_DEBUG_ADDR` would print the address, with its pre-shared key, to the log.
+
    `admission = "open"` lets any listed device log in with a valid binding. To accept only some wallet keys as well, write `admission = "allow-list"` and add a `[[wallet]]` table (`label`, `key` of 56 hex digits) for each.
 
 4. Check it, then create the key once:
@@ -59,7 +77,7 @@ The configuration and the commands are listed in the [reference](../reference/re
    sudo -u spo-relay rm /var/lib/spo-relay/address.once
    ```
 
-   Each operator writes the address to a file that only they can read (`umask 077`, or `chmod 600`; `spo party relay add` refuses a file that its group or others can read or write), stores it with `spo party relay add NAME --node-key HEX --address-file FILE`, deletes the file, and compares the node key with you out of band. Do it again only when the key changes or a device reports that the address no longer reaches the relay.
+   Each operator writes the address to a file that only they can read (`umask 077`, or `chmod 600`; `spo party relay add` refuses a file that its group or others can read or write), stores it with `spo party relay add NAME --node-key HEX --address-file FILE`, deletes the file, and compares the node key with you out of band. Do it again only when the key or the `[derp_region]` tables change, or a device reports that the address no longer reaches the relay.
 
 6. Run it under a supervisor that restarts it, without `--print-address`. It exits with status 3 when its tunnel did not stop, also when that happens in a start that failed; a restart is the recovery. It opens no inbound TCP port; the tunnel engine binds two UDP sockets on system-chosen ports and needs outbound access to the DERP relays.
 
@@ -69,16 +87,6 @@ Edit the `[[device]]` tables and send SIGHUP. Only the device list is reloaded; 
 
 Changing anything else (admission, wallet keys, limits, quotas, retention, paths, port) takes a restart. The registry and the queue survive a restart.
 
-## On Kubernetes (outline)
+## On Kubernetes
 
-Not built yet; manifests are a later stage. The shape:
-
-* **One relay is one workload with `replicas: 1`, its own key and its own volume.** One tailcat node key is one live endpoint, and each store has one owner (a lock file). For availability, run several independent relays (several workloads, each with its own key Secret, configuration and volume) and list all of them on every device. Never scale one workload past one replica, and never share a key or a volume between two. There is no clustering and no shared state.
-* `strategy: Recreate`, so the old pod has stopped before the new one starts with the same key.
-* **Run as a non-root user.** Pod and container security context: `runAsNonRoot: true`, a fixed `runAsUser` and `runAsGroup` (for example 10001), `readOnlyRootFilesystem: true`, `allowPrivilegeEscalation: false`, `capabilities: {drop: [ALL]}`, `seccompProfile: {type: RuntimeDefault}`. The relay needs no capability and writes only to its volume.
-* **The key file is copied by an init container.** The relay uses a key file only if it is a regular file owned by the relay's own user with no group or other permission bit; a Secret volume's files belong to root. Mount the Secret only in an init container that runs as the same non-root user and copies the key into a directory on the relay's volume: `install -d -m 0700 /data/key /data/state && install -m 0600 /secret/relay.key /data/key/relay.key`. Do not mount the Secret in the relay's container, and point `key_file` at `/data/key/relay.key`. The directory that holds the key must not be writable by its group or others, so use a directory the init container made, not the root of an `emptyDir` (which is world-writable).
-* The configuration as a ConfigMap, mounted read-only (its files belong to root and are not writable by others, which the relay accepts). `mailbox_dir` and `registry_dir` under `/data/state` on the persistent volume.
-* **The address is never printed in the cluster.** `--print-address` in the container's command would put the pre-shared key in the container log. Get the address once on a host, as in step 5 above, from the same key file, with the workload scaled to 0 while you do it.
-* No Service and no inbound exposure; an egress policy that allows the DERP relays (and the DERP map address).
-* A reload is SIGHUP to the process; a new ConfigMap needs it, or a restart.
-* Not confirmed: DERP reachability from a pod network, and that a restarted pod with the same key resumes service.
+See [Run a relay on Kubernetes](./run-a-relay-on-kubernetes.md) and the manifests in [`deploy/kubernetes/relay/`](../../deploy/kubernetes/relay/) (not applied to a cluster yet). In short: one relay is one StatefulSet with one replica, its own key Secret, configuration and claim; more relays are more instances, never more replicas; an init container copies the key into a memory volume with mode 0600, because a Secret's files belong to root; the address is got once on a host, never printed in the cluster. Not confirmed: DERP reachability from a pod network, and that a restarted pod with the same key resumes service. Pin the region in full (`[derp_region]`): then the address made on a host is the address the pod has, by construction; without the pin the pod picks its own region and the address may differ.

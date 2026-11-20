@@ -54,3 +54,11 @@ A server in this mode therefore degrades without bound under registrations from 
 3. Observe `len(b.clients)` grow, never shrink, and the time of each registration and of each outbound packet grow with it.
 
 **Suggested fix.** Make registration require proof of the pre-shared key (for example a MAC of the registration ping under the key), so that a stranger cannot add clients. Let the server drop clients (`delete(b.clients, k)` with a network-map update), bound their number, and replace the linear `peerByIP` scan by an indexed lookup.
+
+**The same applies to the DERP server's operator, with an allow-list.** The DERP server labels each packet with its sender's node key, so its operator can send a registration ping in the name of any node key it has seen. `onMeow` answers "meowed" only to a listed key, which tells the operator whether a key is on the server's allow-list (a membership oracle), and it keeps the first disco key it receives for a key (`if _, ok := b.clients[src]; ok { return true }`), so a forged ping sent before the real client's binds that client to a disco key of the operator's choosing until the server is rebuilt. A MAC of the ping under the pre-shared key would close both.
+
+## U4. `TS_DEBUG_ADDR` prints the address, with the pre-shared key, through the global logger
+
+**Description.** `tailcat.go` reads `envknob.Bool("TS_DEBUG_ADDR")` at package initialisation (around line 1011). When it is set, `locoBackend.tailcatAddr` and `ConnInfo.Addr` (around lines 1027 and 1071 to 1073) print the whole connection info, the pre-shared key included, with `log.Printf`, the global logger, not the `Logf` the caller gave the server. A program that filters its logs cannot catch the line. `TS_DEBUG_USE_DERP_HTTP` (derphttp) turns TLS to DERP off for the whole process in the same way.
+
+**Suggested fix.** Write debug output through the caller's `Logf`, never print the pre-shared key (print its hash), and document the debug variables that weaken security. Until then a caller can refuse to start when any `TS_DEBUG_*` variable is set and send the global logger's output nowhere.

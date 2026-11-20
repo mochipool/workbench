@@ -98,15 +98,17 @@ func describe(path string) (cli.WorkspaceInfo, error) {
 		s := cli.Slot{ID: x.ID, Kind: x.Kind, Legacy: x.Legacy}
 		for _, f := range x.Factors {
 			s.Factors = append(s.Factors, f.Kind)
-			touch, backend := "", ""
+			touch, backend, ref := "", "", ports.BackendRef{}
 			if f.Kind == "fido2" {
 				touch = ports.TouchProbe(f.Touch).String()
 			}
 			if f.Kind == string(unlock.Backend) {
-				backend = f.Backend.String()
+				// the command adds the fingerprint with spo.toml's client settings (SPO-Xunlock-OUT-023)
+				backend, ref = f.Backend.String(), f.Backend
 			}
 			s.Touch = append(s.Touch, touch)
 			s.Backend = append(s.Backend, backend)
+			s.BackendRef = append(s.BackendRef, ref)
 		}
 		info.Slots = append(info.Slots, s)
 	}
